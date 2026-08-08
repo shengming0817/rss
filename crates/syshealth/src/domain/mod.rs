@@ -18,26 +18,42 @@
 use primitives::healthz::{HealthCheck, HealthStatus, ProbeName};
 
 // ---------------------------------------------------------------------------
+// Criticality
+// ---------------------------------------------------------------------------
+
+/// 探针关键度（闭枚举；调用点自解释，禁止裸 `bool`）。
+///
+/// - [`Criticality::Critical`] → 失败时聚合退化为 `HealthStatus::Unhealthy`。
+/// - [`Criticality::NonCritical`] → 失败时聚合退化为 `HealthStatus::Degraded`。
+// reason: 构造 / 匹配接线在 W-services；当前仅测试与同模块 aggregate 消费 ⇒ dead_code（库 crate 无 pub root）。
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Criticality {
+    Critical,
+    NonCritical,
+}
+
+// ---------------------------------------------------------------------------
 // ProbeDescriptor
 // ---------------------------------------------------------------------------
 
-/// 探针描述符（私有字段；区分 critical / non-critical 分级聚合）。
+/// 探针描述符（私有字段；按 [`Criticality`] 分级聚合）。
 ///
-/// - `critical: true`  → 失败时聚合结果退化为 `HealthStatus::Unhealthy`。
-/// - `critical: false` → 失败时聚合结果退化为 `HealthStatus::Degraded`。
+/// - [`Criticality::Critical`] → 失败时聚合结果退化为 `HealthStatus::Unhealthy`。
+/// - [`Criticality::NonCritical`] → 失败时聚合结果退化为 `HealthStatus::Degraded`。
 // reason: `new` 当前无生产消费方（探针注册接线在 W-services），仅测试消费；库 crate 无 pub root ⇒ dead_code。
 #[allow(dead_code)]
 pub(crate) struct ProbeDescriptor {
     name: ProbeName,
-    critical: bool,
+    criticality: Criticality,
 }
 
 impl ProbeDescriptor {
     /// 构造探针描述符（位置参必填）。
     // reason: 仅测试 / 未来组合根消费；普通构建不可达（库 crate 无 pub root）。
     #[allow(dead_code)]
-    pub(crate) fn new(name: ProbeName, critical: bool) -> Self {
-        Self { name, critical }
+    pub(crate) fn new(name: ProbeName, criticality: Criticality) -> Self {
+        Self { name, criticality }
     }
 
     /// 探针名。
@@ -45,9 +61,9 @@ impl ProbeDescriptor {
         &self.name
     }
 
-    /// 是否关键探针（关键探针失败 → `Unhealthy`）。
-    pub(crate) fn critical(&self) -> bool {
-        self.critical
+    /// 探针关键度（[`Criticality::Critical`] 失败 → `Unhealthy`）。
+    pub(crate) fn criticality(&self) -> Criticality {
+        self.criticality
     }
 }
 
@@ -55,7 +71,7 @@ impl std::fmt::Debug for ProbeDescriptor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProbeDescriptor")
             .field("name", &self.name)
-            .field("critical", &self.critical)
+            .field("criticality", &self.criticality)
             .finish()
     }
 }
@@ -109,11 +125,11 @@ impl ProbeRegistry {
     /// 时 aggregate 按 fail-closed 兜底（未注册失败探针计为 critical）。
     // reason: 严格查询路径接线在 W-services；当前仅 aggregate（match Err→fail-closed）与测试消费 ⇒ dead_code。
     #[allow(dead_code)]
-    pub(crate) fn criticality_of(&self, name: &ProbeName) -> Result<bool, SyshealthError> {
+    pub(crate) fn criticality_of(&self, name: &ProbeName) -> Result<Criticality, SyshealthError> {
         self.descriptors
             .iter()
             .find(|d| d.name() == name)
-            .map(|d| d.critical())
+            .map(|d| d.criticality())
             .ok_or(SyshealthError::ProbeNotRegistered)
     }
 }
@@ -231,9 +247,11 @@ pub(crate) fn aggregate_with_criticality(
         }
         match registry.criticality_of(check.name()) {
             // critical 失败 OR 未注册失败（fail-closed：注册缺失视为 critical，不静默放行）。
-            Ok(true) | Err(SyshealthError::ProbeNotRegistered) => critical_fail = true,
+            Ok(Criticality::Critical) | Err(SyshealthError::ProbeNotRegistered) => {
+                critical_fail = true
+            }
             // 已注册 non-critical 失败 → 封顶 Degraded（有意的严重度分级）。
-            Ok(false) => noncritical_fail = true,
+            Ok(Criticality::NonCritical) => noncritical_fail = true,
             // reason: criticality_of 仅产 ProbeNotRegistered；其它变体（DuplicateProbe）非查询路径，
             //         fail-closed 兜底为 critical（不可达，防未来变体漂移成静默放行）。
             Err(_) => critical_fail = true,
@@ -272,7 +290,8 @@ pub(crate) enum SyshealthError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ProbeDescriptor, ProbeRegistry, SyshealthError, SystemInfo, aggregate_with_criticality,
+        Criticality, ProbeDescriptor, ProbeRegistry, SyshealthError, SystemInfo,
+        aggregate_with_criticality,
     };
     use primitives::healthz::{HealthCheck, HealthStatus, ProbeName};
 
@@ -287,10 +306,10 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used)]
-    fn registry(entries: &[(&str, bool)]) -> ProbeRegistry {
+    fn registry(entries: &[(&str, Criticality)]) -> ProbeRegistry {
         let mut reg = ProbeRegistry::new();
-        for (name, critical) in entries {
-            reg.register(ProbeDescriptor::new(probe(name), *critical))
+        for (name, criticality) in entries {
+            reg.register(ProbeDescriptor::new(probe(name), *criticality))
                 .unwrap();
         }
         reg
@@ -299,12 +318,12 @@ mod tests {
     // ── ProbeDescriptor ───────────────────────────────────────────────────
     #[test]
     fn probe_descriptor_accessors() {
-        let d = ProbeDescriptor::new(probe("db"), true);
+        let d = ProbeDescriptor::new(probe("db"), Criticality::Critical);
         assert_eq!(d.name(), &probe("db"));
-        assert!(d.critical());
+        assert_eq!(d.criticality(), Criticality::Critical);
 
-        let d2 = ProbeDescriptor::new(probe("cache"), false);
-        assert!(!d2.critical());
+        let d2 = ProbeDescriptor::new(probe("cache"), Criticality::NonCritical);
+        assert_eq!(d2.criticality(), Criticality::NonCritical);
     }
 
     // ── ProbeRegistry ─────────────────────────────────────────────────────
@@ -316,7 +335,11 @@ mod tests {
 
     #[test]
     fn registry_register_ok_and_preserves_order() {
-        let reg = registry(&[("db", true), ("cache", false), ("queue", true)]);
+        let reg = registry(&[
+            ("db", Criticality::Critical),
+            ("cache", Criticality::NonCritical),
+            ("queue", Criticality::Critical),
+        ]);
         let names: Vec<&str> = reg
             .descriptors()
             .iter()
@@ -329,9 +352,9 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     fn registry_register_duplicate_is_err() {
         let mut reg = ProbeRegistry::new();
-        reg.register(ProbeDescriptor::new(probe("db"), true))
+        reg.register(ProbeDescriptor::new(probe("db"), Criticality::Critical))
             .unwrap();
-        let err = reg.register(ProbeDescriptor::new(probe("db"), false));
+        let err = reg.register(ProbeDescriptor::new(probe("db"), Criticality::NonCritical));
         assert!(matches!(err, Err(SyshealthError::DuplicateProbe)));
         // 重复注册不入表（保持单条）。
         assert_eq!(reg.descriptors().len(), 1);
@@ -340,19 +363,22 @@ mod tests {
     // ── criticality_of（fail-closed 查询）─────────────────────────────────
     #[test]
     fn criticality_of_registered_critical() {
-        let reg = registry(&[("db", true)]);
-        assert_eq!(reg.criticality_of(&probe("db")), Ok(true));
+        let reg = registry(&[("db", Criticality::Critical)]);
+        assert_eq!(reg.criticality_of(&probe("db")), Ok(Criticality::Critical));
     }
 
     #[test]
     fn criticality_of_registered_noncritical() {
-        let reg = registry(&[("cache", false)]);
-        assert_eq!(reg.criticality_of(&probe("cache")), Ok(false));
+        let reg = registry(&[("cache", Criticality::NonCritical)]);
+        assert_eq!(
+            reg.criticality_of(&probe("cache")),
+            Ok(Criticality::NonCritical)
+        );
     }
 
     #[test]
     fn criticality_of_unregistered_is_err() {
-        let reg = registry(&[("db", true)]);
+        let reg = registry(&[("db", Criticality::Critical)]);
         assert!(matches!(
             reg.criticality_of(&probe("missing")),
             Err(SyshealthError::ProbeNotRegistered)
@@ -372,7 +398,10 @@ mod tests {
 
     #[test]
     fn aggregate_all_healthy_is_healthy() {
-        let reg = registry(&[("db", true), ("cache", false)]);
+        let reg = registry(&[
+            ("db", Criticality::Critical),
+            ("cache", Criticality::NonCritical),
+        ]);
         let checks = [
             check("db", HealthStatus::Healthy),
             check("cache", HealthStatus::Healthy),
@@ -386,7 +415,7 @@ mod tests {
     #[test]
     fn aggregate_critical_degraded_is_unhealthy() {
         // critical 探针仅 Degraded 也升 Unhealthy。
-        let reg = registry(&[("db", true)]);
+        let reg = registry(&[("db", Criticality::Critical)]);
         let checks = [check("db", HealthStatus::Degraded)];
         assert_eq!(
             aggregate_with_criticality(&checks, &reg),
@@ -396,7 +425,7 @@ mod tests {
 
     #[test]
     fn aggregate_critical_unhealthy_is_unhealthy() {
-        let reg = registry(&[("db", true)]);
+        let reg = registry(&[("db", Criticality::Critical)]);
         let checks = [check("db", HealthStatus::Unhealthy)];
         assert_eq!(
             aggregate_with_criticality(&checks, &reg),
@@ -407,7 +436,7 @@ mod tests {
     #[test]
     fn aggregate_noncritical_unhealthy_caps_at_degraded() {
         // non-critical 探针即便 Unhealthy 也只降到 Degraded。
-        let reg = registry(&[("cache", false)]);
+        let reg = registry(&[("cache", Criticality::NonCritical)]);
         let checks = [check("cache", HealthStatus::Unhealthy)];
         assert_eq!(
             aggregate_with_criticality(&checks, &reg),
@@ -417,7 +446,7 @@ mod tests {
 
     #[test]
     fn aggregate_noncritical_degraded_is_degraded() {
-        let reg = registry(&[("cache", false)]);
+        let reg = registry(&[("cache", Criticality::NonCritical)]);
         let checks = [check("cache", HealthStatus::Degraded)];
         assert_eq!(
             aggregate_with_criticality(&checks, &reg),
@@ -439,7 +468,7 @@ mod tests {
     #[test]
     fn aggregate_unregistered_healthy_probe_is_healthy() {
         // INVARIANT: HEALTHZ-EMPTY-FAIL-CLOSED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }        // 未注册但 Healthy 的 check 不触发 fail-closed（只有失败探针才按注册缺失判 critical）→ Healthy。
-        let reg = registry(&[("db", true)]);
+        let reg = registry(&[("db", Criticality::Critical)]);
         let checks = [
             check("db", HealthStatus::Healthy),
             check("ghost", HealthStatus::Healthy),
@@ -453,7 +482,10 @@ mod tests {
     #[test]
     fn aggregate_two_critical_probes_both_fail_is_unhealthy() {
         // 多个 critical 同时失败仍聚合为 Unhealthy（回归护栏）。
-        let reg = registry(&[("db", true), ("queue", true)]);
+        let reg = registry(&[
+            ("db", Criticality::Critical),
+            ("queue", Criticality::Critical),
+        ]);
         let checks = [
             check("db", HealthStatus::Unhealthy),
             check("queue", HealthStatus::Unhealthy),
@@ -466,7 +498,10 @@ mod tests {
 
     #[test]
     fn aggregate_critical_healthy_noncritical_unhealthy_is_degraded() {
-        let reg = registry(&[("db", true), ("cache", false)]);
+        let reg = registry(&[
+            ("db", Criticality::Critical),
+            ("cache", Criticality::NonCritical),
+        ]);
         let checks = [
             check("db", HealthStatus::Healthy),
             check("cache", HealthStatus::Unhealthy),
@@ -479,7 +514,10 @@ mod tests {
 
     #[test]
     fn aggregate_critical_unhealthy_noncritical_healthy_is_unhealthy() {
-        let reg = registry(&[("db", true), ("cache", false)]);
+        let reg = registry(&[
+            ("db", Criticality::Critical),
+            ("cache", Criticality::NonCritical),
+        ]);
         let checks = [
             check("db", HealthStatus::Unhealthy),
             check("cache", HealthStatus::Healthy),
@@ -493,7 +531,10 @@ mod tests {
     #[test]
     fn aggregate_critical_degraded_noncritical_unhealthy_critical_wins() {
         // critical 失败胜过 non-critical 失败 → Unhealthy。
-        let reg = registry(&[("db", true), ("cache", false)]);
+        let reg = registry(&[
+            ("db", Criticality::Critical),
+            ("cache", Criticality::NonCritical),
+        ]);
         let checks = [
             check("db", HealthStatus::Degraded),
             check("cache", HealthStatus::Unhealthy),
@@ -523,12 +564,12 @@ mod tests {
     // ── Debug / Display 覆盖 ─────────────────────────────────────────────
     #[test]
     fn debug_impls_render_fields() {
-        let d = ProbeDescriptor::new(probe("db"), true);
+        let d = ProbeDescriptor::new(probe("db"), Criticality::Critical);
         let s = format!("{d:?}");
         assert!(s.contains("ProbeDescriptor"));
         assert!(s.contains("db"));
 
-        let reg = registry(&[("db", true)]);
+        let reg = registry(&[("db", Criticality::Critical)]);
         let rs = format!("{reg:?}");
         assert!(rs.contains("ProbeRegistry"));
 

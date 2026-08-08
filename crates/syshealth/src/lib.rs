@@ -10,8 +10,8 @@
 //! # 模块布局
 //!
 //! - `domain` —— 域类型与纯逻辑（dylint 守护区 `rss_domain_no_serialize`，禁 derive Serialize）：
-//!   `ProbeDescriptor` / `ProbeRegistry`（注册 + criticality 查询）、`aggregate_with_criticality`
-//!   分级聚合、`SystemInfo` 系统元信息、`SyshealthError`。
+//!   `Criticality` / `ProbeDescriptor` / `ProbeRegistry`（注册 + criticality 查询）、
+//!   `aggregate_with_criticality` 分级聚合、`SystemInfo` 系统元信息、`SyshealthError`。
 //!
 //! # 接线状态
 //!
