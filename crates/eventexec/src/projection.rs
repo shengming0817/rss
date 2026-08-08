@@ -2159,9 +2159,11 @@ mod tests {
         )
     }
 
+    type ProjectionReadCalls = Arc<Mutex<Vec<(Option<u64>, u32)>>>;
+
     struct FakeProjectionSource {
         events: Vec<ProjectionEventRecord>,
-        calls: Arc<Mutex<Vec<(Option<u64>, u32)>>>,
+        calls: ProjectionReadCalls,
         fail_kind: Option<EngineErrorKind>,
         cancel_on_read: Option<CancellationToken>,
     }
@@ -2197,7 +2199,7 @@ mod tests {
             }
         }
 
-        fn call_recorder(&self) -> Arc<Mutex<Vec<(Option<u64>, u32)>>> {
+        fn call_recorder(&self) -> ProjectionReadCalls {
             Arc::clone(&self.calls)
         }
 
@@ -4018,6 +4020,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn fatal_source_exit_is_typed_and_latches_unhealthy() {
         let source = FakeProjectionSource::fail(EngineErrorKind::Invariant);
         let (harness, _projector, _checkpoint, _dead_letter) =

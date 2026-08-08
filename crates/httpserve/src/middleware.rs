@@ -156,33 +156,35 @@ pub(crate) async fn request_id(mut req: Request, next: Next) -> Response {
     resp
 }
 
-/// 中间件：创建 `http.request` tracing span，不持有 guard 跨 await。
-///
-/// `status` 字段声明为 `Empty`，在响应返回后由 `span.record` 回填（可观测性：响应状态码可查）。
-/// `correlation` 从 ambient `diagctx`（correlation middleware 已在更外层绑定）读入 span 字段——入口请求
-/// span 与 outbox envelope 的 `correlation` 同 key，使事件链路可反查入口请求（无 scope 时空串，F2 review）。
-pub(crate) async fn trace(req: Request, next: Next) -> Response {
+/// W3C-parented HTTP SERVER span. The span ends when response headers are returned; response-body
+/// EOS/error/cancellation settlement belongs to #2037.
+pub(crate) async fn http_server_trace(req: Request, next: Next) -> Response {
+    let inbound = crate::trace_context::InboundTraceContext::from_headers(req.headers());
     let rid = req
         .extensions()
         .get::<RequestId>()
         .map(|r| r.0.clone())
         .unwrap_or_default();
     let correlation = diagctx::correlation();
-    let route = req
-        .extensions()
-        .get::<axum::extract::MatchedPath>()
-        .map_or("<unmatched>", |p| p.as_str());
-    let span = tracing::info_span!(
-        "http.request",
-        method = %req.method(),
-        path = %route,
-        request_id = %rid,
-        correlation = correlation.as_ref().map_or("", |c| c.as_str()),
-        status = tracing::field::Empty,
+    let observation = crate::trace_context::HttpServerObservation::new(
+        req.method(),
+        req.extensions().get::<axum::extract::MatchedPath>(),
+        req.version(),
+        &rid,
+        correlation.as_ref().map_or("", |value| value.as_str()),
     );
+    let span = observation.span();
+    if let Some(inbound) = inbound {
+        inbound.apply_to(&span);
+    }
     use tracing::Instrument;
     let resp = next.run(req).instrument(span.clone()).await;
-    span.record("status", resp.status().as_u16());
+    let status = resp.status().as_u16();
+    span.record("http.response.status_code", status);
+    if resp.status().is_server_error() {
+        span.record("otel.status_code", "error");
+        span.record("error.type", status.to_string());
+    }
     resp
 }
 
@@ -616,8 +618,8 @@ mod tests {
         );
     }
 
-    // `http.request` span 字段（method/path/request_id/correlation/status）的独立断言在 routes.rs 覆盖；
-    // 这里保留 correlation scope 层序的局部探针。
+    // `http.server.request` 的 HTTP semantic fields 独立断言在 routes.rs 覆盖；这里保留
+    // correlation scope 层序的局部探针。
 
     // ── body_limit 测试 ──────────────────────────────────────────────────────────────────────────
 

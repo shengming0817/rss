@@ -1,0 +1,11 @@
+version: 1
+triggers:
+  - id: postgres_pool
+    condition: "A tracker PBI accepts PostgreSQL pool observation scope."
+    action: "Define bounded pool-state observation in that PBI."
+  - id: exporter
+    condition: "A deployment-owned tracker PBI selects an export destination."
+    action: "Define deployment configuration and lifecycle in that PBI."
+  - id: consumer_settlement
+    condition: "A tracker PBI accepts consumer settlement observation scope."
+    action: "Define ack/requeue/dead-letter settlement at the consumer boundary."

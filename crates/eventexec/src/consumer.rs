@@ -509,7 +509,7 @@ async fn handle_fresh<S, H>(
 
 /// 构造消费 span 并（若 producer 透传了 W3C `traceparent`）还原 remote parent，使 handler span 与 producer
 /// 同 `trace_id`（#1224）。`traceparent` 缺失（`None`）/ 畸形 → span 保持 root（fail-open，
-/// [`tracewire::restore_parent`] no-op，不阻消费）。抽出为 helper 控制 [`handle_fresh`] 认知复杂度 ≤15。
+/// [`tracewire::restore_remote_parent`] no-op，不阻消费）。抽出为 helper 控制 [`handle_fresh`] 认知复杂度 ≤15。
 #[doc(hidden)]
 pub fn build_consume_span(
     meta: &ConsumerMeta,
@@ -526,7 +526,7 @@ pub fn build_consume_span(
         messaging.message.id = message_id,
     );
     if let Some(tp) = traceparent {
-        tracewire::restore_parent(&span, tp);
+        tracewire::restore_remote_parent(&span, tp, None);
     }
     span
 }

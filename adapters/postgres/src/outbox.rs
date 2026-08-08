@@ -761,7 +761,7 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 /// - correlation：从 `diagctx` ambient 读回（无 scope → 省略）。
 /// - trace：`tracewire::capture()` 从当前 tracing span 导出 W3C traceparent（emit 与 handler 同 task 同步执行
 ///   ⇒ `Span::current()` 即请求 span；无 otel 层 / 未采样 → `None` 省略）。落 outbox `metadata` 保留键 `trace`，
-///   经 relay → broker header → consumer `tracewire::restore_parent` 还原，使 handler span 与 producer 同 trace_id。
+///   经 relay → broker header → consumer `tracewire::restore_remote_parent` 还原，使 handler span 与 producer 同 trace_id。
 ///
 /// 全部缺失（worker 任务 / 批次未绑 correlation、无 otel）→ 仅含 occurred_at，不 panic（fail-open，不阻投递）。
 pub(crate) fn metadata_with_ambient(

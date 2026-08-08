@@ -44,9 +44,10 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
 pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &["diagctx", "authmint", "sagaauthmint"];
 /// 引擎 / 原语层（依赖基础）。
 ///
-/// `tracewire`（#1224）是 W3C traceparent capture/restore 单源（唯一新 otel 落点）：domain-neutral 纯 infra、
-/// 无 workspace 内部边（出边全是外部 opentelemetry/tracing crate），被 service `eventexec` + adapter `postgres`
-/// 依赖（`allows(Service,Engine)` / `allows(Adapter,Engine)` 均放行；`service→service` 禁故不可置 Service 档）。
+/// `tracewire` 是 W3C Trace Context capture/remote-parent restore 单源（唯一新 otel 落点）：domain-neutral
+/// 纯 infra、无 workspace 内部边（出边全是外部 opentelemetry/tracing crate），被 service `httpserve` +
+/// `eventexec` 和 adapter `postgres` 依赖（`allows(Service,Engine)` / `allows(Adapter,Engine)` 均放行；
+/// `service→service` 禁故不可置 Service 档）。
 pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives", "tracewire"];
 /// DI-infra 层（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费）——可替换 provider 的
 /// DI port trait 单源 + dynosaur 单一 dyn-dispatch 依赖点（ADR-003）。

@@ -2946,6 +2946,7 @@ dependencies = [
  "tokio",
  "tower",
  "tower-http",
+ "tracewire",
  "tracing",
  "trybuild",
  "uuid",

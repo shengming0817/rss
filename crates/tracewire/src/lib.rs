@@ -1,14 +1,15 @@
-//! `tracewire` —— outbox 异步边界的 W3C `traceparent` capture / restore 单源（#1224）。
+//! `tracewire` —— W3C Trace Context capture / remote-parent restore 单源。
 //!
 //! trace 在 `业务请求 → outbox → relay → broker → consumer` 跨 async 边界断链：emit 侧不捕获当前 trace、
 //! consumer 侧无法还原 ⇒ 端到端被 relay 切两段。本 crate 是**唯一碰 `opentelemetry` 的新落点**（#1224 决策 2）——
 //! producer 经 [`capture`] 把当前 `tracing` span 的 OTel 上下文导出为 W3C `traceparent` 串（落 outbox
-//! `metadata` 保留键 `trace`），consumer 经 [`restore_parent`] 还原成 remote parent 挂到消费 span，使 handler
-//! 与 producer **同一 `trace_id`**。`adapters/postgres`（emit）与 `crates/eventexec`（consume）只依赖本 crate、
+//! `metadata` 保留键 `trace`），consumer 经 [`restore_remote_parent`] 还原成 remote parent 挂到消费 span，使 handler
+//! 与 producer **同一 `trace_id`**。HTTP server 入口也经同一 API 恢复 `traceparent` + `tracestate`。
+//! `adapters/postgres`（emit）、`crates/eventexec`（consume）与 `crates/httpserve`（HTTP server）只依赖本 crate、
 //! **不直接 import otel**，延续 RSS「otel 收口」治理（`adapters/otel` / `diagctx` / `observ` 同思路）。
 //!
 //! **fail-open**：诊断信道缺失从不阻塞投递——未装 otel 层 / span context 无效 / 未采样 ⇒ [`capture`] 返
-//! `None`（不写 trace 键）；`traceparent` 畸形 ⇒ [`restore_parent`] no-op（span 保持 root，不 panic）。
+//! `None`（不写 trace 键）；`traceparent` 畸形 ⇒ [`restore_remote_parent`] 建立的新 span 保持 root，不 panic。
 //!
 //! W3C 线格式 `00-<32hex traceid>-<16hex spanid>-<2hex flags>`（W3C Trace Context；OTel messaging producer
 //! inject / consumer extract 约定）。
@@ -22,6 +23,8 @@ use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// W3C Trace Context 透传 header 名（producer inject / consumer extract 的 carrier 键）。
 const TRACEPARENT: &str = "traceparent";
+const TRACESTATE: &str = "tracestate";
+const MAX_TRACE_CONTEXT_BYTES: usize = 512;
 
 /// 捕获当前 `tracing` span 的 OTel 上下文为 W3C `traceparent` 串。
 ///
@@ -40,22 +43,27 @@ pub fn capture() -> Option<String> {
     carrier.remove(TRACEPARENT).filter(|s| !s.is_empty())
 }
 
-/// 把 W3C `traceparent` 还原成 remote parent 挂到 `span`（使其与 producer 同 `trace_id`）。
+/// 把 W3C `traceparent` / `tracestate` 还原成 remote parent 挂到 `span`。
 ///
 /// **fail-open**：`traceparent` 畸形 / 空 ⇒ 解析出无效 SpanContext，`set_parent` 不改 trace 归属（span 保持
 /// 自身 root），**不 panic**——迟到 / 损坏的诊断信道不影响消费正确性。
 ///
-/// 生产 caller：`crates/eventexec` 的 consumer Fresh 路径（读 `Message.metadata` 的 `trace` 键，挂到消费 span，
-/// 再 `instrument` handler）。
-pub fn restore_parent(span: &tracing::Span, traceparent: &str) {
-    // 单键 carrier 经 W3C propagator extract 成 remote-parent Context；畸形 → 无效 SpanContext（set_parent no-op）。
+/// caller 必须在 span 首次 enter/instrument 前调用。畸形 `tracestate` 只丢 state，不使合法 parent 失效。
+/// 生产 caller：`crates/httpserve` HTTP 入口与 `crates/eventexec` consumer Fresh 路径。
+pub fn restore_remote_parent(span: &tracing::Span, traceparent: &str, tracestate: Option<&str>) {
+    if traceparent.len() > MAX_TRACE_CONTEXT_BYTES {
+        return;
+    }
     let mut carrier = std::collections::HashMap::<String, String>::new();
     carrier.insert(TRACEPARENT.to_owned(), traceparent.to_owned());
+    if let Some(tracestate) = tracestate.filter(|value| value.len() <= MAX_TRACE_CONTEXT_BYTES) {
+        carrier.insert(TRACESTATE.to_owned(), tracestate.to_owned());
+    }
     let cx = TraceContextPropagator::new().extract(&carrier);
     if let Err(e) = span.set_parent(cx) {
         // reason: fail-open——set_parent 仅在 span 已 disabled/closed 或 layer 不可 downcast 时 Err（罕见）；
         // trace 续传是 best-effort 诊断，降级为 debug、消费 span 保持 root，绝不阻断消费。
-        tracing::debug!(target: "tracewire", error = %e, "restore_parent: set_parent failed; consume span stays root");
+        tracing::debug!(target: "tracewire", error = %e, "restore_remote_parent: set_parent failed; span stays root");
     }
 }
 
@@ -111,7 +119,7 @@ mod tests {
         assert_eq!(capture(), None);
     }
 
-    // round-trip：capture → restore_parent 后 consumer span 与 producer 同 trace_id（issue 验收）。
+    // round-trip：capture → restore_remote_parent 后 consumer span 与 producer 同 trace_id（issue 验收）。
     // reason: 测试断言——producer/child span 在 `with_test_subscriber` 内恒采样，capture 恒 Some。
     #[allow(clippy::expect_used)]
     #[test]
@@ -121,7 +129,7 @@ mod tests {
                 .in_scope(capture)
                 .expect("producer traceparent");
             let child = tracing::info_span!("consume");
-            restore_parent(&child, &producer_tp);
+            restore_remote_parent(&child, &producer_tp, None);
             let child_tp = child
                 .in_scope(capture)
                 .expect("child traceparent after restore");
@@ -130,7 +138,7 @@ mod tests {
         assert_eq!(
             trace_id_of(&producer_tp),
             trace_id_of(&child_tp),
-            "restore_parent 后 consumer span 与 producer 同 trace_id"
+            "restore_remote_parent 后 consumer span 与 producer 同 trace_id"
         );
     }
 
@@ -139,8 +147,83 @@ mod tests {
     fn restore_malformed_is_noop_no_panic() {
         with_test_subscriber(|| {
             let span = tracing::info_span!("consume");
-            restore_parent(&span, "not-a-valid-traceparent");
+            restore_remote_parent(&span, "not-a-valid-traceparent", None);
             let _ = span.in_scope(capture); // 不 panic 即通过
         });
+    }
+
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn exported_remote_child(
+        traceparent: &str,
+        tracestate: Option<&str>,
+    ) -> opentelemetry_sdk::trace::SpanData {
+        use opentelemetry::trace::TracerProvider as _;
+        use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
+        use tracing_subscriber::prelude::*;
+
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("tracewire-test"));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(parent: None, "remote-child");
+            restore_remote_parent(&span, traceparent, tracestate);
+            let _entered = span.enter();
+        });
+        exporter
+            .get_finished_spans()
+            .expect("finished spans")
+            .into_iter()
+            .find(|span| span.name == "remote-child")
+            .expect("remote child exported")
+    }
+
+    #[test]
+    fn remote_parent_sets_exact_parent_and_inherits_tracestate() {
+        let span = exported_remote_child(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            Some("vendor=value"),
+        );
+        assert_eq!(
+            span.span_context.trace_id().to_string(),
+            "4bf92f3577b34da6a3ce929d0e0e4736"
+        );
+        assert_eq!(span.parent_span_id.to_string(), "00f067aa0ba902b7");
+        assert_eq!(span.span_context.trace_state().header(), "vendor=value");
+    }
+
+    #[test]
+    fn remote_parent_malformed_value_starts_new_root() {
+        let span = exported_remote_child("not-a-valid-traceparent", None);
+        assert_eq!(span.parent_span_id, opentelemetry::trace::SpanId::INVALID);
+    }
+
+    #[test]
+    fn remote_parent_malformed_state_is_dropped_without_losing_parent() {
+        let span = exported_remote_child(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            Some("INVALID KEY=value"),
+        );
+        assert_eq!(span.parent_span_id.to_string(), "00f067aa0ba902b7");
+        assert_eq!(span.span_context.trace_state().header(), "");
+    }
+
+    #[test]
+    fn remote_parent_oversized_value_starts_new_root() {
+        let span = exported_remote_child(&"a".repeat(MAX_TRACE_CONTEXT_BYTES + 1), None);
+        assert_eq!(span.parent_span_id, opentelemetry::trace::SpanId::INVALID);
+    }
+
+    #[test]
+    fn remote_parent_oversized_state_is_dropped_without_losing_parent() {
+        let state = "a".repeat(MAX_TRACE_CONTEXT_BYTES + 1);
+        let span = exported_remote_child(
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            Some(&state),
+        );
+        assert_eq!(span.parent_span_id.to_string(), "00f067aa0ba902b7");
+        assert_eq!(span.span_context.trace_state().header(), "");
     }
 }

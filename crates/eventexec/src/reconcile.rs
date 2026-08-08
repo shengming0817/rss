@@ -5470,7 +5470,7 @@ mod tests {
         ] {
             let exact = format!("device_latent_lease_churn_total{{{labels}}} 1");
             assert!(
-                samples.iter().any(|sample| *sample == exact.as_str()),
+                samples.contains(&exact.as_str()),
                 "missing exact {labels}: {rendered}"
             );
         }
@@ -5493,6 +5493,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn lease_release_store_outcomes_emit_behavior_lease_churn() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
@@ -5664,6 +5665,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn reviewed_certificate_command_cannot_cross_attempts() -> TestResult {
         let store = FakeScheduleStore::default();
         let keys = keyring();

@@ -68,7 +68,7 @@ rss/
 │   ├── authmint/         # Authenticated production evidence mint capability token（AUTH-EVIDENCE-MINT-01）
 │   ├── consistency/      # outbox / saga / reconcile / projection / command_journal / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
-│   ├── tracewire/        # W3C traceparent capture/restore 单源（outbox→consumer trace 续传，唯一 otel 桥落点）
+│   ├── tracewire/        # W3C Trace Context capture/remote-parent restore 单源（HTTP + outbox，唯一 otel 桥落点）
 │   ├── workspacefacts/   # Tooling/Verification：guppy PackageGraph/CargoSet 薄适配；owned Cargo facts
 │   ├── diport/           # DI-infra：可替换 provider 的 port 单源；dynosaur 默认非 Sync，async_sync 闭集（KeyProvider/Pdp/SecretResolver/ServiceTokenReplayStore）是共享例外（ADR-003 · DIPORT-DYN-CONCURRENCY-01）
 │   ├── httpserve/        # axum router / middleware / health
@@ -110,7 +110,7 @@ rss/
 ## 分层(crate 图 + deny.toml 编译期强制)
 
 - **基础** `vocab`/`assembly-schema`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`/`authmint`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 与 `authmint` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖；`diagctx` 仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）；`authmint` 仅由 deny.toml wrappers（`httpserve` + 三 assembly）持有（AUTH-EVIDENCE-MINT-01 Hard）；assembly 内 exact mint + proof-consuming 另由 `rss_authenticated_callsite` Medium 守。现有 sanctioned 前向边:`assembly-schema → vocab`（contract authoring 的 canonical `StepName` / `DomainName` 类型边界）、`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制。
-- **引擎/原语** `consistency`/`primitives`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`tracewire`(W3C traceparent capture/restore 单源)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `eventexec`(consume 还原)+ adapter `postgres`(emit 捕获)依赖——otel 只准在此与 `adapters/otel` 收口,二者外不直接 import otel(当前只有结构性收口,无机器守)。
+- **引擎/原语** `consistency`/`primitives`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`tracewire`(W3C Trace Context capture/remote-parent restore 单源)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `httpserve`(HTTP ingress 还原)+`eventexec`(consume 还原)+ adapter `postgres`(emit 捕获)依赖——otel 只准在此与 `adapters/otel` 收口,二者外不直接 import otel(当前只有结构性收口,无机器守)。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
   产品面定位是 `publish = false` 的 **Internal Provider Contract**：仓内 `pub` 只使 official adapter、服务/域与组合根
   能跨 crate 实现或消费统一接缝，不构成 Platform Public / Release API。official adapter 继续直接实现该 internal seam，

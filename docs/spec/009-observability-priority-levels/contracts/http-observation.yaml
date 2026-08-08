@@ -1,0 +1,32 @@
+version: 1
+span:
+  tracing_name: http.server.request
+  kind: server
+  matched_name: "METHOD route-template"
+  unmatched_name: METHOD
+attributes:
+  required:
+    - otel.kind
+    - otel.name
+    - http.request.method
+    - network.protocol.version
+    - http.response.status_code
+  matched_only:
+    - http.route
+  diagnostic:
+    - request_id
+    - correlation
+status:
+  client_error: unset
+  server_error: error
+  error_type: decimal_status_code
+forbidden_sources:
+  - raw_uri
+  - query
+  - authority
+  - headers
+  - body
+  - credential
+  - tenant
+  - principal
+  - free_form_error

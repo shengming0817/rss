@@ -1189,11 +1189,17 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::projection::Projectio
 pub enum consistency::projection::ProjectionApplyErrorReason
 pub consistency::projection::ProjectionApplyErrorReason::CommitUnknown
 pub consistency::projection::ProjectionApplyErrorReason::Conflict
-pub consistency::projection::ProjectionApplyErrorReason::Invariant
+pub consistency::projection::ProjectionApplyErrorReason::InputBindingDrift
 pub consistency::projection::ProjectionApplyErrorReason::OutOfOrder
-pub consistency::projection::ProjectionApplyErrorReason::Permanent
+pub consistency::projection::ProjectionApplyErrorReason::PayloadMalformed
+pub consistency::projection::ProjectionApplyErrorReason::PayloadValueInvalid
+pub consistency::projection::ProjectionApplyErrorReason::ProviderInvariant
+pub consistency::projection::ProjectionApplyErrorReason::ProviderPermanent
 pub consistency::projection::ProjectionApplyErrorReason::RollbackFailed
+pub consistency::projection::ProjectionApplyErrorReason::TargetDefinitionDrift
+pub consistency::projection::ProjectionApplyErrorReason::TenantDrift
 pub consistency::projection::ProjectionApplyErrorReason::Transient
+pub consistency::projection::ProjectionApplyErrorReason::VersionRegression
 impl consistency::projection::ProjectionApplyErrorReason
 pub const fn consistency::projection::ProjectionApplyErrorReason::as_label(self) -> &'static str
 pub const fn consistency::projection::ProjectionApplyErrorReason::kind(self) -> consistency::projection::ProjectionApplyErrorKind
@@ -1280,31 +1286,6 @@ impl core::marker::Unpin for consistency::projection::ProjectionCheckpointError
 impl core::marker::UnsafeUnpin for consistency::projection::ProjectionCheckpointError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionCheckpointError
 impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionCheckpointError
-#[non_exhaustive] pub enum consistency::projection::ProjectionDeadLetterReason
-pub consistency::projection::ProjectionDeadLetterReason::ApplyConflict
-pub consistency::projection::ProjectionDeadLetterReason::ApplyInvariant
-pub consistency::projection::ProjectionDeadLetterReason::ApplyOutOfOrder
-pub consistency::projection::ProjectionDeadLetterReason::ApplyPermanent
-pub consistency::projection::ProjectionDeadLetterReason::OutOfOrder
-impl consistency::projection::ProjectionDeadLetterReason
-pub const fn consistency::projection::ProjectionDeadLetterReason::as_label(self) -> &'static str
-pub fn consistency::projection::ProjectionDeadLetterReason::from_apply_error_reason(consistency::projection::ProjectionApplyErrorReason) -> core::option::Option<Self>
-impl core::clone::Clone for consistency::projection::ProjectionDeadLetterReason
-pub fn consistency::projection::ProjectionDeadLetterReason::clone(&self) -> consistency::projection::ProjectionDeadLetterReason
-impl core::cmp::Eq for consistency::projection::ProjectionDeadLetterReason
-impl core::cmp::PartialEq for consistency::projection::ProjectionDeadLetterReason
-pub fn consistency::projection::ProjectionDeadLetterReason::eq(&self, &consistency::projection::ProjectionDeadLetterReason) -> bool
-impl core::fmt::Debug for consistency::projection::ProjectionDeadLetterReason
-pub fn consistency::projection::ProjectionDeadLetterReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::StructuralPartialEq for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::Freeze for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::Send for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::Sync for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::Unpin for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::UnsafeUnpin for consistency::projection::ProjectionDeadLetterReason
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionDeadLetterReason
-impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionDeadLetterReason
 pub struct consistency::projection::Lsn(_)
 impl consistency::projection::Lsn
 pub fn consistency::projection::Lsn::get(&self) -> u64
@@ -1335,7 +1316,6 @@ pub struct consistency::projection::ProjectionApplyError
 impl consistency::projection::ProjectionApplyError
 pub const fn consistency::projection::ProjectionApplyError::from_reason(consistency::projection::ProjectionApplyErrorReason) -> Self
 pub const fn consistency::projection::ProjectionApplyError::kind(&self) -> consistency::projection::ProjectionApplyErrorKind
-pub const fn consistency::projection::ProjectionApplyError::new(consistency::projection::ProjectionApplyErrorKind) -> Self
 pub const fn consistency::projection::ProjectionApplyError::reason(&self) -> consistency::projection::ProjectionApplyErrorReason
 impl core::error::Error for consistency::projection::ProjectionApplyError
 impl core::fmt::Debug for consistency::projection::ProjectionApplyError
@@ -1420,6 +1400,28 @@ impl core::marker::Unpin for consistency::projection::ProjectionDeadLetter
 impl core::marker::UnsafeUnpin for consistency::projection::ProjectionDeadLetter
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionDeadLetter
 impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionDeadLetter
+pub struct consistency::projection::ProjectionDeadLetterReason
+impl consistency::projection::ProjectionDeadLetterReason
+pub const fn consistency::projection::ProjectionDeadLetterReason::as_label(self) -> &'static str
+pub fn consistency::projection::ProjectionDeadLetterReason::from_apply_error_reason(consistency::projection::ProjectionApplyErrorReason) -> core::option::Option<Self>
+pub const fn consistency::projection::ProjectionDeadLetterReason::reason(self) -> consistency::projection::ProjectionApplyErrorReason
+pub const fn consistency::projection::ProjectionDeadLetterReason::source_out_of_order() -> Self
+impl core::clone::Clone for consistency::projection::ProjectionDeadLetterReason
+pub fn consistency::projection::ProjectionDeadLetterReason::clone(&self) -> consistency::projection::ProjectionDeadLetterReason
+impl core::cmp::Eq for consistency::projection::ProjectionDeadLetterReason
+impl core::cmp::PartialEq for consistency::projection::ProjectionDeadLetterReason
+pub fn consistency::projection::ProjectionDeadLetterReason::eq(&self, &consistency::projection::ProjectionDeadLetterReason) -> bool
+impl core::fmt::Debug for consistency::projection::ProjectionDeadLetterReason
+pub fn consistency::projection::ProjectionDeadLetterReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::StructuralPartialEq for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::Freeze for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::Send for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::Sync for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::Unpin for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::UnsafeUnpin for consistency::projection::ProjectionDeadLetterReason
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionDeadLetterReason
+impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionDeadLetterReason
 pub struct consistency::projection::ProjectionEventMetadata
 impl consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventMetadata::causation_id(&self) -> core::option::Option<&str>
@@ -3298,11 +3300,17 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::projection::Projectio
 pub enum consistency::ProjectionApplyErrorReason
 pub consistency::ProjectionApplyErrorReason::CommitUnknown
 pub consistency::ProjectionApplyErrorReason::Conflict
-pub consistency::ProjectionApplyErrorReason::Invariant
+pub consistency::ProjectionApplyErrorReason::InputBindingDrift
 pub consistency::ProjectionApplyErrorReason::OutOfOrder
-pub consistency::ProjectionApplyErrorReason::Permanent
+pub consistency::ProjectionApplyErrorReason::PayloadMalformed
+pub consistency::ProjectionApplyErrorReason::PayloadValueInvalid
+pub consistency::ProjectionApplyErrorReason::ProviderInvariant
+pub consistency::ProjectionApplyErrorReason::ProviderPermanent
 pub consistency::ProjectionApplyErrorReason::RollbackFailed
+pub consistency::ProjectionApplyErrorReason::TargetDefinitionDrift
+pub consistency::ProjectionApplyErrorReason::TenantDrift
 pub consistency::ProjectionApplyErrorReason::Transient
+pub consistency::ProjectionApplyErrorReason::VersionRegression
 impl consistency::projection::ProjectionApplyErrorReason
 pub const fn consistency::projection::ProjectionApplyErrorReason::as_label(self) -> &'static str
 pub const fn consistency::projection::ProjectionApplyErrorReason::kind(self) -> consistency::projection::ProjectionApplyErrorKind
@@ -3389,31 +3397,6 @@ impl core::marker::Unpin for consistency::projection::ProjectionCheckpointError
 impl core::marker::UnsafeUnpin for consistency::projection::ProjectionCheckpointError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionCheckpointError
 impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionCheckpointError
-#[non_exhaustive] pub enum consistency::ProjectionDeadLetterReason
-pub consistency::ProjectionDeadLetterReason::ApplyConflict
-pub consistency::ProjectionDeadLetterReason::ApplyInvariant
-pub consistency::ProjectionDeadLetterReason::ApplyOutOfOrder
-pub consistency::ProjectionDeadLetterReason::ApplyPermanent
-pub consistency::ProjectionDeadLetterReason::OutOfOrder
-impl consistency::projection::ProjectionDeadLetterReason
-pub const fn consistency::projection::ProjectionDeadLetterReason::as_label(self) -> &'static str
-pub fn consistency::projection::ProjectionDeadLetterReason::from_apply_error_reason(consistency::projection::ProjectionApplyErrorReason) -> core::option::Option<Self>
-impl core::clone::Clone for consistency::projection::ProjectionDeadLetterReason
-pub fn consistency::projection::ProjectionDeadLetterReason::clone(&self) -> consistency::projection::ProjectionDeadLetterReason
-impl core::cmp::Eq for consistency::projection::ProjectionDeadLetterReason
-impl core::cmp::PartialEq for consistency::projection::ProjectionDeadLetterReason
-pub fn consistency::projection::ProjectionDeadLetterReason::eq(&self, &consistency::projection::ProjectionDeadLetterReason) -> bool
-impl core::fmt::Debug for consistency::projection::ProjectionDeadLetterReason
-pub fn consistency::projection::ProjectionDeadLetterReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::StructuralPartialEq for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::Freeze for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::Send for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::Sync for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::Unpin for consistency::projection::ProjectionDeadLetterReason
-impl core::marker::UnsafeUnpin for consistency::projection::ProjectionDeadLetterReason
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionDeadLetterReason
-impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionDeadLetterReason
 #[non_exhaustive] pub enum consistency::ReconcileResultLabel
 pub consistency::ReconcileResultLabel::Invariant
 pub consistency::ReconcileResultLabel::Permanent
@@ -4713,7 +4696,6 @@ pub struct consistency::ProjectionApplyError
 impl consistency::projection::ProjectionApplyError
 pub const fn consistency::projection::ProjectionApplyError::from_reason(consistency::projection::ProjectionApplyErrorReason) -> Self
 pub const fn consistency::projection::ProjectionApplyError::kind(&self) -> consistency::projection::ProjectionApplyErrorKind
-pub const fn consistency::projection::ProjectionApplyError::new(consistency::projection::ProjectionApplyErrorKind) -> Self
 pub const fn consistency::projection::ProjectionApplyError::reason(&self) -> consistency::projection::ProjectionApplyErrorReason
 impl core::error::Error for consistency::projection::ProjectionApplyError
 impl core::fmt::Debug for consistency::projection::ProjectionApplyError
@@ -4798,6 +4780,28 @@ impl core::marker::Unpin for consistency::projection::ProjectionDeadLetter
 impl core::marker::UnsafeUnpin for consistency::projection::ProjectionDeadLetter
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionDeadLetter
 impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionDeadLetter
+pub struct consistency::ProjectionDeadLetterReason
+impl consistency::projection::ProjectionDeadLetterReason
+pub const fn consistency::projection::ProjectionDeadLetterReason::as_label(self) -> &'static str
+pub fn consistency::projection::ProjectionDeadLetterReason::from_apply_error_reason(consistency::projection::ProjectionApplyErrorReason) -> core::option::Option<Self>
+pub const fn consistency::projection::ProjectionDeadLetterReason::reason(self) -> consistency::projection::ProjectionApplyErrorReason
+pub const fn consistency::projection::ProjectionDeadLetterReason::source_out_of_order() -> Self
+impl core::clone::Clone for consistency::projection::ProjectionDeadLetterReason
+pub fn consistency::projection::ProjectionDeadLetterReason::clone(&self) -> consistency::projection::ProjectionDeadLetterReason
+impl core::cmp::Eq for consistency::projection::ProjectionDeadLetterReason
+impl core::cmp::PartialEq for consistency::projection::ProjectionDeadLetterReason
+pub fn consistency::projection::ProjectionDeadLetterReason::eq(&self, &consistency::projection::ProjectionDeadLetterReason) -> bool
+impl core::fmt::Debug for consistency::projection::ProjectionDeadLetterReason
+pub fn consistency::projection::ProjectionDeadLetterReason::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::StructuralPartialEq for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::Freeze for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::Send for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::Sync for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::Unpin for consistency::projection::ProjectionDeadLetterReason
+impl core::marker::UnsafeUnpin for consistency::projection::ProjectionDeadLetterReason
+impl core::panic::unwind_safe::RefUnwindSafe for consistency::projection::ProjectionDeadLetterReason
+impl core::panic::unwind_safe::UnwindSafe for consistency::projection::ProjectionDeadLetterReason
 pub struct consistency::ProjectionEventMetadata
 impl consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventMetadata::causation_id(&self) -> core::option::Option<&str>

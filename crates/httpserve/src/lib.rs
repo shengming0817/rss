@@ -14,6 +14,7 @@ pub mod health;
 mod middleware;
 pub mod protect;
 pub mod routes;
+mod trace_context;
 
 pub use auth::{
     AuditSinkHandle, Authenticated, AuthenticatedAuditEvent, AuthorizedSubject,

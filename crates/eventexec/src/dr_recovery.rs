@@ -897,6 +897,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn dr_recovery_epoch_id_rejects_nil_and_noncanonical_text() {
         assert_eq!(
             RecoveryEpochId::new(uuid::Uuid::nil()),
@@ -916,6 +917,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn dr_recovery_event_set_enforces_size_and_duplicate_bounds() {
         assert_eq!(
             RecoveryEventSet::new(Vec::new()),
@@ -954,6 +956,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::expect_used)]
     fn dr_recovery_change_ticket_is_canonical_and_bounded() {
         assert_eq!(
             RecoveryChangeTicket::parse(""),

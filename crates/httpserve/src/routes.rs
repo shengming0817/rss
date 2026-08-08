@@ -1299,8 +1299,13 @@ impl ServerMakeService {
     #[cfg(any(test, feature = "test-util"))]
     pub fn from_router_for_test(router: axum::Router, budget: crate::ServerRequestBudget) -> Self {
         Self {
-            inner: seal_server_router(router, crate::protect::EdgeHardening::default(), budget)
-                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+            inner: seal_server_router(
+                router,
+                crate::protect::EdgeHardening::default(),
+                budget,
+                TracePolicy::Enabled,
+            )
+            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
         }
     }
 }
@@ -1319,14 +1324,16 @@ impl ServerMakeService {
 pub struct AuthenticatedRoutes {
     router: axum::Router,
     hardening: crate::protect::EdgeHardening,
+    trace_policy: TracePolicy,
 }
 
 impl AuthenticatedRoutes {
     /// 唯一生产入口（`pub(crate)`）——仅本模块 finalizer 可构造，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
-    pub(crate) fn new(router: axum::Router) -> Self {
+    fn new(router: axum::Router, trace_policy: TracePolicy) -> Self {
         Self {
             router,
             hardening: crate::protect::EdgeHardening::default(),
+            trace_policy,
         }
     }
 
@@ -1355,6 +1362,7 @@ impl AuthenticatedRoutes {
         Self {
             router: self.router.layer(layer),
             hardening: self.hardening,
+            trace_policy: self.trace_policy,
         }
     }
 
@@ -1380,14 +1388,17 @@ impl AuthenticatedRoutes {
     ///
     /// INVARIANT: SERVER-REQUEST-BUDGET-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability type + required argument" }——唯一 bindable 出口必须消费非零 [`crate::ServerRequestBudget`]，且 `httpd` plaintext/mTLS 只接受 [`ServerMakeService`]；不存在无预算 bind 路径。
     ///
-    /// 层序（外→内）：security-headers → `request_id` → `correlation` → server-request-budget
-    /// → body-limit → 验签桥
-    /// → listener trace policy（Health 无 `trace`）→ `panic_recovery` → `Extension(plan)` → enforce → handler。
+    /// INVARIANT: HTTP-SERVER-TRACE-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability field + unique bind funnel" }——finalizer 构造的非可选私有 [`TracePolicy`] 随封印类型传播，并且只能在唯一 bindable funnel 消费；Health Disabled，其余 listener Enabled。
+    ///
+    /// INVARIANT: HTTP-SERVER-TRACE-ORDER-01 { level = "Medium", exec = "test", source = "code" }——T2 finalized-router 测试锁住 SERVER span 包含 budget/body-limit/验签桥/panic/handler 的真实请求顺序。
+    ///
+    /// 层序（外→内）：security-headers → `request_id` → `correlation` → SERVER trace
+    /// → server-request-budget → body-limit → 验签桥 → `panic_recovery` → `Extension(plan)` → enforce → handler。
     ///
     /// 生产出口 [`into_make_service`](Self::into_make_service) 与 test 出口
     /// [`into_router_for_test`](Self::into_router_for_test) 共用本 fn ⇒ 层序一致（test 不漂移）。
     fn sealed_router(self, budget: crate::ServerRequestBudget) -> axum::Router {
-        seal_server_router(self.router, self.hardening, budget)
+        seal_server_router(self.router, self.hardening, budget, self.trace_policy)
     }
 
     /// **唯一** bindable 出口：封防护层（[`sealed_router`](Self::sealed_router)）后转 axum
@@ -1423,11 +1434,12 @@ fn seal_server_router(
     router: axum::Router,
     hardening: crate::protect::EdgeHardening,
     budget: crate::ServerRequestBudget,
+    trace_policy: TracePolicy,
 ) -> axum::Router {
     // `.layer` calls are inner→outer. The timeout covers every fallible/async request component;
     // request/correlation context wraps it so a timeout response remains correlated. Mechanical
     // security response headers stay outermost so the synthetic 503 receives the same headers.
-    let mut router = router
+    let router = router
         .layer(axum::middleware::from_fn_with_state(
             hardening.body_limit,
             crate::middleware::body_limit,
@@ -1435,7 +1447,14 @@ fn seal_server_router(
         .layer(axum::middleware::from_fn_with_state(
             budget,
             crate::middleware::server_request_budget,
-        ))
+        ));
+    let router = match trace_policy {
+        TracePolicy::Enabled => router.layer(axum::middleware::from_fn(
+            crate::middleware::http_server_trace,
+        )),
+        TracePolicy::Disabled => router,
+    };
+    let mut router = router
         .layer(axum::middleware::from_fn(crate::middleware::correlation))
         .layer(axum::middleware::from_fn(crate::middleware::request_id));
 
@@ -1457,7 +1476,7 @@ enum TracePolicy {
 
 impl TracePolicy {
     /// 从 listener auth plan 派生 trace 策略。Health listener 是高频 probe/scrape 面，禁用
-    /// `http.request` span；未知未来 listener fail-closed 为 Enabled，避免静默丢可观测性。
+    /// `http.server.request` span；未知未来 listener fail-closed 为 Enabled，避免静默丢可观测性。
     fn from_plan(plan: AuthPlan) -> Self {
         match plan.listener() {
             ListenerKind::Health => Self::Disabled,
@@ -1472,11 +1491,11 @@ impl TracePolicy {
 /// 生产者（ROUTE-AUTH-FUNNEL-02）。业务不得绕过最终 matcher（runtime-api.md）。
 ///
 /// 层序（`.layer` 调用顺序 = 内→外）：`Extension(plan)`（最内，EnforceService 读 plan）→ `panic_recovery`
-/// （request-aware panic → 500 envelope）→ listener 派生 `trace`（Health listener 禁用；其余 listener 启用）。
-/// `request_id` / `correlation` / server budget **不**在此挂——三者均由唯一 bindable 出口
+/// （request-aware panic → 500 envelope）。listener 派生 trace policy 作为非可选 capability 随封印类型传递，
+/// 到唯一 bindable 出口才消费。`request_id` / `correlation` / SERVER trace / server budget **不**在此挂——均由唯一 bindable 出口
 /// [`AuthenticatedRoutes::sealed_router`] 封装（ROUTE-REQUESTID-OUTERMOST-01 /
 /// ROUTE-CORRELATION-INNER-REQUESTID-01 / SERVER-REQUEST-BUDGET-01 / #1320）。完整请求流（外→内）：
-/// security headers → `request_id` → `correlation` → server budget → 验签桥 → listener trace（Health 无）
+/// security headers → `request_id` → `correlation` → SERVER trace（Health 无）→ server budget → 验签桥
 /// → `panic_recovery` → `Extension(plan)` → 路由匹配 → `EnforceService` → handler。
 ///
 /// 验签桥（#1109）经 [`AuthenticatedRoutes::layer`] 叠在 `finalize_auth` 产物的**外层**（请求方向先于
@@ -1584,11 +1603,7 @@ fn finalize_auth_inner(
         router = router.layer(axum::Extension(authorizer));
     }
     let router = router.layer(axum::middleware::from_fn(crate::middleware::panic_recovery));
-    let router = match trace_policy {
-        TracePolicy::Enabled => router.layer(axum::middleware::from_fn(crate::middleware::trace)),
-        TracePolicy::Disabled => router,
-    };
-    Ok(AuthenticatedRoutes::new(router))
+    Ok(AuthenticatedRoutes::new(router, trace_policy))
 }
 
 fn listener_mismatch(routes: &UnfinalizedRoutes, finalized: ListenerKind) -> RouteGroupError {
@@ -2413,7 +2428,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used, clippy::unwrap_used)]
-    fn primary_listener_emits_http_request_span_fields() {
+    fn primary_listener_emits_http_server_span_fields() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2455,12 +2470,27 @@ mod tests {
         });
         let http_spans: Vec<_> = spans
             .iter()
-            .filter(|span| span.name == "http.request")
+            .filter(|span| span.name == "http.server.request")
             .collect();
         assert_eq!(http_spans.len(), 1, "Primary request emits one span");
         let fields = &http_spans[0].fields;
-        assert_eq!(fields.get("method").map(String::as_str), Some("GET"));
-        assert_eq!(fields.get("path").map(String::as_str), Some("/api/v1/x"));
+        assert_eq!(fields.get("otel.kind").map(String::as_str), Some("server"));
+        assert_eq!(
+            fields.get("otel.name").map(String::as_str),
+            Some("GET /api/v1/x")
+        );
+        assert_eq!(
+            fields.get("http.request.method").map(String::as_str),
+            Some("GET")
+        );
+        assert_eq!(
+            fields.get("http.route").map(String::as_str),
+            Some("/api/v1/x")
+        );
+        assert_eq!(
+            fields.get("network.protocol.version").map(String::as_str),
+            Some("1.1")
+        );
         assert_eq!(
             fields.get("request_id").map(String::as_str),
             Some("rid-span-1")
@@ -2469,7 +2499,10 @@ mod tests {
             fields.get("correlation").map(String::as_str),
             Some("corr-span-1")
         );
-        assert_eq!(fields.get("status").map(String::as_str), Some("200"));
+        assert_eq!(
+            fields.get("http.response.status_code").map(String::as_str),
+            Some("200")
+        );
     }
 
     #[test]
@@ -2519,9 +2552,362 @@ mod tests {
             });
         });
         assert!(
-            spans.iter().all(|span| span.name != "http.request"),
-            "Health listener should not emit http.request spans: {spans:?}"
+            spans.iter().all(|span| span.name != "http.server.request"),
+            "Health listener should not emit http.server.request spans: {spans:?}"
         );
+    }
+
+    fn captured_http_spans(spans: &[CapturedSpan]) -> Vec<&CapturedSpan> {
+        spans
+            .iter()
+            .filter(|span| span.name == "http.server.request")
+            .collect()
+    }
+
+    fn trace_id_of(traceparent: &str) -> &str {
+        traceparent.split('-').nth(1).unwrap_or("")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn http_server_remote_parent_wraps_bridge_and_handler() {
+        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
+        let handler_seen = Arc::clone(&seen);
+        let bridge_seen = Arc::clone(&seen);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let incoming = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+
+        tracewire::with_test_subscriber(|| {
+            rt.block_on(async {
+                let routes = UnfinalizedRoutes::empty()
+                    .nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
+                        let endpoint = GeneratedPrimaryEndpoint::new(
+                            test_binding(
+                                "/api/v1/trace",
+                                "test.primary.trace",
+                                vocab::HttpRouteAuth::Public,
+                            ),
+                            move |_: ContractMarker<TestRouteMarker>| {
+                                let seen = Arc::clone(&handler_seen);
+                                async move {
+                                    seen.lock().unwrap().push(
+                                        tracewire::capture().expect("handler has OTel context"),
+                                    );
+                                    "ok"
+                                }
+                            },
+                        )?;
+                        rb.mount(endpoint)
+                    })
+                    .expect("routes");
+                let plan = AuthPlan::new(
+                    ListenerKind::Primary,
+                    primitives::AuthScheme::RssAccessToken,
+                )
+                .expect("plan");
+                let router = finalize_primary_auth(routes, plan, allow_authorizer())
+                    .expect("finalize")
+                    .layer(axum::middleware::from_fn(
+                        move |req: axum::extract::Request, next: axum::middleware::Next| {
+                            let seen = Arc::clone(&bridge_seen);
+                            async move {
+                                seen.lock()
+                                    .unwrap()
+                                    .push(tracewire::capture().expect("bridge has OTel context"));
+                                next.run(req).await
+                            }
+                        },
+                    ))
+                    .into_router_for_test();
+                let response = router
+                    .oneshot(
+                        Request::builder()
+                            .uri("/api/v1/trace")
+                            .header("traceparent", incoming)
+                            .header("tracestate", "vendor=value")
+                            .body(Body::empty())
+                            .expect("request"),
+                    )
+                    .await
+                    .expect("oneshot");
+                assert_eq!(response.status(), StatusCode::OK);
+            });
+        });
+
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "bridge and handler both observed tracing context"
+        );
+        assert!(
+            seen.iter()
+                .all(|traceparent| trace_id_of(traceparent) == trace_id_of(incoming)),
+            "both inner components inherit the inbound trace: {seen:?}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::unwrap_used)]
+    fn http_server_span_uses_closed_names_status_and_privacy_fields() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (_, spans) = run_with_span_capture(|| {
+            rt.block_on(async {
+                let router = seal_server_router(
+                    axum::Router::new()
+                        .route(
+                            "/items/{id}",
+                            axum::routing::get(|| async { StatusCode::BAD_REQUEST }),
+                        )
+                        .route(
+                            "/failure",
+                            axum::routing::get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
+                        )
+                        .route("/custom", axum::routing::any(|| async { StatusCode::OK })),
+                    crate::protect::EdgeHardening::default(),
+                    crate::ServerRequestBudget::for_test(),
+                    TracePolicy::Enabled,
+                );
+                let secret = "secret-marker-2035";
+                let request = Request::builder()
+                    .uri(format!("/items/{secret}?token={secret}"))
+                    .header("authorization", format!("Bearer {secret}"))
+                    .header("cookie", format!("session={secret}"))
+                    .header("x-tenant-id", secret)
+                    .body(Body::from(secret))
+                    .expect("request");
+                assert_eq!(
+                    router
+                        .clone()
+                        .oneshot(request)
+                        .await
+                        .expect("oneshot")
+                        .status(),
+                    StatusCode::BAD_REQUEST
+                );
+                assert_eq!(
+                    router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .uri("/failure")
+                                .body(Body::empty())
+                                .expect("request"),
+                        )
+                        .await
+                        .expect("oneshot")
+                        .status(),
+                    StatusCode::INTERNAL_SERVER_ERROR
+                );
+                assert_eq!(
+                    router
+                        .clone()
+                        .oneshot(
+                            Request::builder()
+                                .method(Method::from_bytes(b"BREW").expect("custom method"))
+                                .uri("/custom")
+                                .body(Body::empty())
+                                .expect("request"),
+                        )
+                        .await
+                        .expect("oneshot")
+                        .status(),
+                    StatusCode::OK
+                );
+                assert_eq!(
+                    router
+                        .oneshot(
+                            Request::builder()
+                                .uri(format!("/missing/{secret}?q={secret}"))
+                                .body(Body::empty())
+                                .expect("request"),
+                        )
+                        .await
+                        .expect("oneshot")
+                        .status(),
+                    StatusCode::NOT_FOUND
+                );
+            });
+        });
+        let http = captured_http_spans(&spans);
+        assert_eq!(http.len(), 4);
+        assert_eq!(
+            http[0].fields.get("otel.name").map(String::as_str),
+            Some("GET /items/{id}")
+        );
+        assert_eq!(
+            http[0].fields.get("http.route").map(String::as_str),
+            Some("/items/{id}")
+        );
+        assert_eq!(
+            http[0].fields.get("otel.status_code"),
+            None,
+            "4xx remains unset"
+        );
+        assert_eq!(
+            http[1].fields.get("otel.status_code").map(String::as_str),
+            Some("error")
+        );
+        assert_eq!(
+            http[1].fields.get("error.type").map(String::as_str),
+            Some("500")
+        );
+        assert_eq!(
+            http[2].fields.get("otel.name").map(String::as_str),
+            Some("HTTP")
+        );
+        assert_eq!(
+            http[2]
+                .fields
+                .get("http.request.method")
+                .map(String::as_str),
+            Some("_OTHER")
+        );
+        assert_eq!(
+            http[2].fields.get("http.route").map(String::as_str),
+            Some("/custom")
+        );
+        assert_eq!(
+            http[3].fields.get("otel.name").map(String::as_str),
+            Some("GET")
+        );
+        assert_eq!(http[3].fields.get("http.route"), None);
+        let observed = format!("{http:?}");
+        assert!(
+            !observed.contains("secret-marker-2035"),
+            "sensitive request data leaked: {observed}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
+    fn http_server_span_settles_synthetic_413_503_and_panic_500() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let (_, spans) = run_with_span_capture(|| {
+            rt.block_on(async {
+                let inner = axum::Router::new()
+                    .route("/ok", axum::routing::post(|| async { StatusCode::OK }))
+                    .route(
+                        "/slow",
+                        axum::routing::get(|| async {
+                            tokio::time::sleep(core::time::Duration::from_millis(20)).await;
+                            StatusCode::OK
+                        }),
+                    )
+                    .route(
+                        "/panic",
+                        axum::routing::get(|| async {
+                            panic!("closed panic marker");
+                            #[allow(unreachable_code)]
+                            StatusCode::OK
+                        }),
+                    )
+                    .layer(axum::middleware::from_fn(crate::middleware::panic_recovery));
+                let router = seal_server_router(
+                    inner,
+                    crate::protect::EdgeHardening::default(),
+                    crate::ServerRequestBudget::from_millis(
+                        std::num::NonZeroU64::new(1).expect("nonzero"),
+                    ),
+                    TracePolicy::Enabled,
+                );
+                let cases = [
+                    (
+                        Request::builder()
+                            .method(Method::POST)
+                            .uri("/ok")
+                            .header("content-length", "1048577")
+                            .body(Body::empty())
+                            .expect("413 request"),
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                    ),
+                    (
+                        Request::builder()
+                            .uri("/slow")
+                            .body(Body::empty())
+                            .expect("503 request"),
+                        StatusCode::SERVICE_UNAVAILABLE,
+                    ),
+                    (
+                        Request::builder()
+                            .uri("/panic")
+                            .body(Body::empty())
+                            .expect("panic request"),
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                    ),
+                ];
+                for (request, expected) in cases {
+                    let status = router
+                        .clone()
+                        .oneshot(request)
+                        .await
+                        .expect("oneshot")
+                        .status();
+                    assert_eq!(status, expected);
+                }
+            });
+        });
+        let statuses: Vec<_> = captured_http_spans(&spans)
+            .iter()
+            .map(|span| span.fields.get("http.response.status_code").cloned())
+            .collect();
+        assert_eq!(
+            statuses,
+            [
+                Some("413".to_owned()),
+                Some("503".to_owned()),
+                Some("500".to_owned())
+            ]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn http_server_trace_headers_never_grant_protected_route_authority() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let routes = test_routes::<Admin>(|rb| {
+                rb.mount_raw_for_test(admin_route("/protected"), get(|| async { "secret" }))
+            });
+            let plan = AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::RssAccessToken)
+                .expect("plan");
+            let router = finalize_auth(routes, plan)
+                .expect("finalize")
+                .into_router_for_test();
+            for traceparent in [
+                None,
+                Some("not-w3c"),
+                Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"),
+            ] {
+                let mut request = Request::builder().uri("/protected");
+                if let Some(value) = traceparent {
+                    request = request.header("traceparent", value);
+                }
+                let status = router
+                    .clone()
+                    .oneshot(request.body(Body::empty()).expect("request"))
+                    .await
+                    .expect("oneshot")
+                    .status();
+                assert_eq!(
+                    status,
+                    StatusCode::UNAUTHORIZED,
+                    "traceparent={traceparent:?}"
+                );
+            }
+        });
     }
 
     /// funnel round-trip：`unfinalized_for_test` → `finalize_auth` → `AuthenticatedRoutes` → 取回裸 Router

@@ -42,6 +42,18 @@
 - observe 面的脱敏声明与 at-rest 的保护声明是两条正交声明面，不混用、不互相替代。
 - errcode 的 Message / Public Details / Internal Details 三层分工见 `docs/rules/error-handling.md`。
 
+## HTTP server trace
+
+- `tracewire` is the only W3C/OpenTelemetry context bridge. `httpserve` may restore an inbound
+  remote parent through it, but must not import OpenTelemetry directly.
+- INVARIANT: HTTP-SERVER-TRACE-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability field + unique bind funnel" }——every finalized router carries a private, non-optional listener trace policy to the unique bindable funnel. Health is disabled; all other and unknown listeners are enabled.
+- INVARIANT: HTTP-SERVER-TRACE-ORDER-01 { level = "Medium", exec = "test", source = "code" }——the SERVER span wraps request budget, body limit, authentication bridge, panic recovery, enforcement, and handler work. A finalized-router T2 test is the executable carrier because axum layer order is not encoded by Rust types.
+- SERVER span names use only a closed method token and optional `MatchedPath` route template. Raw
+  URI/path/query, authority, headers/cookies, body, credentials, tenant/principal, and free-form
+  error text are forbidden span inputs.
+- Invalid or missing trace context is diagnostic-only and starts a new root; it never changes HTTP,
+  authentication, authorization, or tenant behavior. Response-body completion belongs to #2037.
+
 ## Readyz Probe
 
 - 依赖可用性 probe 用 `_ready` 后缀；运行时操作 probe 不带 `_ready`。

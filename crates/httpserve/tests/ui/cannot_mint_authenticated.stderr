@@ -6,5 +6,21 @@ error[E0624]: associated function `new` is private
   |
  ::: src/routes.rs
   |
-  |     pub(crate) fn new(router: axum::Router) -> Self {
-  |     ----------------------------------------------- private associated function defined here
+  |     fn new(router: axum::Router, trace_policy: TracePolicy) -> Self {
+  |     --------------------------------------------------------------- private associated function defined here
+
+error[E0061]: this function takes 2 arguments but 1 argument was supplied
+ --> tests/ui/cannot_mint_authenticated.rs:5:19
+  |
+5 |     let _authed = httpserve::AuthenticatedRoutes::new(axum::Router::new());
+  |                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------------- argument #2 of type `routes::TracePolicy` is missing
+  |
+note: associated function defined here
+ --> src/routes.rs
+  |
+  |     fn new(router: axum::Router, trace_policy: TracePolicy) -> Self {
+  |        ^^^
+help: provide the argument
+  |
+5 |     let _authed = httpserve::AuthenticatedRoutes::new(axum::Router::new(), /* routes::TracePolicy */);
+  |                                                                          +++++++++++++++++++++++++++

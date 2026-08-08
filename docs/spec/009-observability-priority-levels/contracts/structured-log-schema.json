@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://rss.local/spec/009/structured-log-schema.json",
+  "title": "Bounded diagnostic correlation fields",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "request_id": { "type": "string", "maxLength": 128 },
+    "correlation": { "type": "string", "maxLength": 128 }
+  }
+}
