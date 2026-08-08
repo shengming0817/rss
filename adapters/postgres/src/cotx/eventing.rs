@@ -480,7 +480,7 @@ impl EventingTx<'_, ServingWriteLane, CommandConcern> {
         .bind(env.schema_hash())
         .bind(prepared.fingerprint.as_str())
         .bind(CommandJournalStatus::InFlight.as_label())
-        .bind(tracewire::capture())
+        .bind(tracewire::capture_current().map(tracewire::W3cTraceContext::into_traceparent))
         .bind(diagctx::correlation().map(|id| id.as_str().to_string()))
         .execute(&mut *self.conn)
         .await?;

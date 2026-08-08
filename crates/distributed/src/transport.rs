@@ -79,86 +79,6 @@ impl TransportOutcome {
     }
 }
 
-/// Diagnostic / context-propagation headers a caller may author on a cross-domain dispatch.
-///
-/// Lower-case, fail-closed allowlist. Only correlation and W3C trace-context headers are safe for
-/// a caller to supply. Authentication (`authorization`, `cookie`), tenant scope (`x-tenant-id`) and
-/// service-to-service credentials are **never** caller-supplied — they are minted from the
-/// authenticated channel / contract-derived auth plan by the transport adapter (zero-trust
-/// default-deny). `baggage` is intentionally excluded: it can carry arbitrary caller key-values.
-const ALLOWED_TRANSPORT_HEADERS: &[&str] = &[
-    "correlation-id",
-    "x-correlation-id",
-    "request-id",
-    "x-request-id",
-    "traceparent",
-    "tracestate",
-];
-
-/// Validated header set for a cross-domain dispatch — diagnostic / propagation headers only.
-///
-/// Newtype funnel: the inner vec is private and [`HttpContractHeaders::try_new`] is the only
-/// fabricating constructor, so a [`HttpContractRequest`] cannot carry a raw header bag and
-/// security-relevant headers are *unrepresentable* past this boundary (no caller self-discipline).
-/// Names are matched case-insensitively against [`ALLOWED_TRANSPORT_HEADERS`]; the first disallowed
-/// or empty name fails the whole set closed. Mirrors the crate's `LockKey::parse` fail-closed funnel.
-///
-/// INVARIANT: TRANSPORT-HEADERS-ALLOWLIST-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard newtype boundary + fail-closed allowlist funnel):
-/// `HttpContractRequest` holds `HttpContractHeaders`, never `Vec<(String, String)>`, so `authorization` /
-/// `cookie` / `x-tenant-id` cannot reach the wire through this seam.
-///
-/// `Debug` is exposing (not redacted): by construction the entries are diagnostic / trace-context
-/// headers only — they exist to be observable. The `HttpContractRequest.headers` field is nonetheless
-/// `#[redact(sensitivity = secret)]` so a full-request Debug stays terse.
-#[derive(Debug, Clone, Default)]
-pub struct HttpContractHeaders {
-    entries: Vec<(String, String)>,
-}
-
-impl HttpContractHeaders {
-    /// Empty header set (no caller-supplied headers).
-    pub fn empty() -> Self {
-        Self::default()
-    }
-
-    /// Build a validated header set. Each name is trimmed and lower-cased, then checked against the
-    /// diagnostic allowlist; the first disallowed or empty name fails the whole set closed. Values
-    /// are stored verbatim (the adapter forwards them on the wire request).
-    pub fn try_new(headers: Vec<(String, String)>) -> Result<Self, HttpContractHeaderError> {
-        for (name, _) in &headers {
-            let canonical = name.trim().to_ascii_lowercase();
-            if canonical.is_empty() {
-                return Err(HttpContractHeaderError::EmptyName);
-            }
-            if !ALLOWED_TRANSPORT_HEADERS.contains(&canonical.as_str()) {
-                return Err(HttpContractHeaderError::Forbidden { name: canonical });
-            }
-        }
-        Ok(Self { entries: headers })
-    }
-
-    /// Borrow the validated header entries (adapter reads these to build the wire request).
-    pub fn as_slice(&self) -> &[(String, String)] {
-        &self.entries
-    }
-}
-
-/// [`HttpContractHeaders`] construction error (fail-closed allowlist funnel).
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum HttpContractHeaderError {
-    /// A header name was empty or whitespace-only.
-    #[error("transport header name is empty")]
-    EmptyName,
-    /// A caller-supplied header is not on the diagnostic allowlist (e.g. `authorization`, `cookie`,
-    /// `x-tenant-id`). The name is a non-secret identifier; values are never echoed.
-    #[error("caller-supplied transport header is not allowed: {name}")]
-    Forbidden {
-        /// Lower-cased rejected header name (non-secret).
-        name: String,
-    },
-}
-
 /// Concrete, contract-bound HTTP origin-form target.
 ///
 /// The fields are private so a static route template cannot cross the transport seam. The only
@@ -298,14 +218,12 @@ fn route_parameter_name(segment: &str) -> Option<&str> {
 /// Minimal cross-domain contract HTTP dispatch request.
 ///
 /// `Debug` is derived through `secure::Redact`: adding a field without an explicit `#[redact(...)]`
-/// annotation is a compile error. Path, headers, and body may contain tenant/resource identifiers
+/// annotation is a compile error. Path and body may contain tenant/resource identifiers
 /// or credentials and are therefore never rendered in clear text.
 #[derive(Clone, secure::Redact)]
 pub struct HttpContractRequest {
     #[redact(sensitivity = public, mode = "show")]
     target: HttpContractTarget,
-    #[redact(sensitivity = secret)]
-    headers: HttpContractHeaders,
     #[redact(sensitivity = secret)]
     body: Vec<u8>,
 }
@@ -313,12 +231,8 @@ pub struct HttpContractRequest {
 impl HttpContractRequest {
     /// Construct a dispatch request from one validated concrete target.
     #[must_use]
-    pub fn new(target: HttpContractTarget, headers: HttpContractHeaders, body: Vec<u8>) -> Self {
-        Self {
-            target,
-            headers,
-            body,
-        }
+    pub fn new(target: HttpContractTarget, body: Vec<u8>) -> Self {
+        Self { target, body }
     }
 
     /// Contract binding (target domain + contract id + version + schema hash, same-source).
@@ -339,11 +253,6 @@ impl HttpContractRequest {
     /// Percent-encoded concrete query without the leading `?`.
     pub fn query(&self) -> Option<&str> {
         self.target.query()
-    }
-
-    /// Validated request headers (diagnostic / propagation only).
-    pub fn headers(&self) -> &HttpContractHeaders {
-        &self.headers
     }
 
     /// Request body bytes.
@@ -369,7 +278,7 @@ impl HttpContractResponse {
     pub fn try_new(status_code: u16, body: Vec<u8>) -> Result<Self, HttpContractTransportError> {
         if body.len() > Self::MAX_BODY_BYTES {
             return Err(HttpContractTransportError::new(
-                HttpContractTransportErrorKind::InvalidResponse,
+                HttpContractTransportErrorKind::ResponseTooLarge,
             ));
         }
         Ok(Self { status_code, body })
@@ -391,6 +300,7 @@ impl HttpContractResponse {
 pub enum HttpContractTransportErrorKind {
     Dispatch,
     Timeout,
+    ResponseTooLarge,
     InvalidResponse,
 }
 
@@ -400,6 +310,7 @@ impl HttpContractTransportErrorKind {
         match self {
             Self::Dispatch => "dispatch",
             Self::Timeout => "timeout",
+            Self::ResponseTooLarge => "response_too_large",
             Self::InvalidResponse => "invalid_response",
         }
     }
@@ -447,6 +358,9 @@ impl std::fmt::Display for HttpContractTransportError {
                 f.write_str("domain transport dispatch failed")
             }
             HttpContractTransportErrorKind::Timeout => f.write_str("domain transport timed out"),
+            HttpContractTransportErrorKind::ResponseTooLarge => {
+                f.write_str("domain transport response exceeded the size limit")
+            }
             HttpContractTransportErrorKind::InvalidResponse => {
                 f.write_str("domain transport returned an invalid response")
             }
@@ -691,7 +605,6 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    // reason: 测试用 allowlisted literal 构造 HttpContractHeaders，item-level carve-out（error-handling.md §Carve-out）。
     fn request() -> HttpContractRequest {
         HttpContractRequest::new(
             HttpContractTarget::try_bind(
@@ -700,11 +613,6 @@ mod tests {
                 &[],
             )
             .expect("concrete contract target"),
-            HttpContractHeaders::try_new(vec![(
-                "x-correlation-id".to_owned(),
-                "corr-abc".to_owned(),
-            )])
-            .expect("allowlisted diagnostic header"),
             b"password=secret".to_vec(),
         )
     }
@@ -720,6 +628,10 @@ mod tests {
         assert_eq!(HttpContractMethod::Put.as_str(), "PUT");
         assert_eq!(HttpContractMethod::Patch.as_str(), "PATCH");
         assert_eq!(HttpContractMethod::Delete.as_str(), "DELETE");
+        assert_eq!(
+            HttpContractTransportErrorKind::ResponseTooLarge.as_label(),
+            "response_too_large"
+        );
     }
 
     #[test]
@@ -779,9 +691,8 @@ mod tests {
         // contract binding is public routing metadata (domain + contract_id shown; schema fields remain typed accessors).
         assert!(dbg.contains("identity.login"), "{dbg}");
         assert!(dbg.contains("Post"), "{dbg}");
-        // path / headers / body are secret-redacted: neither resource ids nor header values leak.
+        // path / body are secret-redacted: neither resource ids nor payload values leak.
         assert!(!dbg.contains("tenant-123"), "{dbg}");
-        assert!(!dbg.contains("corr-abc"), "{dbg}");
         assert!(!dbg.contains("password=secret"), "{dbg}");
         assert!(dbg.contains("<redacted>"), "{dbg}");
     }
@@ -792,60 +703,6 @@ mod tests {
         let req = request();
         assert_eq!(req.contract().domain(), "identity");
         assert_eq!(req.contract().contract_id(), "identity.login");
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    // reason: 测试用 allowlisted literal 构造 HttpContractHeaders，item-level carve-out（error-handling.md §Carve-out）。
-    fn transport_headers_allow_diagnostic_headers_case_insensitively() {
-        let headers = HttpContractHeaders::try_new(vec![
-            ("x-correlation-id".to_owned(), "c-1".to_owned()),
-            ("Traceparent".to_owned(), "00-trace".to_owned()),
-            ("REQUEST-ID".to_owned(), "r-1".to_owned()),
-        ])
-        .expect("diagnostic headers are allowlisted (case-insensitive)");
-        assert_eq!(headers.as_slice().len(), 3);
-        // empty() yields no headers.
-        assert!(HttpContractHeaders::empty().as_slice().is_empty());
-    }
-
-    #[test]
-    fn transport_headers_reject_security_headers_fail_closed() {
-        // anti-vacuity: the old raw `Vec` bag accepted these credential/tenant headers verbatim;
-        // the funnel now makes them unrepresentable past the seam boundary.
-        for name in [
-            "authorization",
-            "Cookie",
-            "set-cookie",
-            "x-tenant-id",
-            "proxy-authorization",
-            "x-api-key",
-            "baggage",
-        ] {
-            let result = HttpContractHeaders::try_new(vec![(name.to_owned(), "v".to_owned())]);
-            assert!(
-                matches!(result, Err(HttpContractHeaderError::Forbidden { .. })),
-                "name={name} must be rejected fail-closed"
-            );
-        }
-    }
-
-    #[test]
-    fn transport_headers_reject_empty_name() {
-        let result = HttpContractHeaders::try_new(vec![("   ".to_owned(), "v".to_owned())]);
-        assert!(matches!(result, Err(HttpContractHeaderError::EmptyName)));
-    }
-
-    #[test]
-    fn transport_headers_one_forbidden_fails_whole_set() {
-        // a single disallowed header rejects the whole set — no partial acceptance.
-        let result = HttpContractHeaders::try_new(vec![
-            ("x-correlation-id".to_owned(), "ok".to_owned()),
-            ("authorization".to_owned(), "Bearer leak".to_owned()),
-        ]);
-        assert!(
-            matches!(result, Err(HttpContractHeaderError::Forbidden { name }) if name == "authorization"),
-        );
     }
 
     #[test]
@@ -868,7 +725,7 @@ mod tests {
         let err =
             HttpContractResponse::try_new(200, vec![0; HttpContractResponse::MAX_BODY_BYTES + 1])
                 .expect_err("body above the bound is invalid");
-        assert_eq!(err.kind(), HttpContractTransportErrorKind::InvalidResponse);
+        assert_eq!(err.kind(), HttpContractTransportErrorKind::ResponseTooLarge);
     }
 
     #[test]

@@ -260,7 +260,7 @@ impl std::fmt::Debug for OutboxActor {
 /// 追因链锚点（persisted-only，不进 broker header / 日志 / metrics）、`partition_key` 是可选有序投递
 /// 分区键（`None` = 无序并行；`Some` = 同 partition 串行有序，#1211）。reserved envelope key
 /// （trace / correlation / principal / occurredAt）**不在此**——由 adapter 在受控构造点注入（`occurredAt`
-/// 取注入 `Clock`，#1129；trace 已接线 #1224（`tracewire::capture`）；correlation 已接线 #1160；principal 待 #1397）。
+/// 取注入 `Clock`，#1129；trace 已接线 #1224（`tracewire::capture_current`）；correlation 已接线 #1160；principal 待 #1397）。
 ///
 /// 字段私有 + 构造器 [`OutboxEnvelopeParts::new`]（input-struct-field-exclusion，**Hard**）：business 不能绕过
 /// 构造器分别 set domain/contract_id 字段，只能给 `(contract, tenant, subject_id)`。`contract` 的**预期**来源是

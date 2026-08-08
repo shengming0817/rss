@@ -19,3 +19,13 @@ The observation boundary contains only:
 
 It cannot contain the request, URI, header map, body, authority, authentication evidence, tenant,
 principal, or arbitrary error text.
+
+## HTTP client observation
+
+The private observation value contains only a closed HTTP method and one typed `ContractBinding`.
+It derives the method-only span name, domain and contract id; status and closed settlement values are
+recorded after the attempt. It has no field capable of holding an endpoint, URL/path/query, headers,
+body, address/port, credential, tenant, principal, or raw error.
+
+`W3cTraceContext` has private fields and one production mint function, `capture_current`. The contract
+request has no header field, leaving the current CLIENT span as the only W3C header authority.

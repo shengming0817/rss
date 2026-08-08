@@ -1,5 +1,5 @@
-version: 1
-span:
+version: 2
+server_span:
   tracing_name: http.server.request
   kind: server
   matched_name: "METHOD route-template"
@@ -30,3 +30,26 @@ forbidden_sources:
   - tenant
   - principal
   - free_form_error
+client_span:
+  tracing_name: http.client.request
+  kind: client
+  name: METHOD
+  attributes:
+    - otel.kind
+    - otel.name
+    - http.request.method
+    - domain
+    - contract_id
+    - http.response.status_code
+    - outcome
+    - error.type
+    - otel.status_code
+  settlement:
+    failures: [dispatch, timeout, response_too_large, invalid_response]
+    complete_2xx_3xx: transport_ok
+    complete_4xx_5xx: transport_ok_otel_error
+  propagation:
+    authority: ambient_current_client_span
+    headers: [traceparent, tracestate, x-correlation-id]
+    redirects: disabled
+    retries: disabled

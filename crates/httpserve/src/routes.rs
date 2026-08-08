@@ -2594,7 +2594,9 @@ mod tests {
                                 let seen = Arc::clone(&handler_seen);
                                 async move {
                                     seen.lock().unwrap().push(
-                                        tracewire::capture().expect("handler has OTel context"),
+                                        tracewire::capture_current()
+                                            .expect("handler has OTel context")
+                                            .into_traceparent(),
                                     );
                                     "ok"
                                 }
@@ -2614,9 +2616,11 @@ mod tests {
                         move |req: axum::extract::Request, next: axum::middleware::Next| {
                             let seen = Arc::clone(&bridge_seen);
                             async move {
-                                seen.lock()
-                                    .unwrap()
-                                    .push(tracewire::capture().expect("bridge has OTel context"));
+                                seen.lock().unwrap().push(
+                                    tracewire::capture_current()
+                                        .expect("bridge has OTel context")
+                                        .into_traceparent(),
+                                );
                                 next.run(req).await
                             }
                         },

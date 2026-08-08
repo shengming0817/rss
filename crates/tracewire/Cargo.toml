@@ -20,14 +20,18 @@ opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
 # `test-util` feature 装配确定性测试 subscriber（registry().with(otel layer)）；optional——默认 build 不引入。
 tracing-subscriber = { workspace = true, optional = true }
+# `test-util` owns a current-thread runtime so async capture cannot escape its dispatcher boundary.
+tokio = { workspace = true, features = ["rt"], optional = true }
 
 [features]
 # 跨 crate 测试脚手架（同 identity/authn 的 `test-support` 范式）：导出 `with_test_subscriber`，
 # 使下游 postgres/eventexec 测试复用 otel subscriber 装配而**不直接 import otel**（otel 收口在本 crate）。
-test-util = ["dep:tracing-subscriber"]
+test-util = ["dep:tracing-subscriber", "dep:tokio", "opentelemetry_sdk/testing"]
 
 [dev-dependencies]
 # 本 crate 自身单测装 subscriber（与 test-util 同款；自测不经 feature flag）。
 tracing-subscriber = { workspace = true }
 # 精确断言 remote parent / tracestate 的内存 exporter；只进入本 crate 测试图。
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
+static_assertions = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }

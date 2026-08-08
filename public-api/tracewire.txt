@@ -1,3 +1,15 @@
 pub mod tracewire
-pub fn tracewire::capture() -> core::option::Option<alloc::string::String>
+pub struct tracewire::W3cTraceContext
+impl tracewire::W3cTraceContext
+pub fn tracewire::W3cTraceContext::into_traceparent(self) -> alloc::string::String
+pub fn tracewire::W3cTraceContext::traceparent(&self) -> &str
+pub fn tracewire::W3cTraceContext::tracestate(&self) -> core::option::Option<&str>
+impl core::marker::Freeze for tracewire::W3cTraceContext
+impl core::marker::Send for tracewire::W3cTraceContext
+impl core::marker::Sync for tracewire::W3cTraceContext
+impl core::marker::Unpin for tracewire::W3cTraceContext
+impl core::marker::UnsafeUnpin for tracewire::W3cTraceContext
+impl core::panic::unwind_safe::RefUnwindSafe for tracewire::W3cTraceContext
+impl core::panic::unwind_safe::UnwindSafe for tracewire::W3cTraceContext
+pub fn tracewire::capture_current() -> core::option::Option<tracewire::W3cTraceContext>
 pub fn tracewire::restore_remote_parent(&tracing::span::Span, &str, core::option::Option<&str>)

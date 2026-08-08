@@ -45,10 +45,9 @@ use std::time::Duration;
 use axum::serve::{IncomingStream, Listener, ListenerExt};
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use distributed::{
-    HttpContractMethod, HttpContractRequest, HttpContractResponse, HttpContractTransport,
-    HttpContractTransportError, HttpContractTransportErrorKind,
+    HttpContractRequest, HttpContractResponse, HttpContractTransport, HttpContractTransportError,
+    HttpContractTransportErrorKind,
 };
-use reqwest::header::{HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
@@ -57,8 +56,8 @@ use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
 
-const DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-const DEFAULT_DOMAIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+mod domain_client;
+use domain_client::{DomainHttpTarget, ObservedHttpClient};
 
 /// HTTP 传输 adapter：持有 bind 成功的 listener 地址、graceful-shutdown 的 [`CancellationToken`]
 /// 与 serve 任务句柄。每 listener（Primary / Health / …）一个实例，经组合根 `ShutdownStack` 托管。
@@ -117,16 +116,10 @@ impl DomainHttpTargetConfig {
     }
 }
 
-#[derive(Clone)]
-struct DomainHttpTarget {
-    endpoint: reqwest::Url,
-    client: reqwest::Client,
-}
-
 /// Outbound synchronous cross-domain HTTP transport backed by SPIFFE/mTLS.
 ///
-/// The transport accepts only [`distributed::HttpContractHeaders`] from callers, which are already a
-/// diagnostic-header allowlist. It never accepts caller-provided credential or tenant headers.
+/// The request type has no header slot. W3C trace context and correlation are minted exclusively from
+/// ambient diagnostic context inside the private HTTP-attempt funnel.
 pub struct DomainHttpTransport {
     targets: BTreeMap<String, DomainHttpTarget>,
     mtls_source: Option<spiffe::X509Source>,
@@ -262,44 +255,7 @@ impl HttpContractTransport for DomainHttpTransport {
             let target = self.targets.get(&domain).ok_or_else(|| {
                 HttpContractTransportError::new(HttpContractTransportErrorKind::Dispatch)
             })?;
-            let url = request_url(&target.endpoint, request.path(), request.query())?;
-            let method = reqwest_method(request.method());
-            let mut builder = target.client.request(method, url);
-            for (name, value) in request.headers().as_slice() {
-                let header_name = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|e| {
-                    HttpContractTransportError::with_source(
-                        HttpContractTransportErrorKind::Dispatch,
-                        &e,
-                    )
-                })?;
-                let header_value = HeaderValue::from_str(value).map_err(|e| {
-                    HttpContractTransportError::with_source(
-                        HttpContractTransportErrorKind::Dispatch,
-                        &e,
-                    )
-                })?;
-                builder = builder.header(header_name, header_value);
-            }
-            let response = builder
-                .body(request.body().to_vec())
-                .send()
-                .await
-                .map_err(|e| {
-                    if e.is_timeout() {
-                        HttpContractTransportError::with_source(
-                            HttpContractTransportErrorKind::Timeout,
-                            &e,
-                        )
-                    } else {
-                        HttpContractTransportError::with_source(
-                            HttpContractTransportErrorKind::Dispatch,
-                            &e,
-                        )
-                    }
-                })?;
-            let status = response.status().as_u16();
-            let body = bounded_response_body(response).await?;
-            HttpContractResponse::try_new(status, body)
+            target.execute_attempt(request).await
         })
     }
 }
@@ -430,7 +386,7 @@ where
     BuildClient: FnMut(
         &Source,
         &authn::OutboundMtlsPolicy,
-    ) -> Result<reqwest::Client, DomainHttpTransportBuildError>,
+    ) -> Result<ObservedHttpClient, DomainHttpTransportBuildError>,
     Rollback: FnOnce(Source) -> RollbackFuture,
     RollbackFuture: Future<Output = Result<(), CleanupError>>,
 {
@@ -450,10 +406,7 @@ where
         };
         mapped.insert(
             target.domain,
-            DomainHttpTarget {
-                endpoint: target.endpoint,
-                client,
-            },
+            DomainHttpTarget::new(target.endpoint, client),
         );
     }
     Ok((mapped, source))
@@ -468,7 +421,7 @@ async fn shutdown_uncommitted_x509_source(
 fn mtls_reqwest_client(
     source: &spiffe::X509Source,
     policy: &authn::OutboundMtlsPolicy,
-) -> Result<reqwest::Client, DomainHttpTransportBuildError> {
+) -> Result<ObservedHttpClient, DomainHttpTransportBuildError> {
     ensure_local_svid(source, policy.local_identity())?;
     let allowed_server_ids: Vec<String> = policy
         .server_allow_set()
@@ -491,17 +444,7 @@ fn mtls_reqwest_client(
         .with_alpn_protocols([b"http/1.1"])
         .build()
         .map_err(DomainHttpTransportBuildError::Rustls)?;
-    domain_http_client_builder()
-        .https_only(true)
-        .use_preconfigured_tls(config)
-        .build()
-        .map_err(DomainHttpTransportBuildError::Client)
-}
-
-fn domain_http_client_builder() -> reqwest::ClientBuilder {
-    reqwest::Client::builder()
-        .connect_timeout(DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT)
-        .timeout(DEFAULT_DOMAIN_HTTP_REQUEST_TIMEOUT)
+    ObservedHttpClient::build_mtls(config).map_err(DomainHttpTransportBuildError::Client)
 }
 
 fn owned_readiness_from_source_health(source_healthy: bool) -> DomainHttpOwnedReadiness {
@@ -523,87 +466,6 @@ fn ensure_local_svid(
         return Err(DomainHttpTransportBuildError::LocalSvidMismatch);
     }
     Ok(())
-}
-
-fn request_url(
-    endpoint: &reqwest::Url,
-    path: &str,
-    query: Option<&str>,
-) -> Result<reqwest::Url, HttpContractTransportError> {
-    let url = endpoint.clone();
-    let base = endpoint.path().trim_end_matches('/');
-    let suffix = path.trim_start_matches('/');
-    let joined = if suffix.is_empty() {
-        if base.is_empty() { "/" } else { base }
-    } else if base.is_empty() {
-        let mut url = set_url_path(url, &format!("/{suffix}"));
-        url.set_query(query);
-        return Ok(url);
-    } else {
-        let mut url = set_url_path(url, &format!("{base}/{suffix}"));
-        url.set_query(query);
-        return Ok(url);
-    };
-    let mut url = set_url_path(url, joined);
-    url.set_query(query);
-    Ok(url)
-}
-
-fn set_url_path(mut url: reqwest::Url, path: &str) -> reqwest::Url {
-    url.set_path(path);
-    url.set_query(None);
-    url.set_fragment(None);
-    url
-}
-
-fn reqwest_method(method: HttpContractMethod) -> reqwest::Method {
-    match method {
-        HttpContractMethod::Get => reqwest::Method::GET,
-        HttpContractMethod::Post => reqwest::Method::POST,
-        HttpContractMethod::Put => reqwest::Method::PUT,
-        HttpContractMethod::Patch => reqwest::Method::PATCH,
-        HttpContractMethod::Delete => reqwest::Method::DELETE,
-    }
-}
-
-async fn bounded_response_body(
-    mut response: reqwest::Response,
-) -> Result<Vec<u8>, HttpContractTransportError> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > HttpContractResponse::MAX_BODY_BYTES as u64)
-    {
-        return Err(HttpContractTransportError::new(
-            HttpContractTransportErrorKind::InvalidResponse,
-        ));
-    }
-
-    let mut body = Vec::new();
-    while let Some(chunk) = response.chunk().await.map_err(|error| {
-        let kind = if error.is_timeout() {
-            HttpContractTransportErrorKind::Timeout
-        } else {
-            HttpContractTransportErrorKind::InvalidResponse
-        };
-        HttpContractTransportError::with_source(kind, &error)
-    })? {
-        let next_len = body.len().checked_add(chunk.len()).ok_or_else(|| {
-            HttpContractTransportError::new(HttpContractTransportErrorKind::InvalidResponse)
-        })?;
-        if next_len > HttpContractResponse::MAX_BODY_BYTES {
-            return Err(HttpContractTransportError::new(
-                HttpContractTransportErrorKind::InvalidResponse,
-            ));
-        }
-        body.try_reserve_exact(chunk.len()).map_err(|error| {
-            HttpContractTransportError::with_source(
-                HttpContractTransportErrorKind::InvalidResponse,
-                &error,
-            )
-        })?;
-        body.extend_from_slice(&chunk);
-    }
-    Ok(body)
 }
 
 /// mTLS acceptor backed by SPIRE Workload API X.509-SVID rotation.
@@ -1143,6 +1005,7 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
     use tokio_rustls::TlsConnector;
+    use tracing::Instrument as _;
 
     /// 极简 router → budget-sealed make service，挂一个 GET /healthz 恒 200。
     fn make_svc() -> httpserve::ServerMakeService {
@@ -1219,8 +1082,16 @@ mod tests {
             .to_owned();
         let auth_present = headers.contains_key("authorization");
         let tenant_present = headers.contains_key("x-tenant-id");
+        let traceparent = headers
+            .get("traceparent")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        let tracestate = headers
+            .get("tracestate")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
         let body = format!(
-            "{}|correlation={correlation_id}|auth={auth_present}|tenant={tenant_present}",
+            "{}|correlation={correlation_id}|auth={auth_present}|tenant={tenant_present}|traceparent={traceparent}|tracestate={tracestate}",
             String::from_utf8_lossy(&body)
         );
         let mut response = (StatusCode::CREATED, body).into_response();
@@ -1264,11 +1135,6 @@ mod tests {
         HttpContractRequest::new(
             distributed::HttpContractTarget::try_bind(route, &[], &[])
                 .expect("concrete contract target"),
-            distributed::HttpContractHeaders::try_new(vec![(
-                "x-correlation-id".to_owned(),
-                "corr-1500".to_owned(),
-            )])
-            .expect("diagnostic header"),
             b"payload".to_vec(),
         )
     }
@@ -1304,20 +1170,24 @@ mod tests {
                 &[("limit", "50"), ("cursor", "next + one")],
             )
             .expect("bound path and query"),
-            distributed::HttpContractHeaders::empty(),
             Vec::new(),
         )
     }
 
     #[allow(clippy::expect_used)]
     fn test_domain_transport(endpoint: reqwest::Url) -> DomainHttpTransport {
+        test_domain_transport_with_client(endpoint, ObservedHttpClient::plaintext_for_test())
+    }
+
+    #[allow(clippy::expect_used)]
+    fn test_domain_transport_with_client(
+        endpoint: reqwest::Url,
+        client: ObservedHttpClient,
+    ) -> DomainHttpTransport {
         let mut targets = BTreeMap::new();
         targets.insert(
             "IDENTITY".to_owned(),
-            DomainHttpTarget {
-                endpoint,
-                client: reqwest::Client::new(),
-            },
+            DomainHttpTarget::new(endpoint, client),
         );
         DomainHttpTransport::from_targets(targets).expect("domain transport")
     }
@@ -1617,8 +1487,8 @@ mod tests {
 
     #[test]
     fn domain_http_client_defaults_are_bounded() {
-        assert!(DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT > Duration::ZERO);
-        assert!(DEFAULT_DOMAIN_HTTP_REQUEST_TIMEOUT > DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT);
+        assert!(domain_client::CONNECT_TIMEOUT > Duration::ZERO);
+        assert!(domain_client::REQUEST_TIMEOUT > domain_client::CONNECT_TIMEOUT);
     }
 
     #[tokio::test]
@@ -1691,17 +1561,461 @@ mod tests {
             reqwest::Url::parse(&format!("http://{}/rpc", server.local_addr())).expect("url");
         let transport = SharedDomainHttpTransport::new(test_domain_transport(endpoint));
 
-        let response = transport
-            .dispatch(domain_request("identity"))
+        let context = diagctx::DiagnosticCtx::new(
+            diagctx::CorrelationId::parse("corr-1500").expect("valid correlation"),
+        );
+        let response = diagctx::scope(context, transport.dispatch(domain_request("identity")))
             .await
             .expect("dispatch");
         assert_eq!(response.status_code(), 201);
         assert_eq!(
             response.body(),
-            b"payload|correlation=corr-1500|auth=false|tenant=false"
+            b"payload|correlation=corr-1500|auth=false|tenant=false|traceparent=|tracestate="
         );
 
         assert!(server.shutdown().await.is_ok(), "echo shutdown 收敛");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_client_span_mints_w3c_and_parents_server_span() {
+        const UPSTREAM: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let (response_body, spans) = tracewire::with_test_span_capture(async {
+            let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+            let server = HttpServer::serve("domain-trace", addr, make_domain_transport_svc())
+                .await
+                .expect("serve echo");
+            let endpoint =
+                reqwest::Url::parse(&format!("http://{}/rpc", server.local_addr())).expect("url");
+            let transport = test_domain_transport(endpoint);
+            let ambient = tracing::info_span!(parent: None, "ambient.dispatch");
+            tracewire::restore_remote_parent(&ambient, UPSTREAM, Some("vendor=value"));
+            let context = diagctx::DiagnosticCtx::new(
+                diagctx::CorrelationId::parse("corr-t2").expect("valid correlation"),
+            );
+            let response = diagctx::scope(
+                context,
+                transport
+                    .dispatch(domain_request("identity"))
+                    .instrument(ambient),
+            )
+            .await
+            .expect("dispatch");
+            server.shutdown().await.expect("shutdown");
+            String::from_utf8(response.body().to_vec()).expect("utf8 response")
+        });
+
+        let ambient = spans
+            .iter()
+            .find(|span| span.name == "ambient.dispatch")
+            .expect("ambient span");
+        let client = spans
+            .iter()
+            .find(|span| span.kind == "client")
+            .expect("one client span");
+        let server = spans
+            .iter()
+            .find(|span| span.kind == "server")
+            .expect("one server span");
+        assert_eq!(client.trace_id, ambient.trace_id);
+        assert_eq!(client.parent_span_id, ambient.span_id);
+        assert_eq!(server.trace_id, client.trace_id);
+        assert_eq!(server.parent_span_id, client.span_id);
+        assert_eq!(client.tracestate, "vendor=value");
+        assert_eq!(server.tracestate, "vendor=value");
+        assert!(
+            response_body.contains(&format!(
+                "traceparent=00-{}-{}-01",
+                client.trace_id, client.span_id
+            )),
+            "wire traceparent must be minted from the CLIENT span: {response_body}"
+        );
+        assert!(response_body.contains("tracestate=vendor=value"));
+        assert!(response_body.contains("correlation=corr-t2"));
+        let client_surface = format!("{} {:?}", client.name, client.attributes);
+        for forbidden in ["/rpc", "payload", "corr-t2", "vendor=value", "127.0.0.1"] {
+            assert!(
+                !client_surface.contains(forbidden),
+                "CLIENT observation leaked forbidden marker {forbidden}: {client_surface}"
+            );
+        }
+        assert_eq!(spans.iter().filter(|span| span.kind == "client").count(), 1);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_without_ambient_parent_starts_client_root_and_injects_it() {
+        let (_, spans) = tracewire::with_test_span_capture(async {
+            let server = HttpServer::serve(
+                "domain-root",
+                "127.0.0.1:0".parse().expect("addr"),
+                make_domain_transport_svc(),
+            )
+            .await
+            .expect("serve");
+            let endpoint =
+                reqwest::Url::parse(&format!("http://{}/rpc", server.local_addr())).expect("url");
+            test_domain_transport(endpoint)
+                .dispatch(domain_request("identity"))
+                .await
+                .expect("dispatch");
+            server.shutdown().await.expect("shutdown");
+        });
+        let client = spans
+            .iter()
+            .find(|span| span.kind == "client")
+            .expect("client span");
+        let server = spans
+            .iter()
+            .find(|span| span.kind == "server")
+            .expect("server span");
+        assert_eq!(client.parent_span_id, "0000000000000000");
+        assert_eq!(server.parent_span_id, client.span_id);
+        assert_eq!(server.trace_id, client.trace_id);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_does_not_follow_redirect() {
+        let redirected = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("redirect target bind");
+        let redirected_addr = redirected.local_addr().expect("target addr");
+        let target_task = tokio::spawn(async move {
+            tokio::time::timeout(Duration::from_millis(100), redirected.accept())
+                .await
+                .is_ok()
+        });
+
+        let origin = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("redirect origin bind");
+        let origin_addr = origin.local_addr().expect("origin addr");
+        let origin_task = tokio::spawn(async move {
+            let (mut stream, _) = origin.accept().await.expect("origin accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 302 Found\r\nLocation: http://{redirected_addr}/leak\r\nContent-Length: 0\r\n\r\n"
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write redirect");
+        });
+        let endpoint = reqwest::Url::parse(&format!("http://{origin_addr}/rpc")).expect("url");
+        let response = test_domain_transport(endpoint)
+            .dispatch(domain_request("identity"))
+            .await
+            .expect("302 is a complete transport response");
+        assert_eq!(response.status_code(), 302);
+        origin_task.await.expect("origin completes");
+        assert!(
+            !target_task.await.expect("target task"),
+            "redirect target was contacted"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_does_not_retry_incomplete_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("first accept");
+            let mut request = [0_u8; 2048];
+            let _ = stream.read(&mut request).await.expect("read request");
+            drop(stream);
+            usize::from(
+                tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                    .await
+                    .is_ok(),
+            ) + 1
+        });
+        let endpoint = reqwest::Url::parse(&format!("http://{addr}/rpc")).expect("url");
+        let error = test_domain_transport(endpoint)
+            .dispatch(domain_request("identity"))
+            .await
+            .expect_err("closed response is invalid");
+        assert_eq!(
+            error.kind(),
+            HttpContractTransportErrorKind::InvalidResponse
+        );
+        assert_eq!(
+            server.await.expect("server count"),
+            1,
+            "one network attempt"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_timeout_settles_one_client_span() {
+        let (kind, spans) = tracewire::with_test_span_capture(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request).await.expect("read");
+                std::future::pending::<()>().await;
+            });
+            let endpoint = reqwest::Url::parse(&format!("http://{addr}/rpc")).expect("url");
+            let transport = test_domain_transport_with_client(
+                endpoint,
+                ObservedHttpClient::plaintext_with_timeout_for_test(Duration::from_millis(20)),
+            );
+            let error = transport
+                .dispatch(domain_request("identity"))
+                .await
+                .expect_err("request timeout");
+            server.abort();
+            let _ = server.await;
+            error.kind()
+        });
+        assert_eq!(kind, HttpContractTransportErrorKind::Timeout);
+        let clients: Vec<_> = spans.iter().filter(|span| span.kind == "client").collect();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(
+            clients[0].attributes.get("outcome").map(String::as_str),
+            Some("error")
+        );
+        assert_eq!(
+            clients[0].attributes.get("error.type").map(String::as_str),
+            Some("timeout")
+        );
+        assert!(clients[0].status.starts_with("error"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_cancelled_future_settles_one_client_span() {
+        let (_, spans) = tracewire::with_test_span_capture(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.expect("accept");
+                let mut request = [0_u8; 2048];
+                let _ = stream.read(&mut request).await.expect("read");
+                let _ = accepted_tx.send(());
+                std::future::pending::<()>().await;
+            });
+            let endpoint = reqwest::Url::parse(&format!("http://{addr}/rpc")).expect("url");
+            let transport = test_domain_transport(endpoint);
+            let mut attempt = transport.dispatch(domain_request("identity"));
+            tokio::select! {
+                result = &mut attempt => {
+                    result.expect("pending peer must not complete");
+                }
+                accepted = accepted_rx => {
+                    accepted.expect("server observed request");
+                }
+            }
+            drop(attempt);
+            server.abort();
+            let _ = server.await;
+        });
+        let clients: Vec<_> = spans.iter().filter(|span| span.kind == "client").collect();
+        assert_eq!(clients.len(), 1);
+        assert_eq!(
+            clients[0].attributes.get("outcome").map(String::as_str),
+            Some("error")
+        );
+        assert_eq!(
+            clients[0].attributes.get("error.type").map(String::as_str),
+            Some("dispatch")
+        );
+        assert!(clients[0].status.starts_with("error"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_http_error_status_is_transport_ok_and_otel_error() {
+        let (statuses, spans) = tracewire::with_test_span_capture(async {
+            let mut statuses = Vec::new();
+            for wire in [
+                b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+                b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\n\r\n".to_vec(),
+            ] {
+                let (transport, server) = canned_domain_transport(wire, false).await;
+                let response = transport
+                    .dispatch(domain_request("identity"))
+                    .await
+                    .expect("bounded HTTP error is a transport response");
+                server.await.expect("server completes");
+                statuses.push(response.status_code());
+            }
+            statuses
+        });
+        assert_eq!(statuses, [404, 503]);
+        let clients: Vec<_> = spans.iter().filter(|span| span.kind == "client").collect();
+        assert_eq!(clients.len(), 2);
+        let mut error_types = clients
+            .iter()
+            .map(|span| {
+                assert_eq!(
+                    span.attributes.get("outcome").map(String::as_str),
+                    Some("ok")
+                );
+                assert!(span.status.starts_with("error"));
+                span.attributes
+                    .get("error.type")
+                    .expect("status error type")
+                    .as_str()
+            })
+            .collect::<Vec<_>>();
+        error_types.sort_unstable();
+        assert_eq!(error_types, ["404", "503"]);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_failure_taxonomy_settles_exactly_once() {
+        let (kinds, spans) = tracewire::with_test_span_capture(async {
+            let mut kinds = Vec::new();
+            let oversized = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+                HttpContractResponse::MAX_BODY_BYTES + 1
+            )
+            .into_bytes();
+            let (transport, server) = canned_domain_transport(oversized, true).await;
+            kinds.push(
+                transport
+                    .dispatch(domain_request("identity"))
+                    .await
+                    .expect_err("oversize")
+                    .kind(),
+            );
+            server.abort();
+
+            let (transport, server) = canned_domain_transport(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".to_vec(),
+                false,
+            )
+            .await;
+            kinds.push(
+                transport
+                    .dispatch(domain_request("identity"))
+                    .await
+                    .expect_err("invalid framing")
+                    .kind(),
+            );
+            server.await.expect("invalid server completes");
+
+            let unused = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = unused.local_addr().expect("addr");
+            drop(unused);
+            let endpoint = reqwest::Url::parse(&format!("http://{addr}/rpc")).expect("url");
+            kinds.push(
+                test_domain_transport(endpoint)
+                    .dispatch(domain_request("identity"))
+                    .await
+                    .expect_err("connection refused")
+                    .kind(),
+            );
+            kinds
+        });
+        assert_eq!(
+            kinds,
+            [
+                HttpContractTransportErrorKind::ResponseTooLarge,
+                HttpContractTransportErrorKind::InvalidResponse,
+                HttpContractTransportErrorKind::Dispatch,
+            ]
+        );
+        let clients: Vec<_> = spans.iter().filter(|span| span.kind == "client").collect();
+        assert_eq!(
+            clients.len(),
+            3,
+            "one CLIENT span per send; captured={:?}",
+            spans.iter().map(|span| &span.name).collect::<Vec<_>>()
+        );
+        let mut error_types = clients
+            .iter()
+            .map(|span| {
+                span.attributes
+                    .get("error.type")
+                    .expect("closed error type")
+                    .as_str()
+            })
+            .collect::<Vec<_>>();
+        error_types.sort_unstable();
+        assert_eq!(
+            error_types,
+            ["dispatch", "invalid_response", "response_too_large"]
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn domain_transport_logical_dispatch_parents_remote_client_and_inproc_emits_no_client() {
+        struct FixedClock;
+        impl diport::Clock for FixedClock {
+            fn now(&self) -> std::time::SystemTime {
+                std::time::SystemTime::UNIX_EPOCH
+            }
+        }
+        struct InProc;
+        impl HttpContractTransport for InProc {
+            fn dispatch(
+                &self,
+                _request: HttpContractRequest,
+            ) -> std::pin::Pin<
+                Box<
+                    dyn Future<Output = Result<HttpContractResponse, HttpContractTransportError>>
+                        + Send
+                        + '_,
+                >,
+            > {
+                Box::pin(async { HttpContractResponse::try_new(204, Vec::new()) })
+            }
+        }
+
+        let (_, remote_spans) = tracewire::with_test_span_capture(async {
+            let server = HttpServer::serve(
+                "logical-parent",
+                "127.0.0.1:0".parse().expect("addr"),
+                make_domain_transport_svc(),
+            )
+            .await
+            .expect("serve");
+            let endpoint =
+                reqwest::Url::parse(&format!("http://{}/rpc", server.local_addr())).expect("url");
+            let transport = distributed::InstrumentedHttpContractTransport::new(
+                test_domain_transport(endpoint),
+                distributed::TransportMode::Remote,
+                Box::new(FixedClock),
+            );
+            transport
+                .dispatch(domain_request("identity"))
+                .await
+                .expect("dispatch");
+            server.shutdown().await.expect("shutdown");
+        });
+        let logical = remote_spans
+            .iter()
+            .find(|span| span.name == "domain_transport.dispatch")
+            .expect("logical span");
+        let client = remote_spans
+            .iter()
+            .find(|span| span.kind == "client")
+            .expect("client span");
+        assert_eq!(client.parent_span_id, logical.span_id);
+
+        let (_, inproc_spans) = tracewire::with_test_span_capture(async {
+            distributed::InstrumentedHttpContractTransport::new(
+                InProc,
+                distributed::TransportMode::InProc,
+                Box::new(FixedClock),
+            )
+            .dispatch(domain_request("identity"))
+            .await
+            .expect("inproc dispatch");
+        });
+        assert!(inproc_spans.iter().all(|span| span.kind != "client"));
     }
 
     #[tokio::test]
@@ -1747,7 +2061,7 @@ mod tests {
         .expect_err("oversize response is invalid");
         assert_eq!(
             error.kind(),
-            HttpContractTransportErrorKind::InvalidResponse
+            HttpContractTransportErrorKind::ResponseTooLarge
         );
         server.abort();
     }
@@ -1771,7 +2085,7 @@ mod tests {
             .expect_err("actual chunked body above the bound is invalid");
         assert_eq!(
             error.kind(),
-            HttpContractTransportErrorKind::InvalidResponse
+            HttpContractTransportErrorKind::ResponseTooLarge
         );
         server.await.expect("canned server completes");
     }
@@ -1812,6 +2126,26 @@ mod tests {
             HttpContractTransportErrorKind::InvalidResponse
         );
         server.await.expect("canned server completes");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_maps_malformed_response_head_to_invalid_response() {
+        for response in [
+            b"NOT HTTP\r\n\r\n".to_vec(),
+            b"HTTP/1.1 200 OK\r\nmalformed header\r\n\r\n".to_vec(),
+        ] {
+            let (transport, server) = canned_domain_transport(response, false).await;
+            let error = transport
+                .dispatch(domain_request("identity"))
+                .await
+                .expect_err("malformed response head is invalid response");
+            assert_eq!(
+                error.kind(),
+                HttpContractTransportErrorKind::InvalidResponse
+            );
+            server.await.expect("canned server completes");
+        }
     }
 
     #[tokio::test]
@@ -1882,7 +2216,7 @@ mod tests {
                         if current == failure_at {
                             Err(DomainHttpTransportBuildError::LocalSvidMismatch)
                         } else {
-                            Ok(reqwest::Client::new())
+                            Ok(ObservedHttpClient::plaintext_for_test())
                         }
                     }
                 },

@@ -128,10 +128,16 @@
 - 跨域同步 contract 调用的 metric 由统一 instrumented seam 在每次 dispatch 结算时发射，
   成功与失败路径都必须记录 outcome；错误细节不进入 label。
 - 目标 domain 与 `contract_id` 不入 transport metric label，只进 dispatch span。
-- dispatch span 只记录路由元数据；path / headers / body 必须经字段策略脱敏，不得明文进入 Debug 或 span 字段。
+- logical dispatch span 只记录路由元数据；remote adapter 在唯一真实 HTTP attempt funnel 内另建 CLIENT span。
+- CLIENT span 必须先成为 current，再从 ambient mint W3C context；每个 send 恰好结算一个 span。raw client、
+  redirect/retry 策略与 settlement enum 均封闭在该 funnel，禁止隐式 redirect 或 retry。
+- CLIENT span 只记录闭 method、typed domain/contract、status 与闭 outcome/error；URL、endpoint、address/port、
+  path/query、headers、body、credential、tenant、principal 和原始错误不得进入 span。
 - 契约身份经 typed `vocab::ContractBinding` 单源绑定。
-- caller-supplied header 经 fail-closed 白名单（仅诊断 / trace-context 头），拒绝 `authorization`、
-  `cookie`、`x-tenant-id` 等；认证、租户与服务凭据由 adapter 从已认证信道铸造，不经此 seam。
+- request 类型不提供 header 槽。`traceparent`/`tracestate` 只由 adapter 从 current CLIENT span mint，
+  `x-correlation-id` 只从 `diagctx` ambient 注入；request id 不跨域转发。认证、租户与服务凭据同样不经此 seam。
+- declared/累计 response oversize 映射 `response_too_large`；timeout、dispatch、invalid response 使用闭值。
+  完整 4xx/5xx 保持 transport `Ok`，但 CLIENT OTel status 为 error 且 `error.type` 是十进制 status。
 - remote adapter 只实现同一 transport trait，不另建一套指标标签。
 
 ## Redis Namespace
@@ -156,7 +162,7 @@
   - `correlation` 走独立可读诊断信道（非授权信道）fail-open 读回。跨服务贯通要求调用方携带
     `X-Correlation-ID`（受限字符集、有长度上限）；缺失时服务生成 UUID 保底，但链路不贯通。
   - `trace` 从当前 span 导出 W3C traceparent，consumer 侧还原 remote parent。fail-open：
-    无 otel 层、未采样或畸形 traceparent 一律省略，绝不阻投递。
+    无有效 otel context 或畸形 traceparent 时省略；有效未采样 context 仍以 flags `00` 传播，绝不阻投递。
 - `subjectId` / `principal` / `actor` / `causation_id` 是 persisted-only。完整 `Principal`、email、姓名、
   token 等 PII 不得进入 metadata，也永不进入 broker header，不能作为 broker-visible auth source。
 - broker-visible metadata 只能来自 transport header allowlist；persisted metadata 不回填 broker header。

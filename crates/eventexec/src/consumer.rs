@@ -3380,13 +3380,15 @@ mod tests {
     fn build_consume_span_restores_producer_trace_id() {
         tracewire::with_test_subscriber(|| {
             let producer_tp = tracing::info_span!("producer")
-                .in_scope(tracewire::capture)
-                .expect("producer traceparent");
+                .in_scope(tracewire::capture_current)
+                .expect("producer traceparent")
+                .into_traceparent();
             // 消费侧：用透传的 traceparent 建消费 span，其 trace_id 应等于 producer。
             let consume = super::build_consume_span(&meta(), "msg-trace-1", Some(&producer_tp));
             let restored = consume
-                .in_scope(tracewire::capture)
-                .expect("consume span traceparent after restore");
+                .in_scope(tracewire::capture_current)
+                .expect("consume span traceparent after restore")
+                .into_traceparent();
             assert_eq!(
                 trace_id_of(&restored),
                 trace_id_of(&producer_tp),
@@ -3404,8 +3406,9 @@ mod tests {
         tracewire::with_test_subscriber(|| {
             let consume = super::build_consume_span(&meta(), "msg-trace-2", None);
             let tp = consume
-                .in_scope(tracewire::capture)
-                .expect("consume span 自身在 otel 下有 root traceparent");
+                .in_scope(tracewire::capture_current)
+                .expect("consume span 自身在 otel 下有 root traceparent")
+                .into_traceparent();
             // 自生 root：版本前缀合法、不 panic（未挂任何畸形/外来 parent）。
             assert!(
                 tp.starts_with("00-"),
@@ -3427,8 +3430,9 @@ mod tests {
 
         let producer_trace_id = tracewire::with_test_subscriber(|| {
             let producer_tp = tracing::info_span!("producer")
-                .in_scope(tracewire::capture)
-                .expect("producer traceparent");
+                .in_scope(tracewire::capture_current)
+                .expect("producer traceparent")
+                .into_traceparent();
 
             // broker 透传等价物：subscriber 从 header rehydrate 出带 trace 键的 Message。
             let mut md = tenant_metadata("msg-e2e-trace");
@@ -3439,7 +3443,8 @@ mod tests {
                 let seen = seen_handler.clone();
                 Box::pin(async move {
                     // handler 经 `.instrument(consume_span)` 在还原后的消费 span 内执行。
-                    *seen.lock().unwrap() = tracewire::capture().map(|tp| trace_id_of(&tp));
+                    *seen.lock().unwrap() = tracewire::capture_current()
+                        .map(|context| trace_id_of(context.traceparent()));
                     HandleResult::ack()
                 })
             };

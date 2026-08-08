@@ -28,3 +28,16 @@ Only these four PBIs belong to Epic #2034. The three child PBIs may proceed inde
 - Malformed diagnostic headers fail open and never affect authentication or tenancy.
 
 Response-body completion is intentionally owned by #2037.
+
+## #2036 acceptance
+
+- A private outbound funnel owns the raw client, disables redirect/retry, and emits exactly one
+  CLIENT span for each real network attempt. In-process dispatch emits no CLIENT span.
+- The CLIENT span becomes current before the adapter captures and injects W3C context, so the peer
+  SERVER span is its exact child and `tracestate` remains continuous. Valid unsampled context propagates.
+- `HttpContractRequest` has no header slot. W3C context and canonical correlation are ambient-only;
+  request id, credentials, tenant and arbitrary caller headers cannot be expressed.
+- URL, endpoint/address, path/query, header/body values, identity data and raw errors are forbidden
+  from the observation surface.
+- Response-too-large, timeout, invalid-response and dispatch failures use distinct closed outcomes;
+  complete 4xx/5xx responses remain transport results while setting OTel error status.
