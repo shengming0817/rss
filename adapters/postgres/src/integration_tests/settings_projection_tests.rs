@@ -875,8 +875,8 @@ fn assert_settings_dual_worker_stops(
 }
 
 fn settings_dual_worker_harness(
-    worker: &crate::pool::VerifiedPgProjectionWorkerStore,
-    target_scope: &crate::bundle::ProjectionWorkerTarget,
+    worker: &crate::projection_worker::VerifiedPgProjectionWorkerStore,
+    target_scope: &crate::projection_worker::ProjectionWorkerTarget,
     tenant: vocab::TenantId,
     projection_target: std::sync::Arc<dyn eventexec::ProjectionTarget>,
     execution: eventexec::ProjectionExecutionContext,
@@ -884,18 +884,18 @@ fn settings_dual_worker_harness(
 ) -> Result<
     eventexec::ProjectionHarness<
         eventexec::ProjectionProjector,
-        crate::PgCheckpointStore,
-        crate::PgDeadLetterStore,
+        crate::projection_worker::PgProjectionWorkerCheckpointStore,
+        crate::projection_worker::PgProjectionWorkerDeadLetterStore,
     >,
     TestError,
 > {
     let selector = target_scope.selector(tenant);
-    let checkpoint = std::sync::Arc::new(crate::PgCheckpointStore::new_projection_worker(
+    let checkpoint = std::sync::Arc::new(crate::projection_worker::checkpoint_for_integration(
         worker,
         target_scope,
         tenant,
     ));
-    let dead_letter = std::sync::Arc::new(crate::PgDeadLetterStore::new_projection_worker(
+    let dead_letter = std::sync::Arc::new(crate::projection_worker::dead_letter_for_integration(
         worker,
         target_scope,
         tenant,
@@ -2908,11 +2908,11 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
     .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
     .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
-    .fetch_all(worker.pool())
+    .fetch_all(worker.pool_for_integration())
     .await?;
     assert!(tenants.is_empty());
 
-    let mut denied_tx = worker.pool().begin().await?;
+    let mut denied_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *denied_tx)
@@ -2938,7 +2938,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     );
     denied_tx.rollback().await?;
 
-    let mut tx = worker.pool().begin().await?;
+    let mut tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *tx)
@@ -3045,7 +3045,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .bind(SETTINGS_PROJECTION_ID)
     .execute(&owner.pool)
     .await?;
-    let mut rollback_tx = worker.pool().begin().await?;
+    let mut rollback_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *rollback_tx)
@@ -3079,7 +3079,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .bind(rollback_generation)
     .execute(&owner.pool)
     .await?;
-    let mut resolver_tx = worker.pool().begin().await?;
+    let mut resolver_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *resolver_tx)
@@ -3091,7 +3091,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .await?;
     assert_eq!(resolved, (rollback_generation.to_owned(), 2));
     resolver_tx.rollback().await?;
-    let mut quarantine_probe = worker.pool().begin().await?;
+    let mut quarantine_probe = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *quarantine_probe)
@@ -3132,7 +3132,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     )
     .bind(tenant.to_string())
     .bind(&generation)
-    .execute(worker.pool())
+    .execute(worker.pool_for_integration())
     .await;
     assert!(
         matches!(raw_write, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
@@ -3151,7 +3151,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
     .bind(TEST_OCCURRED_SECS as i64)
     .bind(vec![0x5d_u8; 32])
-    .fetch_one(worker.pool())
+    .fetch_one(worker.pool_for_integration())
     .await;
     assert!(
         matches!(operator_apply, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
@@ -3209,7 +3209,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
     .execute(&owner.pool)
     .await?;
-    let mut observe_tx = worker.pool().begin().await?;
+    let mut observe_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *observe_tx)
@@ -3227,7 +3227,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .fetch_one(&mut *observe_tx)
     .await?;
     let observed: (Option<i64>, Option<i64>, Option<i64>, i64) =
-        sqlx::query_as(crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
+        sqlx::query_as(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
             .bind(tenant.to_string())
             .bind(SETTINGS_PROJECTION_ID)
             .bind(rollback_generation)
@@ -3253,7 +3253,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     );
     let foreign = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let cross_tenant = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
-        crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
+        crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
     )
     .bind(foreign.to_string())
     .bind(SETTINGS_PROJECTION_ID)
@@ -3269,13 +3269,13 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     );
     observe_tx.rollback().await?;
 
-    let mut wrong_generation_tx = worker.pool().begin().await?;
+    let mut wrong_generation_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *wrong_generation_tx)
         .await?;
     let wrong_generation = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
-        crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
+        crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
     )
     .bind(tenant.to_string())
     .bind(SETTINGS_PROJECTION_ID)
@@ -3291,13 +3291,13 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     );
     wrong_generation_tx.rollback().await?;
 
-    let mut wrong_digest_tx = worker.pool().begin().await?;
+    let mut wrong_digest_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *wrong_digest_tx)
         .await?;
     let wrong_digest = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
-        crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
+        crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
     )
     .bind(tenant.to_string())
     .bind(SETTINGS_PROJECTION_ID)
@@ -3319,13 +3319,13 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         .bind(observe_checkpoint_id.as_str())
         .execute(&owner.pool)
         .await?;
-    let mut missing_tx = worker.pool().begin().await?;
+    let mut missing_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
         .execute(&mut *missing_tx)
         .await?;
     let missing_cp: (Option<i64>, Option<i64>, Option<i64>, i64) =
-        sqlx::query_as(crate::bundle::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
+        sqlx::query_as(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
             .bind(tenant.to_string())
             .bind(SETTINGS_PROJECTION_ID)
             .bind(rollback_generation)
@@ -3338,7 +3338,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     assert_eq!(missing_cp.2, None);
     missing_tx.rollback().await?;
 
-    worker.store_arc().shutdown().await?;
+    worker.shutdown_for_integration().await?;
     owner.shutdown().await?;
     Ok(())
 }
@@ -3438,14 +3438,14 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         .fetch_all(&pool)
         .await
     };
-    let initial = list_tenants(worker.pool().clone()).await?;
+    let initial = list_tenants(worker.pool_for_integration().clone()).await?;
     assert!(initial.contains(&quarantined.to_string()));
     assert!(initial.contains(&healthy.to_string()));
     for (tenant, expected_generation) in [
         (quarantined, quarantined_generation),
         (healthy, healthy_generation),
     ] {
-        let mut resolve_tx = worker.pool().begin().await?;
+        let mut resolve_tx = worker.pool_for_integration().begin().await?;
         sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
             .bind(tenant.to_string())
             .execute(&mut *resolve_tx)
@@ -3484,7 +3484,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     .bind(SETTINGS_PROJECTION_ID)
     .execute(&owner.pool)
     .await?;
-    let mut next_quantum = worker.pool().begin().await?;
+    let mut next_quantum = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(healthy.to_string())
         .execute(&mut *next_quantum)
@@ -3512,7 +3512,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         "the next worker quantum must fence the generation that was active before the swap: {stale_checkpoint:?}"
     );
     next_quantum.rollback().await?;
-    let mut next_quantum = worker.pool().begin().await?;
+    let mut next_quantum = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(healthy.to_string())
         .execute(&mut *next_quantum)
@@ -3542,7 +3542,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     .bind(healthy_next_generation)
     .execute(&owner.pool)
     .await?;
-    let mut drift_tx = worker.pool().begin().await?;
+    let mut drift_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(healthy.to_string())
         .execute(&mut *drift_tx)
@@ -3568,7 +3568,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     .execute(&owner.pool)
     .await?;
 
-    let mut quarantine_tx = worker.pool().begin().await?;
+    let mut quarantine_tx = worker.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(quarantined.to_string())
         .execute(&mut *quarantine_tx)
@@ -3605,7 +3605,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         )
     );
     for _ in 0..3 {
-        let active = list_tenants(worker.pool().clone()).await?;
+        let active = list_tenants(worker.pool_for_integration().clone()).await?;
         assert!(
             active.contains(&quarantined.to_string()),
             "generation-neutral discovery must not hide a tenant before its active scope is resolved"
@@ -3629,12 +3629,12 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         "catalog scans must not hot-loop or rewrite quarantine"
     );
 
-    worker.store_arc().shutdown().await?;
+    worker.shutdown_for_integration().await?;
     let restarted = PgStore::connect_verified_projection_worker(&worker_config).await?;
-    let after_restart = list_tenants(restarted.pool().clone()).await?;
+    let after_restart = list_tenants(restarted.pool_for_integration().clone()).await?;
     assert!(after_restart.contains(&quarantined.to_string()));
     assert!(after_restart.contains(&healthy.to_string()));
-    let mut restarted_probe = restarted.pool().begin().await?;
+    let mut restarted_probe = restarted.pool_for_integration().begin().await?;
     sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
         .bind(quarantined.to_string())
         .execute(&mut *restarted_probe)
@@ -3710,7 +3710,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         .recover_quarantined_tenant(consistency::Lsn::new(42))
         .await?;
     assert!(recovered);
-    let after_recovery = list_tenants(restarted.pool().clone()).await?;
+    let after_recovery = list_tenants(restarted.pool_for_integration().clone()).await?;
     assert!(after_recovery.contains(&quarantined.to_string()));
     let released: (String, String, i64) = sqlx::query_as(
         "SELECT state, reason, failed_lsn FROM public.projection_worker_tenant_quarantine \
@@ -3727,7 +3727,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     );
 
     operator.shutdown().await?;
-    restarted.store_arc().shutdown().await?;
+    restarted.shutdown_for_integration().await?;
     app.shutdown().await?;
     owner.shutdown().await?;
     Ok(())
@@ -4128,7 +4128,8 @@ async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale
         &target_generation,
     )
     .ok_or("Settings projection runtime binding fixture missing")?;
-    let target_scope = crate::bundle::ProjectionWorkerTarget::from_binding(&binding);
+    let target_scope =
+        crate::projection_worker::ProjectionWorkerTarget::from_binding_for_test(&binding);
     let execution = binding.background_execution_issuer().issue(tenant);
     let event_specs = (1..=EVENT_END)
         .map(|lsn| {
@@ -4148,10 +4149,10 @@ async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale
         barrier: std::sync::Arc::new(tokio::sync::Barrier::new(2)),
     };
     let target_a = target(std::sync::Arc::new(
-        crate::PgSettingsProjectionApplyStore::new_projection_worker(&worker_a),
+        crate::PgSettingsProjectionApplyStore::new_projection_worker(&worker_a, &target_scope),
     ));
     let target_b = target(std::sync::Arc::new(
-        crate::PgSettingsProjectionApplyStore::new_projection_worker(&worker_b),
+        crate::PgSettingsProjectionApplyStore::new_projection_worker(&worker_b, &target_scope),
     ));
     let harness_a = settings_dual_worker_harness(
         &worker_a,
@@ -4250,8 +4251,8 @@ async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale
     assert_eq!(total_applied, EVENT_END as usize);
     assert_eq!(total_duplicates, EVENT_END as usize);
 
-    worker_a.store_arc().shutdown().await?;
-    worker_b.store_arc().shutdown().await?;
+    worker_a.shutdown_for_integration().await?;
+    worker_b.shutdown_for_integration().await?;
     owner.shutdown().await?;
     Ok(())
 }

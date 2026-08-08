@@ -12,18 +12,68 @@ use settings::ports::{
 use sqlx::PgConnection;
 
 use super::{
-    LocalTxAttempt, ProjectionOperatorWriteLane, ProjectionWorkerWriteLane, ServingReadLane,
-    TenantDb, TenantLane, WriteLane,
+    LocalTxAttempt, ProjectionOperatorWriteLane, ServingReadLane, TenantDb, TenantLane, WriteLane,
+    tenant_lane_seal,
 };
+use crate::projection_worker::{ProjectionWorkerApplyMint, ProjectionWorkerTarget};
+
+/// Opaque handoff minted only from a verified worker store and its plan-issued target.
+pub(crate) struct ProjectionWorkerBoundPool {
+    pool: sqlx::PgPool,
+    target: ProjectionWorkerTarget,
+}
+
+impl ProjectionWorkerBoundPool {
+    pub(crate) fn mint(
+        pool: sqlx::PgPool,
+        target: ProjectionWorkerTarget,
+        _mint: ProjectionWorkerApplyMint,
+    ) -> Self {
+        Self { pool, target }
+    }
+}
+
+/// Closed write lane carried only by the Settings-owned projection worker slice.
+#[derive(Clone)]
+pub(crate) struct ProjectionWorkerWriteLane {
+    target: ProjectionWorkerTarget,
+}
+
+impl tenant_lane_seal::Sealed for ProjectionWorkerWriteLane {}
+impl TenantLane for ProjectionWorkerWriteLane {}
+impl WriteLane for ProjectionWorkerWriteLane {}
+
+impl TenantDb<ProjectionWorkerWriteLane> {
+    pub(crate) fn new_projection_worker(pool: ProjectionWorkerBoundPool) -> Self {
+        Self {
+            pool: pool.pool,
+            lane: ProjectionWorkerWriteLane {
+                target: pool.target,
+            },
+        }
+    }
+}
 
 pub(in crate::cotx) trait SettingsProjectionWriteLane: WriteLane {
     const APPLY_SQL: &'static str;
+
+    fn matches_scope(&self, _scope: &SettingsProjectionApplyScope) -> bool {
+        true
+    }
 }
 
 impl SettingsProjectionWriteLane for ProjectionWorkerWriteLane {
     const APPLY_SQL: &'static str = "SELECT public.rss_settings_projection_apply_worker(\
          $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13\
          )";
+
+    fn matches_scope(&self, scope: &SettingsProjectionApplyScope) -> bool {
+        scope.projection().as_str() == self.target.projection_id()
+            && scope.target_generation().as_str() == self.target.target_generation()
+            && scope.definition_version() == self.target.definition_version()
+            && scope.definition_schema_digest().as_str() == self.target.definition_schema_digest()
+            && scope.input_generation().as_str() == self.target.input_generation()
+    }
 }
 
 impl SettingsProjectionWriteLane for ProjectionOperatorWriteLane {
@@ -286,6 +336,11 @@ where
             crate::settings_projection::SettingsProjectionTestFault,
         >,
     ) -> LocalTxAttempt<eventexec::ProjectionTargetStoreOutcome, SettingsProjectionTxError> {
+        if !self.lane.matches_scope(&scope) {
+            return LocalTxAttempt::unsettled(
+                SettingsProjectionTxError::DefinitionIdentityMismatch,
+            );
+        }
         let tenant_scope = scope.tenant_scope();
         self.write_attempt(
             tenant_scope,

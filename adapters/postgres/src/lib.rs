@@ -77,6 +77,8 @@ mod policy_repo;
 mod pool;
 mod projection_control;
 mod projection_events;
+#[cfg(feature = "domain-settings")]
+mod projection_worker;
 mod readiness;
 mod reconcile;
 #[cfg(any(
@@ -182,21 +184,20 @@ pub use account_security_repo::PgAccountSecurityRepo;
 #[cfg(feature = "domain-identity")]
 pub use bundle::PgDeviceIdentityDraftRuntime;
 #[cfg(feature = "domain-settings")]
-pub use bundle::PgProjectionWorkerDeps;
-#[cfg(feature = "domain-settings")]
 pub use bundle::PgSettingsBundle;
 #[cfg(all(feature = "domain-identity", any(test, feature = "test-support")))]
 pub use bundle::identity_pseudonym_keys_for_test;
+#[cfg(feature = "domain-identity")]
 pub use bundle::{
-    DeviceLatentInspectionAuditOutcome, MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain,
-    PgDomainDeps, PgInfraDeps, PgL2DrRecoveryDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
+    DeviceLatentInspectionAuditOutcome, PgDeviceLatentInspectionDeps, PgDeviceLatentOperatorDeps,
+    UNVERIFIED_DEVICE_LATENT_OPERATOR,
+};
+pub use bundle::{
+    MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
+    PgL2DrRecoveryDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
     PgProjectionOperatorCapability, PgProjectionOperatorDeps, PgProjectionReplayStores,
     PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, PgSagaOperatorDeps,
     ProjectionReplayAction, ProjectionStatusAction, ProjectionSwapAction, caps,
-};
-#[cfg(feature = "domain-identity")]
-pub use bundle::{
-    PgDeviceLatentInspectionDeps, PgDeviceLatentOperatorDeps, UNVERIFIED_DEVICE_LATENT_OPERATOR,
 };
 pub use cas_store::PgCasStore;
 pub use checkpoint::PgCheckpointStore;
@@ -293,9 +294,13 @@ mod test_pg;
 pub use inbox::{PgInboxStore, PgInboxSweeper};
 pub use pool::{
     PgConfig, PgError, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgPassword,
-    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgProjectionWorkerConfig,
-    PgSagaOperatorConfig, PgTenantReadConfig, PoolReadiness,
+    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgSagaOperatorConfig,
+    PgTenantReadConfig, PoolReadiness,
 };
+#[cfg(feature = "domain-settings")]
+pub use pool::{PgProjectionWorkerConfig, PgProjectionWorkerError};
+#[cfg(feature = "domain-settings")]
+pub use projection_worker::PgProjectionWorkerDeps;
 // `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
 // 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。
 pub use readiness::{PgDbReadiness, PgReadinessSampler};

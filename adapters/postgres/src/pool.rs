@@ -12,6 +12,13 @@ use vocab::TenantId;
 use crate::PgStore;
 use crate::cotx::set_local_tenant;
 
+#[cfg(feature = "domain-settings")]
+mod projection_worker;
+#[cfg(feature = "domain-settings")]
+pub(crate) use projection_worker::ProjectionWorkerMint;
+#[cfg(feature = "domain-settings")]
+pub use projection_worker::{PgProjectionWorkerConfig, PgProjectionWorkerError};
+
 /// 默认连接池上限（与 sqlx 缺省同值）。tuning 参数（非安全必填依赖），故可有默认。
 pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 10;
 /// 默认获取连接超时（与 sqlx 缺省同值）。
@@ -28,7 +35,6 @@ const WRITER_APPLICATION_NAME: &str = "rss-postgres-writer";
 const READER_APPLICATION_NAME: &str = "rss-postgres-reader";
 const PROJECTION_SOURCE_READER_APPLICATION_NAME: &str = "rss-postgres-projection-source-reader";
 const PROJECTION_OPERATOR_APPLICATION_NAME: &str = "rss-postgres-projection-operator";
-const PROJECTION_WORKER_APPLICATION_NAME: &str = "rss-postgres-projection-worker";
 const SAGA_OPERATOR_APPLICATION_NAME: &str = "rss-postgres-saga-operator";
 const L2_DR_RECOVERY_AUDITOR_APPLICATION_NAME: &str = "rss-postgres-l2-dr-recovery-auditor";
 const L2_DR_RECOVERY_EXECUTOR_APPLICATION_NAME: &str = "rss-postgres-l2-dr-recovery-executor";
@@ -244,21 +250,6 @@ pub enum PgError {
     /// Projection operator may not persist through PostgreSQL large objects or parameter ACLs.
     #[error("postgres projection operator external persistence capabilities are not empty")]
     ProjectionOperatorExternalPersistencePrivileges,
-    /// Projection worker role/function/catalog probe failed.
-    #[error("postgres projection worker capability probe failed")]
-    ProjectionWorkerCapability(#[source] sqlx::Error),
-    /// Projection worker must be the exact function-only workload role.
-    #[error("postgres projection worker role or grants are not exact")]
-    ProjectionWorkerRoleOrGrantMismatch,
-    /// Projection worker must not own database objects.
-    #[error("postgres projection worker object ownership is not empty")]
-    ProjectionWorkerOwnership,
-    /// Projection worker fixed function implementation drifted.
-    #[error("postgres projection worker function definitions are not exact")]
-    ProjectionWorkerFunctionDefinitions { actual_fingerprint: String },
-    /// Projection worker may not persist through raw relations, large objects, or parameter ACLs.
-    #[error("postgres projection worker effective privileges are not exact")]
-    ProjectionWorkerPrivileges { actual_fingerprint: String },
     /// Saga operator role/function/catalog probe failed.
     #[error("postgres Saga operator capability probe failed")]
     SagaOperatorCapability(#[source] sqlx::Error),
@@ -539,29 +530,6 @@ impl PgProjectionOperatorConfig {
     }
 }
 
-/// Opaque configuration for the dedicated function-only Projection worker credential.
-#[derive(Clone)]
-pub struct PgProjectionWorkerConfig(PgConfig);
-
-impl PgProjectionWorkerConfig {
-    #[must_use]
-    pub fn new(config: PgConfig) -> Self {
-        Self(config)
-    }
-
-    pub(crate) fn as_pg_config(&self) -> &PgConfig {
-        &self.0
-    }
-}
-
-impl std::fmt::Debug for PgProjectionWorkerConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("PgProjectionWorkerConfig")
-            .field(&self.0)
-            .finish()
-    }
-}
-
 /// Opaque configuration for the independent function-only Saga operator credential.
 #[derive(Clone)]
 pub struct PgSagaOperatorConfig(PgConfig);
@@ -655,10 +623,6 @@ pub(crate) struct VerifiedPgProjectionSourceReadStore(Arc<PgStore>);
 #[derive(Clone)]
 pub(crate) struct VerifiedPgProjectionOperatorStore(Arc<PgStore>);
 
-/// A Projection worker store that passed its exact function-only role gate.
-#[derive(Clone)]
-pub(crate) struct VerifiedPgProjectionWorkerStore(Arc<PgStore>);
-
 /// A Saga operator store that passed its exact function-only role gate.
 #[derive(Clone)]
 pub(crate) struct VerifiedPgSagaOperatorStore(Arc<PgStore>);
@@ -739,16 +703,6 @@ impl VerifiedPgProjectionSourceReadStore {
 }
 
 impl VerifiedPgProjectionOperatorStore {
-    pub(crate) fn pool(&self) -> &sqlx::PgPool {
-        &self.0.pool
-    }
-
-    pub(crate) fn store_arc(&self) -> Arc<PgStore> {
-        Arc::clone(&self.0)
-    }
-}
-
-impl VerifiedPgProjectionWorkerStore {
     pub(crate) fn pool(&self) -> &sqlx::PgPool {
         &self.0.pool
     }
@@ -1115,14 +1069,10 @@ const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
     "sha256:cad2f8308d618a8228b4eda3aea2404a888ff8f131a8ee5fe7671ce4729bd8cf";
-const EXPECTED_PROJECTION_WORKER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:223134df6e06666cf1bce94580e0b6325c4aa164e9263d38b73a28548cf7abf2";
 const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
     "sha256:bcd85f1793dbd7b52b3b1cf92ed835db90b9866e5f29520520878a061fa3c6d8";
 const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
     "sha256:630d472191ed562717aec601d5f32d248e06c23c1b7bd1aa75d7707f4e7bfed7";
-const EXPECTED_PROJECTION_WORKER_FUNCTION_FINGERPRINT: &str =
-    "sha256:f652149bd75667ddf06124958e1e681192f9d54458472c4f6262160085f55daf";
 const EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT: &str =
     "sha256:a4acf64119c15ed5a836550100fbff32c3c0eac3024b8349ea20c368dc060c9b";
 
@@ -1242,32 +1192,6 @@ WHERE procedure.oid IN (
     'public.rss_settings_projection_apply_operator(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
     'public.rss_projection_operator_insert_dead_letter(uuid,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure,
     'public.rss_projection_operator_recover_tenant(uuid,text,text,bigint)'::regprocedure
-)
-ORDER BY procedure.proname
-"#;
-
-const PROJECTION_WORKER_FUNCTION_DEFINITIONS_SQL: &str = r#"
-SELECT procedure.proname,
-       language.lanname,
-       procedure.prosrc,
-       procedure.provolatile::text,
-       procedure.proparallel::text,
-       procedure.proleakproof,
-       procedure.proisstrict
-FROM pg_catalog.pg_proc AS procedure
-JOIN pg_catalog.pg_language AS language ON language.oid = procedure.prolang
-WHERE procedure.oid IN (
-    'public.rss_projection_worker_list_tenants(text,text,text,text,uuid,integer)'::regprocedure,
-    'public.rss_projection_worker_quarantine_tenant(uuid,text,text,text,text,text,text,bigint)'::regprocedure,
-    'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)'::regprocedure,
-    'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)'::regprocedure,
-    'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)'::regprocedure,
-    'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)'::regprocedure,
-    'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)'::regprocedure,
-    'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)'::regprocedure,
-    'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure,
-    'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
-    'public.rss_settings_projection_resolve_active()'::regprocedure
 )
 ORDER BY procedure.proname
 "#;
@@ -2271,184 +2195,6 @@ impl PgStore {
             .await
             .map_err(PgError::ProjectionOperatorCapability)?;
         ensure_projection_operator_capability_fingerprint(actual_fingerprint)
-    }
-
-    /// Exact capability gate for the dedicated background Projection worker role.
-    pub(crate) async fn verify_projection_worker_capability(&self) -> Result<(), PgError> {
-        let exact: (bool,) = sqlx::query_as(
-            r#"
-            WITH role_grants AS (
-                SELECT grant_row.table_name, grant_row.privilege_type
-                FROM information_schema.role_table_grants AS grant_row
-                WHERE grant_row.grantee = current_user
-                  AND grant_row.table_schema = 'public'
-            )
-            SELECT session_user = 'rss_projection_worker'
-               AND current_user = 'rss_projection_worker'
-               AND role.rolcanlogin
-               AND NOT role.rolsuper
-               AND NOT role.rolbypassrls
-               AND NOT role.rolcreatedb
-               AND NOT role.rolcreaterole
-               AND NOT role.rolreplication
-               AND NOT role.rolinherit
-               AND COALESCE(cardinality(role.rolconfig), 0) = 1
-               AND role.rolconfig @> ARRAY['search_path=pg_catalog, public']::text[]
-               AND NOT EXISTS (SELECT 1 FROM role_grants)
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_list_tenants(text,text,text,text,uuid,integer)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_quarantine_tenant(uuid,text,text,text,text,text,text,bigint)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)', 'EXECUTE')
-               AND has_function_privilege(current_user, 'public.rss_settings_projection_resolve_active()', 'EXECUTE')
-               AND (
-                    SELECT count(*) = 11
-                       AND pg_catalog.bool_and(
-                           procedure.prosecdef
-                           AND procedure.proconfig =
-                               ARRAY['search_path=pg_catalog, pg_temp']::text[]
-                           AND function_owner.rolname = CASE
-                               WHEN procedure.proname = 'rss_settings_projection_resolve_active'
-                               THEN 'rss_projection_serving_owner'
-                               ELSE 'rss_projection_worker_owner'
-                           END
-                           AND NOT function_owner.rolcanlogin
-                           AND NOT function_owner.rolsuper
-                           AND NOT function_owner.rolbypassrls
-                           AND NOT function_owner.rolcreatedb
-                           AND NOT function_owner.rolcreaterole
-                           AND NOT function_owner.rolreplication
-                           AND NOT function_owner.rolinherit
-                           AND NOT EXISTS (
-                               SELECT 1
-                               FROM pg_catalog.pg_auth_members AS membership
-                               WHERE membership.member = function_owner.oid
-                                  OR membership.roleid = function_owner.oid
-                           )
-                           AND (
-                               SELECT count(*) = CASE
-                                          WHEN procedure.proname =
-                                              'rss_settings_projection_resolve_active'
-                                          THEN 3 ELSE 2 END
-                                  AND count(*) FILTER (
-                                      WHERE acl.grantor = procedure.proowner
-                                        AND acl.grantee = procedure.proowner
-                                        AND acl.privilege_type = 'EXECUTE'
-                                        AND NOT acl.is_grantable
-                                  ) = 1
-                                  AND count(*) FILTER (
-                                      WHERE procedure.proname =
-                                                'rss_settings_projection_resolve_active'
-                                        AND acl.grantee =
-                                            'rss_app_read'::regrole::oid
-                                        AND acl.privilege_type = 'EXECUTE'
-                                        AND NOT acl.is_grantable
-                                  ) = CASE
-                                          WHEN procedure.proname =
-                                              'rss_settings_projection_resolve_active'
-                                          THEN 1 ELSE 0 END
-                                  AND count(*) FILTER (
-                                      WHERE acl.grantor = procedure.proowner
-                                        AND acl.grantee = role.oid
-                                        AND acl.privilege_type = 'EXECUTE'
-                                        AND NOT acl.is_grantable
-                                  ) = 1
-                               FROM pg_catalog.aclexplode(
-                                   COALESCE(
-                                       procedure.proacl,
-                                       pg_catalog.acldefault('f', procedure.proowner)
-                                   )
-                               ) AS acl
-                           )
-                       )
-                    FROM pg_catalog.pg_proc AS procedure
-                    JOIN pg_catalog.pg_roles AS function_owner
-                      ON function_owner.oid = procedure.proowner
-                    WHERE procedure.oid IN (
-                        'public.rss_projection_worker_list_tenants(text,text,text,text,uuid,integer)'::regprocedure,
-                        'public.rss_projection_worker_quarantine_tenant(uuid,text,text,text,text,text,text,bigint)'::regprocedure,
-                        'public.rss_projection_worker_tenant_is_quarantined(uuid,text,text,text,text,text)'::regprocedure,
-                        'public.rss_projection_worker_read_events(uuid,text,text,text,text,text,bigint,integer)'::regprocedure,
-                        'public.rss_projection_worker_source_high_water(uuid,text,text,text,text,text)'::regprocedure,
-                        'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)'::regprocedure,
-                        'public.rss_projection_worker_get_checkpoint(uuid,text,text,text,text,text)'::regprocedure,
-                        'public.rss_projection_worker_save_checkpoint(uuid,text,text,text,text,text,bigint,bigint)'::regprocedure,
-                        'public.rss_projection_worker_insert_dead_letter(uuid,text,text,text,text,text,text,text,text,text,text,text,jsonb,text,bigint,text,bytea,text,integer,text)'::regprocedure,
-                        'public.rss_settings_projection_apply_worker(uuid,text,text,text,text,text,text,bigint,text,text,bigint,bigint,bytea)'::regprocedure,
-                        'public.rss_settings_projection_resolve_active()'::regprocedure
-                    )
-               )
-               AND NOT EXISTS (
-                    SELECT 1
-                    FROM information_schema.role_routine_grants AS grant_row
-                    WHERE grant_row.grantee = current_user
-                      AND grant_row.specific_schema = 'public'
-                      AND grant_row.routine_name NOT IN (
-                          'rss_projection_worker_list_tenants',
-                          'rss_projection_worker_quarantine_tenant',
-                          'rss_projection_worker_tenant_is_quarantined',
-                          'rss_projection_worker_read_events',
-                          'rss_projection_worker_source_high_water',
-                          'rss_projection_worker_observe_tenant',
-                          'rss_projection_worker_get_checkpoint',
-                          'rss_projection_worker_save_checkpoint',
-                          'rss_projection_worker_insert_dead_letter',
-                          'rss_settings_projection_apply_worker',
-                          'rss_settings_projection_resolve_active'
-                      )
-               )
-               AND NOT EXISTS (
-                    SELECT 1
-                    FROM pg_catalog.pg_auth_members AS membership
-                    WHERE membership.member = role.oid OR membership.roleid = role.oid
-               )
-            FROM pg_catalog.pg_roles AS role
-            WHERE role.rolname = current_user
-            "#,
-        )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(PgError::ProjectionWorkerCapability)?;
-        if !exact.0 {
-            return Err(PgError::ProjectionWorkerRoleOrGrantMismatch);
-        }
-        if current_role_owns_database_objects(&self.pool)
-            .await
-            .map_err(PgError::ProjectionWorkerCapability)?
-        {
-            return Err(PgError::ProjectionWorkerOwnership);
-        }
-        if has_projection_external_persistence_capabilities(&self.pool)
-            .await
-            .map_err(PgError::ProjectionWorkerCapability)?
-        {
-            return Err(PgError::ProjectionWorkerPrivileges {
-                actual_fingerprint: "external-persistence".to_owned(),
-            });
-        }
-        let function_fingerprint = load_function_definition_fingerprint(
-            &self.pool,
-            PROJECTION_WORKER_FUNCTION_DEFINITIONS_SQL,
-        )
-        .await
-        .map_err(PgError::ProjectionWorkerCapability)?;
-        if function_fingerprint != EXPECTED_PROJECTION_WORKER_FUNCTION_FINGERPRINT {
-            return Err(PgError::ProjectionWorkerFunctionDefinitions {
-                actual_fingerprint: function_fingerprint,
-            });
-        }
-        let actual_fingerprint = load_effective_capability_fingerprint(&self.pool)
-            .await
-            .map_err(PgError::ProjectionWorkerCapability)?;
-        if actual_fingerprint != EXPECTED_PROJECTION_WORKER_CAPABILITY_FINGERPRINT {
-            return Err(PgError::ProjectionWorkerPrivileges { actual_fingerprint });
-        }
-        Ok(())
     }
 
     /// Exact capability gate for the independent function-only Saga operator role.
@@ -3657,25 +3403,6 @@ impl PgStore {
             return Err(error);
         }
         Ok(VerifiedPgProjectionOperatorStore(store))
-    }
-
-    /// Connect and mint the function-only Projection worker capability after its exact gate.
-    pub(crate) async fn connect_verified_projection_worker(
-        config: &PgProjectionWorkerConfig,
-    ) -> Result<VerifiedPgProjectionWorkerStore, PgError> {
-        let store = Arc::new(
-            Self::connect_for(
-                config.as_pg_config(),
-                "projection-worker",
-                PROJECTION_WORKER_APPLICATION_NAME,
-            )
-            .await?,
-        );
-        if let Err(error) = store.verify_projection_worker_capability().await {
-            store.pool.close().await;
-            return Err(error);
-        }
-        Ok(VerifiedPgProjectionWorkerStore(store))
     }
 
     /// Connect and mint the function-only Saga operator capability after its exact gate succeeds.

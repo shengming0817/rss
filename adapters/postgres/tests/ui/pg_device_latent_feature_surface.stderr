@@ -1,0 +1,14 @@
+error[E0432]: unresolved import `postgres::DeviceLatentInspectionAuditOutcome`
+ --> tests/ui/pg_device_latent_feature_surface.rs:1:5
+  |
+1 | use postgres::DeviceLatentInspectionAuditOutcome;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `DeviceLatentInspectionAuditOutcome` in the root
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(feature = "domain-identity")]
+  |       --------------------------- the item is gated behind the `domain-identity` feature
+  | pub use bundle::{
+  |     DeviceLatentInspectionAuditOutcome, PgDeviceLatentInspectionDeps, PgDeviceLatentOperatorDeps,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -1,0 +1,18 @@
+error[E0432]: unresolved import `postgres::PgProjectionWorkerConfig`
+ --> tests/ui/pg_projection_worker_feature_surface.rs:1:5
+  |
+1 | use postgres::PgProjectionWorkerConfig;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no `PgProjectionWorkerConfig` in the root
+  |
+note: found an item that was configured out
+ --> src/lib.rs
+  |
+  | #[cfg(feature = "domain-settings")]
+  |       --------------------------- the item is gated behind the `domain-settings` feature
+  | pub use pool::{PgProjectionWorkerConfig, PgProjectionWorkerError};
+  |                ^^^^^^^^^^^^^^^^^^^^^^^^
+help: a similar name exists in the module
+  |
+1 - use postgres::PgProjectionWorkerConfig;
+1 + use postgres::PgProjectionOperatorConfig;
+  |

@@ -32,6 +32,23 @@ impl MatrixCase {
 
     pub(crate) fn args(&self) -> Vec<String> {
         let mut args = vec!["check".to_owned(), "-p".to_owned(), "postgres".to_owned()];
+        self.push_feature_selection(&mut args);
+        args
+    }
+
+    pub(crate) fn surface_test_args(&self) -> Vec<String> {
+        let mut args = vec![
+            "test".to_owned(),
+            "-p".to_owned(),
+            "postgres".to_owned(),
+            "--test".to_owned(),
+            "domain_feature_surface_trybuild".to_owned(),
+        ];
+        self.push_feature_selection(&mut args);
+        args
+    }
+
+    fn push_feature_selection(&self, args: &mut Vec<String>) {
         match self {
             Self::Core => args.push("--no-default-features".to_owned()),
             Self::SingleDomain(feature) => {
@@ -42,7 +59,6 @@ impl MatrixCase {
                 ]);
             }
         }
-        args
     }
 }
 
@@ -103,35 +119,43 @@ pub(crate) fn run(execution_policy: crate::cmd::ExecutionPolicy) -> Result<()> {
     let cases = build_matrix(&domains);
     validate_matrix(&cases, &domains)?;
     let mut failures = Vec::new();
-    for (index, case) in cases.iter().enumerate() {
-        let mut args = case.args();
-        if execution_policy.keeps_going() {
-            args.push("--keep-going".to_owned());
-        }
-        let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        eprintln!(
-            "postgres-feature-matrix: [{}/{}] {}",
-            index + 1,
-            cases.len(),
-            case.label()
-        );
-        let status = crate::cmd::cargo_cmd(
-            crate::cmd::CargoSubcommand::Check,
-            &arg_refs[1..],
-            &[],
-            Some(&root),
-        )
-        .status()?;
-        if !status.success() {
-            let failure = format!(
-                "Postgres feature matrix case `{}` failed (cargo {})",
-                case.label(),
-                args.join(" ")
-            );
-            if !execution_policy.keeps_going() {
-                bail!(failure);
+    let total_proofs = cases.len() * 2;
+    let mut proof_index = 0;
+    for case in &cases {
+        let commands = [
+            ("compile", crate::cmd::CargoSubcommand::Check, case.args()),
+            (
+                "feature-surface",
+                crate::cmd::CargoSubcommand::Test,
+                case.surface_test_args(),
+            ),
+        ];
+        for (proof, subcommand, mut args) in commands {
+            proof_index += 1;
+            if execution_policy.keeps_going() {
+                args.push(match subcommand {
+                    crate::cmd::CargoSubcommand::Test => "--no-fail-fast".to_owned(),
+                    _ => "--keep-going".to_owned(),
+                });
             }
-            failures.push(failure);
+            let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+            eprintln!(
+                "postgres-feature-matrix: [{proof_index}/{total_proofs}] {} {proof}",
+                case.label()
+            );
+            let status =
+                crate::cmd::cargo_cmd(subcommand, &arg_refs[1..], &[], Some(&root)).status()?;
+            if !status.success() {
+                let failure = format!(
+                    "Postgres feature matrix case `{}` proof `{proof}` failed (cargo {})",
+                    case.label(),
+                    args.join(" ")
+                );
+                if !execution_policy.keeps_going() {
+                    bail!(failure);
+                }
+                failures.push(failure);
+            }
         }
     }
     if !failures.is_empty() {
@@ -169,6 +193,30 @@ mod tests {
                 "check",
                 "-p",
                 "postgres",
+                "--no-default-features",
+                "--features",
+                domains[0].as_str(),
+            ]
+        );
+        assert_eq!(
+            cases[0].surface_test_args(),
+            [
+                "test",
+                "-p",
+                "postgres",
+                "--test",
+                "domain_feature_surface_trybuild",
+                "--no-default-features",
+            ]
+        );
+        assert_eq!(
+            cases[1].surface_test_args(),
+            [
+                "test",
+                "-p",
+                "postgres",
+                "--test",
+                "domain_feature_surface_trybuild",
                 "--no-default-features",
                 "--features",
                 domains[0].as_str(),

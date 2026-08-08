@@ -39,14 +39,10 @@ use sqlx::PgPool;
 use vocab::ProjectionInputBinding;
 
 use crate::PgStore;
-use crate::bundle::ProjectionWorkerTarget;
 use crate::cotx::ServingWriteLane;
 use crate::cotx::eventing::{EventingTx, GeneratedOutboxConcern};
 use crate::outbox::OutboxEnvelope;
-use crate::pool::{
-    VerifiedPgProjectionOperatorStore, VerifiedPgProjectionSourceReadStore,
-    VerifiedPgProjectionWorkerStore,
-};
+use crate::pool::{VerifiedPgProjectionOperatorStore, VerifiedPgProjectionSourceReadStore};
 
 /// PostgreSQL projection_events adapter（append-only changelog 源）。
 ///
@@ -56,79 +52,6 @@ pub(crate) struct PgProjectionSourceReader {
     operator_pool: PgPool,
     pool: PgPool,
     scope: eventexec::ProjectionSourceScope,
-}
-
-/// Tenant-bound source on the dedicated background worker credential.
-pub(crate) struct PgProjectionWorkerSource {
-    pool: PgPool,
-    tenant: vocab::TenantId,
-    projection: Box<str>,
-    target_generation: Box<str>,
-    definition_version: Box<str>,
-    definition_schema_digest: Box<str>,
-    input_generation: Box<str>,
-}
-
-impl PgProjectionWorkerSource {
-    pub(crate) fn new(
-        store: &VerifiedPgProjectionWorkerStore,
-        target: &ProjectionWorkerTarget,
-        tenant: vocab::TenantId,
-    ) -> Self {
-        Self {
-            pool: store.pool().clone(),
-            tenant,
-            projection: target.projection_id().into(),
-            target_generation: target.target_generation().into(),
-            definition_version: target.definition_version().into(),
-            definition_schema_digest: target.definition_schema_digest().into(),
-            input_generation: target.input_generation().into(),
-        }
-    }
-
-    async fn read_batch(
-        &self,
-        after: Option<Lsn>,
-        limit: ProjectionBatchLimit,
-    ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
-        let after = after
-            .map(|lsn| lsn.get())
-            .map(i64::try_from)
-            .transpose()
-            .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?
-            .unwrap_or(0);
-        let rows: Vec<ProjectionEventRow> = tokio::time::timeout(
-            crate::bundle::PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
-            async {
-                let mut tx = self.pool.begin().await?;
-                crate::cotx::set_local_tenant(&mut tx, self.tenant).await?;
-                let rows = sqlx::query_as(
-                    "SELECT id, event_id, domain, event_type, payload, contract_id, contract_version, \
-                            schema_hash, metadata, partition_key, causation_id \
-                     FROM public.rss_projection_worker_read_events(\
-                         $1::uuid, $2, $3, $4, $5, $6, $7, $8::integer\
-                     )",
-                )
-                .bind(self.tenant.to_string())
-                .bind(&self.projection)
-                .bind(&self.target_generation)
-                .bind(&self.definition_version)
-                .bind(&self.definition_schema_digest)
-                .bind(&self.input_generation)
-                .bind(after)
-                .bind(i64::from(limit.get()))
-                .fetch_all(&mut *tx)
-                .await?;
-                tx.rollback().await?;
-                Ok::<_, sqlx::Error>(rows)
-            },
-        )
-        .await
-        .map_err(|_| EngineError::new(EngineErrorKind::Transient))?
-        .map_err(map_projection_source_sqlx_error)
-        .map_err(ProjectionSourceReadError::into_engine)?;
-        decode_projection_rows(rows)
-    }
 }
 
 /// Opaque 256-bit database authority. It is neither cloneable nor printable and is wiped on drop.
@@ -734,7 +657,7 @@ pub(crate) fn projection_scope_sqlx_error(error: &sqlx::Error) -> bool {
         .is_some_and(|code| code == "22023" || code == "42501")
 }
 
-fn map_projection_source_sqlx_error(error: sqlx::Error) -> ProjectionSourceReadError {
+pub(crate) fn map_projection_source_sqlx_error(error: sqlx::Error) -> ProjectionSourceReadError {
     if projection_scope_sqlx_error(&error) {
         ProjectionSourceReadError::ScopeInvalid
     } else {
@@ -742,7 +665,7 @@ fn map_projection_source_sqlx_error(error: sqlx::Error) -> ProjectionSourceReadE
     }
 }
 
-type ProjectionEventRow = (
+pub(crate) type ProjectionEventRow = (
     i64,
     String,
     String,
@@ -756,7 +679,8 @@ type ProjectionEventRow = (
     Option<String>,
 );
 
-fn decode_projection_rows(
+#[cfg(feature = "domain-settings")]
+pub(crate) fn decode_projection_rows(
     rows: Vec<ProjectionEventRow>,
 ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
     rows.into_iter()
@@ -820,18 +744,6 @@ impl ProjectionEventSource for PgProjectionSourceReader {
         limit: ProjectionBatchLimit,
     ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
         PgProjectionSourceReader::read_from(self, after, limit).await
-    }
-}
-
-impl PartitionSerialDelivery for PgProjectionWorkerSource {}
-
-impl ProjectionEventSource for PgProjectionWorkerSource {
-    async fn read_from(
-        &self,
-        after: Option<Lsn>,
-        limit: ProjectionBatchLimit,
-    ) -> Result<Vec<ProjectionEventRecord>, EngineError> {
-        self.read_batch(after, limit).await
     }
 }
 

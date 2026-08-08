@@ -27,7 +27,7 @@ const OPERATOR_OR_READER_FUNCTIONS: &[&str] = &[
 ];
 
 #[test]
-fn tenant_fatal_quarantine_is_durable_closed_and_operator_recoverable() {
+fn tenant_fatal_quarantine_is_durable_closed_and_operator_recoverable() -> Result<(), String> {
     let sql = normalized();
     for required in [
         "CREATE TABLE public.projection_worker_tenant_quarantine",
@@ -43,7 +43,7 @@ fn tenant_fatal_quarantine_is_durable_closed_and_operator_recoverable() {
         );
     }
 
-    let candidates = function_section(&sql, "rss_projection_worker_list_tenants");
+    let candidates = function_section(&sql, "rss_projection_worker_list_tenants")?;
     assert!(
         candidates.contains("projection_worker_tenant_quarantine")
             && candidates.contains("quarantine.state = 'quarantined'")
@@ -52,7 +52,7 @@ fn tenant_fatal_quarantine_is_durable_closed_and_operator_recoverable() {
         "worker discovery must exclude only durably quarantined tenants"
     );
 
-    let quarantine = function_section(&sql, "rss_projection_worker_quarantine_tenant");
+    let quarantine = function_section(&sql, "rss_projection_worker_quarantine_tenant")?;
     assert!(
         quarantine
             .contains("ON CONFLICT (tenant_scope_id, projection_id, target_generation) DO UPDATE")
@@ -60,7 +60,7 @@ fn tenant_fatal_quarantine_is_durable_closed_and_operator_recoverable() {
             && quarantine.contains("failed_lsn = EXCLUDED.failed_lsn"),
         "tenant fatal quarantine must be idempotent and durable across worker restarts"
     );
-    let recover = function_section(&sql, "rss_projection_operator_recover_tenant");
+    let recover = function_section(&sql, "rss_projection_operator_recover_tenant")?;
     assert!(
         recover.contains("state = 'released'")
             && recover.contains("failed_lsn = p_expected_failed_lsn")
@@ -77,6 +77,7 @@ fn tenant_fatal_quarantine_is_durable_closed_and_operator_recoverable() {
         "rss_projection_operator_recover_tenant",
         "rss_projection_operator",
     );
+    Ok(())
 }
 
 const DENIED_LOGIN_ROLES: &[&str] = &[
@@ -97,13 +98,14 @@ fn normalized() -> String {
     MIGRATION.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn function_section<'a>(sql: &'a str, name: &str) -> &'a str {
+fn function_section<'a>(sql: &'a str, name: &str) -> Result<&'a str, String> {
     let marker = format!("CREATE FUNCTION public.{name}(");
     let (_, tail) = sql
         .split_once(&marker)
-        .unwrap_or_else(|| panic!("0097 must create `{name}`"));
-    tail.split_once("$function$;")
-        .map_or(tail, |(section, _)| section)
+        .ok_or_else(|| format!("0097 must create `{name}`"))?;
+    Ok(tail
+        .split_once("$function$;")
+        .map_or(tail, |(section, _)| section))
 }
 
 fn statements_containing<'a>(sql: &'a str, marker: &str) -> Vec<&'a str> {
@@ -144,7 +146,7 @@ fn assert_executable_only_by(sql: &str, function: &str, role: &str) {
 }
 
 #[test]
-fn hard_cut_replaces_ambiguous_apply_with_fixed_purpose_entrypoints() {
+fn hard_cut_replaces_ambiguous_apply_with_fixed_purpose_entrypoints() -> Result<(), String> {
     let sql = normalized();
     let legacy_signature = "public.rss_settings_projection_apply( uuid, text, text, text, text, text, text, bigint, text, text, bigint, bigint, bytea )";
     assert!(
@@ -174,7 +176,7 @@ fn hard_cut_replaces_ambiguous_apply_with_fixed_purpose_entrypoints() {
             "rss_projection_operator",
         ),
     ] {
-        let section = function_section(&sql, function);
+        let section = function_section(&sql, function)?;
         let signature = section
             .split_once(") RETURNS text")
             .map_or(section, |(signature, _)| signature);
@@ -203,29 +205,30 @@ fn hard_cut_replaces_ambiguous_apply_with_fixed_purpose_entrypoints() {
         );
         assert_executable_only_by(&sql, function, role);
     }
+    Ok(())
 }
 
 #[test]
-fn receipt_attribution_is_backfilled_before_a_closed_pair_constraint() {
+fn receipt_attribution_is_backfilled_before_a_closed_pair_constraint() -> Result<(), String> {
     let sql = normalized();
     let add_actor = sql
         .find("ADD COLUMN actor text")
-        .expect("0097 must add receipt actor");
+        .ok_or_else(|| "0097 must add receipt actor".to_owned())?;
     let add_purpose = sql
         .find("ADD COLUMN purpose text")
-        .expect("0097 must add receipt purpose");
+        .ok_or_else(|| "0097 must add receipt purpose".to_owned())?;
     let backfill = sql
         .find("UPDATE public.settings_projection_dedupe_receipts SET actor = 'rss-projection-replay', purpose = 'operator-replay'")
-        .expect("0097 must attribute all historical receipts to operator replay");
+        .ok_or_else(|| "0097 must attribute all historical receipts to operator replay".to_owned())?;
     let actor_not_null = sql
         .find("ALTER COLUMN actor SET NOT NULL")
-        .expect("0097 must close nullable actor state");
+        .ok_or_else(|| "0097 must close nullable actor state".to_owned())?;
     let purpose_not_null = sql
         .find("ALTER COLUMN purpose SET NOT NULL")
-        .expect("0097 must close nullable purpose state");
+        .ok_or_else(|| "0097 must close nullable purpose state".to_owned())?;
     let pair_constraint = sql
         .find("CHECK ( (actor = 'rss-projection-worker' AND purpose = 'background-shadow') OR (actor = 'rss-projection-replay' AND purpose = 'operator-replay') )")
-        .expect("0097 must constrain receipts to the two reviewed attribution pairs");
+        .ok_or_else(|| "0097 must constrain receipts to the two reviewed attribution pairs".to_owned())?;
 
     assert!(
         add_actor < backfill
@@ -247,6 +250,7 @@ fn receipt_attribution_is_backfilled_before_a_closed_pair_constraint() {
             "receipt attribution must not use ambient defaults: `{forbidden}`"
         );
     }
+    Ok(())
 }
 
 #[test]
@@ -337,17 +341,17 @@ fn worker_role_has_an_exact_function_only_capability_closure() {
 }
 
 #[test]
-fn destructive_cutover_has_a_worker_role_drift_preflight() {
+fn destructive_cutover_has_a_worker_role_drift_preflight() -> Result<(), String> {
     let sql = normalized();
     let preflight = sql
         .find("projection worker preflight")
-        .expect("0097 must label the worker role preflight");
+        .ok_or_else(|| "0097 must label the worker role preflight".to_owned())?;
     let receipt_alter = sql
         .find("ALTER TABLE public.settings_projection_dedupe_receipts")
-        .expect("0097 must alter historical receipts");
+        .ok_or_else(|| "0097 must alter historical receipts".to_owned())?;
     let legacy_drop = sql
         .find("DROP FUNCTION public.rss_settings_projection_apply")
-        .expect("0097 must hard-drop the legacy apply function");
+        .ok_or_else(|| "0097 must hard-drop the legacy apply function".to_owned())?;
     assert!(
         preflight < receipt_alter && preflight < legacy_drop,
         "role drift must fail before any destructive hard-cut action"
@@ -367,17 +371,19 @@ fn destructive_cutover_has_a_worker_role_drift_preflight() {
             "0097 worker preflight omits `{required}`"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn worker_apply_and_source_read_are_exactly_plan_bound() {
-    let apply = function_section(&normalized(), "rss_settings_projection_apply_worker").to_owned();
+fn worker_apply_and_source_read_are_exactly_plan_bound() -> Result<(), String> {
+    let normalized = normalized();
+    let apply = function_section(&normalized, "rss_settings_projection_apply_worker")?.to_owned();
     assert!(
         apply.contains("p_generation <> 'v3'"),
         "worker apply must reject a target generation outside the sealed v3 plan"
     );
 
-    let read = function_section(&normalized(), "rss_projection_worker_read_events").to_owned();
+    let read = function_section(&normalized, "rss_projection_worker_read_events")?.to_owned();
     assert!(
         read.contains("candidate_binding.contract_version = event.contract_version")
             && read.contains("candidate_binding.schema_hash = event.schema_hash"),
@@ -387,13 +393,14 @@ fn worker_apply_and_source_read_are_exactly_plan_bound() {
         !read.contains("CASE WHEN EXISTS"),
         "worker source read must not return metadata for a non-exact event while blanking only payload"
     );
+    Ok(())
 }
 
 #[test]
-fn worker_source_checkpoint_and_dlq_seams_validate_scope_directly() {
+fn worker_source_checkpoint_and_dlq_seams_validate_scope_directly() -> Result<(), String> {
     let sql = normalized();
     for function in WORKER_FUNCTIONS {
-        let section = function_section(&sql, function);
+        let section = function_section(&sql, function)?;
         for required in [
             "LANGUAGE plpgsql",
             "SECURITY DEFINER",
@@ -419,7 +426,7 @@ fn worker_source_checkpoint_and_dlq_seams_validate_scope_directly() {
         "rss_projection_worker_insert_dead_letter",
         "rss_settings_projection_apply_worker",
     ] {
-        let section = function_section(&sql, function);
+        let section = function_section(&sql, function)?;
         assert!(
             section.contains("pg_catalog.current_setting('rss.tenant_id', true)")
                 && section.contains("p_tenant_id"),
@@ -427,9 +434,9 @@ fn worker_source_checkpoint_and_dlq_seams_validate_scope_directly() {
         );
     }
 
-    let candidates = function_section(&sql, "rss_projection_worker_list_tenants");
-    let events = function_section(&sql, "rss_projection_worker_read_events");
-    let high_water = function_section(&sql, "rss_projection_worker_source_high_water");
+    let candidates = function_section(&sql, "rss_projection_worker_list_tenants")?;
+    let events = function_section(&sql, "rss_projection_worker_read_events")?;
+    let high_water = function_section(&sql, "rss_projection_worker_source_high_water")?;
     for (name, section) in [
         ("list_tenants", candidates),
         ("read_events", events),
@@ -442,8 +449,8 @@ fn worker_source_checkpoint_and_dlq_seams_validate_scope_directly() {
         );
     }
 
-    let checkpoint = function_section(&sql, "rss_projection_worker_get_checkpoint");
-    let save_checkpoint = function_section(&sql, "rss_projection_worker_save_checkpoint");
+    let checkpoint = function_section(&sql, "rss_projection_worker_get_checkpoint")?;
+    let save_checkpoint = function_section(&sql, "rss_projection_worker_save_checkpoint")?;
     for section in [checkpoint, save_checkpoint] {
         assert!(
             section.contains("'projection:' || p_tenant_id::text") && section.contains("':shadow'"),
@@ -451,7 +458,7 @@ fn worker_source_checkpoint_and_dlq_seams_validate_scope_directly() {
         );
     }
     assert!(
-        function_section(&sql, "rss_projection_worker_insert_dead_letter")
+        function_section(&sql, "rss_projection_worker_insert_dead_letter")?
             .contains("public.rss_projection_dead_letter_source_kind()"),
         "worker DLQ seam must use the projection-only source kind"
     );
@@ -464,7 +471,7 @@ fn worker_source_checkpoint_and_dlq_seams_validate_scope_directly() {
     ] {
         for function in WORKER_FUNCTIONS {
             assert!(
-                !function_section(&sql, function).contains(forbidden),
+                !function_section(&sql, function)?.contains(forbidden),
                 "worker seam `{function}` must not reuse operator/source-reader capability `{forbidden}`"
             );
         }
@@ -478,4 +485,5 @@ fn worker_source_checkpoint_and_dlq_seams_validate_scope_directly() {
             "worker role must not receive operator/source-reader capability `{forbidden}`"
         );
     }
+    Ok(())
 }

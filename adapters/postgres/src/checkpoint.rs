@@ -25,8 +25,8 @@ use sqlx::PgPool;
 use consistency::Lsn;
 
 use crate::PgStore;
-use crate::bundle::{ProjectionOperatorTarget, ProjectionWorkerTarget};
-use crate::pool::{VerifiedPgProjectionOperatorStore, VerifiedPgProjectionWorkerStore};
+use crate::bundle::ProjectionOperatorTarget;
+use crate::pool::VerifiedPgProjectionOperatorStore;
 
 /// PostgreSQL checkpoint store adapter（CAS 版本控制）。
 ///
@@ -35,24 +35,12 @@ use crate::pool::{VerifiedPgProjectionOperatorStore, VerifiedPgProjectionWorkerS
 pub struct PgCheckpointStore {
     pool: PgPool,
     projection_scope: Option<ProjectionCheckpointScope>,
-    projection_worker_scope: Option<ProjectionWorkerCheckpointScope>,
 }
 
 struct ProjectionCheckpointScope {
     tenant: vocab::TenantId,
     projection: Box<str>,
     version: Box<str>,
-    owner: CheckpointOwner,
-    id: CheckpointId,
-}
-
-struct ProjectionWorkerCheckpointScope {
-    tenant: vocab::TenantId,
-    projection: Box<str>,
-    target_generation: Box<str>,
-    definition_version: Box<str>,
-    definition_schema_digest: Box<str>,
-    input_generation: Box<str>,
     owner: CheckpointOwner,
     id: CheckpointId,
 }
@@ -65,7 +53,6 @@ impl PgStore {
         PgCheckpointStore {
             pool: self.pool.clone(),
             projection_scope: None,
-            projection_worker_scope: None,
         }
     }
 }
@@ -85,29 +72,6 @@ impl PgCheckpointStore {
                 owner: selector.shadow_checkpoint_owner(),
                 id: selector.shadow_checkpoint_id(),
             }),
-            projection_worker_scope: None,
-        }
-    }
-
-    pub(crate) fn new_projection_worker(
-        store: &VerifiedPgProjectionWorkerStore,
-        target: &ProjectionWorkerTarget,
-        tenant: vocab::TenantId,
-    ) -> Self {
-        let selector = target.selector(tenant);
-        Self {
-            pool: store.store_arc().pool.clone(),
-            projection_scope: None,
-            projection_worker_scope: Some(ProjectionWorkerCheckpointScope {
-                tenant,
-                projection: target.projection_id().into(),
-                target_generation: target.target_generation().into(),
-                definition_version: target.definition_version().into(),
-                definition_schema_digest: target.definition_schema_digest().into(),
-                input_generation: target.input_generation().into(),
-                owner: selector.shadow_checkpoint_owner(),
-                id: selector.shadow_checkpoint_id(),
-            }),
         }
     }
 }
@@ -121,37 +85,10 @@ impl OwnerCheckpointStore for PgCheckpointStore {
         owner: &CheckpointOwner,
         id: &CheckpointId,
     ) -> Result<Option<Checkpoint>, CheckpointStoreError> {
-        let row: Option<(i64, i64)> = if let Some(scope) = &self.projection_worker_scope {
-            ensure_projection_worker_checkpoint_target(scope, owner, id)?;
-            tokio::time::timeout(
-                crate::bundle::PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
-                async {
-                    let mut tx = self.pool.begin().await?;
-                    crate::cotx::set_local_tenant(&mut tx, scope.tenant).await?;
-                    let row = sqlx::query_as(
-                        "SELECT offset_lsn, version FROM public.rss_projection_worker_get_checkpoint(\
-                         $1::uuid, $2, $3, $4, $5, $6)",
-                    )
-                    .bind(scope.tenant.to_string())
-                    .bind(&scope.projection)
-                    .bind(&scope.target_generation)
-                    .bind(&scope.definition_version)
-                    .bind(&scope.definition_schema_digest)
-                    .bind(&scope.input_generation)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-                    tx.rollback().await?;
-                    Ok::<_, sqlx::Error>(row)
-                },
-            )
-            .await
-            .map_err(CheckpointStoreError::new)?
-            .map_err(CheckpointStoreError::new)?
-        } else {
-            match &self.projection_scope {
-                Some(scope) => {
-                    ensure_projection_checkpoint_target(scope, owner, id)?;
-                    sqlx::query_as(
+        let row: Option<(i64, i64)> = match &self.projection_scope {
+            Some(scope) => {
+                ensure_projection_checkpoint_target(scope, owner, id)?;
+                sqlx::query_as(
                     "SELECT offset_lsn, version FROM public.rss_projection_operator_get_checkpoint(\
                      $1::uuid, $2, $3)",
                 )
@@ -161,20 +98,19 @@ impl OwnerCheckpointStore for PgCheckpointStore {
                 .fetch_optional(&self.pool)
                 .await
                 .map_err(CheckpointStoreError::new)?
-                }
-                None => sqlx::query_as(
-                    r#"
+            }
+            None => sqlx::query_as(
+                r#"
                 SELECT offset_lsn, version
                 FROM checkpoint
                 WHERE owner = $1 AND checkpoint_id = $2
                 "#,
-                )
-                .bind(owner.as_str())
-                .bind(id.as_str())
-                .fetch_optional(&self.pool)
-                .await
-                .map_err(CheckpointStoreError::new)?,
-            }
+            )
+            .bind(owner.as_str())
+            .bind(id.as_str())
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(CheckpointStoreError::new)?,
         };
 
         match row {
@@ -202,42 +138,6 @@ impl OwnerCheckpointStore for PgCheckpointStore {
         expected: CheckpointVersion,
     ) -> Result<SaveOutcome, CheckpointStoreError> {
         let offset_lsn = i64::try_from(offset.get()).map_err(CheckpointStoreError::new)?;
-
-        if let Some(scope) = &self.projection_worker_scope {
-            ensure_projection_worker_checkpoint_target(scope, owner, id)?;
-            let expected_ver = i64::try_from(expected.get()).map_err(CheckpointStoreError::new)?;
-            let saved = tokio::time::timeout(
-                crate::bundle::PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
-                async {
-                    let mut tx = self.pool.begin().await?;
-                    crate::cotx::set_local_tenant(&mut tx, scope.tenant).await?;
-                    let saved: bool = sqlx::query_scalar(
-                        "SELECT public.rss_projection_worker_save_checkpoint(\
-                         $1::uuid, $2, $3, $4, $5, $6, $7, $8)",
-                    )
-                    .bind(scope.tenant.to_string())
-                    .bind(&scope.projection)
-                    .bind(&scope.target_generation)
-                    .bind(&scope.definition_version)
-                    .bind(&scope.definition_schema_digest)
-                    .bind(&scope.input_generation)
-                    .bind(offset_lsn)
-                    .bind(expected_ver)
-                    .fetch_one(&mut *tx)
-                    .await?;
-                    tx.commit().await?;
-                    Ok::<_, sqlx::Error>(saved)
-                },
-            )
-            .await
-            .map_err(CheckpointStoreError::new)?
-            .map_err(CheckpointStoreError::new)?;
-            return Ok(if saved {
-                SaveOutcome::Saved
-            } else {
-                SaveOutcome::StaleVersion
-            });
-        }
 
         if let Some(scope) = &self.projection_scope {
             ensure_projection_checkpoint_target(scope, owner, id)?;
@@ -315,20 +215,6 @@ impl OwnerCheckpointStore for PgCheckpointStore {
     // `bootstrap::ShutdownStack` 逆序编排统一关闭；`PgCheckpointStore` 自身无额外 infra 资源。
     async fn shutdown(&self) -> Result<(), CheckpointStoreError> {
         Ok(())
-    }
-}
-
-fn ensure_projection_worker_checkpoint_target(
-    scope: &ProjectionWorkerCheckpointScope,
-    owner: &CheckpointOwner,
-    id: &CheckpointId,
-) -> Result<(), CheckpointStoreError> {
-    if owner == &scope.owner && id == &scope.id {
-        Ok(())
-    } else {
-        Err(CheckpointStoreError::new(std::io::Error::other(
-            "projection checkpoint target does not match scoped worker capability",
-        )))
     }
 }
 

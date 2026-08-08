@@ -16,13 +16,13 @@ fn normalized(source: &str) -> String {
     source.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn first_sha256_after<'a>(source: &'a str, marker: &str) -> &'a str {
+fn first_sha256_after<'a>(source: &'a str, marker: &str) -> Result<&'a str, String> {
     let (_, tail) = source
         .split_once(marker)
-        .unwrap_or_else(|| panic!("generated source omits `{marker}`"));
+        .ok_or_else(|| format!("generated source omits `{marker}`"))?;
     let start = tail
         .find("sha256:")
-        .unwrap_or_else(|| panic!("generated source has no digest after `{marker}`"));
+        .ok_or_else(|| format!("generated source has no digest after `{marker}`"))?;
     let digest = &tail[start..start + "sha256:".len() + 64];
     assert!(
         digest["sha256:".len()..]
@@ -30,20 +30,21 @@ fn first_sha256_after<'a>(source: &'a str, marker: &str) -> &'a str {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
         "generated digest must be canonical lowercase sha256"
     );
-    digest
+    Ok(digest)
 }
 
-fn function_section<'a>(sql: &'a str, name: &str) -> &'a str {
+fn function_section<'a>(sql: &'a str, name: &str) -> Result<&'a str, String> {
     let create = format!("CREATE FUNCTION public.{name}(");
     let replace = format!("CREATE OR REPLACE FUNCTION public.{name}(");
     let tail = sql
         .split_once(&create)
         .or_else(|| sql.split_once(&replace))
         .map(|(_, tail)| tail)
-        .unwrap_or_else(|| panic!("0098 must create fixed function `{name}`"));
-    tail.split_once("$function$;")
+        .ok_or_else(|| format!("0098 must create fixed function `{name}`"))?;
+    Ok(tail
+        .split_once("$function$;")
         .or_else(|| tail.split_once("$$;"))
-        .map_or(tail, |(section, _)| section)
+        .map_or(tail, |(section, _)| section))
 }
 
 fn statements_containing<'a>(sql: &'a str, marker: &str) -> Vec<&'a str> {
@@ -185,14 +186,14 @@ fn serving_owner_and_login_roles_have_an_exact_function_only_closure() {
 }
 
 #[test]
-fn resolver_status_and_swap_are_fixed_security_definer_carriers() {
+fn resolver_status_and_swap_are_fixed_security_definer_carriers() -> Result<(), String> {
     let sql = normalized(MIGRATION);
     for function in [
         "rss_settings_projection_resolve_active",
         "rss_projection_operator_status_active",
         "rss_projection_operator_swap_active",
     ] {
-        let section = function_section(&sql, function);
+        let section = function_section(&sql, function)?;
         for required in [
             "LANGUAGE plpgsql",
             "SECURITY DEFINER",
@@ -206,7 +207,7 @@ fn resolver_status_and_swap_are_fixed_security_definer_carriers() {
         }
     }
 
-    let resolver = function_section(&sql, "rss_settings_projection_resolve_active");
+    let resolver = function_section(&sql, "rss_settings_projection_resolve_active")?;
     assert!(
         resolver.contains("RETURNS TABLE")
             && resolver.contains("generation")
@@ -221,7 +222,7 @@ fn resolver_status_and_swap_are_fixed_security_definer_carriers() {
         "resolver must return a typed snapshot, authenticate tenant context, and validate the pointed generation"
     );
 
-    let swap = function_section(&sql, "rss_projection_operator_swap_active");
+    let swap = function_section(&sql, "rss_projection_operator_swap_active")?;
     for required in [
         "pg_catalog.pg_advisory_xact_lock",
         "rss.projection_events.append",
@@ -254,6 +255,7 @@ fn resolver_status_and_swap_are_fixed_security_definer_carriers() {
     ] {
         assert!(swap.contains(reason), "swap omits rejection `{reason}`");
     }
+    Ok(())
 }
 
 #[test]
@@ -285,10 +287,10 @@ fn legacy_json_pointer_functions_are_hard_dropped_and_reserved_namespace_is_clos
 }
 
 #[test]
-fn worker_apply_is_hard_cut_to_generated_active_identity_and_purpose() {
+fn worker_apply_is_hard_cut_to_generated_active_identity_and_purpose() -> Result<(), String> {
     let sql = normalized(MIGRATION);
-    let definition_digest = first_sha256_after(GENERATED_PROJECTION, "settings.config-projection");
-    let input_generation = first_sha256_after(GENERATED_INPUTS, "PROJECTION_INPUT_GENERATION");
+    let definition_digest = first_sha256_after(GENERATED_PROJECTION, "settings.config-projection")?;
+    let input_generation = first_sha256_after(GENERATED_INPUTS, "PROJECTION_INPUT_GENERATION")?;
 
     assert!(
         sql.contains(definition_digest),
@@ -309,7 +311,7 @@ fn worker_apply_is_hard_cut_to_generated_active_identity_and_purpose() {
         "receipt attribution constraint must be replaced, not relaxed"
     );
 
-    let worker = function_section(&sql, "rss_settings_projection_apply_worker");
+    let worker = function_section(&sql, "rss_settings_projection_apply_worker")?;
     assert!(worker.contains("'background-worker'"));
     assert!(!worker.contains("'background-shadow'"));
     assert!(
@@ -317,19 +319,20 @@ fn worker_apply_is_hard_cut_to_generated_active_identity_and_purpose() {
         "worker apply must prove the requested generation is the tenant active pointer"
     );
 
-    let operator = function_section(&sql, "rss_settings_projection_apply_operator");
+    let operator = function_section(&sql, "rss_settings_projection_apply_operator")?;
     assert!(operator.contains("'operator-replay'"));
     assert!(operator.contains(definition_digest));
     assert!(operator.contains(input_generation));
+    Ok(())
 }
 
 #[test]
-fn worker_scope_and_discovery_are_active_generation_closed() {
+fn worker_scope_and_discovery_are_active_generation_closed() -> Result<(), String> {
     let sql = normalized(MIGRATION);
     let active_scope = function_section(
         &sql,
         "rss_settings_projection_worker_tenant_scope_is_active",
-    );
+    )?;
     for required in [
         "settings_projection_active_pointer",
         "settings_projection_generations",
@@ -344,10 +347,11 @@ fn worker_scope_and_discovery_are_active_generation_closed() {
         );
     }
 
-    let tenants = function_section(&sql, "rss_projection_worker_list_tenants");
+    let tenants = function_section(&sql, "rss_projection_worker_list_tenants")?;
     assert!(
         !tenants.contains("p_target_generation")
             && !tenants.contains("projection_worker_tenant_quarantine"),
         "tenant discovery must be generation-neutral; each tenant quantum resolves and fences its active generation separately"
     );
+    Ok(())
 }

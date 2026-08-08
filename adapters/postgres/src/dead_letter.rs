@@ -9,12 +9,10 @@
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;
-use crate::bundle::{ProjectionOperatorTarget, ProjectionWorkerTarget};
+use crate::bundle::ProjectionOperatorTarget;
 use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
-use crate::pool::{
-    VerifiedPgProjectionOperatorStore, VerifiedPgProjectionWorkerStore, VerifiedPgWriteStore,
-};
+use crate::pool::{VerifiedPgProjectionOperatorStore, VerifiedPgWriteStore};
 use diport::{
     DeadLetterRecord, DeadLetterSource, DeadLetterStore, DeadLetterStoreError, EnvelopeMetadata,
     KEY_TENANT_AUTHORITY,
@@ -32,25 +30,10 @@ enum DeadLetterLane {
         pool: sqlx::PgPool,
         scope: ProjectionDeadLetterScope,
     },
-    ProjectionWorker {
-        pool: sqlx::PgPool,
-        scope: ProjectionWorkerDeadLetterScope,
-    },
 }
 
 struct ProjectionDeadLetterScope {
     tenant: vocab::TenantId,
-    owner: Box<str>,
-    checkpoint_id: Box<str>,
-}
-
-struct ProjectionWorkerDeadLetterScope {
-    tenant: vocab::TenantId,
-    projection: Box<str>,
-    target_generation: Box<str>,
-    definition_version: Box<str>,
-    definition_schema_digest: Box<str>,
-    input_generation: Box<str>,
     owner: Box<str>,
     checkpoint_id: Box<str>,
 }
@@ -96,31 +79,6 @@ impl PgDeadLetterStore {
             payload_protector,
         }
     }
-
-    pub(crate) fn new_projection_worker(
-        store: &VerifiedPgProjectionWorkerStore,
-        target: &ProjectionWorkerTarget,
-        tenant: vocab::TenantId,
-        payload_protector: DlxPayloadProtector,
-    ) -> Self {
-        let selector = target.selector(tenant);
-        Self {
-            lane: DeadLetterLane::ProjectionWorker {
-                pool: store.store_arc().pool.clone(),
-                scope: ProjectionWorkerDeadLetterScope {
-                    tenant,
-                    projection: target.projection_id().into(),
-                    target_generation: target.target_generation().into(),
-                    definition_version: target.definition_version().into(),
-                    definition_schema_digest: target.definition_schema_digest().into(),
-                    input_generation: target.input_generation().into(),
-                    owner: selector.shadow_checkpoint_owner().as_str().into(),
-                    checkpoint_id: selector.shadow_checkpoint_id().as_str().into(),
-                },
-            },
-            payload_protector,
-        }
-    }
 }
 
 impl DeadLetterStore for PgDeadLetterStore {
@@ -128,13 +86,9 @@ impl DeadLetterStore for PgDeadLetterStore {
         &self,
         record: DeadLetterRecord,
     ) -> Result<(), DeadLetterStoreError> {
-        let worker_lane = matches!(&self.lane, DeadLetterLane::ProjectionWorker { .. });
         let operation = async {
             if let DeadLetterLane::ProjectionOperator { scope, .. } = &self.lane {
                 ensure_projection_dead_letter_target(scope, &record)?;
-            }
-            if let DeadLetterLane::ProjectionWorker { scope, .. } = &self.lane {
-                ensure_projection_worker_dead_letter_target(scope, &record)?;
             }
             let source_kind = record.source().as_str();
             let metadata = metadata_json(record.metadata());
@@ -199,77 +153,13 @@ impl DeadLetterStore for PgDeadLetterStore {
                 .await
                 .map(|_| ())
                 .map_err(DeadLetterStoreError::new),
-                DeadLetterLane::ProjectionWorker { pool, scope } => {
-                    let mut tx = pool.begin().await.map_err(DeadLetterStoreError::new)?;
-                    crate::cotx::set_local_tenant(&mut tx, record.tenant())
-                        .await
-                        .map_err(DeadLetterStoreError::new)?;
-                    sqlx::query(
-                        r#"
-                    SELECT public.rss_projection_worker_insert_dead_letter(
-                        $1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
-                        $13::jsonb, $14, $15, $16, $17, $18, $19, $20
-                    )
-                    "#,
-                    )
-                    .bind(record.tenant().to_string())
-                    .bind(&scope.projection)
-                    .bind(&scope.target_generation)
-                    .bind(&scope.definition_version)
-                    .bind(&scope.definition_schema_digest)
-                    .bind(&scope.input_generation)
-                    .bind(record.message_id())
-                    .bind(record.producer_domain())
-                    .bind(record.consumer_domain())
-                    .bind(record.contract_id())
-                    .bind(record.topic())
-                    .bind(record.consumer_group())
-                    .bind(sqlx::types::Json(protected.replay_capsule()))
-                    .bind(protected.key_ref())
-                    .bind(protected.payload_len())
-                    .bind(crate::dead_letter_payload::DLX_REPLAY_CAPSULE_ENCODING)
-                    .bind(protected.metadata_digest())
-                    .bind(record.error_summary())
-                    .bind(i32::try_from(record.num_attempts()).unwrap_or(i32::MAX))
-                    .bind(record.source().as_str())
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(DeadLetterStoreError::new)?;
-                    tx.commit().await.map_err(DeadLetterStoreError::new)
-                }
             }
         };
-        if worker_lane {
-            tokio::time::timeout(
-                crate::bundle::PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
-                operation,
-            )
-            .await
-            .map_err(DeadLetterStoreError::new)?
-        } else {
-            operation.await
-        }
+        operation.await
     }
 
     async fn shutdown(&self) -> Result<(), DeadLetterStoreError> {
         Ok(())
-    }
-}
-
-fn ensure_projection_worker_dead_letter_target(
-    scope: &ProjectionWorkerDeadLetterScope,
-    record: &DeadLetterRecord,
-) -> Result<(), DeadLetterStoreError> {
-    if record.source() == DeadLetterSource::Projection
-        && record.tenant() == scope.tenant
-        && record.consumer_domain() == Some(scope.owner.as_ref())
-        && record.consumer_group() == Some(scope.checkpoint_id.as_ref())
-    {
-        Ok(())
-    } else {
-        Err(DeadLetterStoreError::new(std::io::Error::other(
-            "projection dead letter does not match target-bound worker capability",
-        )))
     }
 }
 

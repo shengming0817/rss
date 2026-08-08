@@ -19,12 +19,11 @@ use settings::ports::{
     settings_projection_apply_from_validated,
 };
 
-use crate::cotx::{
-    ProjectionOperatorWriteLane, ProjectionWorkerWriteLane, ServingReadLane, TenantDb,
-};
-use crate::pool::{
-    VerifiedPgProjectionOperatorStore, VerifiedPgProjectionWorkerStore, VerifiedPgReadStore,
-};
+use crate::cotx::settings_projection::ProjectionWorkerWriteLane;
+use crate::cotx::{ProjectionOperatorWriteLane, ServingReadLane, TenantDb};
+use crate::pool::{VerifiedPgProjectionOperatorStore, VerifiedPgReadStore};
+use crate::projection_worker::ProjectionWorkerTarget;
+use crate::projection_worker::VerifiedPgProjectionWorkerStore;
 use crate::tx_retry::{SETTINGS_PROJECTION_BOUNDARY, record_settlement};
 
 /// Read-only PostgreSQL adapter for one tenant-bound Settings projection generation.
@@ -110,10 +109,15 @@ enum SettingsProjectionApplyPool {
 }
 
 impl PgSettingsProjectionApplyStore {
-    pub(crate) fn new_projection_worker(store: &VerifiedPgProjectionWorkerStore) -> Self {
+    pub(crate) fn new_projection_worker(
+        store: &VerifiedPgProjectionWorkerStore,
+        target: &ProjectionWorkerTarget,
+    ) -> Self {
         Self {
             pool: SettingsProjectionApplyPool::Worker(
-                TenantDb::<ProjectionWorkerWriteLane>::new_projection_worker(store),
+                TenantDb::<ProjectionWorkerWriteLane>::new_projection_worker(
+                    store.bind_pool(target),
+                ),
             ),
             #[cfg(all(test, feature = "integration"))]
             test_calls: std::sync::atomic::AtomicU64::new(0),
@@ -290,7 +294,7 @@ impl ProjectionTargetStore for PgSettingsProjectionApplyStore {
                 .map_err(|error| ProjectionTargetStoreError::new(error.reason(), error))?;
             match &self.pool {
                 SettingsProjectionApplyPool::Worker(_) => tokio::time::timeout(
-                    crate::bundle::PROJECTION_WORKER_APPLY_TIMEOUT,
+                    crate::projection_worker::PROJECTION_WORKER_APPLY_TIMEOUT,
                     self.apply_parts(scope, mutation),
                 )
                 .await

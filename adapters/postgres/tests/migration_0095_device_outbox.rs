@@ -93,7 +93,7 @@ fn serving_role_receives_only_exact_device_functions() {
 }
 
 #[test]
-fn bypassrls_owner_rejects_both_membership_directions_before_elevation() {
+fn bypassrls_owner_rejects_both_membership_directions_before_elevation() -> Result<(), String> {
     let sql = normalized_migration();
 
     for required in [
@@ -111,14 +111,15 @@ fn bypassrls_owner_rejects_both_membership_directions_before_elevation() {
 
     let membership_gate = sql
         .find("FROM pg_catalog.pg_auth_members AS membership")
-        .expect("membership gate");
+        .ok_or_else(|| "membership gate".to_owned())?;
     let bypass_elevation = sql
         .find("ALTER ROLE rss_device_mqtt_outbox_owner NOLOGIN NOSUPERUSER BYPASSRLS")
-        .expect("BYPASSRLS elevation");
+        .ok_or_else(|| "BYPASSRLS elevation".to_owned())?;
     assert!(
         membership_gate < bypass_elevation,
         "membership validation must complete before BYPASSRLS elevation"
     );
+    Ok(())
 }
 
 #[test]
@@ -224,7 +225,10 @@ mod postgres {
         let failure = migrations_through(95)
             .run(pool)
             .await
-            .expect_err("0095 must reject a pre-existing outbox-owner membership");
+            .err()
+            .ok_or_else(|| {
+                std::io::Error::other("0095 must reject a pre-existing outbox-owner membership")
+            })?;
         let database_error = migration_database_error(&failure)?;
         assert_eq!(database_error.code().as_deref(), Some("55000"));
         assert_eq!(database_error.message(), MEMBERSHIP_FAILURE);

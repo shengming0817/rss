@@ -209,9 +209,9 @@ fn validate_settings_projection_column_allowlist(sql: &str) -> Result<(), String
 }
 
 #[test]
-fn settings_metadata_projection_schema_is_exact_rls_scoped_and_least_privilege() {
-    validate_settings_projection_column_allowlist(SETTINGS_METADATA_PROJECTION)
-        .expect("0091 Settings projection column allow-list must remain exact");
+fn settings_metadata_projection_schema_is_exact_rls_scoped_and_least_privilege()
+-> Result<(), String> {
+    validate_settings_projection_column_allowlist(SETTINGS_METADATA_PROJECTION)?;
 
     let normalized = SETTINGS_METADATA_PROJECTION
         .split_whitespace()
@@ -292,20 +292,25 @@ fn settings_metadata_projection_schema_is_exact_rls_scoped_and_least_privilege()
             "0091 exposes forbidden Settings projection surface `{forbidden}`"
         );
     }
+    Ok(())
 }
 
 #[test]
-fn settings_metadata_projection_allowlist_rejects_synthetic_payload_column() {
+fn settings_metadata_projection_allowlist_rejects_synthetic_payload_column() -> Result<(), String> {
     let bad_schema = SETTINGS_METADATA_PROJECTION.replace(
         "    updated_at",
         "    payload jsonb NOT NULL,\n    updated_at",
     );
     let error = validate_settings_projection_column_allowlist(&bad_schema)
-        .expect_err("synthetic payload/jsonb column must fail the exact allow-list");
+        .err()
+        .ok_or_else(|| {
+            "synthetic payload/jsonb column must fail the exact allow-list".to_owned()
+        })?;
     assert!(
         error.contains("JSON column") || error.contains("columns differ"),
         "synthetic negative must fail for the injected payload column: {error}"
     );
+    Ok(())
 }
 
 #[test]
