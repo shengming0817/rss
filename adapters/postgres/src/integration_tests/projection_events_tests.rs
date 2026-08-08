@@ -460,8 +460,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
             .ok_or_else(|| std::io::Error::other("generated projection input lacks definition"))?;
         let source_event_id = unique_event_id(binding.projection_id());
         let source_lsn =
-            append_generated_projection_source_event(&store, &app, binding, &source_event_id)
-                .await?;
+            append_generated_projection_source_event(&app, binding, &source_event_id).await?;
         generated_sources.push((*definition, binding, source_event_id, source_lsn));
     }
     assert_ne!(generated_sources[0].0, generated_sources[1].0);
@@ -1280,7 +1279,6 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     let noise_payload = b"other-tenant-noise";
 
     let first_lsn = append_generated_projection_source_event_with_payload_for_tenant(
-        &owner,
         &app,
         MULTI_BINDING_HIGH_WATER_INPUTS[0],
         &first_event_id,
@@ -1289,7 +1287,6 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     )
     .await?;
     let second_lsn = append_generated_projection_source_event_with_payload_for_tenant(
-        &owner,
         &app,
         MULTI_BINDING_HIGH_WATER_INPUTS[1],
         &second_event_id,
@@ -1298,7 +1295,6 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     )
     .await?;
     let noise_lsn = append_generated_projection_source_event_with_payload_for_tenant(
-        &owner,
         &app,
         MULTI_BINDING_HIGH_WATER_INPUTS[1],
         &noise_event_id,
@@ -1555,7 +1551,6 @@ async fn projection_scoped_high_water_isolates_tenant_projection_and_payload() -
 
     let other_tenant_event_id = unique_event_id("projection-high-water-other-tenant");
     let other_tenant_lsn = append_generated_projection_source_event_for_tenant(
-        &fixture.owner,
         &fixture.app,
         fixture.binding,
         &other_tenant_event_id,
@@ -1575,7 +1570,6 @@ async fn projection_scoped_high_water_isolates_tenant_projection_and_payload() -
     let foreign_binding = fixture.foreign_binding()?;
     let foreign_event_id = unique_event_id("projection-high-water-other-projection");
     append_generated_projection_source_event_for_tenant(
-        &fixture.owner,
         &fixture.app,
         foreign_binding,
         &foreign_event_id,
@@ -1933,16 +1927,10 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
 
     let first_event_id = unique_event_id("projection-replay-first");
     let second_event_id = unique_event_id("projection-replay-second");
-    let first_lsn = append_generated_projection_source_event_for_tenant(
-        &owner,
-        &app,
-        binding,
-        &first_event_id,
-        tenant,
-    )
-    .await?;
+    let first_lsn =
+        append_generated_projection_source_event_for_tenant(&app, binding, &first_event_id, tenant)
+            .await?;
     let second_lsn = append_generated_projection_source_event_for_tenant(
-        &owner,
         &app,
         binding,
         &second_event_id,
@@ -1951,7 +1939,6 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
     .await?;
     let other_tenant_event_id = unique_event_id("projection-replay-other-tenant");
     append_generated_projection_source_event_for_tenant(
-        &owner,
         &app,
         binding,
         &other_tenant_event_id,
@@ -2020,14 +2007,9 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
     assert_eq!(idle_restart.applied, 0);
 
     let third_event_id = unique_event_id("projection-replay-after-restart");
-    let third_lsn = append_generated_projection_source_event_for_tenant(
-        &owner,
-        &app,
-        binding,
-        &third_event_id,
-        tenant,
-    )
-    .await?;
+    let third_lsn =
+        append_generated_projection_source_event_for_tenant(&app, binding, &third_event_id, tenant)
+            .await?;
     let resumed = restarted.run_once(runner_config).await;
     assert_eq!(resumed.stop, eventexec::ProjectionStop::Completed);
     assert_eq!(resumed.scanned, 1);

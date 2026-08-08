@@ -297,7 +297,7 @@ pub(in super::super) const TEST_PROJECTION_INPUT_GENERATION: &str =
     "sha256:6ceef61bfb723713a3d27682fb2597b6ed830e4497d97b78c044d9d999130286";
 
 pub(in super::super) static TEST_PROJECTION_INPUTS: &[vocab::ProjectionInputBinding] =
-    &[vocab::ProjectionInputBinding::from_static(
+    &[test_projection_input_binding(
         "test-projection",
         "test",
         "projection.bound",
@@ -310,7 +310,7 @@ pub(in super::super) const SESSION_PROJECTION_INPUT_GENERATION: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 pub(in super::super) static SESSION_PROJECTION_INPUTS: &[vocab::ProjectionInputBinding] =
-    &[vocab::ProjectionInputBinding::from_static(
+    &[test_projection_input_binding(
         "test-projection",
         "identity",
         generated::event::identity_v1::session_created::CONTRACT.contract_id(),
@@ -320,7 +320,7 @@ pub(in super::super) static SESSION_PROJECTION_INPUTS: &[vocab::ProjectionInputB
     )];
 
 pub(in super::super) fn test_contract() -> vocab::ContractBinding {
-    vocab::ContractBinding::from_static("test", "test.contract", "v1", TEST_SCHEMA_HASH)
+    test_contract_binding("test", "test.contract", "v1", TEST_SCHEMA_HASH)
 }
 
 pub(in super::super) async fn reviewed_reconcile_command(

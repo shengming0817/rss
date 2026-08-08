@@ -341,12 +341,7 @@ pub(in super::super) const POLICY_PERMISSION: &str = "identity:role:read";
 pub(in super::super) const RESOURCE_ATTRIBUTE_ID: &str = "11111111-2222-4333-8444-555555555555";
 
 pub(in super::super) const POLICY_UPDATED_CONTRACT: vocab::ContractBinding =
-    vocab::ContractBinding::from_static(
-        "identity",
-        "identity.policy-updated",
-        "v1",
-        "sha256:47b84018a53fa99bd8674f8b3344b11da69a9964e569b57de821483c8b2d0de2",
-    );
+    generated::event::identity_v1::policy_updated::CONTRACT;
 
 pub(in super::super) fn policy_time(secs: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(secs)

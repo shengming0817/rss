@@ -10,7 +10,9 @@
 //! receipt/typestate marker 的正确生产来源是 `generated::saga::*::{SPEC,STEPS,STEP_*}` 和 sealed generated receipt DTO。本 guard 把残余面
 //! 收口为 Medium：扫描生产 Rust AST，任何非测试代码直接调用 generated binding constructor 都
 //! fail-fast。
-//! 测试 fixture 与 generated/xtask 不在本扫描范围内。
+//! generated/xtask 与独立测试 target 不在本扫描范围内。crate 内测试 support 仍扫描；确需任意
+//! binding 的 fixture 必须把 constructor 收口到显式 `#[cfg(test)]` owner，生产代码则只能消费
+//! generated binding。PostgreSQL projection fixed function 只能由 sanctioned typed wrapper 调用。
 //!
 //! INVARIANT: CONTRACT-BINDING-FUNNEL-01 { level = "Medium", exec = "check", source = "code" }.
 //! INVARIANT: ROUTE-EVIDENCE-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "contract_binding_guard::tests::scan_sources_covers_nested_examples_and_direct_journey_roots", anti_vacuity = "contract_binding_guard::tests::real_source_roots_cover_workspace_compositions_and_direct_journeys" }.
@@ -588,7 +590,7 @@ fn is_test_file(path: &Path) -> bool {
         || name.ends_with("_tests.rs")
         || path
             .components()
-            .any(|c| matches!(c.as_os_str().to_str(), Some("tests" | "integration_tests")))
+            .any(|c| matches!(c.as_os_str().to_str(), Some("tests")))
 }
 
 fn is_binding_definition_file(path: &Path) -> bool {
@@ -1708,7 +1710,7 @@ mod tests {
         assert!(is_test_file(Path::new("crates/x/src/route_tests.rs")));
         assert!(is_test_file(Path::new("crates/x/src/tests.rs")));
         assert!(is_test_file(Path::new("crates/x/tests/route.rs")));
-        assert!(is_test_file(Path::new(
+        assert!(!is_test_file(Path::new(
             "adapters/postgres/src/integration_tests/support/eventing.rs"
         )));
         assert!(!is_test_file(Path::new(
@@ -1717,6 +1719,26 @@ mod tests {
         assert!(!is_test_file(Path::new(
             "adapters/postgres/src/integration_testing/eventing.rs"
         )));
+    }
+
+    #[test]
+    fn postgres_integration_support_has_explicit_trusted_binding_provenance() -> anyhow::Result<()>
+    {
+        let root = workspace_root()?;
+        let mut findings = Vec::new();
+        for relative in [
+            "adapters/postgres/src/integration_tests/support/eventing.rs",
+            "adapters/postgres/src/integration_tests/support/identity_support.rs",
+            "adapters/postgres/src/integration_tests/support/runtime.rs",
+        ] {
+            let source = std::fs::read_to_string(root.join(relative))?;
+            findings.extend(scan_file(Path::new(relative), &source)?);
+        }
+        assert!(
+            findings.is_empty(),
+            "integration support must use generated/typed bindings or an explicit cfg(test) mint owner: {findings:?}"
+        );
+        Ok(())
     }
 
     #[test]

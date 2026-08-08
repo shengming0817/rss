@@ -1,6 +1,6 @@
 //! External-consumer proof for the Postgres domain feature façade.
 //!
-//! INVARIANT: PG-DOMAIN-FEATURES-01 { level = "Hard", exec = "native-compile", source = "code", native = "parent-gated modules and conditional crate-root re-exports remove inactive domain APIs from rustc input" }
+//! INVARIANT: PG-DOMAIN-FEATURES-01 { level = "Hard", exec = "test", source = "trybuild", native = "external consumer compilation proves parent-gated modules and conditional crate-root re-exports remove inactive domain APIs from rustc input" }
 
 #[test]
 fn domain_feature_surface_tracks_the_selected_graph() {

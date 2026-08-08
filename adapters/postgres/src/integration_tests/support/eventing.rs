@@ -117,19 +117,11 @@ pub(in super::super) async fn register_generated_projection_input_catalog(
 }
 
 pub(in super::super) async fn append_generated_projection_source_event(
-    store: &PgStore,
     app: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    append_generated_projection_source_event_for_tenant(
-        store,
-        app,
-        binding,
-        event_id,
-        test_tenant(),
-    )
-    .await
+    append_generated_projection_source_event_for_tenant(app, binding, event_id, test_tenant()).await
 }
 
 pub(in super::super) async fn prepare_generated_projection_source_outbox_event(
@@ -163,16 +155,7 @@ pub(in super::super) async fn prepare_generated_projection_source_outbox_event_w
     let env = OutboxEnvelope::new(
         binding.domain().to_owned(),
         binding.contract_id().to_owned(),
-        OutboxMetadata::new(
-            0,
-            tenant,
-            vocab::ContractBinding::from_static(
-                binding.domain(),
-                binding.contract_id(),
-                binding.version(),
-                binding.schema_hash(),
-            ),
-        ),
+        OutboxMetadata::new(0, tenant, binding.contract()),
     );
     let metadata = env.metadata_json();
     eventing_test_db(store)
@@ -195,14 +178,12 @@ pub(in super::super) async fn prepare_generated_projection_source_outbox_event_w
 }
 
 pub(in super::super) async fn append_generated_projection_source_event_for_tenant(
-    store: &PgStore,
     app: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
     tenant: vocab::TenantId,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     append_generated_projection_source_event_with_payload_for_tenant(
-        store,
         app,
         binding,
         event_id,
@@ -213,39 +194,54 @@ pub(in super::super) async fn append_generated_projection_source_event_for_tenan
 }
 
 pub(in super::super) async fn append_generated_projection_source_event_with_payload_for_tenant(
-    store: &PgStore,
     app: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
     tenant: vocab::TenantId,
     payload: &[u8],
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    let metadata = prepare_generated_projection_source_outbox_event_with_payload(
-        store, binding, event_id, tenant, payload,
-    )
-    .await?;
-
-    let mut tx = app.pool.begin().await?;
-    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
-        .bind(tenant.to_string())
-        .execute(&mut *tx)
+    let entry = EventEntry::new(
+        EventTopic::parse(binding.topic())?,
+        IdemKey::parse(event_id)?,
+        reviewed_payload(payload),
+    );
+    let env = OutboxEnvelope::new(
+        binding.domain().to_owned(),
+        binding.contract_id().to_owned(),
+        OutboxMetadata::new(0, tenant, binding.contract()),
+    );
+    let registry = crate::projection_events::ProjectionWriteRegistry::from_selected(&[binding]);
+    let lsn = eventing_test_db(app)
+        .test_write(
+            integration_tenant_scope(tenant),
+            move |cap| {
+                let entry = entry.clone();
+                let env = env.clone();
+                let registry = registry.clone();
+                Box::pin(async move {
+                    let outcome = append_outbox(cap, &entry, &env)
+                        .await
+                        .map_err(test_append_error)?;
+                    if outcome != OutboxAppendOutcome::Inserted {
+                        return Err(sqlx::Error::Protocol(
+                            "projection source fixture event already exists".to_owned(),
+                        ));
+                    }
+                    crate::projection_events::append_projection_event_if_bound(
+                        cap, &entry, &env, &registry,
+                    )
+                    .await?
+                    .ok_or_else(|| {
+                        sqlx::Error::Protocol(
+                            "projection source fixture was not bound by its registry".to_owned(),
+                        )
+                    })
+                }) as BoxFuture<'_, Result<consistency::Lsn, sqlx::Error>>
+            },
+            std::convert::identity,
+        )
         .await?;
-    let (lsn,): (i64,) = sqlx::query_as(
-        "SELECT public.rss_append_projection_event(\
-         $1, $2, $1, $3, $4, NULL, $5, $6, $7, $8::jsonb, NULL, NULL)",
-    )
-    .bind(event_id)
-    .bind(binding.domain())
-    .bind(binding.topic())
-    .bind(payload)
-    .bind(binding.contract_id())
-    .bind(binding.version())
-    .bind(binding.schema_hash())
-    .bind(metadata)
-    .fetch_one(&mut *tx)
-    .await?;
-    tx.commit().await?;
-    Ok(lsn)
+    Ok(i64::try_from(lsn.get())?)
 }
 
 pub(in super::super) async fn projection_source_high_water(
@@ -719,7 +715,7 @@ pub(in super::super) struct ProjectionHighWaterFixture {
 }
 
 pub(in super::super) static MULTI_BINDING_HIGH_WATER_INPUTS: &[vocab::ProjectionInputBinding] = &[
-    vocab::ProjectionInputBinding::from_static(
+    test_projection_input_binding(
         "test.multi-binding-projection",
         "multi-a",
         "projection.multi-a",
@@ -727,7 +723,7 @@ pub(in super::super) static MULTI_BINDING_HIGH_WATER_INPUTS: &[vocab::Projection
         TEST_SCHEMA_HASH,
         "test.multi-a",
     ),
-    vocab::ProjectionInputBinding::from_static(
+    test_projection_input_binding(
         "test.multi-binding-projection",
         "multi-b",
         "projection.multi-b",
@@ -829,7 +825,6 @@ pub(in super::super) async fn append_projection_high_water_fixture_event(
 ) -> Result<(String, i64), TestError> {
     let event_id = unique_event_id(label);
     let lsn = append_generated_projection_source_event_for_tenant(
-        &fixture.owner,
         &fixture.app,
         fixture.binding,
         &event_id,
