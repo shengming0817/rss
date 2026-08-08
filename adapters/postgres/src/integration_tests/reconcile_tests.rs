@@ -1405,6 +1405,8 @@ async fn reconcile_concurrent_takeover_commits_only_highest_authority_without_re
         .await?,
         ScheduleActionOutcome::Enqueued
     );
+    // Mint while the old authority is still valid; the race exercises durable submission fencing.
+    let stale = reviewed_reconcile_command(&store, &old_attempt, "stale-retry", 1).await?;
 
     sqlx::query(
         "UPDATE device_certificate_desired_states SET generation = 2, updated_at = now() \
@@ -1440,7 +1442,6 @@ async fn reconcile_concurrent_takeover_commits_only_highest_authority_without_re
             ScheduleAttemptOutcome::Started(attempt) => attempt,
             ScheduleAttemptOutcome::Lost => return Err("current authority lost before race".into()),
         };
-    let stale = reviewed_reconcile_command(&store, &old_attempt, "stale-retry", 1).await?;
     let current =
         reviewed_reconcile_command_at_generation(&store, &current_attempt, "generation-two", 2, 2)
             .await?;
