@@ -4,7 +4,7 @@
 //! INVARIANT: INTEGRATION-SHARD-SELECTOR-01 { level = "Hard", exec = "native-compile", source = "code", native = "filtersets render only from typed package/binary/kind execution units" }.
 //! INVARIANT: INTEGRATION-SHARD-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "metadata_coverage_rejects_missing_duplicate_and_unknown_targets|source_and_security_provider_relations_reject_catalog_drift", anti_vacuity = "workspace_metadata_covers_legacy_integration_targets|shared_journey_relations_match_independently_discovered_module_edges|source_and_security_provider_relations_are_closed_and_non_vacuous" }.
 //! INVARIANT: INTEGRATION-SHARD-ELIGIBILITY-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "cargo_target_eligibility_rejects_missing_duplicate_path_and_feature_drift|cargo_target_eligibility_rejects_crate_level_feature_cfg", anti_vacuity = "catalog_test_and_remote_only_sets_are_non_vacuous|workspace_cargo_target_eligibility_matches_local_feature_scope" }.
-//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique" }.
+//! INVARIANT: INTEGRATION-SHARD-SCHEDULING-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "scheduling_plan_rejects_dangerous_target_parallelism|localtx_backend_execution_unit_rejects_missing_duplicate_and_drift|identityaudit_runtime_resource_closure_rejects_missing_duplicate_and_extra", anti_vacuity = "workspace_plan_freezes_resources_and_dangerous_targets|localtx_journeys_form_one_unpartitioned_serial_batch|localtx_backend_execution_unit_is_unique|identityaudit_runtime_resource_closure_is_exact_and_non_vacuous" }.
 
 #[cfg(test)]
 use crate::workspace_root;
@@ -871,7 +871,7 @@ integration_shard_catalog! {
             EventTransportJourney => ("event-transport-journey", ReleaseCheck, "journeys", "eventtransport_journey", Test, Parallel, Affected, resources: [Postgres, Redis, Amqp, Mqtt], impact_packages: [], capabilities: [Docker]),
             IdentityLoginAuditDurableJourney => ("identity-login-audit-durable-journey", IntegrationCritical, "journeys", "identity_login_audit_durable_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, EventexecPackage, IdentityPackage, PostgresPackage], capabilities: []),
             IdentityLoginAuditJourney => ("identity-login-audit-journey", ReleaseCheck, "journeys", "identity_login_audit_journey", Test, Parallel, Affected, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
-            IdentityAuditRuntimeJourney => ("identity-audit-runtime-journey", ReleaseCheck, "journeys", "identityaudit_runtime", Test, Serial, RemoteOnly, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
+            IdentityAuditRuntimeJourney => ("identity-audit-runtime-journey", ReleaseCheck, "journeys", "identityaudit_runtime", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [], capabilities: []),
             EventTransportDurableE2e => ("event-transport-durable-e2e", IntegrationCritical, "runtime", "event_transport_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [AmqpPackage, EventexecPackage, MqttPackage, PostgresPackage, RedisAdapterPackage, RuntimePackage, RuntimeSurface], capabilities: [Docker]),
         ],
     },
@@ -2556,6 +2556,54 @@ mod tests {
         owner_drift[0].primary_owner = ExecutionProfile::ReleaseCheck;
         assert!(validate_integration_unit_catalog(&owner_drift, SHARD_SPECS).is_err());
         Ok(())
+    }
+
+    fn validate_identityaudit_runtime_resource_closure(resources: &[Resource]) -> Result<()> {
+        let expected = [Resource::Postgres, Resource::Redis, Resource::Amqp];
+        if resources.is_empty() {
+            bail!("IdentityAudit runtime resource closure must be non-empty");
+        }
+        if resources != expected {
+            bail!(
+                "IdentityAudit runtime resource closure must be exactly {expected:?}, got {resources:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn identityaudit_runtime_resource_closure_is_exact_and_non_vacuous() -> Result<()> {
+        validate_identityaudit_runtime_resource_closure(
+            IntegrationUnitId::IdentityAuditRuntimeJourney
+                .spec()
+                .resources,
+        )
+    }
+
+    #[test]
+    fn identityaudit_runtime_resource_closure_rejects_missing_duplicate_and_extra() {
+        assert!(
+            validate_identityaudit_runtime_resource_closure(&[Resource::Postgres, Resource::Amqp])
+                .is_err()
+        );
+        assert!(
+            validate_identityaudit_runtime_resource_closure(&[
+                Resource::Postgres,
+                Resource::Redis,
+                Resource::Amqp,
+                Resource::Mqtt,
+            ])
+            .is_err()
+        );
+
+        let mut duplicate = INTEGRATION_UNIT_SPECS.to_vec();
+        duplicate[IntegrationUnitId::IdentityAuditRuntimeJourney as usize].resources = &[
+            Resource::Postgres,
+            Resource::Redis,
+            Resource::Redis,
+            Resource::Amqp,
+        ];
+        assert!(validate_integration_unit_catalog(&duplicate, SHARD_SPECS).is_err());
     }
 
     #[test]
