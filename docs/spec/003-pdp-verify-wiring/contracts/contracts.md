@@ -18,7 +18,8 @@
 | `authn::verify_rss_access` / `verify_federated_access` / `verify_service_token` | `crates/authn` profile-specific 验证 funnel | runtime 按 typed binding 调用 |
 | `httpserve::finalize_auth(router, plan)` | `crates/httpserve/src/lib.rs:122` | 签名**保持冻结**（验签桥走组合根外层 layer，不穿入） |
 
-`finalize_auth` / `diport::Pdp` 属库 crate 公开 API 面（轴 A SemVer），由 `cargo public-api` golden 守；本 feature 不改其签名 → 无 public-api diff。
+`finalize_auth` / `diport::Pdp` 属 workspace 跨 crate exported-symbol 面，由 `cargo public-api` golden 审查漂移；
+两者当前所在 crate 均不发布，该 internal baseline 不授予 Release API 或轴 A SemVer。本 feature 不改其签名 → 无 public-api diff。
 
 ## 治理 / lint（无新增 port → 无新增定义面守卫）
 

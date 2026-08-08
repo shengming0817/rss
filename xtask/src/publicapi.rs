@@ -1,7 +1,8 @@
-//! `cargo xtask public-api` —— 库公开 API 面 baseline（封装外部 `cargo-public-api`）。
+//! `cargo xtask public-api` —— 库 exported-symbol baseline（封装外部 `cargo-public-api`）。
 //!
-//! 用途：基础/引擎层签名冻结 + 安全敏感 curated extras 的 exported 符号面冻结为可 commit 的 baseline，
-//! 后续 PR diff（crate 公开 API = 轴 A SemVer，见 `docs/rules/api-versioning.md`）。
+//! 用途：Release API crate 的轴 A 签名审查 + 安全敏感 internal curated extras 的 exported 符号面漂移审查，
+//! 形成可 commit 的 baseline。internal curated baseline 不把 crate 提升为 Release API，也不产生 SemVer 承诺
+//! （见 `docs/rules/api-versioning.md`）。
 //!
 //! **PR-0 仅落工具入口**；baseline 快照随 PR-1/PR-2 产出并 commit 到 `public-api/<crate>.txt`
 //! （PR-1 `--layer basis`、PR-2 `--layer engine`、安全敏感例外 `--layer curated`；无 `--layer` =
@@ -15,8 +16,9 @@
 //! （`rustup toolchain install <PINNED_NIGHTLY>`，见 [`PINNED_NIGHTLY`]）。未满足时本命令给指引并**非零退出**（非静默 noop）。
 //!
 //! **不在 `cargo xtask verify` 聚合门内**：verify 聚合每次代码改动的强制门（fmt/build/clippy/nextest/deny/
-//! dylint + meta）；public-api 是**库封装面 baseline 冻结门**（轴 A SemVer，需 nightly rustdoc-json 重新生成
-//! baseline），语义与触发节奏不同，故为独立可选门（单独 `cargo xtask public-api --check`）。
+//! dylint + meta）；public-api 是**库 exported-symbol baseline 漂移门**（Release API 承载轴 A SemVer；internal
+//! curated extras 只承载安全/封装审查，需 nightly rustdoc-json 重新生成 baseline），语义与触发节奏不同，故为
+//! 独立可选门（单独 `cargo xtask public-api --check`）。
 //!
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— 工具缺失 fail-fast，不静默成功。
 //! INVARIANT: PUBLICAPI-DRIFT-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— `--check` 缺失/漂移默认 fail-fast；缺失豁免仅经显式 `--allow-missing`。
@@ -32,9 +34,10 @@ use std::path::PathBuf;
 use std::process::Command;
 
 // 分层成员单源 = `layers.rs`（basis = PR-1 验收集、engine = PR-2 验收集）；此处复用，不另列副本。
-// curated extras 不是架构 layer，只是安全敏感公开 API 面的定点 golden 例外。
+// curated extras 不是架构 layer，只是安全敏感 exported-symbol 面的定点 golden 例外；其中 internal crate
+// 的 baseline 是漂移审查，不是 Release API / SemVer 承诺。
 // `diport`（DI-infra 层，非 basis/engine）：持全部安全敏感 DI port（Signer/SecretResolver/Pdp/Revocation/
-// KeyProvider…），公开 trait/类型面是轴 A SemVer 边界，列入 curated extras 定点冻结（#1470）。
+// KeyProvider…），以 internal exported-symbol baseline 锁住安全/封装漂移，列入 curated extras（#1470）。
 // `generated` 暴露 contract-derived metadata，作为 PR review 审查材料定点冻结（#1472/#1688）。
 // `runtimeexec` 的 launch/probe/inventory hook 是三个 assembly 的稳定内部接缝（#1795）；冻结其窄公开面，
 // 防止 ShutdownStack、HTTP/provider 类型或第二 executor 意外外泄。
@@ -188,10 +191,34 @@ fn report(check: bool, allow_missing: bool, drift: &[String], missing: &[String]
         return Ok(());
     }
     if !drift.is_empty() {
+        let (internal_curated, release): (Vec<_>, Vec<_>) = drift
+            .iter()
+            .partition(|krate| CURATED_EXTRA_CRATES.contains(&krate.as_str()));
+        let mut dispositions = Vec::new();
+        if !release.is_empty() {
+            dispositions.push(format!(
+                "Release API baseline: {}（按 api-versioning.md 轴 A 审查）",
+                release
+                    .iter()
+                    .map(|krate| krate.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        if !internal_curated.is_empty() {
+            dispositions.push(format!(
+                "internal curated baseline: {}（仅作 exported-symbol/封装漂移审查，不产生 SemVer 承诺）",
+                internal_curated
+                    .iter()
+                    .map(|krate| krate.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         bail!(
-            "public-api drift：{} crate 封装面与 committed baseline 不一致：{}（确认是否破坏式 API 变更，按 api-versioning.md 轴 A 处理）",
+            "public-api drift：{} crate 封装面与 committed baseline 不一致；{}",
             drift.len(),
-            drift.join(", ")
+            dispositions.join("；")
         );
     }
     if !missing.is_empty() {
@@ -272,6 +299,33 @@ mod tests {
     #[test]
     fn report_check_drift_fails() {
         assert!(report(true, false, &v(&["vocab"]), &[]).is_err());
+    }
+
+    /// F1 回归：同一次 full gate 的 Release-layer 与 internal curated drift 必须给出不同处置语义。
+    #[test]
+    fn report_check_drift_distinguishes_internal_curated_from_release_axis() {
+        let err = report(true, false, &v(&["vocab", "diport"]), &[])
+            .expect_err("drift 必须 fail-closed")
+            .to_string();
+        assert!(
+            err.contains("Release API baseline: vocab（按 api-versioning.md 轴 A 审查）"),
+            "Release-layer drift 须指向轴 A: {err}"
+        );
+        assert!(
+            err.contains(
+                "internal curated baseline: diport（仅作 exported-symbol/封装漂移审查，不产生 SemVer 承诺）"
+            ),
+            "internal curated drift 不得被提升为轴 A: {err}"
+        );
+
+        let internal_only = report(true, false, &v(&["diport"]), &[])
+            .expect_err("internal curated drift 必须 fail-closed")
+            .to_string();
+        assert!(internal_only.contains("internal curated baseline: diport"));
+        assert!(
+            !internal_only.contains("轴 A"),
+            "internal-only drift 诊断不得出现轴 A: {internal_only}"
+        );
     }
 
     /// drift 优先 fail-fast，即便同时有 missing。
@@ -444,7 +498,8 @@ mod tests {
     }
 
     #[test]
-    fn diport_public_api_golden_reexports_send_variant_not_base_trait() -> anyhow::Result<()> {
+    fn diport_internal_export_baseline_reexports_send_variant_not_base_trait() -> anyhow::Result<()>
+    {
         let baseline = std::fs::read_to_string(baseline_dir()?.join("diport.txt"))?;
         // crate 根 re-export = Send 变体 + Dyn wrapper + KeyProvider 公开类型（adapters/组合根消费面）。
         for required in [
@@ -461,18 +516,18 @@ mod tests {
         ] {
             assert!(
                 baseline.contains(required),
-                "diport public-api golden 缺少必要公开项: {required}"
+                "diport internal export baseline 缺少必要导出项: {required}"
             );
         }
         // 非 Send 基 trait `*Local` **不**在 crate 根 re-export（仅 `diport::key_provider::KeyProviderLocal`
         // 经 pub mod 可达），避免 glob import 方法解析歧义（ADR-003 落地结论）。
         assert!(
             !baseline.contains("pub trait diport::KeyProviderLocal"),
-            "diport public-api golden 不得在 crate 根 re-export 基 trait KeyProviderLocal"
+            "diport internal export baseline 不得在 crate 根 re-export 基 trait KeyProviderLocal"
         );
         assert!(
             !baseline.contains("VerifiedClaims::new"),
-            "diport public-api golden 不得恢复开放的 VerifiedClaims 构造器"
+            "diport internal export baseline 不得恢复开放的 VerifiedClaims 构造器"
         );
         // 安全负向不变式（ADR-011 §D3 防 timing oracle）：key 标识 `KeyName`/`KeyVersion`/`KeyRef` **禁** derive
         // `PartialEq`/`Eq`——只能经 `ct_eq` 等值-only 匹配。golden 锁住「无 `==` 能力」，杜绝后续 PR 重生 baseline
@@ -487,7 +542,7 @@ mod tests {
         ] {
             assert!(
                 !baseline.contains(forbidden),
-                "diport public-api golden 不得暴露 key 标识的非常数时间 `==`（ADR-011 §D3）: {forbidden}"
+                "diport internal export baseline 不得暴露 key 标识的非常数时间 `==`（ADR-011 §D3）: {forbidden}"
             );
         }
         Ok(())

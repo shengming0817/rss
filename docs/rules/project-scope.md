@@ -42,7 +42,7 @@ workspace 结构与分层仍以 [`architecture.md`](architecture.md) 为准，�
 | **Domain Governance** | domain/crate 边界、依赖方向、contract-only 跨域通信、ArchRules 和 AI-robust 载体 | 外部 Rust module 静态消费、统一 module factory、规则与事实源去重 | 现有 `xtask` 和治理门继续维护，但冻结通用构建/CI 平台化 | 动态插件运行时、模块市场、安装升级控制面、组织级研发门户和团队/项目管理平台 |
 | **Contract / Codegen** | contract schema、生命周期、兼容性、Rust codegen、route/effect/consistency 元数据 | breaking/deprecation 闭环、标准 schema 导出、真实外部 Rust consumer | 保留现有 contract kind、Rust 语言和 schema 输出宽度 | API Gateway、托管 Schema Registry、无真实 consumer 的语言 SDK、全语言 SDK 平台和业务 CRUD/UI generator |
 | **Runtime Assembly** | AssemblyLock、RuntimePlan、RuntimeExec、provider 构造、listener、readiness、drain、inventory | 现有 production assembly 的 plan/lock/wiring/inventory 闭合和故障证据 | 现有 Dockerfile、Compose 和应用运行契约继续维护，但不新增 production delivery 投影 | Helm、Kustomize、Terraform、Pulumi、Ingress、NetworkPolicy、HPA/PDB、CRD 和跨集群 orchestrator |
-| **DI Port / Adapter** | port、capability、lifecycle、provider conformance 和外部 adapter SPI | 现有 provider 的 readiness、故障语义和跨 provider conformance | 现有 adapter 全部保留；新 adapter 必须有 production assembly、两个独立 consumer 或 cross-provider conformance 需求 | 无 consumer 的 adapter 堆叠、云厂商资源管理 API、动态插件 ABI、插件市场和 service locator |
+| **DI Port / Adapter** | internal provider-neutral seam、封闭 Official Integration、capability、lifecycle、health、failure posture 与仓内 provider conformance | 现有 provider 的 readiness、故障语义和跨 provider conformance | 现有 adapter 全部保留；新 adapter 必须有 production assembly、两个独立 consumer 或 cross-provider conformance 需求 | 当前通用外部 Provider SPI、无 consumer 的 adapter 堆叠、云厂商资源管理 API、动态插件 ABI、插件市场和 service locator |
 | **Consistency L0–L4** | consistency semantics、outbox/inbox、fencing、replay、checkpoint、reconcile 和 fault matrix | 已声明 L3/L4 primitive 的真实纵向切片及其最低充分并发/crash correctness；soak、多副本和长期恢复只在 GA hardening trigger 或已接纳 SLO 下实施 | 现有 primitive 全部保留；新 primitive 必须至少有两个 domain consumer，或属于 safety-critical invariant | BPMN/低代码工作流、MDM/fleet、设备运营平台、Kubernetes Operator framework、XA/2PC 和伪 exactly-once |
 | **Security / AuthN / AuthZ / Tenant** | 凭据验证、可信 Principal、授权执行、obligation、RLS、tenant isolation、审计和外部 OIDC/SSO 接入 | 现有 Local Identity & Security Profile 的正确性、安全、并发和恢复闭环 | 现有登录、会话、账户安全、Role/Policy 管理能力保留，但不扩展为企业 SSO/IAM 或租户管理产品 | MFA/Passkey、SCIM、LDAP/AD、federation、realm/client/consent、tenant/org 生命周期、member/invite/domain、套餐/配额/订阅/计费和管理门户 |
 | **Observability / Health / Local CI** | RSS 指标与 trace 语义、health/readiness、runtime inventory、项目专属正确性门 | label 闭值、trace continuity 与 correctness diagnosis；最小 SLI/runbook 只在 GA hardening trigger 后实施，dashboard/alert 不因 metric 存在而自动进入范围 | 新 gate 必须绑定独立生产 hazard，并替换或合并既有证明；不继续建设通用 CI 控制面 | CI scheduler、Runner fleet、通用 cache/tool-install/release 平台、监控托管、SIEM 和 incident/on-call 产品 |
@@ -86,12 +86,20 @@ profile 与公开符号仍从 Cargo metadata、manifest、schema、codegen 和 r
 
 ### DI Port / Adapter
 
-- **拥有**：domain-shaped port、provider-agnostic infra seam、受控外部 adapter SPI、capability、lifecycle、health、
-  failure posture 与真实需要的 conformance。
-- **不拥有**：任意实现兼容承诺、社区插件认证/市场、为 mock 或未来可能性创建的 trait、对成熟上游 API 的整面镜像，
-  以及无 consumer 的 adapter 堆叠。
+- **拥有**：domain-shaped port、internal provider-neutral infra seam、封闭 Official Integration、capability、lifecycle、
+  health、failure posture 与真实需要的仓内 conformance。`diport` 是 Internal Provider Contract；official adapter
+  可直接实现它，并由静态 composition root 经封闭 provider catalog 构造。
+- **不拥有**：当前通用外部 Provider SPI、任意实现兼容承诺、社区插件认证/市场、为 mock 或未来可能性创建的 trait、
+  对成熟上游 API 的整面镜像，以及无 consumer 的 adapter 堆叠。
 - **完成**：domain 不接触 raw provider client；实际交付 provider 的 capability、failure、health 与 lifecycle 证据闭合；
   新 adapter 满足上表的 production assembly、独立 consumer 或 cross-provider conformance 准入条件。
+
+第三方扩展只保留**条件提升机制**。真实独立 provider 与 consumer、capability owner、SemVer/支持责任、typed static
+bridge 和最低充分 conformance 同时成立后，必须经独立 scope/ADR/PBI 才能建立 capability-specific Release API。
+package metadata 即使届时引入，也只是由工具验证的**不可信候选声明**：扫描或声明不会自动注册 provider，provider
+不得自行声明 maturity 或 conformance receipt；显式 assembly 选择与既有
+`assembly.toml → generated catalog → AssemblyLock → RuntimePlan` 仍是唯一接纳链。多个真实 capability-specific
+SPI 证明稳定共同语义前，不提取通用 provider vocabulary crate。
 
 ### Consistency L0–L4
 
@@ -123,8 +131,8 @@ profile 与公开符号仍从 Cargo metadata、manifest、schema、codegen 和 r
 
 ## 公共消费边界
 
-- 对外承诺只来自明确的 standalone component、稳定 façade、contract/schema artifact 或受控 adapter SPI；仓内 `pub`
-  与 internal signature baseline 不自动构成外部兼容承诺。
+- 对外承诺只来自明确的 standalone component、稳定 façade、contract/schema artifact，或经独立范围变更接纳的
+  capability-specific extension contract；仓内 `pub` 与 internal signature baseline 不自动构成外部兼容承诺。
 - domain、generated internals、provider catalog、RuntimePlan 构造细节、`xtask` 与 journey/fault harness 默认保持 internal。
 - 新公开面必须有真实 consumer、owner、版本与退出路径；不得以“未来可能使用”扩大 release surface。
 

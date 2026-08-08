@@ -3,6 +3,11 @@
 //! 分层位置：基础 / 引擎 **之上**、服务 / 域 / adapter **之下**（被它们消费）——`xtask`
 //! `layers.rs` 的 `Layer::DiPort`。依赖基础 + 引擎；不依赖服务 / 域 / adapter（无 back-path）。
 //! 跨域通信单源仍是 contract；DI infra port ≠ 跨域 wire，本 crate 不放 wire 类型（ADR-003 §6 偏离 2）。
+//! 产品面定位：本 crate 是 `publish = false` 的 **Internal Provider Contract**，不是 Platform Public /
+//! Release API。这里的 `pub` 只服务 workspace 内 official adapter、服务/域与组合根的跨 crate 实现和消费；
+//! official adapter 直接实现这些 internal seams，并由静态 composition root 经封闭 provider catalog 构造。
+//! 未来 capability-specific 第三方 SPI 必须由真实独立 provider/consumer 经单独 scope/ADR/PBI 接纳后建立，
+//! 再通过 typed bridge 接入本层；本 crate 不因该未来路径承担外部 SemVer 承诺。
 //!
 //! ## 派发策略（ADR-003）
 //!
@@ -113,12 +118,12 @@ pub mod outbox_emitter;
 pub mod pdp;
 pub mod publisher;
 pub mod rate_limiter;
-// provider-error wrapper 共享脱敏 source 字段。`pub`（经下方 re-export 进公开 API 面）：`pub enum` 错误
+// provider-error wrapper 共享脱敏 source 字段。`pub`（经下方 re-export 进跨 crate 导出面）：`pub enum` 错误
 // （`ObjectStoreError`）变体字段恒 public，须持 public 类型避免 privacy leak（#1120 merge：PR215 RedactedSource
 // pub(crate) 与 PR214 pub-enum 错误不兼容）。
 mod redacted;
 // DTO 字节 payload 脱敏 newtype（`Debug`/`Display` 恒 `<redacted>`，经 `as_bytes`/`into_bytes` 受控访问）。
-// `pub`（经下方 re-export 进公开 API 面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
+// `pub`（经下方 re-export 进跨 crate 导出面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
 mod redacted_bytes;
 pub mod revocation_store;
 pub mod saga_durable_store;

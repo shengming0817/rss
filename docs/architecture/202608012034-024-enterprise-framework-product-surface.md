@@ -2,7 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-01
-- **Last updated**：2026-08-02
+- **Last updated**：2026-08-08
 - **Scope**：[`project-scope.md`](../rules/project-scope.md) 的项目目标与目标验收边界
 
 ## Context
@@ -23,8 +23,17 @@ RSS 已具备 contract/codegen、静态 assembly、L0–L4 primitive、多租户
 | Internal Implementation | 仓内重构边界 | generated/runtime internals、provider catalog 与 composition detail |
 | Tool / Verification | 仓内执行边界 | xtask、lint、testkit、journey 与 fault/recovery evidence |
 
-公开面由 committed public-api baseline、contract/schema artifact 和真实外部 consumer 共同界定。`pub` 可见性只表达 Rust
-访问边界，版本承诺由产品面 owner 与 release artifact 确定。
+公开产品面只由产品面 owner、release artifact 与真实外部 consumer 的明确承诺界定。committed public-api baseline
+既可审查 Release API，也可仅审查 internal crate 的 exported-symbol 漂移；baseline 本身不授予公开产品面或 SemVer。
+`pub` 可见性只表达 Rust 访问边界。
+
+Provider 产品边界采用三层结构：`diport` 是 `publish = false` 的 Internal Provider Contract；成熟上游的内置 adapter
+属于封闭 Official Integration，由静态 composition root 经私有 provider catalog 构造；当前 Platform Public 不发布
+通用第三方 Provider SPI。未来只有在真实独立 provider 与 consumer、capability owner、SemVer/支持责任、typed static
+bridge 和最低充分 conformance 同时成立后，才能经独立 scope/ADR/PBI 提升 capability-specific extension contract。
+package metadata 如在该后续交付中引入，只能是不可信候选声明：它不能自动注册 provider，不能由 provider 自行声明
+maturity 或 conformance receipt，且必须汇入既有 assembly governance/compiler 单链，不能成为第二套 registry。
+多个真实 capability-specific SPI 证明稳定共同语义前，不预建通用 provider vocabulary crate。
 
 ### 官方 profile
 
@@ -94,9 +103,10 @@ Identity、Settings 与 Audit 是 RSS 的第一方 Reference Extension，用于�
 T3 产品面。
 
 `assemblies/identityaudit` 与 `assemblies/settingsonly` 的长期定位是迁出 RSS 核心产品/发布面，成为独立的
-第一方外部 reference consumer。迁出不立即执行：在 `core`/`eventing` canonical artifact、稳定 Platform
-Public/adapter SPI、外部 consumer build/upgrade baseline 全部闭合前，两个 assembly 作为过渡 reference carrier 保留，
-但立即冻结新产品能力、新 provider 组合和独立 T3 扩展。
+第一方外部 reference consumer。迁出不立即执行：在 `core`/`eventing` canonical artifact、稳定 Platform Public、
+外部 consumer build/upgrade baseline 全部闭合前，两个 assembly 作为过渡 reference carrier 保留；若迁出后的真实
+consumer 确需第三方 Provider 扩展，还必须先接纳相应 capability-specific extension contract。两个 assembly 立即冻结
+新产品能力、新 provider 组合和独立 T3 扩展，尚未批准的通用 adapter SPI 不构成迁出前置。
 
 迁出时必须由单独弃用/迁移决策记录目标仓库、版本边界、consumer build、release ownership 和回退方式。
 Identity、Settings、Audit 的 domain/contract 能力不因 assembly 迁出而自动删除或迁仓；它们仍按

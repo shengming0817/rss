@@ -35,6 +35,10 @@ Handler 响应和事件 payload 使用 typed DTO + converter。禁止把 domain 
 > 由 `deny.toml` + `cargo xtask layer-deps` 强制（`DIPORT-MACRO-CONFINE`，Medium）。
 > `adapter→域` 经 DIP 内向边 impl 域形 port；域 crate 只经构造器注入 dyn wrapper 消费。
 > 纯域内（非可替换 provider）的仓储 / 服务 trait 仍留 `internal/ports`。
+>
+> 这里的 `pub` 是 official adapter 与组合根跨 crate 实现/消费所需的 Rust 可见性，不是产品发布声明。
+> `diport` 是 `publish = false` 的 Internal Provider Contract；official adapter 可直接实现它。只有真实独立外部
+> provider/consumer 经单独 scope/ADR/PBI 接纳后，才建立 capability-specific Release API 与 internal bridge。
 
 ## Init fail-fast
 

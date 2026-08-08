@@ -112,6 +112,9 @@ rss/
 - **基础** `vocab`/`assembly-schema`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`/`authmint`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；`diagctx` 与 `authmint` 为独立根，不依赖其它基础 crate，不被其它基础 crate 依赖；`diagctx` 仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）；`authmint` 仅由 deny.toml wrappers（`httpserve` + 三 assembly）持有（AUTH-EVIDENCE-MINT-01 Hard）；assembly 内 exact mint + proof-consuming 另由 `rss_authenticated_callsite` Medium 守。现有 sanctioned 前向边:`assembly-schema → vocab`（contract authoring 的 canonical `StepName` / `DomainName` 类型边界）、`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制。
 - **引擎/原语** `consistency`/`primitives`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`tracewire`(W3C traceparent capture/restore 单源)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `eventexec`(consume 还原)+ adapter `postgres`(emit 捕获)依赖——otel 只准在此与 `adapters/otel` 收口,二者外不直接 import otel(当前只有结构性收口,无机器守)。
 - **DI-infra** `diport`:依赖基础+引擎;**被服务/域/adapter/组合根消费**,自身不依赖服务及以上(无 back-path)。
+  产品面定位是 `publish = false` 的 **Internal Provider Contract**：仓内 `pub` 只使 official adapter、服务/域与组合根
+  能跨 crate 实现或消费统一接缝，不构成 Platform Public / Release API。official adapter 继续直接实现该 internal seam，
+  并由静态 composition root 经封闭 provider catalog 构造；无需绕尚不存在的公共 Provider SPI。
   **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/ManagedResource/DlxLifecycleRepository/DlxArchiveStore…,签名只引基础/wire/port-owned/associated types)。需要运行期动态消费的 async port 使用 dynosaur Dyn wrapper；默认 dyn wrapper 是 Send 非 Sync（`async_send`），跨 `Send + Sync` worker 多次调用且 provider 由组合根静态选择的 port 改用 ADR-003 静态泛型。共享 Sync 例外是 `classify_ports!` 的 `async_sync` 闭集四端口（`KeyProvider` / `Pdp` / `SecretResolver` / `ServiceTokenReplayStore`，base trait 显式 `Send + Sync`；INVARIANT DIPORT-DYN-CONCURRENCY-01：Hard = native `assert_send_sync_bound`，Medium = `ui_assert_*` trybuild），其中 PDP 由正向/负向 compile gate 锁定并供 HTTP serving 跨 await 共享。不为无消费方的动态能力生成 wrapper。**服务/域 互不依赖,但都可向下依赖 diport** ——
   服务层 crate(bootstrap/deviceloop/eventexec/authn…)消费 DI port 须经此层,故 diport 不能与它们同层(服务→服务禁)。
   注:**域形** repo/service port(签名引用域内实体)**不归 diport**,归所属域 crate `pub mod ports`(ADR-005 Option 2,见下「域」行 + category line ADR-005 §2.1)。
@@ -136,6 +139,8 @@ rss/
   Phase 3。`cargo xtask assembly validate` 守 manifest intent 非空/闭值/去重、active provider 的依赖 /
   feature 与安全边界（例如 production `diport::RevocationStore` 必须持久）。assembly intent / provider 声明不替代
   `contracts/**/contract.toml`、env/secrets、listener bind 配置或 Rust 构造器接线；跨域 wire contract 单源仍是 contracts。
+  `assembly.toml → private generated provider catalog → AssemblyLock → RuntimePlan` 是已接纳 provider 的唯一事实链；
+  未来候选 package metadata 即使存在，也必须先经同一 governance/compiler 验证，不能自动注册或建立平行 registry。
   `cargo xtask graph assembly` 从该 manifest、匹配的 committed `modules_gen.rs` carrier 与 active event
   contract/subscription 派生同一 typed model 的 Mermaid/JSON。默认 runtime 双产物提交在
   `docs/architecture/generated/runtime-assembly.{mmd,json}`，`--check` 作为字节级漂移门；显式
@@ -241,7 +246,8 @@ active PR 的 Medium enforcement；运行时激活状态、required-check 状态
 本地差异 preflight 统一使用 `make ci CI_BASE=<remote>/develop`：10 分钟有界、unknown 默认本地忽略并留痕，
 只跑受影响 package 与定向治理测试；显式全量 `cargo xtask ci full` 仅供人工诊断，不是 PR 完成条件。
 nightly/develop 重型门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
-（引擎-基础 ≥90%，无 ratchet 例外）、`public-api --check`（轴 A）与供应链门。
+（引擎-基础 ≥90%，无 ratchet 例外）、`public-api --check`（Release API 做轴 A 审查；internal curated
+baseline 只做 exported-symbol/封装漂移审查，不产生 SemVer 承诺）与供应链门。
 **供应链门**必须同时覆盖依赖内容与时间维度：`cargo deny check`（advisories/licenses/bans/sources）
 守当前依赖集，advisory-scoped 定时刷新覆盖「未变依赖」后来披露 CVE。
 实际 schedule、forge 与 required-check 状态以

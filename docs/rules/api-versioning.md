@@ -24,9 +24,13 @@ compensation effect scope、idempotency/compensation/retry class 或 retry polic
 
 ## 轴 A / 轴 B 边界
 
-RSS 当前没有外部 Rust API 调用方，因此轴 A（库 crate 公开 API 与 authoring schema）
-的破坏变更不保留旧 Rust API shim；公开符号面仍由 `cargo public-api` /
+轴 A 只覆盖由产品面 owner 与 release artifact 明确承诺的 Rust API 和 authoring schema。RSS 当前没有外部 Rust API
+调用方，因此轴 A 的破坏变更不保留旧 Rust API shim；Release API 符号面仍由 `cargo public-api` /
 `cargo-semver-checks` 显式审查。
+
+仓内 `pub` 只表示 Rust 跨 crate 可见性，不自动进入轴 A。`publish = false` 的 internal crate 可以保留
+`cargo public-api` curated baseline 作为安全敏感 exported-symbol 漂移审查，但该 baseline 不把 internal crate 提升为
+Release API，也不产生外部 SemVer 承诺；`diport` 属于这一类 Internal Provider Contract。
 
 轴 B 是版本化 wire contract，不使用轴 A 的“不留 shim”结论绕过消费方隔离。
 `active` wire 发生破坏式变更时必须：
