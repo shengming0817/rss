@@ -264,7 +264,7 @@ fn domain_placement_remote_endpoint_from_per_domain_url() {
     assert_eq!(identity.spiffe_identity(), None);
     assert_eq!(
         identity.readiness(),
-        Some(httpd::DomainHttpReadiness::PeerEndpointUnresolved)
+        Some(runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable)
     );
 }
 
@@ -285,7 +285,7 @@ fn domain_placement_remote_endpoint_from_shared_url_on_durable_shared() {
     assert_eq!(identity.spiffe_identity(), None);
     assert_eq!(
         identity.readiness(),
-        Some(httpd::DomainHttpReadiness::PeerEndpointUnresolved)
+        Some(runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable)
     );
 }
 
@@ -302,7 +302,7 @@ fn domain_placement_isolated_ignores_shared_url_for_endpoint_mint() {
     assert!(identity.endpoint().is_none());
     assert_eq!(
         identity.readiness(),
-        Some(httpd::DomainHttpReadiness::PeerEndpointUnresolved)
+        Some(runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable)
     );
 }
 

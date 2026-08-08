@@ -17,7 +17,7 @@ use crate::diagnostic::{Finding, GovernanceCheck, finding};
 
 const CONFIG_PATH: &str = "xtask/runtime-deps-guard.toml";
 const STRUCT_NAME: &str = "SharedRuntimeDeps";
-const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::DomainTransport>";
+const EXACT_DOMAIN_TRANSPORT_ARC: &str = "Arc<dyn distributed::HttpContractTransport>";
 const EXACT_IDENTITY_RUNTIME_CONFIG: &str = "identity_composition::IdentityRuntimeConfig";
 const EXACT_PASSWORD_BLOCKLIST_ARC: &str = "Arc<secure::DigestPasswordBlocklist>";
 const EXACT_PSEUDONYM_KEY_RING_ARC: &str = "Arc<secure::PseudonymKeyRing>";
@@ -602,7 +602,7 @@ fn is_exact_domain_transport_arc(
     let Some(TypeParamBound::Trait(bound)) = trait_object.bounds.first() else {
         return false;
     };
-    canonical_path_segments(&bound.path, resolver) == ["distributed", "DomainTransport"]
+    canonical_path_segments(&bound.path, resolver) == ["distributed", "HttpContractTransport"]
 }
 
 fn contains_forbidden_runtime_dep_type(
@@ -837,7 +837,7 @@ mod tests {
         assert_eq!(
             policy.exact_exceptions(),
             [
-                "Arc<dyn distributed::DomainTransport>",
+                "Arc<dyn distributed::HttpContractTransport>",
                 "Arc<oidc::OidcProvider>",
                 "Arc<secure::DigestPasswordBlocklist>",
                 "Arc<secure::PseudonymKeyRing>",
@@ -858,7 +858,7 @@ mod tests {
                 r#"
 schemaVersion = 1
 allowedRoots = ["postgres"]
-exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+exactExceptions = ["Arc<dyn distributed::HttpContractTransport>"]
 extra = true
 "#,
             ),
@@ -899,7 +899,7 @@ extra = true
                 r#"
 schemaVersion = 1
 allowedRoots = []
-exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+exactExceptions = ["Arc<dyn distributed::HttpContractTransport>"]
 "#,
             ),
             (
@@ -907,7 +907,7 @@ exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
                 r#"
 schemaVersion = 1
 allowedRoots = ["postgres", "postgres"]
-exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+exactExceptions = ["Arc<dyn distributed::HttpContractTransport>"]
 "#,
             ),
             (
@@ -915,7 +915,7 @@ exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
                 r#"
 schemaVersion = 1
 allowedRoots = ["settings"]
-exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+exactExceptions = ["Arc<dyn distributed::HttpContractTransport>"]
 "#,
             ),
             (
@@ -923,7 +923,7 @@ exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
                 r#"
 schemaVersion = 1
 allowedRoots = ["distributed"]
-exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+exactExceptions = ["Arc<dyn distributed::HttpContractTransport>"]
 "#,
             ),
             (
@@ -931,7 +931,7 @@ exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
                 r#"
 schemaVersion = 1
 allowedRoots = ["std"]
-exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+exactExceptions = ["Arc<dyn distributed::HttpContractTransport>"]
 "#,
             ),
             (
@@ -939,7 +939,7 @@ exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
                 r#"
 schemaVersion = 1
 allowedRoots = ["postgress"]
-exactExceptions = ["Arc<dyn distributed::DomainTransport>"]
+exactExceptions = ["Arc<dyn distributed::HttpContractTransport>"]
 "#,
             ),
         ] {
@@ -1192,10 +1192,10 @@ exactExceptions = ["Arc<dyn distributed::Other>"]
         let accepted = findings_with_policy(
             r#"
 use std::sync::Arc as SharedArc;
-use distributed::DomainTransport;
+use distributed::HttpContractTransport;
 
 pub struct SharedRuntimeDeps {
-    pub domain_transport: SharedArc<dyn DomainTransport>,
+    pub domain_transport: SharedArc<dyn HttpContractTransport>,
 }
 "#,
         )?;
@@ -1216,7 +1216,7 @@ pub struct SharedRuntimeDeps {
                 "different wrapper",
                 r#"
 pub struct SharedRuntimeDeps {
-    pub domain_transport: Box<dyn distributed::DomainTransport>,
+    pub domain_transport: Box<dyn distributed::HttpContractTransport>,
 }
 "#,
             ),
@@ -1226,7 +1226,7 @@ pub struct SharedRuntimeDeps {
 use std::sync::Arc;
 
 pub struct SharedRuntimeDeps {
-    pub domain_transport: Arc<dyn distributed::DomainTransport + Send>,
+    pub domain_transport: Arc<dyn distributed::HttpContractTransport + Send>,
 }
 "#,
             ),

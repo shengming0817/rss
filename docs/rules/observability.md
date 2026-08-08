@@ -49,8 +49,8 @@
 - probe 名是运维契约，改名必须同步已经存在的运维文档、tests、dashboard 与 alert consumer；不得以“同步”为由新建
   dashboard/alert，新建项在任何阶段都只能按下述有界例外逐项授权。
 - 域 crate repo readiness 由域 crate 边界显式注册，禁止静默吞掉缺失 repo。
-- remote peer readiness 只探测 resolved endpoint 的 TCP 可达性，不反向调用对端 `/readyz`；
-  peer 不可达只影响 readiness，不影响 liveness。
+- outbound domain transport readiness 只读取本进程持有的 SPIFFE material，不执行 peer
+  DNS/TCP/TLS/HTTP 主动探测；peer 不可达通过 dispatch metric 与 trace 诊断，不影响 readiness/liveness。
 - verbose readyz 分 wire 响应、server log、trace、metrics 四通道：wire 必须裁剪敏感 error，
   server log 是主诊断通道，trace 默认跳过 health endpoint。
 

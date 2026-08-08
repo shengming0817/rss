@@ -3371,7 +3371,7 @@ fn contract_package_impacts(
     let mut packages = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     let mut extend = |source: &str, origin: &str| -> Result<()> {
         for (package, reasons) in
-            contract_manifest_impacts(source).with_context(|| origin.to_owned())?
+            contract_manifest_impacts(root, source).with_context(|| origin.to_owned())?
         {
             packages.entry(package).or_default().extend(reasons);
         }
@@ -3401,13 +3401,47 @@ fn contract_package_impacts(
     Ok(packages)
 }
 
-fn contract_manifest_impacts(source: &str) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
+fn contract_manifest_impacts(
+    root: &Path,
+    source: &str,
+) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
     let impact = crate::contract::governance::contract_impact_from_manifest(source)?;
     let mut packages = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
-    packages
-        .entry(impact.owner().to_owned())
-        .or_default()
-        .insert(PackageImpact::ContractOwner);
+    if let Some(owner) = impact.owner() {
+        packages
+            .entry(owner.to_owned())
+            .or_default()
+            .insert(PackageImpact::ContractOwner);
+    } else {
+        let governance = crate::assembly_governance::AssemblyGovernanceIr::<
+            crate::assembly_governance::Core,
+        >::load(root)
+        .context("load canonical assembly consumers for framework contract")?;
+        let consumers = governance
+            .assemblies()
+            .iter()
+            .filter(|assembly| {
+                assembly
+                    .manifest()
+                    .framework_contracts()
+                    .iter()
+                    .any(|mount| mount.id == impact.id())
+            })
+            .map(|assembly| assembly.manifest().name().to_owned())
+            .collect::<BTreeSet<_>>();
+        if consumers.is_empty() {
+            bail!(
+                "framework contract `{}` has no canonical assembly consumer",
+                impact.id()
+            );
+        }
+        for consumer in consumers {
+            packages
+                .entry(consumer)
+                .or_default()
+                .insert(PackageImpact::ContractOwner);
+        }
+    }
     for subscription in impact.subscribers() {
         packages
             .entry(subscription.clone())
@@ -7079,6 +7113,20 @@ mod tests {
     #[test]
     fn contract_owner_subscriber_and_merge_base_deletion_are_preserved() -> Result<()> {
         let workspace = crate::workspace_root()?;
+        assert_eq!(
+            contract_packages(
+                &workspace,
+                "contracts/http/runtime/v1/inventory/response.schema.json",
+                DiffStatus::Added,
+                "unused",
+            )?,
+            BTreeSet::from([
+                "identityaudit".to_owned(),
+                "runtime".to_owned(),
+                "settingsonly".to_owned(),
+            ]),
+            "framework-owned contracts must select every assembly that mounts the contract"
+        );
         assert_eq!(
             contract_packages(
                 &workspace,

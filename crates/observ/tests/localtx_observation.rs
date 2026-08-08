@@ -23,6 +23,7 @@ fn route() -> HttpRouteBinding<TestRoute, LocalTx> {
         ContractBinding::from_static("identity", "identity.password-change", "v1", "test"),
         "/test",
         "POST",
+        &[],
         HttpSuccessStatus::new(204),
         HttpIdempotency::NonIdempotent,
         HttpRouteAuth::ServiceOwned,

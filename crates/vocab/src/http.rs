@@ -357,6 +357,37 @@ pub enum HttpResourceSharing {
     Global,
 }
 
+/// One generated query parameter accepted by a concrete HTTP request target.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HttpQueryParameterSpec {
+    name: &'static str,
+    required: bool,
+}
+
+impl HttpQueryParameterSpec {
+    /// Construct generated query metadata from a request schema property.
+    #[must_use]
+    pub const fn from_static(name: &'static str, required: bool) -> Self {
+        assert!(
+            !name.is_empty(),
+            "HTTP query parameter name must not be empty"
+        );
+        Self { name, required }
+    }
+
+    /// Canonical query parameter name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        self.name
+    }
+
+    /// Whether the request schema requires this query parameter.
+    #[must_use]
+    pub const fn required(self) -> bool {
+        self.required
+    }
+}
+
 /// Atomic proof used to register one generated HTTP route.
 ///
 /// All fields are private. Code generation constructs the complete value in one expression;
@@ -367,6 +398,7 @@ pub struct HttpRouteEvidence {
     contract: ContractBinding,
     path: &'static str,
     method: &'static str,
+    query_parameters: &'static [HttpQueryParameterSpec],
     success_status: HttpSuccessStatus,
     idempotency: HttpIdempotency,
     auth: HttpRouteAuth,
@@ -412,6 +444,7 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
         contract: ContractBinding,
         path: &'static str,
         method: &'static str,
+        query_parameters: &'static [HttpQueryParameterSpec],
         success_status: HttpSuccessStatus,
         idempotency: HttpIdempotency,
         auth: HttpRouteAuth,
@@ -426,6 +459,7 @@ impl<M, C: HttpConsistencyClass> HttpRouteBinding<M, C> {
                 contract,
                 path,
                 method,
+                query_parameters,
                 success_status,
                 idempotency,
                 auth,
@@ -592,6 +626,7 @@ impl HttpRouteEvidence {
         contract: ContractBinding,
         path: &'static str,
         method: &'static str,
+        query_parameters: &'static [HttpQueryParameterSpec],
         success_status: HttpSuccessStatus,
         idempotency: HttpIdempotency,
         auth: HttpRouteAuth,
@@ -606,6 +641,21 @@ impl HttpRouteEvidence {
             "HTTP route path must be absolute"
         );
         assert!(!method.is_empty(), "HTTP route method must not be empty");
+        let mut query_index = 0;
+        while query_index < query_parameters.len() {
+            let mut candidate = query_index + 1;
+            while candidate < query_parameters.len() {
+                assert!(
+                    !static_str_eq(
+                        query_parameters[query_index].name(),
+                        query_parameters[candidate].name(),
+                    ),
+                    "HTTP query parameter names must be unique"
+                );
+                candidate += 1;
+            }
+            query_index += 1;
+        }
         assert!(
             !(resource.is_some() && self_scoped),
             "HTTP resource and self scope are mutually exclusive"
@@ -624,6 +674,7 @@ impl HttpRouteEvidence {
             contract,
             path,
             method,
+            query_parameters,
             success_status,
             idempotency,
             auth,
@@ -663,6 +714,12 @@ impl HttpRouteEvidence {
     #[must_use]
     pub const fn method(&self) -> &'static str {
         self.method
+    }
+
+    /// Generated query parameter vocabulary derived from the request schema.
+    #[must_use]
+    pub const fn query_parameters(&self) -> &'static [HttpQueryParameterSpec] {
+        self.query_parameters
     }
 
     /// Validated successful response status.
@@ -731,6 +788,7 @@ mod tests {
         CONTRACT,
         "/v1/profile",
         "GET",
+        &[],
         HttpSuccessStatus::new(200),
         HttpIdempotency::Idempotent,
         HttpRouteAuth::Permission(RoutePermissionId::IdentityProfileRead),
@@ -772,6 +830,7 @@ mod tests {
             CONTRACT,
             "/v1/profile",
             "GET",
+            &[],
             HttpSuccessStatus::new(202),
             HttpIdempotency::NonIdempotent,
             HttpRouteAuth::Public,
@@ -831,6 +890,7 @@ mod tests {
             CONTRACT,
             "v1/profile",
             "GET",
+            &[],
             HttpSuccessStatus::new(200),
             HttpIdempotency::Idempotent,
             HttpRouteAuth::Public,
@@ -850,6 +910,7 @@ mod tests {
             CONTRACT,
             "/v1/profile",
             "GET",
+            &[],
             HttpSuccessStatus::new(200),
             HttpIdempotency::Idempotent,
             HttpRouteAuth::Public,

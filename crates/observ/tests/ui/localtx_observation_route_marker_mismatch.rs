@@ -14,6 +14,7 @@ fn route() -> HttpRouteBinding<LogoutRoute, LocalTx> {
         ContractBinding::from_static("identity", "identity.logout", "v1", "test"),
         "/test",
         "POST",
+        &[],
         HttpSuccessStatus::new(204),
         HttpIdempotency::NonIdempotent,
         HttpRouteAuth::ServiceOwned,

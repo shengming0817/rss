@@ -40,9 +40,8 @@ impl PlacementEndpoint {
 ///
 /// Remote `endpoint` is minted from the same URL family as outbound transport resolve
 /// (per-domain first; `RSS_DOMAIN_TRANSPORT_URL` shared fallback only when
-/// `RSS_TOPOLOGY=durable-shared`). Mint-time `readiness` stays
-/// [`httpd::DomainHttpReadiness::PeerEndpointUnresolved`] even when an endpoint URL is present —
-/// live TCP/mTLS readiness is probed later by the outbound transport adapter.
+/// `RSS_TOPOLOGY=durable-shared`). Mint-time remote `readiness` is fail-closed until the live
+/// outbound transport-owned readiness sampler is published.
 ///
 /// `spiffe_identity` is reserved for a future peer (server) SPIFFE projection; mint does not
 /// store the local outbound client SPIFFE id here (that material stays on the mTLS policy /
@@ -57,7 +56,7 @@ pub(crate) struct PlacementExecutionSpec {
     workload: String,
     endpoint: Option<PlacementEndpoint>,
     spiffe_identity: Option<String>,
-    readiness: Option<httpd::DomainHttpReadiness>,
+    readiness: Option<runtimeexec::inventory::InventoryPlacementReadiness>,
 }
 
 impl PlacementExecutionSpec {
@@ -86,7 +85,7 @@ impl PlacementExecutionSpec {
     }
 
     #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
-    pub(crate) fn readiness(&self) -> Option<httpd::DomainHttpReadiness> {
+    pub(crate) fn readiness(&self) -> Option<runtimeexec::inventory::InventoryPlacementReadiness> {
         self.readiness
     }
 
@@ -110,9 +109,9 @@ impl PlacementExecutionSpec {
             workload: workload.into(),
             endpoint: None,
             spiffe_identity: None,
-            readiness: mode
-                .is_remote()
-                .then_some(httpd::DomainHttpReadiness::PeerEndpointUnresolved),
+            readiness: mode.is_remote().then_some(
+                runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable,
+            ),
         }
     }
 }
@@ -178,23 +177,9 @@ impl PlacementExecutionPlan {
                             )
                         })
                         .transpose()?;
-                    let readiness = match placement.readiness() {
-                        Some(httpd::DomainHttpReadiness::Ready) => {
-                            runtimeexec::inventory::InventoryPlacementReadiness::Ready
-                        }
-                        Some(httpd::DomainHttpReadiness::MtlsSourceUnavailable) => {
-                            runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable
-                        }
-                        Some(httpd::DomainHttpReadiness::PeerEndpointUnresolved) => {
-                            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnresolved
-                        }
-                        Some(httpd::DomainHttpReadiness::PeerEndpointUnavailable) | None => {
-                            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable
-                        }
-                        Some(_) => {
-                            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable
-                        }
-                    };
+                    let readiness = placement.readiness().unwrap_or(
+                        runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable,
+                    );
                     runtimeexec::inventory::PlacementObservation::remote(
                         placement.domain(),
                         placement.workload(),
@@ -258,11 +243,12 @@ pub(super) fn mint(
             };
             let (endpoint, readiness) = if mode.is_remote() {
                 let endpoint = resolve_remote_endpoint(domain, topology, config);
-                // Mint records URL resolution only; live peer reachability stays unresolved until
-                // the outbound transport TCP/mTLS probe runs.
+                // Remote seed is fail-closed until the local outbound mTLS sampler is published.
                 (
                     endpoint,
-                    Some(httpd::DomainHttpReadiness::PeerEndpointUnresolved),
+                    Some(
+                        runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable,
+                    ),
                 )
             } else {
                 (None, None)

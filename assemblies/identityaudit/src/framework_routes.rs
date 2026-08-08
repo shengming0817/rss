@@ -298,12 +298,6 @@ const fn placement_readiness(
         InventoryPlacementReadiness::MtlsSourceUnavailable => {
             wire::RuntimePlacementReadiness::MtlsSourceUnavailable
         }
-        InventoryPlacementReadiness::PeerEndpointUnresolved => {
-            wire::RuntimePlacementReadiness::PeerEndpointUnresolved
-        }
-        InventoryPlacementReadiness::PeerEndpointUnavailable => {
-            wire::RuntimePlacementReadiness::PeerEndpointUnavailable
-        }
     }
 }
 

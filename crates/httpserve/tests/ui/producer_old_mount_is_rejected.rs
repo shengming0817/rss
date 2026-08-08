@@ -16,6 +16,7 @@ const ROUTE: HttpRouteBinding<RouteMarker, OutboxFact> = HttpRouteBinding::from_
     ),
     "/v1/login",
     "POST",
+    &[],
     HttpSuccessStatus::new(201),
     HttpIdempotency::NonIdempotent,
     HttpRouteAuth::Public,

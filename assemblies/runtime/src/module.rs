@@ -18,7 +18,7 @@
 //!   `DomainModuleResult`，故 A 域产物喂进 B 域 wiring 编译期不可表达（type-system 一档载体）。
 //! - **INVARIANT: WIRING-DEPS-INFRA-ONLY-01 { level = "Medium", exec = "check", source = "code" }（Medium，xtask 字段扫描）**：
 //!   `SharedRuntimeDeps` 字段类型只允许 provider bundle / infra value object 允许列表，以及精确例外
-//!   `Arc<secure::DigestPasswordBlocklist>`、`Arc<dyn distributed::DomainTransport>`、
+//!   `Arc<secure::DigestPasswordBlocklist>`、`Arc<dyn distributed::HttpContractTransport>`、
 //!   `Arc<oidc::OidcProvider>`、`postgres::PgRevocationStore`、`Arc<vault::VaultSigner>`；
 //!   域 service / repo 类型不得经 deps bag 跨 module handoff。
 //!
@@ -94,9 +94,9 @@ pub struct SharedRuntimeDeps {
     pub(crate) settings_readiness: settings_composition::SettingsReadinessDeps,
 
     /// 共享 outbound domain transport dispatch seam。组合根构造真实 provider 并注入 typed trait
-    /// object，后续域/运行时消费者只能经 `distributed::DomainTransport` 发起跨域同步调用；底层 HTTP
+    /// object，后续域/运行时消费者只能经 `distributed::HttpContractTransport` 发起跨域同步调用；底层 HTTP
     /// adapter 的 mTLS source 生命周期另由 `DomainModuleResult.resources` 托管。
-    pub domain_transport: Arc<dyn distributed::DomainTransport>,
+    pub domain_transport: Arc<dyn distributed::HttpContractTransport>,
 }
 
 impl SharedRuntimeDeps {
@@ -112,7 +112,7 @@ impl SharedRuntimeDeps {
         identity_signer: Arc<vault::VaultSigner>,
         settings_config_value_key_name: KeyName,
         settings_readiness: settings_composition::SettingsReadinessDeps,
-        domain_transport: Arc<dyn distributed::DomainTransport>,
+        domain_transport: Arc<dyn distributed::HttpContractTransport>,
     ) -> Self {
         Self::from_parts(
             password_blocklist,
@@ -143,7 +143,7 @@ impl SharedRuntimeDeps {
         identity_signer: Arc<vault::VaultSigner>,
         settings_config_value_key_name: KeyName,
         settings_readiness: settings_composition::SettingsReadinessDeps,
-        domain_transport: Arc<dyn distributed::DomainTransport>,
+        domain_transport: Arc<dyn distributed::HttpContractTransport>,
     ) -> Self {
         let revocation_store = pg.infra().revocation_store();
         Self::from_parts(
@@ -171,7 +171,7 @@ impl SharedRuntimeDeps {
         identity_signer: Arc<vault::VaultSigner>,
         settings_config_value_key_name: KeyName,
         settings_readiness: settings_composition::SettingsReadinessDeps,
-        domain_transport: Arc<dyn distributed::DomainTransport>,
+        domain_transport: Arc<dyn distributed::HttpContractTransport>,
     ) -> Self {
         Self {
             password_blocklist,

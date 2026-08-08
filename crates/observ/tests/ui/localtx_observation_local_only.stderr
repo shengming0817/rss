@@ -1,7 +1,7 @@
 error[E0308]: mismatched types
-  --> tests/ui/localtx_observation_local_only.rs:24:37
+  --> tests/ui/localtx_observation_local_only.rs:25:37
    |
-24 |     let _ = LocalTxObservation::new(route, LocalTxBoundary::SingleDomain);
+25 |     let _ = LocalTxObservation::new(route, LocalTxBoundary::SingleDomain);
    |             ----------------------- ^^^^^ expected `HttpRouteBinding<_, LocalTx>`, found `HttpRouteBinding<Route, LocalOnly>`
    |             |
    |             arguments to this function are incorrect

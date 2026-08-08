@@ -1076,6 +1076,7 @@ mod tests {
                 ),
                 "/api/v1/identity/global/{resourceId}",
                 "GET",
+                &[],
                 vocab::HttpSuccessStatus::new(200),
                 vocab::HttpIdempotency::Idempotent,
                 vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityPolicyRead),

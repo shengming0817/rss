@@ -183,12 +183,7 @@
         "spiffeIdentity": { "type": "string", "minLength": 1 },
         "readiness": {
           "type": "string",
-          "enum": [
-            "ready",
-            "mtls-source-unavailable",
-            "peer-endpoint-unresolved",
-            "peer-endpoint-unavailable"
-          ]
+          "enum": ["ready", "mtls-source-unavailable"]
         }
       },
       "additionalProperties": false

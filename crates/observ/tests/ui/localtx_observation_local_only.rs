@@ -13,6 +13,7 @@ fn main() {
         ContractBinding::from_static("identity", "identity.test", "v1", "test"),
         "/test",
         "POST",
+        &[],
         HttpSuccessStatus::new(204),
         HttpIdempotency::NonIdempotent,
         HttpRouteAuth::ServiceOwned,

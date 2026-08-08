@@ -78,7 +78,7 @@ vault = VaultRuntimeDeps
 identity_signer = Arc<vault::VaultSigner>
 settings_config_value_key_name = KeyName
 settings_readiness = settings_composition::SettingsReadinessDeps
-domain_transport = Arc<dyn distributed::DomainTransport>
+domain_transport = Arc<dyn distributed::HttpContractTransport>
 
 [domainModuleResult.fields]
 probes = Vec<(ProbeName, Box<dyn HealthProbe>)>

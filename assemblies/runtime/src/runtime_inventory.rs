@@ -229,12 +229,6 @@ fn placement_to_wire(
             model::InventoryPlacementReadiness::MtlsSourceUnavailable => {
                 wire::RuntimePlacementReadiness::MtlsSourceUnavailable
             }
-            model::InventoryPlacementReadiness::PeerEndpointUnresolved => {
-                wire::RuntimePlacementReadiness::PeerEndpointUnresolved
-            }
-            model::InventoryPlacementReadiness::PeerEndpointUnavailable => {
-                wire::RuntimePlacementReadiness::PeerEndpointUnavailable
-            }
         },
         spiffe_identity: placement.spiffe_identity().map(parse).transpose()?,
         workload: parse(placement.workload())?,

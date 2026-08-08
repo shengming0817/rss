@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
 use std::future::Future;
-use std::net::{SocketAddr, TcpStream as StdTcpStream};
+use std::net::SocketAddr;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
@@ -45,8 +45,8 @@ use std::time::Duration;
 use axum::serve::{IncomingStream, Listener, ListenerExt};
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use distributed::{
-    DomainMethod, DomainRequest, DomainResponse, DomainTransport, DomainTransportError,
-    DomainTransportErrorKind,
+    HttpContractMethod, HttpContractRequest, HttpContractResponse, HttpContractTransport,
+    HttpContractTransportError, HttpContractTransportErrorKind,
 };
 use reqwest::header::{HeaderName, HeaderValue};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
@@ -59,7 +59,6 @@ use tower::Service;
 
 const DEFAULT_DOMAIN_HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const DEFAULT_DOMAIN_HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const DOMAIN_HTTP_READINESS_CONNECT_TIMEOUT: Duration = Duration::from_millis(200);
 
 /// HTTP 传输 adapter：持有 bind 成功的 listener 地址、graceful-shutdown 的 [`CancellationToken`]
 /// 与 serve 任务句柄。每 listener（Primary / Health / …）一个实例，经组合根 `ShutdownStack` 托管。
@@ -126,7 +125,7 @@ struct DomainHttpTarget {
 
 /// Outbound synchronous cross-domain HTTP transport backed by SPIFFE/mTLS.
 ///
-/// The transport accepts only [`distributed::TransportHeaders`] from callers, which are already a
+/// The transport accepts only [`distributed::HttpContractHeaders`] from callers, which are already a
 /// diagnostic-header allowlist. It never accepts caller-provided credential or tenant headers.
 pub struct DomainHttpTransport {
     targets: BTreeMap<String, DomainHttpTarget>,
@@ -135,16 +134,13 @@ pub struct DomainHttpTransport {
 
 /// Current readiness state for outbound domain HTTP transport.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum DomainHttpReadiness {
+pub enum DomainHttpOwnedReadiness {
     Ready,
     MtlsSourceUnavailable,
-    PeerEndpointUnresolved,
-    PeerEndpointUnavailable,
 }
 
-impl DomainHttpReadiness {
-    /// True only when local mTLS material and all configured peer TCP endpoints are available.
+impl DomainHttpOwnedReadiness {
+    /// True only when this process owns usable outbound mTLS material.
     pub fn is_ready(self) -> bool {
         matches!(self, Self::Ready)
     }
@@ -154,8 +150,6 @@ impl DomainHttpReadiness {
         match self {
             Self::Ready => "ready",
             Self::MtlsSourceUnavailable => "mtls-source-unavailable",
-            Self::PeerEndpointUnresolved => "peer-endpoint-unresolved",
-            Self::PeerEndpointUnavailable => "peer-endpoint-unavailable",
         }
     }
 }
@@ -205,36 +199,27 @@ impl DomainHttpTransport {
         })
     }
 
-    /// Readiness snapshot for local mTLS material and configured peer TCP endpoints.
+    /// Readiness snapshot for transport state owned by this process.
     ///
     /// Production transports hold an `X509Source`; test-only transports do not. Runtime registers
     /// this as `domain_transport_ready`.
-    pub fn readiness(&self) -> DomainHttpReadiness {
-        if self
-            .mtls_source
-            .as_ref()
-            .is_some_and(|source| source.svid().is_err())
-        {
-            return DomainHttpReadiness::MtlsSourceUnavailable;
-        }
-        for target in self.targets.values() {
-            let state = peer_endpoint_readiness(&target.endpoint);
-            if !state.is_ready() {
-                return state;
-            }
-        }
-        DomainHttpReadiness::Ready
+    pub fn owned_readiness(&self) -> DomainHttpOwnedReadiness {
+        owned_readiness_from_source_health(
+            self.mtls_source
+                .as_ref()
+                .is_none_or(spiffe::X509Source::is_healthy),
+        )
     }
 
-    /// Boolean compatibility view of [`DomainHttpTransport::readiness`].
+    /// Boolean view of [`DomainHttpTransport::owned_readiness`].
     pub fn is_ready(&self) -> bool {
-        self.readiness().is_ready()
+        self.owned_readiness().is_ready()
     }
 }
 
 /// Shared outbound domain HTTP transport handle.
 ///
-/// Runtime needs the same concrete transport as both a callable [`DomainTransport`] dependency and
+/// Runtime needs the same concrete transport as both a callable [`HttpContractTransport`] dependency and
 /// a shutdown [`ManagedResource`]. This wrapper keeps those two views pointed at one `Arc`, so the
 /// dispatch seam and the `X509Source` lifecycle cannot drift.
 #[derive(Clone)]
@@ -251,38 +236,47 @@ impl SharedDomainHttpTransport {
     }
 
     /// Readiness snapshot of the underlying transport.
-    pub fn readiness(&self) -> DomainHttpReadiness {
-        self.inner.readiness()
+    pub fn owned_readiness(&self) -> DomainHttpOwnedReadiness {
+        self.inner.owned_readiness()
     }
 
-    /// Boolean compatibility view of [`SharedDomainHttpTransport::readiness`].
+    /// Boolean view of [`SharedDomainHttpTransport::owned_readiness`].
     pub fn is_ready(&self) -> bool {
-        self.readiness().is_ready()
+        self.owned_readiness().is_ready()
     }
 }
 
-impl DomainTransport for DomainHttpTransport {
+impl HttpContractTransport for DomainHttpTransport {
     fn dispatch(
         &self,
-        request: DomainRequest,
+        request: HttpContractRequest,
     ) -> std::pin::Pin<
-        Box<dyn Future<Output = Result<DomainResponse, DomainTransportError>> + Send + '_>,
+        Box<
+            dyn Future<Output = Result<HttpContractResponse, HttpContractTransportError>>
+                + Send
+                + '_,
+        >,
     > {
         Box::pin(async move {
             let domain = request.contract().domain().to_uppercase();
-            let target = self
-                .targets
-                .get(&domain)
-                .ok_or_else(|| DomainTransportError::new(DomainTransportErrorKind::Dispatch))?;
-            let url = request_url(&target.endpoint, request.path())?;
+            let target = self.targets.get(&domain).ok_or_else(|| {
+                HttpContractTransportError::new(HttpContractTransportErrorKind::Dispatch)
+            })?;
+            let url = request_url(&target.endpoint, request.path(), request.query())?;
             let method = reqwest_method(request.method());
             let mut builder = target.client.request(method, url);
             for (name, value) in request.headers().as_slice() {
                 let header_name = HeaderName::from_bytes(name.trim().as_bytes()).map_err(|e| {
-                    DomainTransportError::with_source(DomainTransportErrorKind::Dispatch, &e)
+                    HttpContractTransportError::with_source(
+                        HttpContractTransportErrorKind::Dispatch,
+                        &e,
+                    )
                 })?;
                 let header_value = HeaderValue::from_str(value).map_err(|e| {
-                    DomainTransportError::with_source(DomainTransportErrorKind::Dispatch, &e)
+                    HttpContractTransportError::with_source(
+                        HttpContractTransportErrorKind::Dispatch,
+                        &e,
+                    )
                 })?;
                 builder = builder.header(header_name, header_value);
             }
@@ -292,31 +286,34 @@ impl DomainTransport for DomainHttpTransport {
                 .await
                 .map_err(|e| {
                     if e.is_timeout() {
-                        DomainTransportError::with_source(DomainTransportErrorKind::Timeout, &e)
+                        HttpContractTransportError::with_source(
+                            HttpContractTransportErrorKind::Timeout,
+                            &e,
+                        )
                     } else {
-                        DomainTransportError::with_source(DomainTransportErrorKind::Dispatch, &e)
+                        HttpContractTransportError::with_source(
+                            HttpContractTransportErrorKind::Dispatch,
+                            &e,
+                        )
                     }
                 })?;
             let status = response.status().as_u16();
-            let headers = response_headers(response.headers())?;
-            let body = response
-                .bytes()
-                .await
-                .map_err(|e| {
-                    DomainTransportError::with_source(DomainTransportErrorKind::Dispatch, &e)
-                })?
-                .to_vec();
-            Ok(DomainResponse::new(status, headers, body))
+            let body = bounded_response_body(response).await?;
+            HttpContractResponse::try_new(status, body)
         })
     }
 }
 
-impl DomainTransport for SharedDomainHttpTransport {
+impl HttpContractTransport for SharedDomainHttpTransport {
     fn dispatch(
         &self,
-        request: DomainRequest,
+        request: HttpContractRequest,
     ) -> std::pin::Pin<
-        Box<dyn Future<Output = Result<DomainResponse, DomainTransportError>> + Send + '_>,
+        Box<
+            dyn Future<Output = Result<HttpContractResponse, HttpContractTransportError>>
+                + Send
+                + '_,
+        >,
     > {
         self.inner.dispatch(request)
     }
@@ -507,19 +504,11 @@ fn domain_http_client_builder() -> reqwest::ClientBuilder {
         .timeout(DEFAULT_DOMAIN_HTTP_REQUEST_TIMEOUT)
 }
 
-fn peer_endpoint_readiness(endpoint: &reqwest::Url) -> DomainHttpReadiness {
-    let Ok(addrs) = endpoint.socket_addrs(|| endpoint.port_or_known_default()) else {
-        return DomainHttpReadiness::PeerEndpointUnresolved;
-    };
-    if addrs.is_empty() {
-        return DomainHttpReadiness::PeerEndpointUnresolved;
-    }
-    if addrs.iter().any(|addr| {
-        StdTcpStream::connect_timeout(addr, DOMAIN_HTTP_READINESS_CONNECT_TIMEOUT).is_ok()
-    }) {
-        DomainHttpReadiness::Ready
+fn owned_readiness_from_source_health(source_healthy: bool) -> DomainHttpOwnedReadiness {
+    if source_healthy {
+        DomainHttpOwnedReadiness::Ready
     } else {
-        DomainHttpReadiness::PeerEndpointUnavailable
+        DomainHttpOwnedReadiness::MtlsSourceUnavailable
     }
 }
 
@@ -536,18 +525,28 @@ fn ensure_local_svid(
     Ok(())
 }
 
-fn request_url(endpoint: &reqwest::Url, path: &str) -> Result<reqwest::Url, DomainTransportError> {
+fn request_url(
+    endpoint: &reqwest::Url,
+    path: &str,
+    query: Option<&str>,
+) -> Result<reqwest::Url, HttpContractTransportError> {
     let url = endpoint.clone();
     let base = endpoint.path().trim_end_matches('/');
     let suffix = path.trim_start_matches('/');
     let joined = if suffix.is_empty() {
         if base.is_empty() { "/" } else { base }
     } else if base.is_empty() {
-        return Ok(set_url_path(url, &format!("/{suffix}")));
+        let mut url = set_url_path(url, &format!("/{suffix}"));
+        url.set_query(query);
+        return Ok(url);
     } else {
-        return Ok(set_url_path(url, &format!("{base}/{suffix}")));
+        let mut url = set_url_path(url, &format!("{base}/{suffix}"));
+        url.set_query(query);
+        return Ok(url);
     };
-    Ok(set_url_path(url, joined))
+    let mut url = set_url_path(url, joined);
+    url.set_query(query);
+    Ok(url)
 }
 
 fn set_url_path(mut url: reqwest::Url, path: &str) -> reqwest::Url {
@@ -557,27 +556,54 @@ fn set_url_path(mut url: reqwest::Url, path: &str) -> reqwest::Url {
     url
 }
 
-fn reqwest_method(method: DomainMethod) -> reqwest::Method {
+fn reqwest_method(method: HttpContractMethod) -> reqwest::Method {
     match method {
-        DomainMethod::Get => reqwest::Method::GET,
-        DomainMethod::Post => reqwest::Method::POST,
-        DomainMethod::Put => reqwest::Method::PUT,
-        DomainMethod::Patch => reqwest::Method::PATCH,
-        DomainMethod::Delete => reqwest::Method::DELETE,
+        HttpContractMethod::Get => reqwest::Method::GET,
+        HttpContractMethod::Post => reqwest::Method::POST,
+        HttpContractMethod::Put => reqwest::Method::PUT,
+        HttpContractMethod::Patch => reqwest::Method::PATCH,
+        HttpContractMethod::Delete => reqwest::Method::DELETE,
     }
 }
 
-fn response_headers(
-    headers: &reqwest::header::HeaderMap,
-) -> Result<Vec<(String, String)>, DomainTransportError> {
-    let mut mapped = Vec::with_capacity(headers.len());
-    for (name, value) in headers {
-        let value = value.to_str().map_err(|e| {
-            DomainTransportError::with_source(DomainTransportErrorKind::InvalidResponse, &e)
-        })?;
-        mapped.push((name.as_str().to_owned(), value.to_owned()));
+async fn bounded_response_body(
+    mut response: reqwest::Response,
+) -> Result<Vec<u8>, HttpContractTransportError> {
+    if response
+        .content_length()
+        .is_some_and(|length| length > HttpContractResponse::MAX_BODY_BYTES as u64)
+    {
+        return Err(HttpContractTransportError::new(
+            HttpContractTransportErrorKind::InvalidResponse,
+        ));
     }
-    Ok(mapped)
+
+    let mut body = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        let kind = if error.is_timeout() {
+            HttpContractTransportErrorKind::Timeout
+        } else {
+            HttpContractTransportErrorKind::InvalidResponse
+        };
+        HttpContractTransportError::with_source(kind, &error)
+    })? {
+        let next_len = body.len().checked_add(chunk.len()).ok_or_else(|| {
+            HttpContractTransportError::new(HttpContractTransportErrorKind::InvalidResponse)
+        })?;
+        if next_len > HttpContractResponse::MAX_BODY_BYTES {
+            return Err(HttpContractTransportError::new(
+                HttpContractTransportErrorKind::InvalidResponse,
+            ));
+        }
+        body.try_reserve_exact(chunk.len()).map_err(|error| {
+            HttpContractTransportError::with_source(
+                HttpContractTransportErrorKind::InvalidResponse,
+                &error,
+            )
+        })?;
+        body.extend_from_slice(&chunk);
+    }
+    Ok(body)
 }
 
 /// mTLS acceptor backed by SPIRE Workload API X.509-SVID rotation.
@@ -1115,7 +1141,7 @@ mod tests {
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer, ServerName};
     use rustls::{ClientConfig, RootCertStore, ServerConfig};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-    use tokio::net::TcpStream;
+    use tokio::net::{TcpListener, TcpStream};
     use tokio_rustls::TlsConnector;
 
     /// 极简 router → budget-sealed make service，挂一个 GET /healthz 恒 200。
@@ -1142,7 +1168,16 @@ mod tests {
 
     fn make_domain_transport_svc() -> httpserve::ServerMakeService {
         httpserve::ServerMakeService::from_router_for_test(
-            Router::new().route("/rpc/echo", axum::routing::post(domain_transport_echo)),
+            Router::new()
+                .route("/rpc/echo", axum::routing::post(domain_transport_echo))
+                .route(
+                    "/rpc/tenants/{tenant}/entries",
+                    get(|uri: axum::http::Uri| async move {
+                        uri.path_and_query()
+                            .map(ToString::to_string)
+                            .unwrap_or_default()
+                    }),
+                ),
             httpserve::ServerRequestBudget::for_test(),
         )
     }
@@ -1185,14 +1220,10 @@ mod tests {
         let auth_present = headers.contains_key("authorization");
         let tenant_present = headers.contains_key("x-tenant-id");
         let body = format!(
-            "{}|auth={auth_present}|tenant={tenant_present}",
+            "{}|correlation={correlation_id}|auth={auth_present}|tenant={tenant_present}",
             String::from_utf8_lossy(&body)
         );
         let mut response = (StatusCode::CREATED, body).into_response();
-        response.headers_mut().insert(
-            "x-seen-correlation-id",
-            HeaderValue::from_str(&correlation_id).unwrap_or_else(|_| HeaderValue::from_static("")),
-        );
         response
             .headers_mut()
             .insert("x-domain-transport", HeaderValue::from_static("ok"));
@@ -1211,19 +1242,70 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn domain_request(domain: &'static str) -> DomainRequest {
+    fn domain_request(domain: &'static str) -> HttpContractRequest {
         const HASH: &str =
             "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        DomainRequest::new(
+        const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        let route = vocab::HttpRouteEvidence::from_static(
+            vocab::HttpContractOwner::domain(domain),
             vocab::ContractBinding::from_static(domain, "identity.login", "v1", HASH),
-            DomainMethod::Post,
             "/echo",
-            distributed::TransportHeaders::try_new(vec![(
+            "POST",
+            &[],
+            vocab::HttpSuccessStatus::new(200),
+            vocab::HttpIdempotency::Idempotent,
+            vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            vocab::http::HttpResourceSharing::TenantScoped,
+            vocab::HttpConsistencyLevel::LocalOnly,
+            vocab::HttpEffectProfile::new(EFFECTS),
+        );
+        HttpContractRequest::new(
+            distributed::HttpContractTarget::try_bind(route, &[], &[])
+                .expect("concrete contract target"),
+            distributed::HttpContractHeaders::try_new(vec![(
                 "x-correlation-id".to_owned(),
                 "corr-1500".to_owned(),
             )])
             .expect("diagnostic header"),
             b"payload".to_vec(),
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn parameterized_domain_request(domain: &'static str) -> HttpContractRequest {
+        const HASH: &str =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+        const QUERY: &[vocab::http::HttpQueryParameterSpec] = &[
+            vocab::http::HttpQueryParameterSpec::from_static("cursor", false),
+            vocab::http::HttpQueryParameterSpec::from_static("limit", true),
+        ];
+        let route = vocab::HttpRouteEvidence::from_static(
+            vocab::HttpContractOwner::domain(domain),
+            vocab::ContractBinding::from_static(domain, "audit.list-entries", "v1", HASH),
+            "/tenants/{tenantId}/entries",
+            "GET",
+            QUERY,
+            vocab::HttpSuccessStatus::new(200),
+            vocab::HttpIdempotency::Idempotent,
+            vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            vocab::http::HttpResourceSharing::TenantScoped,
+            vocab::HttpConsistencyLevel::LocalOnly,
+            vocab::HttpEffectProfile::new(EFFECTS),
+        );
+        HttpContractRequest::new(
+            distributed::HttpContractTarget::try_bind(
+                route,
+                &[("tenantId", "blue/team")],
+                &[("limit", "50"), ("cursor", "next + one")],
+            )
+            .expect("bound path and query"),
+            distributed::HttpContractHeaders::empty(),
+            Vec::new(),
         )
     }
 
@@ -1241,11 +1323,26 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn unused_loopback_endpoint() -> reqwest::Url {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind unused port");
-        let addr = listener.local_addr().expect("unused port addr");
-        drop(listener);
-        reqwest::Url::parse(&format!("http://{addr}/rpc")).expect("loopback url")
+    async fn canned_domain_transport(
+        response: Vec<u8>,
+        keep_open: bool,
+    ) -> (DomainHttpTransport, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind canned response server");
+        let addr = listener.local_addr().expect("canned server address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept request");
+            let mut request = vec![0; 8192];
+            let _ = stream.read(&mut request).await.expect("read request");
+            stream.write_all(&response).await.expect("write response");
+            if keep_open {
+                std::future::pending::<()>().await;
+            }
+        });
+        let endpoint =
+            reqwest::Url::parse(&format!("http://{addr}/rpc")).expect("canned server endpoint");
+        (test_domain_transport(endpoint), server)
     }
 
     /// 绑 `127.0.0.1:0` ephemeral → 真 socket 上发 HTTP/1.1 GET，读回完整响应（raw，无 reqwest dep）。
@@ -1544,19 +1641,27 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn domain_transport_readiness_fails_when_peer_endpoint_is_down() {
-        let endpoint = unused_loopback_endpoint();
+    fn domain_transport_owned_readiness_ignores_peer_endpoint_reachability() {
+        let endpoint = reqwest::Url::parse("http://peer.invalid/rpc").expect("unresolvable URL");
         let shared = SharedDomainHttpTransport::new(test_domain_transport(endpoint));
-        let readiness = shared.readiness();
+        let readiness = shared.owned_readiness();
 
         assert_eq!(
             readiness,
-            DomainHttpReadiness::PeerEndpointUnavailable,
-            "domain transport readiness detail should identify peer TCP failure"
+            DomainHttpOwnedReadiness::Ready,
+            "peer reachability is not process-owned readiness"
         );
-        assert!(
-            !readiness.is_ready(),
-            "domain transport readiness must include remote endpoint TCP reachability"
+    }
+
+    #[test]
+    fn domain_transport_owned_readiness_maps_local_source_health() {
+        assert_eq!(
+            owned_readiness_from_source_health(true),
+            DomainHttpOwnedReadiness::Ready
+        );
+        assert_eq!(
+            owned_readiness_from_source_health(false),
+            DomainHttpOwnedReadiness::MtlsSourceUnavailable
         );
     }
 
@@ -1591,16 +1696,122 @@ mod tests {
             .await
             .expect("dispatch");
         assert_eq!(response.status_code(), 201);
-        assert_eq!(response.body(), b"payload|auth=false|tenant=false");
-        assert!(
-            response
-                .headers()
-                .iter()
-                .any(|(name, value)| name == "x-seen-correlation-id" && value == "corr-1500"),
-            "diagnostic header was forwarded and observed by target"
+        assert_eq!(
+            response.body(),
+            b"payload|correlation=corr-1500|auth=false|tenant=false"
         );
 
         assert!(server.shutdown().await.is_ok(), "echo shutdown 收敛");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_dispatches_bound_percent_encoded_path_and_query() {
+        let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
+        let server =
+            HttpServer::serve("domain-transport-target", addr, make_domain_transport_svc())
+                .await
+                .expect("serve target echo");
+        let endpoint =
+            reqwest::Url::parse(&format!("http://{}/rpc", server.local_addr())).expect("url");
+        let transport = SharedDomainHttpTransport::new(test_domain_transport(endpoint));
+
+        let response = transport
+            .dispatch(parameterized_domain_request("identity"))
+            .await
+            .expect("dispatch bound target");
+
+        assert_eq!(
+            response.body(),
+            b"/rpc/tenants/blue%2Fteam/entries?cursor=next+%2B+one&limit=50"
+        );
+        assert!(server.shutdown().await.is_ok(), "target echo shutdown");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_rejects_known_oversize_without_reading_body() {
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
+            HttpContractResponse::MAX_BODY_BYTES + 1
+        )
+        .into_bytes();
+        let (transport, server) = canned_domain_transport(response, true).await;
+
+        let error = tokio::time::timeout(
+            Duration::from_millis(250),
+            transport.dispatch(domain_request("identity")),
+        )
+        .await
+        .expect("content-length rejection must not wait for the body")
+        .expect_err("oversize response is invalid");
+        assert_eq!(
+            error.kind(),
+            HttpContractTransportErrorKind::InvalidResponse
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_enforces_actual_chunked_body_bound() {
+        let body = vec![b'a'; HttpContractResponse::MAX_BODY_BYTES + 1];
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&body);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (transport, server) = canned_domain_transport(response, false).await;
+
+        let error = transport
+            .dispatch(domain_request("identity"))
+            .await
+            .expect_err("actual chunked body above the bound is invalid");
+        assert_eq!(
+            error.kind(),
+            HttpContractTransportErrorKind::InvalidResponse
+        );
+        server.await.expect("canned server completes");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_accepts_chunked_body_at_exact_bound() {
+        let body = vec![b'a'; HttpContractResponse::MAX_BODY_BYTES];
+        let mut response = format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n",
+            body.len()
+        )
+        .into_bytes();
+        response.extend_from_slice(&body);
+        response.extend_from_slice(b"\r\n0\r\n\r\n");
+        let (transport, server) = canned_domain_transport(response, false).await;
+
+        let response = transport
+            .dispatch(domain_request("identity"))
+            .await
+            .expect("body at the exact bound is valid");
+        assert_eq!(response.body().len(), HttpContractResponse::MAX_BODY_BYTES);
+        server.await.expect("canned server completes");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_maps_truncated_body_to_invalid_response() {
+        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nabc".to_vec();
+        let (transport, server) = canned_domain_transport(response, false).await;
+
+        let error = transport
+            .dispatch(domain_request("identity"))
+            .await
+            .expect_err("truncated response is invalid");
+        assert_eq!(
+            error.kind(),
+            HttpContractTransportErrorKind::InvalidResponse
+        );
+        server.await.expect("canned server completes");
     }
 
     #[tokio::test]
@@ -1612,7 +1823,7 @@ mod tests {
             .dispatch(domain_request("audit"))
             .await
             .expect_err("unconfigured target domain fails before network dispatch");
-        assert_eq!(err.kind(), DomainTransportErrorKind::Dispatch);
+        assert_eq!(err.kind(), HttpContractTransportErrorKind::Dispatch);
     }
 
     #[tokio::test]

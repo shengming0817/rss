@@ -275,12 +275,6 @@ fn placement_to_wire(
         model::InventoryPlacementReadiness::MtlsSourceUnavailable => {
             wire::RuntimePlacementReadiness::MtlsSourceUnavailable
         }
-        model::InventoryPlacementReadiness::PeerEndpointUnresolved => {
-            wire::RuntimePlacementReadiness::PeerEndpointUnresolved
-        }
-        model::InventoryPlacementReadiness::PeerEndpointUnavailable => {
-            wire::RuntimePlacementReadiness::PeerEndpointUnavailable
-        }
     };
     Ok(wire::RuntimePlacement {
         domain: placement

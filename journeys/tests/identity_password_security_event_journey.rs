@@ -117,25 +117,22 @@ impl JourneyFixture {
 
 struct NoopDomainTransport;
 
-impl distributed::DomainTransport for NoopDomainTransport {
+impl distributed::HttpContractTransport for NoopDomainTransport {
     fn dispatch(
         &self,
-        _request: distributed::DomainRequest,
+        _request: distributed::HttpContractRequest,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = Result<distributed::DomainResponse, distributed::DomainTransportError>,
+                    Output = Result<
+                        distributed::HttpContractResponse,
+                        distributed::HttpContractTransportError,
+                    >,
                 > + Send
                 + '_,
         >,
     > {
-        Box::pin(async {
-            Ok(distributed::DomainResponse::new(
-                204,
-                Vec::new(),
-                Vec::new(),
-            ))
-        })
+        Box::pin(async { distributed::HttpContractResponse::try_new(204, Vec::new()) })
     }
 }
 

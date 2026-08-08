@@ -1680,9 +1680,7 @@ pub mod inventory {
     ///      "type": "string",
     ///      "enum": [
     ///        "ready",
-    ///        "mtls-source-unavailable",
-    ///        "peer-endpoint-unresolved",
-    ///        "peer-endpoint-unavailable"
+    ///        "mtls-source-unavailable"
     ///      ]
     ///    },
     ///    "spiffeIdentity": {
@@ -1801,9 +1799,7 @@ pub mod inventory {
     ///  "type": "string",
     ///  "enum": [
     ///    "ready",
-    ///    "mtls-source-unavailable",
-    ///    "peer-endpoint-unresolved",
-    ///    "peer-endpoint-unavailable"
+    ///    "mtls-source-unavailable"
     ///  ]
     ///}
     /// ```
@@ -1825,18 +1821,12 @@ pub mod inventory {
         Ready,
         #[serde(rename = "mtls-source-unavailable")]
         MtlsSourceUnavailable,
-        #[serde(rename = "peer-endpoint-unresolved")]
-        PeerEndpointUnresolved,
-        #[serde(rename = "peer-endpoint-unavailable")]
-        PeerEndpointUnavailable,
     }
     impl ::std::fmt::Display for RuntimePlacementReadiness {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Ready => f.write_str("ready"),
                 Self::MtlsSourceUnavailable => f.write_str("mtls-source-unavailable"),
-                Self::PeerEndpointUnresolved => f.write_str("peer-endpoint-unresolved"),
-                Self::PeerEndpointUnavailable => f.write_str("peer-endpoint-unavailable"),
             }
         }
     }
@@ -1846,8 +1836,6 @@ pub mod inventory {
             match value {
                 "ready" => Ok(Self::Ready),
                 "mtls-source-unavailable" => Ok(Self::MtlsSourceUnavailable),
-                "peer-endpoint-unresolved" => Ok(Self::PeerEndpointUnresolved),
-                "peer-endpoint-unavailable" => Ok(Self::PeerEndpointUnavailable),
                 _ => Err("invalid value".into()),
             }
         }
@@ -2276,11 +2264,14 @@ pub mod inventory {
         "runtime",
         "runtime.inventory",
         "v1",
-        "sha256:f3f9c32443f10c2449a3df547a62f0a84297e2c6f2382f66deb661f7d51e09bb",
+        "sha256:2068246486fd433631e0257d18f1e20209f9db354e67b5f554fe4e8b31e429a8",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/runtime/inventory";
+
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
 
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
@@ -2305,6 +2296,7 @@ pub mod inventory {
             CONTRACT,
             PATH,
             "GET",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::RuntimeInventoryRead),

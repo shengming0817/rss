@@ -102,7 +102,7 @@ pub(crate) mod test_support {
     pub(crate) use super::infra::domain_transport::{
         DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV, DOMAIN_TRANSPORT_READY_PROBE_NAME,
         DomainTransportConfig, DomainTransportRuntime, DomainTransportRuntimeInner,
-        InProcDomainTransport, RuntimeDomainTransport, SPIFFE_ENDPOINT_SOCKET_ENV,
+        InProcHttpContractTransport, RuntimeHttpContractTransport, SPIFFE_ENDPOINT_SOCKET_ENV,
         build_domain_transport_targets_from, required_spiffe_endpoint_from_value,
     };
     pub(crate) use super::infra::keyring::{

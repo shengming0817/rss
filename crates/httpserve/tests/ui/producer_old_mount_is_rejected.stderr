@@ -1,7 +1,7 @@
 error[E0599]: the associated function or constant `new` exists for struct `GeneratedPrimaryEndpoint<(), vocab::http::OutboxFact>`, but its trait bounds were not satisfied
-  --> tests/ui/producer_old_mount_is_rejected.rs:36:68
+  --> tests/ui/producer_old_mount_is_rejected.rs:37:68
    |
-36 |     let _ = httpserve::GeneratedPrimaryEndpoint::<(), OutboxFact>::new(ROUTE, handler);
+37 |     let _ = httpserve::GeneratedPrimaryEndpoint::<(), OutboxFact>::new(ROUTE, handler);
    |                                                                    ^^^ associated function or constant cannot be called due to unsatisfied trait bounds
    |
   ::: $WORKSPACE/crates/vocab/src/http.rs

@@ -16,10 +16,10 @@ use crate::phase::PreparedRuntimeInputs;
 use crate::phase::test_support::{
     AUTH_GRANT_SWEEPER_PROBE_NAME, AUTH_GRANT_SWEEPER_WORKER_NAME, AuthGrantSweepFuture,
     AuthGrantSweepRunner, DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV, DOMAIN_TRANSPORT_READY_PROBE_NAME,
-    DomainTransportRuntime, DomainTransportRuntimeInner, InProcDomainTransport,
+    DomainTransportRuntime, DomainTransportRuntimeInner, InProcHttpContractTransport,
     REVOCATION_SWEEPER_PROBE_NAME, REVOCATION_SWEEPER_WORKER_NAME, RLS_READY_PROBE_NAME,
     RevocationSweepFuture, RevocationSweepObservation, RevocationSweepRunner, RlsReadyProbe,
-    RuntimeDomainTransport, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME,
+    RuntimeHttpContractTransport, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME,
     SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME, SPIFFE_ENDPOINT_SOCKET_ENV, SweeperHealth,
     build_dlx_lifecycle_bootstrap_config_from, build_domain_transport_targets_from,
     required_spiffe_endpoint_from_value, run_auth_grant_sweeper_loop, run_revocation_sweeper_loop,
@@ -1833,25 +1833,22 @@ struct NoopRuntimeDomainTransport {
     ready: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl distributed::DomainTransport for NoopRuntimeDomainTransport {
+impl distributed::HttpContractTransport for NoopRuntimeDomainTransport {
     fn dispatch(
         &self,
-        _request: distributed::DomainRequest,
+        _request: distributed::HttpContractRequest,
     ) -> Pin<
         Box<
             dyn Future<
-                    Output = Result<distributed::DomainResponse, distributed::DomainTransportError>,
+                    Output = Result<
+                        distributed::HttpContractResponse,
+                        distributed::HttpContractTransportError,
+                    >,
                 > + Send
                 + '_,
         >,
     > {
-        Box::pin(async {
-            Ok(distributed::DomainResponse::new(
-                204,
-                Vec::new(),
-                Vec::new(),
-            ))
-        })
+        Box::pin(async { distributed::HttpContractResponse::try_new(204, Vec::new()) })
     }
 }
 
@@ -1865,12 +1862,12 @@ impl ManagedResource for NoopRuntimeDomainTransport {
     }
 }
 
-impl RuntimeDomainTransport for NoopRuntimeDomainTransport {
-    fn readiness(&self) -> httpd::DomainHttpReadiness {
+impl RuntimeHttpContractTransport for NoopRuntimeDomainTransport {
+    fn owned_readiness(&self) -> httpd::DomainHttpOwnedReadiness {
         if self.ready.load(std::sync::atomic::Ordering::Acquire) {
-            httpd::DomainHttpReadiness::Ready
+            httpd::DomainHttpOwnedReadiness::Ready
         } else {
-            httpd::DomainHttpReadiness::MtlsSourceUnavailable
+            httpd::DomainHttpOwnedReadiness::MtlsSourceUnavailable
         }
     }
 }
@@ -1880,7 +1877,7 @@ impl RuntimeDomainTransport for NoopRuntimeDomainTransport {
 fn domain_transport_runtime_exports_dispatch_resource_and_readyz() {
     let ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
     let runtime = DomainTransportRuntime::InProc(DomainTransportRuntimeInner::new(
-        InProcDomainTransport,
+        InProcHttpContractTransport,
         ProbeName::parse(DOMAIN_TRANSPORT_READY_PROBE_NAME).expect("valid domain transport probe"),
         distributed::TransportMode::InProc,
     ));

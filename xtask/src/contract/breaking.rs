@@ -176,6 +176,8 @@ fn compare_node(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
     ) {
         compare_node(oi, ni, &item_path(path), out);
     }
+    compare_named_schema_children(old, new, path, "definitions", out, compare_node);
+    compare_named_schema_children(old, new, path, "$defs", out, compare_node);
 }
 
 /// Producer output must remain a subset of the values accepted by the old schema. This is the
@@ -204,6 +206,30 @@ fn compare_output_node(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBr
         new.get("items").filter(|value| value.is_object()),
     ) {
         compare_output_node(old_items, new_items, &item_path(path), out);
+    }
+    compare_named_schema_children(old, new, path, "definitions", out, compare_output_node);
+    compare_named_schema_children(old, new, path, "$defs", out, compare_output_node);
+}
+
+fn compare_named_schema_children(
+    old: &Value,
+    new: &Value,
+    path: &str,
+    keyword: &str,
+    out: &mut Vec<RawBreak>,
+    compare: fn(&Value, &Value, &str, &mut Vec<RawBreak>),
+) {
+    let (Some(old_children), Some(new_children)) = (
+        old.get(keyword).and_then(Value::as_object),
+        new.get(keyword).and_then(Value::as_object),
+    ) else {
+        return;
+    };
+    let definitions_path = child(path, keyword);
+    for (name, old_child) in old_children {
+        if let Some(new_child) = new_children.get(name) {
+            compare(old_child, new_child, &child(&definitions_path, name), out);
+        }
     }
 }
 
@@ -294,6 +320,15 @@ fn check_output_enum(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBrea
             detail: format!("{} 输出 enum 约束被删除", show(path)),
         }),
         (Some(old_values), Some(new_values)) => {
+            for value in old_values {
+                if !new_values.contains(value) {
+                    out.push(RawBreak {
+                        rule: BreakingRule::EnumValueDeleted,
+                        pointer: path.to_string(),
+                        detail: format!("{} 输出删除 enum 值 {value}", show(path)),
+                    });
+                }
+            }
             for value in new_values {
                 if !old_values.contains(value) {
                     out.push(RawBreak {
@@ -4676,6 +4711,37 @@ effects = ["read"]
                 "opposite output narrowing must not report {expected:?}"
             );
         }
+    }
+
+    #[test]
+    fn output_enum_value_removal_is_breaking() {
+        let old = json!({
+            "definitions": {
+                "RuntimePlacement": {
+                    "type": "object",
+                    "properties": {
+                        "readiness": {"enum": ["ready", "peer-unavailable"]}
+                    }
+                }
+            }
+        });
+        let new = json!({
+            "definitions": {
+                "RuntimePlacement": {
+                    "type": "object",
+                    "properties": {
+                        "readiness": {"enum": ["ready"]}
+                    }
+                }
+            }
+        });
+
+        let breaks = compare_schemas_for_direction(&old, &new, SchemaDirection::Output);
+
+        assert!(
+            rules(&breaks).contains(&BreakingRule::EnumValueDeleted),
+            "output enum narrowing changes the active response vocabulary: {breaks:?}"
+        );
     }
 
     #[test]

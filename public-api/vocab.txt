@@ -876,10 +876,31 @@ impl core::marker::Unpin for vocab::http::HttpProducerEvidence
 impl core::marker::UnsafeUnpin for vocab::http::HttpProducerEvidence
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpProducerEvidence
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpProducerEvidence
+pub struct vocab::http::HttpQueryParameterSpec
+impl vocab::http::HttpQueryParameterSpec
+pub const fn vocab::http::HttpQueryParameterSpec::from_static(&'static str, bool) -> Self
+pub const fn vocab::http::HttpQueryParameterSpec::name(self) -> &'static str
+pub const fn vocab::http::HttpQueryParameterSpec::required(self) -> bool
+impl core::clone::Clone for vocab::http::HttpQueryParameterSpec
+pub fn vocab::http::HttpQueryParameterSpec::clone(&self) -> vocab::http::HttpQueryParameterSpec
+impl core::cmp::Eq for vocab::http::HttpQueryParameterSpec
+impl core::cmp::PartialEq for vocab::http::HttpQueryParameterSpec
+pub fn vocab::http::HttpQueryParameterSpec::eq(&self, &vocab::http::HttpQueryParameterSpec) -> bool
+impl core::fmt::Debug for vocab::http::HttpQueryParameterSpec
+pub fn vocab::http::HttpQueryParameterSpec::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::http::HttpQueryParameterSpec
+impl core::marker::StructuralPartialEq for vocab::http::HttpQueryParameterSpec
+impl core::marker::Freeze for vocab::http::HttpQueryParameterSpec
+impl core::marker::Send for vocab::http::HttpQueryParameterSpec
+impl core::marker::Sync for vocab::http::HttpQueryParameterSpec
+impl core::marker::Unpin for vocab::http::HttpQueryParameterSpec
+impl core::marker::UnsafeUnpin for vocab::http::HttpQueryParameterSpec
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::HttpQueryParameterSpec
+impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpQueryParameterSpec
 pub struct vocab::http::HttpRouteBinding<M, C>
 impl<M, C: vocab::http::HttpConsistencyClass> vocab::http::HttpRouteBinding<M, C>
 pub const fn vocab::http::HttpRouteBinding<M, C>::evidence(&self) -> vocab::http::HttpRouteEvidence
-pub const fn vocab::http::HttpRouteBinding<M, C>::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteBinding<M, C>::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, &'static [vocab::http::HttpQueryParameterSpec], vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpEffectProfile) -> Self
 impl<M, C> core::clone::Clone for vocab::http::HttpRouteBinding<M, C>
 pub fn vocab::http::HttpRouteBinding<M, C>::clone(&self) -> Self
 impl<M, C> core::marker::Copy for vocab::http::HttpRouteBinding<M, C>
@@ -897,11 +918,12 @@ pub const fn vocab::http::HttpRouteEvidence::consistency_level(&self) -> vocab::
 pub const fn vocab::http::HttpRouteEvidence::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::http::HttpRouteEvidence::contract_id(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::effect_profile(&self) -> vocab::http::HttpEffectProfile
-pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, &'static [vocab::http::HttpQueryParameterSpec], vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
 pub const fn vocab::http::HttpRouteEvidence::idempotency(&self) -> vocab::http::HttpIdempotency
 pub const fn vocab::http::HttpRouteEvidence::method(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::owner(&self) -> vocab::http::HttpContractOwner
 pub const fn vocab::http::HttpRouteEvidence::path(&self) -> &'static str
+pub const fn vocab::http::HttpRouteEvidence::query_parameters(&self) -> &'static [vocab::http::HttpQueryParameterSpec]
 pub const fn vocab::http::HttpRouteEvidence::resource(&self) -> core::option::Option<&'static str>
 pub const fn vocab::http::HttpRouteEvidence::resource_sharing(&self) -> vocab::http::HttpResourceSharing
 pub const fn vocab::http::HttpRouteEvidence::self_scoped(&self) -> bool
@@ -2094,6 +2116,68 @@ impl core::marker::Unpin for vocab::authz::Action
 impl core::marker::UnsafeUnpin for vocab::authz::Action
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::Action
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::Action
+pub struct vocab::CanonicalSha256Digest(_)
+impl vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::as_str(&self) -> &str
+pub fn vocab::CanonicalSha256Digest::parse(impl core::convert::AsRef<str>) -> core::result::Result<Self, vocab::CanonicalSha256DigestError>
+impl core::clone::Clone for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::clone(&self) -> vocab::CanonicalSha256Digest
+impl core::cmp::Eq for vocab::CanonicalSha256Digest
+impl core::cmp::Ord for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::cmp(&self, &vocab::CanonicalSha256Digest) -> core::cmp::Ordering
+impl core::cmp::PartialEq for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::eq(&self, &vocab::CanonicalSha256Digest) -> bool
+impl core::cmp::PartialOrd for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::partial_cmp(&self, &vocab::CanonicalSha256Digest) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::AsRef<str> for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::as_ref(&self) -> &str
+impl core::convert::TryFrom<&str> for vocab::CanonicalSha256Digest
+pub type vocab::CanonicalSha256Digest::Error = vocab::CanonicalSha256DigestError
+pub fn vocab::CanonicalSha256Digest::try_from(&str) -> core::result::Result<Self, Self::Error>
+impl core::convert::TryFrom<alloc::string::String> for vocab::CanonicalSha256Digest
+pub type vocab::CanonicalSha256Digest::Error = vocab::CanonicalSha256DigestError
+pub fn vocab::CanonicalSha256Digest::try_from(alloc::string::String) -> core::result::Result<Self, Self::Error>
+impl core::fmt::Debug for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for vocab::CanonicalSha256Digest
+impl core::str::traits::FromStr for vocab::CanonicalSha256Digest
+pub type vocab::CanonicalSha256Digest::Err = vocab::CanonicalSha256DigestError
+pub fn vocab::CanonicalSha256Digest::from_str(&str) -> core::result::Result<Self, Self::Err>
+impl serde_core::ser::Serialize for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for vocab::CanonicalSha256Digest
+pub fn vocab::CanonicalSha256Digest::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for vocab::CanonicalSha256Digest
+impl core::marker::Send for vocab::CanonicalSha256Digest
+impl core::marker::Sync for vocab::CanonicalSha256Digest
+impl core::marker::Unpin for vocab::CanonicalSha256Digest
+impl core::marker::UnsafeUnpin for vocab::CanonicalSha256Digest
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::CanonicalSha256Digest
+impl core::panic::unwind_safe::UnwindSafe for vocab::CanonicalSha256Digest
+pub struct vocab::CanonicalSha256DigestError
+impl core::clone::Clone for vocab::CanonicalSha256DigestError
+pub fn vocab::CanonicalSha256DigestError::clone(&self) -> vocab::CanonicalSha256DigestError
+impl core::cmp::Eq for vocab::CanonicalSha256DigestError
+impl core::cmp::PartialEq for vocab::CanonicalSha256DigestError
+pub fn vocab::CanonicalSha256DigestError::eq(&self, &vocab::CanonicalSha256DigestError) -> bool
+impl core::error::Error for vocab::CanonicalSha256DigestError
+impl core::fmt::Debug for vocab::CanonicalSha256DigestError
+pub fn vocab::CanonicalSha256DigestError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for vocab::CanonicalSha256DigestError
+pub fn vocab::CanonicalSha256DigestError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::CanonicalSha256DigestError
+impl core::marker::StructuralPartialEq for vocab::CanonicalSha256DigestError
+impl core::marker::Freeze for vocab::CanonicalSha256DigestError
+impl core::marker::Send for vocab::CanonicalSha256DigestError
+impl core::marker::Sync for vocab::CanonicalSha256DigestError
+impl core::marker::Unpin for vocab::CanonicalSha256DigestError
+impl core::marker::UnsafeUnpin for vocab::CanonicalSha256DigestError
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::CanonicalSha256DigestError
+impl core::panic::unwind_safe::UnwindSafe for vocab::CanonicalSha256DigestError
 pub struct vocab::ContractBinding
 impl vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
@@ -2278,7 +2362,7 @@ impl core::panic::unwind_safe::UnwindSafe for vocab::http::HttpEffectProfile
 pub struct vocab::HttpRouteBinding<M, C>
 impl<M, C: vocab::http::HttpConsistencyClass> vocab::http::HttpRouteBinding<M, C>
 pub const fn vocab::http::HttpRouteBinding<M, C>::evidence(&self) -> vocab::http::HttpRouteEvidence
-pub const fn vocab::http::HttpRouteBinding<M, C>::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteBinding<M, C>::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, &'static [vocab::http::HttpQueryParameterSpec], vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpEffectProfile) -> Self
 impl<M, C> core::clone::Clone for vocab::http::HttpRouteBinding<M, C>
 pub fn vocab::http::HttpRouteBinding<M, C>::clone(&self) -> Self
 impl<M, C> core::marker::Copy for vocab::http::HttpRouteBinding<M, C>
@@ -2296,11 +2380,12 @@ pub const fn vocab::http::HttpRouteEvidence::consistency_level(&self) -> vocab::
 pub const fn vocab::http::HttpRouteEvidence::contract(&self) -> vocab::contract::binding::ContractBinding
 pub const fn vocab::http::HttpRouteEvidence::contract_id(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::effect_profile(&self) -> vocab::http::HttpEffectProfile
-pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
+pub const fn vocab::http::HttpRouteEvidence::from_static(vocab::http::HttpContractOwner, vocab::contract::binding::ContractBinding, &'static str, &'static str, &'static [vocab::http::HttpQueryParameterSpec], vocab::http::HttpSuccessStatus, vocab::http::HttpIdempotency, vocab::http::HttpRouteAuth, core::option::Option<&'static str>, bool, vocab::http::HttpResourceSharing, vocab::http::HttpConsistencyLevel, vocab::http::HttpEffectProfile) -> Self
 pub const fn vocab::http::HttpRouteEvidence::idempotency(&self) -> vocab::http::HttpIdempotency
 pub const fn vocab::http::HttpRouteEvidence::method(&self) -> &'static str
 pub const fn vocab::http::HttpRouteEvidence::owner(&self) -> vocab::http::HttpContractOwner
 pub const fn vocab::http::HttpRouteEvidence::path(&self) -> &'static str
+pub const fn vocab::http::HttpRouteEvidence::query_parameters(&self) -> &'static [vocab::http::HttpQueryParameterSpec]
 pub const fn vocab::http::HttpRouteEvidence::resource(&self) -> core::option::Option<&'static str>
 pub const fn vocab::http::HttpRouteEvidence::resource_sharing(&self) -> vocab::http::HttpResourceSharing
 pub const fn vocab::http::HttpRouteEvidence::self_scoped(&self) -> bool

@@ -1,6 +1,6 @@
 //! Cross-domain synchronous transport seam.
 //!
-//! `DomainTransport` is the provider-agnostic dispatch seam used by composition roots to route a
+//! `HttpContractTransport` is the provider-agnostic dispatch seam used by composition roots to route a
 //! contract HTTP call either in-process or through a remote transport adapter. This module owns the
 //! closed metric label vocab for that seam so `distributed` can emit low-cardinality metrics without
 //! depending on `observ`, `httpserve`, or any adapter crate.
@@ -13,7 +13,7 @@ use vocab::ContractBinding;
 
 /// HTTP method closed set for cross-domain contract dispatch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DomainMethod {
+pub enum HttpContractMethod {
     Get,
     Post,
     Put,
@@ -21,15 +21,26 @@ pub enum DomainMethod {
     Delete,
 }
 
-impl DomainMethod {
+impl HttpContractMethod {
     /// Stable wire label for diagnostics.
     pub fn as_str(self) -> &'static str {
         match self {
-            DomainMethod::Get => "GET",
-            DomainMethod::Post => "POST",
-            DomainMethod::Put => "PUT",
-            DomainMethod::Patch => "PATCH",
-            DomainMethod::Delete => "DELETE",
+            HttpContractMethod::Get => "GET",
+            HttpContractMethod::Post => "POST",
+            HttpContractMethod::Put => "PUT",
+            HttpContractMethod::Patch => "PATCH",
+            HttpContractMethod::Delete => "DELETE",
+        }
+    }
+
+    fn from_route_token(method: &str) -> Option<Self> {
+        match method {
+            "GET" => Some(Self::Get),
+            "POST" => Some(Self::Post),
+            "PUT" => Some(Self::Put),
+            "PATCH" => Some(Self::Patch),
+            "DELETE" => Some(Self::Delete),
+            _ => None,
         }
     }
 }
@@ -86,25 +97,25 @@ const ALLOWED_TRANSPORT_HEADERS: &[&str] = &[
 
 /// Validated header set for a cross-domain dispatch — diagnostic / propagation headers only.
 ///
-/// Newtype funnel: the inner vec is private and [`TransportHeaders::try_new`] is the only
-/// fabricating constructor, so a [`DomainRequest`] cannot carry a raw header bag and
+/// Newtype funnel: the inner vec is private and [`HttpContractHeaders::try_new`] is the only
+/// fabricating constructor, so a [`HttpContractRequest`] cannot carry a raw header bag and
 /// security-relevant headers are *unrepresentable* past this boundary (no caller self-discipline).
 /// Names are matched case-insensitively against [`ALLOWED_TRANSPORT_HEADERS`]; the first disallowed
 /// or empty name fails the whole set closed. Mirrors the crate's `LockKey::parse` fail-closed funnel.
 ///
 /// INVARIANT: TRANSPORT-HEADERS-ALLOWLIST-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }(Hard newtype boundary + fail-closed allowlist funnel):
-/// `DomainRequest` holds `TransportHeaders`, never `Vec<(String, String)>`, so `authorization` /
+/// `HttpContractRequest` holds `HttpContractHeaders`, never `Vec<(String, String)>`, so `authorization` /
 /// `cookie` / `x-tenant-id` cannot reach the wire through this seam.
 ///
 /// `Debug` is exposing (not redacted): by construction the entries are diagnostic / trace-context
-/// headers only — they exist to be observable. The `DomainRequest.headers` field is nonetheless
+/// headers only — they exist to be observable. The `HttpContractRequest.headers` field is nonetheless
 /// `#[redact(sensitivity = secret)]` so a full-request Debug stays terse.
 #[derive(Debug, Clone, Default)]
-pub struct TransportHeaders {
+pub struct HttpContractHeaders {
     entries: Vec<(String, String)>,
 }
 
-impl TransportHeaders {
+impl HttpContractHeaders {
     /// Empty header set (no caller-supplied headers).
     pub fn empty() -> Self {
         Self::default()
@@ -113,14 +124,14 @@ impl TransportHeaders {
     /// Build a validated header set. Each name is trimmed and lower-cased, then checked against the
     /// diagnostic allowlist; the first disallowed or empty name fails the whole set closed. Values
     /// are stored verbatim (the adapter forwards them on the wire request).
-    pub fn try_new(headers: Vec<(String, String)>) -> Result<Self, TransportHeaderError> {
+    pub fn try_new(headers: Vec<(String, String)>) -> Result<Self, HttpContractHeaderError> {
         for (name, _) in &headers {
             let canonical = name.trim().to_ascii_lowercase();
             if canonical.is_empty() {
-                return Err(TransportHeaderError::EmptyName);
+                return Err(HttpContractHeaderError::EmptyName);
             }
             if !ALLOWED_TRANSPORT_HEADERS.contains(&canonical.as_str()) {
-                return Err(TransportHeaderError::Forbidden { name: canonical });
+                return Err(HttpContractHeaderError::Forbidden { name: canonical });
             }
         }
         Ok(Self { entries: headers })
@@ -132,10 +143,10 @@ impl TransportHeaders {
     }
 }
 
-/// [`TransportHeaders`] construction error (fail-closed allowlist funnel).
+/// [`HttpContractHeaders`] construction error (fail-closed allowlist funnel).
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum TransportHeaderError {
+pub enum HttpContractHeaderError {
     /// A header name was empty or whitespace-only.
     #[error("transport header name is empty")]
     EmptyName,
@@ -148,41 +159,163 @@ pub enum TransportHeaderError {
     },
 }
 
+/// Concrete, contract-bound HTTP origin-form target.
+///
+/// The fields are private so a static route template cannot cross the transport seam. The only
+/// constructor binds every generated path parameter and validates query names against generated
+/// request-schema metadata before URL encoding either component.
+#[derive(Clone, secure::Redact)]
+pub struct HttpContractTarget {
+    #[redact(sensitivity = public, mode = "show")]
+    contract: ContractBinding,
+    #[redact(sensitivity = public, mode = "show")]
+    method: HttpContractMethod,
+    #[redact(sensitivity = secret)]
+    path: String,
+    #[redact(sensitivity = secret)]
+    query: Option<String>,
+}
+
+impl HttpContractTarget {
+    /// Bind generated route evidence to concrete path and query parameter values.
+    pub fn try_bind(
+        route: vocab::HttpRouteEvidence,
+        path_parameters: &[(&str, &str)],
+        query_parameters: &[(&str, &str)],
+    ) -> Result<Self, HttpContractTransportError> {
+        let method = HttpContractMethod::from_route_token(route.method())
+            .ok_or_else(invalid_contract_target)?;
+        reject_duplicate_names(path_parameters)?;
+        reject_duplicate_names(query_parameters)?;
+
+        let mut url =
+            url::Url::parse("http://contract.invalid/").map_err(|_| invalid_contract_target())?;
+        let mut used_path_parameters = 0usize;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|()| invalid_contract_target())?;
+            segments.clear();
+            for segment in route.path().trim_start_matches('/').split('/') {
+                if let Some(name) = route_parameter_name(segment) {
+                    let (_, value) = path_parameters
+                        .iter()
+                        .find(|(candidate, _)| *candidate == name)
+                        .ok_or_else(invalid_contract_target)?;
+                    if value.is_empty() {
+                        return Err(invalid_contract_target());
+                    }
+                    used_path_parameters += 1;
+                    segments.push(value);
+                } else {
+                    if segment.contains(['{', '}']) {
+                        return Err(invalid_contract_target());
+                    }
+                    segments.push(segment);
+                }
+            }
+        }
+        if used_path_parameters != path_parameters.len() {
+            return Err(invalid_contract_target());
+        }
+
+        let specs = route.query_parameters();
+        if query_parameters
+            .iter()
+            .any(|(name, _)| !specs.iter().any(|spec| spec.name() == *name))
+        {
+            return Err(invalid_contract_target());
+        }
+        {
+            let mut pairs = url.query_pairs_mut();
+            for spec in specs {
+                match query_parameters
+                    .iter()
+                    .find(|(name, _)| *name == spec.name())
+                {
+                    Some((_, value)) => {
+                        pairs.append_pair(spec.name(), value);
+                    }
+                    None if spec.required() => return Err(invalid_contract_target()),
+                    None => {}
+                }
+            }
+        }
+
+        Ok(Self {
+            contract: route.contract(),
+            method,
+            path: url.path().to_owned(),
+            query: url.query().map(str::to_owned),
+        })
+    }
+
+    /// Contract binding derived from generated route evidence.
+    pub fn contract(&self) -> &ContractBinding {
+        &self.contract
+    }
+
+    /// Closed HTTP method derived from generated route evidence.
+    pub fn method(&self) -> HttpContractMethod {
+        self.method
+    }
+
+    /// Percent-encoded concrete path.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// Percent-encoded concrete query without the leading `?`.
+    pub fn query(&self) -> Option<&str> {
+        self.query.as_deref()
+    }
+}
+
+fn invalid_contract_target() -> HttpContractTransportError {
+    HttpContractTransportError::new(HttpContractTransportErrorKind::Dispatch)
+}
+
+fn reject_duplicate_names(parameters: &[(&str, &str)]) -> Result<(), HttpContractTransportError> {
+    for (index, (name, _)) in parameters.iter().enumerate() {
+        if name.is_empty()
+            || parameters[index + 1..]
+                .iter()
+                .any(|(candidate, _)| candidate == name)
+        {
+            return Err(invalid_contract_target());
+        }
+    }
+    Ok(())
+}
+
+fn route_parameter_name(segment: &str) -> Option<&str> {
+    segment
+        .strip_prefix('{')
+        .and_then(|name| name.strip_suffix('}'))
+        .filter(|name| !name.is_empty() && !name.contains(['{', '}']))
+}
+
 /// Minimal cross-domain contract HTTP dispatch request.
 ///
 /// `Debug` is derived through `secure::Redact`: adding a field without an explicit `#[redact(...)]`
 /// annotation is a compile error. Path, headers, and body may contain tenant/resource identifiers
 /// or credentials and are therefore never rendered in clear text.
 #[derive(Clone, secure::Redact)]
-pub struct DomainRequest {
+pub struct HttpContractRequest {
     #[redact(sensitivity = public, mode = "show")]
-    contract: ContractBinding,
-    #[redact(sensitivity = public, mode = "show")]
-    method: DomainMethod,
+    target: HttpContractTarget,
     #[redact(sensitivity = secret)]
-    path: String,
-    #[redact(sensitivity = secret)]
-    headers: TransportHeaders,
+    headers: HttpContractHeaders,
     #[redact(sensitivity = secret)]
     body: Vec<u8>,
 }
 
-impl DomainRequest {
-    /// Construct a dispatch request. `contract` binds the target domain and contract id at a single
-    /// source (`generated::…::CONTRACT`), so they cannot drift; `headers` is a validated
-    /// [`TransportHeaders`] set. The caller passes a contract-derived path; this seam deliberately
-    /// does not parse HTTP.
-    pub fn new(
-        contract: ContractBinding,
-        method: DomainMethod,
-        path: impl Into<String>,
-        headers: TransportHeaders,
-        body: Vec<u8>,
-    ) -> Self {
+impl HttpContractRequest {
+    /// Construct a dispatch request from one validated concrete target.
+    #[must_use]
+    pub fn new(target: HttpContractTarget, headers: HttpContractHeaders, body: Vec<u8>) -> Self {
         Self {
-            contract,
-            method,
-            path: path.into(),
+            target,
             headers,
             body,
         }
@@ -190,21 +323,26 @@ impl DomainRequest {
 
     /// Contract binding (target domain + contract id + version + schema hash, same-source).
     pub fn contract(&self) -> &ContractBinding {
-        &self.contract
+        self.target.contract()
     }
 
     /// HTTP method.
-    pub fn method(&self) -> DomainMethod {
-        self.method
+    pub fn method(&self) -> HttpContractMethod {
+        self.target.method()
     }
 
     /// Request path. This may contain resource identifiers; do not place it in metric labels.
     pub fn path(&self) -> &str {
-        &self.path
+        self.target.path()
+    }
+
+    /// Percent-encoded concrete query without the leading `?`.
+    pub fn query(&self) -> Option<&str> {
+        self.target.query()
     }
 
     /// Validated request headers (diagnostic / propagation only).
-    pub fn headers(&self) -> &TransportHeaders {
+    pub fn headers(&self) -> &HttpContractHeaders {
         &self.headers
     }
 
@@ -216,33 +354,30 @@ impl DomainRequest {
 
 /// Minimal cross-domain contract HTTP dispatch response.
 #[derive(Clone, secure::Redact)]
-pub struct DomainResponse {
+pub struct HttpContractResponse {
     #[redact(sensitivity = public, mode = "show")]
     status_code: u16,
-    #[redact(sensitivity = secret)]
-    headers: Vec<(String, String)>,
     #[redact(sensitivity = secret)]
     body: Vec<u8>,
 }
 
-impl DomainResponse {
-    /// Construct a dispatch response.
-    pub fn new(status_code: u16, headers: Vec<(String, String)>, body: Vec<u8>) -> Self {
-        Self {
-            status_code,
-            headers,
-            body,
+impl HttpContractResponse {
+    /// Maximum response body size accepted across the transport seam.
+    pub const MAX_BODY_BYTES: usize = 1024 * 1024;
+
+    /// Construct a bounded dispatch response.
+    pub fn try_new(status_code: u16, body: Vec<u8>) -> Result<Self, HttpContractTransportError> {
+        if body.len() > Self::MAX_BODY_BYTES {
+            return Err(HttpContractTransportError::new(
+                HttpContractTransportErrorKind::InvalidResponse,
+            ));
         }
+        Ok(Self { status_code, body })
     }
 
     /// HTTP status code returned by the target domain transport.
     pub fn status_code(&self) -> u16 {
         self.status_code
-    }
-
-    /// Response headers.
-    pub fn headers(&self) -> &[(String, String)] {
-        &self.headers
     }
 
     /// Response body bytes.
@@ -253,27 +388,41 @@ impl DomainResponse {
 
 /// Domain transport error kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DomainTransportErrorKind {
+pub enum HttpContractTransportErrorKind {
     Dispatch,
     Timeout,
     InvalidResponse,
 }
 
+impl HttpContractTransportErrorKind {
+    /// Stable low-cardinality tracing label.
+    pub fn as_label(self) -> &'static str {
+        match self {
+            Self::Dispatch => "dispatch",
+            Self::Timeout => "timeout",
+            Self::InvalidResponse => "invalid_response",
+        }
+    }
+}
+
 /// Domain transport failure. Display is intentionally constant and never expands raw source text.
 #[derive(Debug, Clone)]
-pub struct DomainTransportError {
-    kind: DomainTransportErrorKind,
+pub struct HttpContractTransportError {
+    kind: HttpContractTransportErrorKind,
     source: Option<secure::LastError>,
 }
 
-impl DomainTransportError {
+impl HttpContractTransportError {
     /// Construct an error without a lower-level source.
-    pub fn new(kind: DomainTransportErrorKind) -> Self {
+    pub fn new(kind: HttpContractTransportErrorKind) -> Self {
         Self { kind, source: None }
     }
 
     /// Construct an error with a redacted source summary.
-    pub fn with_source(kind: DomainTransportErrorKind, source: &dyn std::error::Error) -> Self {
+    pub fn with_source(
+        kind: HttpContractTransportErrorKind,
+        source: &dyn std::error::Error,
+    ) -> Self {
         Self {
             kind,
             source: Some(secure::LastError::from_error(source)),
@@ -281,7 +430,7 @@ impl DomainTransportError {
     }
 
     /// Error kind.
-    pub fn kind(&self) -> DomainTransportErrorKind {
+    pub fn kind(&self) -> HttpContractTransportErrorKind {
         self.kind
     }
 
@@ -291,37 +440,39 @@ impl DomainTransportError {
     }
 }
 
-impl std::fmt::Display for DomainTransportError {
+impl std::fmt::Display for HttpContractTransportError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.kind {
-            DomainTransportErrorKind::Dispatch => f.write_str("domain transport dispatch failed"),
-            DomainTransportErrorKind::Timeout => f.write_str("domain transport timed out"),
-            DomainTransportErrorKind::InvalidResponse => {
+            HttpContractTransportErrorKind::Dispatch => {
+                f.write_str("domain transport dispatch failed")
+            }
+            HttpContractTransportErrorKind::Timeout => f.write_str("domain transport timed out"),
+            HttpContractTransportErrorKind::InvalidResponse => {
                 f.write_str("domain transport returned an invalid response")
             }
         }
     }
 }
 
-impl std::error::Error for DomainTransportError {}
+impl std::error::Error for HttpContractTransportError {}
 
 /// Object-safe cross-domain transport trait.
-pub trait DomainTransport: Send + Sync {
+pub trait HttpContractTransport: Send + Sync {
     /// Dispatch one contract HTTP request.
     fn dispatch(
         &self,
-        request: DomainRequest,
-    ) -> BoxFuture<'_, Result<DomainResponse, DomainTransportError>>;
+        request: HttpContractRequest,
+    ) -> BoxFuture<'_, Result<HttpContractResponse, HttpContractTransportError>>;
 }
 
 /// Metrics/tracing wrapper for a concrete domain transport.
-pub struct InstrumentedDomainTransport<T> {
+pub struct InstrumentedHttpContractTransport<T> {
     inner: T,
     mode: TransportMode,
     clock: Box<dyn diport::Clock>,
 }
 
-impl<T> InstrumentedDomainTransport<T> {
+impl<T> InstrumentedHttpContractTransport<T> {
     /// Construct an instrumented transport. `clock` is injected to satisfy workspace clock
     /// discipline; this crate never calls system time directly.
     pub fn new(inner: T, mode: TransportMode, clock: Box<dyn diport::Clock>) -> Self {
@@ -339,11 +490,11 @@ impl<T> InstrumentedDomainTransport<T> {
     }
 }
 
-impl<T: DomainTransport> DomainTransport for InstrumentedDomainTransport<T> {
+impl<T: HttpContractTransport> HttpContractTransport for InstrumentedHttpContractTransport<T> {
     fn dispatch(
         &self,
-        request: DomainRequest,
-    ) -> BoxFuture<'_, Result<DomainResponse, DomainTransportError>> {
+        request: HttpContractRequest,
+    ) -> BoxFuture<'_, Result<HttpContractResponse, HttpContractTransportError>> {
         Box::pin(async move {
             let mode = self.mode;
             let start = self.clock.now();
@@ -352,13 +503,19 @@ impl<T: DomainTransport> DomainTransport for InstrumentedDomainTransport<T> {
                 transport_mode = mode.as_label(),
                 domain = request.contract().domain(),
                 contract_id = request.contract().contract_id(),
+                outcome = tracing::field::Empty,
+                error_kind = tracing::field::Empty,
             );
-            let result = self.inner.dispatch(request).instrument(span).await;
+            let result = self.inner.dispatch(request).instrument(span.clone()).await;
             let outcome = if result.is_ok() {
                 TransportOutcome::Ok
             } else {
                 TransportOutcome::Error
             };
+            span.record("outcome", outcome.as_label());
+            if let Err(error) = &result {
+                span.record("error_kind", error.kind().as_label());
+            }
             let seconds = elapsed_seconds(start, self.clock.now());
             record_dispatch_metrics(mode, outcome, seconds);
             result
@@ -391,11 +548,101 @@ fn record_dispatch_metrics(mode: TransportMode, outcome: TransportOutcome, secon
 mod tests {
     use super::*;
     use futures::FutureExt as _;
+    use std::collections::HashMap;
     use std::sync::Mutex;
     use std::time::{Duration, SystemTime};
 
+    const TEST_EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Read];
+
+    fn route_evidence(path: &'static str, method: &'static str) -> vocab::HttpRouteEvidence {
+        route_evidence_with_query(path, method, &[])
+    }
+
+    fn route_evidence_with_query(
+        path: &'static str,
+        method: &'static str,
+        query_parameters: &'static [vocab::http::HttpQueryParameterSpec],
+    ) -> vocab::HttpRouteEvidence {
+        const HASH: &str =
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        vocab::HttpRouteEvidence::from_static(
+            vocab::HttpContractOwner::domain("identity"),
+            ContractBinding::from_static("identity", "identity.login", "v1", HASH),
+            path,
+            method,
+            query_parameters,
+            vocab::HttpSuccessStatus::new(200),
+            vocab::HttpIdempotency::Idempotent,
+            vocab::HttpRouteAuth::Public,
+            None,
+            false,
+            vocab::http::HttpResourceSharing::TenantScoped,
+            vocab::HttpConsistencyLevel::LocalOnly,
+            vocab::HttpEffectProfile::new(TEST_EFFECTS),
+        )
+    }
+
     struct StepClock {
         next: Mutex<u64>,
+    }
+
+    #[derive(Clone)]
+    struct CapturedSpan {
+        name: &'static str,
+        fields: HashMap<String, String>,
+    }
+
+    #[derive(Default)]
+    struct SpanCapture {
+        spans: Mutex<Vec<CapturedSpan>>,
+    }
+
+    struct SpanFields<'a>(&'a mut HashMap<String, String>);
+
+    impl tracing::field::Visit for SpanFields<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+    }
+
+    impl tracing::Subscriber for SpanCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        #[allow(clippy::expect_used)]
+        fn new_span(&self, attributes: &tracing::span::Attributes<'_>) -> tracing::Id {
+            let mut fields = HashMap::new();
+            attributes.record(&mut SpanFields(&mut fields));
+            let mut spans = self.spans.lock().expect("span capture lock");
+            let id = u64::try_from(spans.len() + 1).unwrap_or(u64::MAX);
+            spans.push(CapturedSpan {
+                name: attributes.metadata().name(),
+                fields,
+            });
+            tracing::Id::from_u64(id)
+        }
+
+        #[allow(clippy::expect_used)]
+        fn record(&self, span: &tracing::Id, values: &tracing::span::Record<'_>) {
+            let mut fields = HashMap::new();
+            values.record(&mut SpanFields(&mut fields));
+            let index = usize::try_from(span.into_u64())
+                .expect("span id fits usize")
+                .saturating_sub(1);
+            if let Some(captured) = self.spans.lock().expect("span capture lock").get_mut(index) {
+                captured.fields.extend(fields);
+            }
+        }
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::Id) {}
+        fn exit(&self, _span: &tracing::Id) {}
     }
 
     impl StepClock {
@@ -417,25 +664,25 @@ mod tests {
 
     struct OkTransport;
 
-    impl DomainTransport for OkTransport {
+    impl HttpContractTransport for OkTransport {
         fn dispatch(
             &self,
-            _request: DomainRequest,
-        ) -> BoxFuture<'_, Result<DomainResponse, DomainTransportError>> {
-            async { Ok(DomainResponse::new(204, Vec::new(), Vec::new())) }.boxed()
+            _request: HttpContractRequest,
+        ) -> BoxFuture<'_, Result<HttpContractResponse, HttpContractTransportError>> {
+            async { HttpContractResponse::try_new(204, Vec::new()) }.boxed()
         }
     }
 
     struct FailTransport;
 
-    impl DomainTransport for FailTransport {
+    impl HttpContractTransport for FailTransport {
         fn dispatch(
             &self,
-            _request: DomainRequest,
-        ) -> BoxFuture<'_, Result<DomainResponse, DomainTransportError>> {
+            _request: HttpContractRequest,
+        ) -> BoxFuture<'_, Result<HttpContractResponse, HttpContractTransportError>> {
             async {
-                Err(DomainTransportError::with_source(
-                    DomainTransportErrorKind::Dispatch,
+                Err(HttpContractTransportError::with_source(
+                    HttpContractTransportErrorKind::Dispatch,
                     &std::io::Error::other("leak-marker-token"),
                 ))
             }
@@ -444,16 +691,20 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    // reason: 测试用 allowlisted literal 构造 TransportHeaders，item-level carve-out（error-handling.md §Carve-out）。
-    fn request() -> DomainRequest {
-        const HASH: &str =
-            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-        DomainRequest::new(
-            ContractBinding::from_static("identity", "identity.login", "v1", HASH),
-            DomainMethod::Post,
-            "/api/v1/tenant-123/session",
-            TransportHeaders::try_new(vec![("x-correlation-id".to_owned(), "corr-abc".to_owned())])
-                .expect("allowlisted diagnostic header"),
+    // reason: 测试用 allowlisted literal 构造 HttpContractHeaders，item-level carve-out（error-handling.md §Carve-out）。
+    fn request() -> HttpContractRequest {
+        HttpContractRequest::new(
+            HttpContractTarget::try_bind(
+                route_evidence("/api/v1/tenant-123/session", "POST"),
+                &[],
+                &[],
+            )
+            .expect("concrete contract target"),
+            HttpContractHeaders::try_new(vec![(
+                "x-correlation-id".to_owned(),
+                "corr-abc".to_owned(),
+            )])
+            .expect("allowlisted diagnostic header"),
             b"password=secret".to_vec(),
         )
     }
@@ -464,11 +715,62 @@ mod tests {
         assert_eq!(TransportMode::Remote.as_label(), "remote");
         assert_eq!(TransportOutcome::Ok.as_label(), "ok");
         assert_eq!(TransportOutcome::Error.as_label(), "error");
-        assert_eq!(DomainMethod::Get.as_str(), "GET");
-        assert_eq!(DomainMethod::Post.as_str(), "POST");
-        assert_eq!(DomainMethod::Put.as_str(), "PUT");
-        assert_eq!(DomainMethod::Patch.as_str(), "PATCH");
-        assert_eq!(DomainMethod::Delete.as_str(), "DELETE");
+        assert_eq!(HttpContractMethod::Get.as_str(), "GET");
+        assert_eq!(HttpContractMethod::Post.as_str(), "POST");
+        assert_eq!(HttpContractMethod::Put.as_str(), "PUT");
+        assert_eq!(HttpContractMethod::Patch.as_str(), "PATCH");
+        assert_eq!(HttpContractMethod::Delete.as_str(), "DELETE");
+    }
+
+    #[test]
+    fn http_contract_request_rejects_method_outside_closed_set() {
+        let error = HttpContractTarget::try_bind(
+            route_evidence("/api/v1/tenant-123/session", "TRACE"),
+            &[],
+            &[],
+        )
+        .expect_err("generated route method must belong to the transport closed set");
+        assert_eq!(error.kind(), HttpContractTransportErrorKind::Dispatch);
+    }
+
+    #[test]
+    fn unresolved_route_template_cannot_become_a_dispatch_request() {
+        let error = HttpContractTarget::try_bind(
+            route_evidence("/api/v1/tenants/{tenantId}/entries", "GET"),
+            &[],
+            &[],
+        )
+        .expect_err("a static path template is not a concrete HTTP request target");
+
+        assert_eq!(error.kind(), HttpContractTransportErrorKind::Dispatch);
+    }
+
+    #[test]
+    fn contract_target_binds_and_encodes_path_and_generated_query_parameters() {
+        const QUERY: &[vocab::http::HttpQueryParameterSpec] = &[
+            vocab::http::HttpQueryParameterSpec::from_static("cursor", false),
+            vocab::http::HttpQueryParameterSpec::from_static("limit", true),
+        ];
+        let route = route_evidence_with_query("/api/v1/tenants/{tenantId}/entries", "GET", QUERY);
+
+        let target = HttpContractTarget::try_bind(
+            route,
+            &[("tenantId", "tenant/blue")],
+            &[("limit", "50"), ("cursor", "next + one")],
+        )
+        .expect("complete generated target binding");
+
+        assert_eq!(target.path(), "/api/v1/tenants/tenant%2Fblue/entries");
+        assert_eq!(target.query(), Some("cursor=next+%2B+one&limit=50"));
+        for invalid in [
+            vec![("cursor", "next")],
+            vec![("limit", "50"), ("unknown", "value")],
+            vec![("limit", "50"), ("limit", "51")],
+        ] {
+            assert!(
+                HttpContractTarget::try_bind(route, &[("tenantId", "tenant")], &invalid).is_err()
+            );
+        }
     }
 
     #[test]
@@ -494,9 +796,9 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    // reason: 测试用 allowlisted literal 构造 TransportHeaders，item-level carve-out（error-handling.md §Carve-out）。
+    // reason: 测试用 allowlisted literal 构造 HttpContractHeaders，item-level carve-out（error-handling.md §Carve-out）。
     fn transport_headers_allow_diagnostic_headers_case_insensitively() {
-        let headers = TransportHeaders::try_new(vec![
+        let headers = HttpContractHeaders::try_new(vec![
             ("x-correlation-id".to_owned(), "c-1".to_owned()),
             ("Traceparent".to_owned(), "00-trace".to_owned()),
             ("REQUEST-ID".to_owned(), "r-1".to_owned()),
@@ -504,7 +806,7 @@ mod tests {
         .expect("diagnostic headers are allowlisted (case-insensitive)");
         assert_eq!(headers.as_slice().len(), 3);
         // empty() yields no headers.
-        assert!(TransportHeaders::empty().as_slice().is_empty());
+        assert!(HttpContractHeaders::empty().as_slice().is_empty());
     }
 
     #[test]
@@ -520,9 +822,9 @@ mod tests {
             "x-api-key",
             "baggage",
         ] {
-            let result = TransportHeaders::try_new(vec![(name.to_owned(), "v".to_owned())]);
+            let result = HttpContractHeaders::try_new(vec![(name.to_owned(), "v".to_owned())]);
             assert!(
-                matches!(result, Err(TransportHeaderError::Forbidden { .. })),
+                matches!(result, Err(HttpContractHeaderError::Forbidden { .. })),
                 "name={name} must be rejected fail-closed"
             );
         }
@@ -530,40 +832,49 @@ mod tests {
 
     #[test]
     fn transport_headers_reject_empty_name() {
-        let result = TransportHeaders::try_new(vec![("   ".to_owned(), "v".to_owned())]);
-        assert!(matches!(result, Err(TransportHeaderError::EmptyName)));
+        let result = HttpContractHeaders::try_new(vec![("   ".to_owned(), "v".to_owned())]);
+        assert!(matches!(result, Err(HttpContractHeaderError::EmptyName)));
     }
 
     #[test]
     fn transport_headers_one_forbidden_fails_whole_set() {
         // a single disallowed header rejects the whole set — no partial acceptance.
-        let result = TransportHeaders::try_new(vec![
+        let result = HttpContractHeaders::try_new(vec![
             ("x-correlation-id".to_owned(), "ok".to_owned()),
             ("authorization".to_owned(), "Bearer leak".to_owned()),
         ]);
         assert!(
-            matches!(result, Err(TransportHeaderError::Forbidden { name }) if name == "authorization"),
+            matches!(result, Err(HttpContractHeaderError::Forbidden { name }) if name == "authorization"),
         );
     }
 
     #[test]
     fn domain_response_debug_redacts_sensitive_fields() {
-        let response = DomainResponse::new(
-            200,
-            vec![("set-cookie".to_owned(), "session=secret".to_owned())],
-            b"secret-body".to_vec(),
-        );
+        let response =
+            HttpContractResponse::try_new(200, b"secret-body".to_vec()).expect("bounded response");
         let dbg = format!("{response:?}");
         assert!(dbg.contains("200"), "{dbg}");
-        assert!(!dbg.contains("session=secret"), "{dbg}");
         assert!(!dbg.contains("secret-body"), "{dbg}");
         assert!(dbg.contains("<redacted>"), "{dbg}");
     }
 
     #[test]
+    fn domain_response_constructor_enforces_body_bound() {
+        let exact =
+            HttpContractResponse::try_new(200, vec![0; HttpContractResponse::MAX_BODY_BYTES])
+                .expect("body at the bound is valid");
+        assert_eq!(exact.body().len(), HttpContractResponse::MAX_BODY_BYTES);
+
+        let err =
+            HttpContractResponse::try_new(200, vec![0; HttpContractResponse::MAX_BODY_BYTES + 1])
+                .expect_err("body above the bound is invalid");
+        assert_eq!(err.kind(), HttpContractTransportErrorKind::InvalidResponse);
+    }
+
+    #[test]
     fn error_display_does_not_expand_source_text() {
-        let err = DomainTransportError::with_source(
-            DomainTransportErrorKind::Dispatch,
+        let err = HttpContractTransportError::with_source(
+            HttpContractTransportErrorKind::Dispatch,
             &std::io::Error::other("leak-marker-token"),
         );
         assert_eq!(err.to_string(), "domain transport dispatch failed");
@@ -577,12 +888,12 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             futures::executor::block_on(async {
-                let ok = InstrumentedDomainTransport::new(
+                let ok = InstrumentedHttpContractTransport::new(
                     OkTransport,
                     TransportMode::InProc,
                     Box::new(StepClock::new()),
                 );
-                let fail = InstrumentedDomainTransport::new(
+                let fail = InstrumentedHttpContractTransport::new(
                     FailTransport,
                     TransportMode::Remote,
                     Box::new(StepClock::new()),
@@ -609,5 +920,46 @@ mod tests {
         assert!(rendered.contains("transport_mode=\"remote\""), "{rendered}");
         assert!(rendered.contains("outcome=\"ok\""), "{rendered}");
         assert!(rendered.contains("outcome=\"error\""), "{rendered}");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn instrumentation_records_closed_span_outcome_and_error_kind() {
+        let subscriber = std::sync::Arc::new(SpanCapture::default());
+        let dispatch = tracing::Dispatch::new(std::sync::Arc::clone(&subscriber));
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+        let ok = InstrumentedHttpContractTransport::new(
+            OkTransport,
+            TransportMode::InProc,
+            Box::new(StepClock::new()),
+        );
+        let fail = InstrumentedHttpContractTransport::new(
+            FailTransport,
+            TransportMode::Remote,
+            Box::new(StepClock::new()),
+        );
+
+        assert!(ok.dispatch(request()).await.is_ok());
+        assert!(fail.dispatch(request()).await.is_err());
+
+        let spans = subscriber.spans.lock().expect("span capture lock");
+        let dispatches = spans
+            .iter()
+            .filter(|span| span.name == "domain_transport.dispatch")
+            .collect::<Vec<_>>();
+        assert_eq!(dispatches.len(), 2);
+        assert_eq!(
+            dispatches[0].fields.get("outcome").map(String::as_str),
+            Some("ok")
+        );
+        assert!(!dispatches[0].fields.contains_key("error_kind"));
+        assert_eq!(
+            dispatches[1].fields.get("outcome").map(String::as_str),
+            Some("error")
+        );
+        assert_eq!(
+            dispatches[1].fields.get("error_kind").map(String::as_str),
+            Some("dispatch")
+        );
     }
 }

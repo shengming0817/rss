@@ -291,6 +291,12 @@ pub mod list_entries {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/audit/entries";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[
+        ::vocab::http::HttpQueryParameterSpec::from_static("cursor", false),
+        ::vocab::http::HttpQueryParameterSpec::from_static("limit", false),
+    ];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[
         super::super::HttpProjectionFieldSpec {
@@ -336,6 +342,7 @@ pub mod list_entries {
             CONTRACT,
             PATH,
             "GET",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::AuditRead),
@@ -650,6 +657,12 @@ pub mod list_tenant_entries {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/audit/tenants/{tenantId}/entries";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[
+        ::vocab::http::HttpQueryParameterSpec::from_static("cursor", false),
+        ::vocab::http::HttpQueryParameterSpec::from_static("limit", false),
+    ];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[
         super::super::HttpProjectionFieldSpec {
@@ -695,6 +708,7 @@ pub mod list_tenant_entries {
             CONTRACT,
             PATH,
             "GET",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::NonIdempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::AuditRead),

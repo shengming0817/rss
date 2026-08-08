@@ -172,8 +172,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::Invento
 impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryPlacementMode
 pub enum runtimeexec::inventory::InventoryPlacementReadiness
 pub runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable
-pub runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable
-pub runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnresolved
 pub runtimeexec::inventory::InventoryPlacementReadiness::Ready
 impl core::clone::Clone for runtimeexec::inventory::InventoryPlacementReadiness
 pub fn runtimeexec::inventory::InventoryPlacementReadiness::clone(&self) -> runtimeexec::inventory::InventoryPlacementReadiness

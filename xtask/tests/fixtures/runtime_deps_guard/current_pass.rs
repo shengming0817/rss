@@ -13,5 +13,5 @@ pub struct SharedRuntimeDeps {
     pub s3: S3RuntimeDeps,
     pub vault: VaultRuntimeDeps,
     pub settings_config_value_key_name: KeyName,
-    pub domain_transport: Arc<dyn distributed::DomainTransport>,
+    pub domain_transport: Arc<dyn distributed::HttpContractTransport>,
 }

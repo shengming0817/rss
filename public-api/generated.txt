@@ -2976,6 +2976,7 @@ pub const generated::http::audit_v1::list_entries::EFFECTS: &[vocab::http::HttpE
 pub const generated::http::audit_v1::list_entries::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::audit_v1::list_entries::PATH: &str
 pub const generated::http::audit_v1::list_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::audit_v1::list_entries::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::audit_v1::list_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_entries::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::audit_v1::list_entries::SPEC: generated::http::HttpSpec
 pub mod generated::http::audit_v1::list_tenant_entries
@@ -3084,69 +3085,9 @@ pub const generated::http::audit_v1::list_tenant_entries::EFFECT_PROFILE: vocab:
 pub const generated::http::audit_v1::list_tenant_entries::LOCAL_TX: generated::http::LocalTxSpec
 pub const generated::http::audit_v1::list_tenant_entries::PATH: &str
 pub const generated::http::audit_v1::list_tenant_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::audit_v1::list_tenant_entries::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::audit_v1::list_tenant_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_tenant_entries::RouteMarker, vocab::http::LocalTx>
 pub const generated::http::audit_v1::list_tenant_entries::SPEC: generated::http::HttpSpec
-pub mod generated::http::audit_v2
-pub mod generated::http::audit_v2::error
-pub struct generated::http::audit_v2::error::ConversionError(_)
-impl core::convert::From<&'static str> for generated::http::audit_v2::error::ConversionError
-pub fn generated::http::audit_v2::error::ConversionError::from(&'static str) -> Self
-impl core::convert::From<alloc::string::String> for generated::http::audit_v2::error::ConversionError
-pub fn generated::http::audit_v2::error::ConversionError::from(alloc::string::String) -> Self
-impl core::error::Error for generated::http::audit_v2::error::ConversionError
-impl core::fmt::Debug for generated::http::audit_v2::error::ConversionError
-pub fn generated::http::audit_v2::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
-impl core::fmt::Display for generated::http::audit_v2::error::ConversionError
-pub fn generated::http::audit_v2::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
-impl core::marker::Freeze for generated::http::audit_v2::error::ConversionError
-impl core::marker::Send for generated::http::audit_v2::error::ConversionError
-impl core::marker::Sync for generated::http::audit_v2::error::ConversionError
-impl core::marker::Unpin for generated::http::audit_v2::error::ConversionError
-impl core::marker::UnsafeUnpin for generated::http::audit_v2::error::ConversionError
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v2::error::ConversionError
-impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v2::error::ConversionError
-pub struct generated::http::audit_v2::AuditSessionProjectionRequest
-impl core::clone::Clone for generated::http::audit_v2::AuditSessionProjectionRequest
-pub fn generated::http::audit_v2::AuditSessionProjectionRequest::clone(&self) -> generated::http::audit_v2::AuditSessionProjectionRequest
-impl core::default::Default for generated::http::audit_v2::AuditSessionProjectionRequest
-pub fn generated::http::audit_v2::AuditSessionProjectionRequest::default() -> Self
-impl core::fmt::Debug for generated::http::audit_v2::AuditSessionProjectionRequest
-pub fn generated::http::audit_v2::AuditSessionProjectionRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::audit_v2::AuditSessionProjectionRequest
-pub fn generated::http::audit_v2::AuditSessionProjectionRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::audit_v2::AuditSessionProjectionRequest
-pub fn generated::http::audit_v2::AuditSessionProjectionRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v2::AuditSessionProjectionRequest
-pub fn generated::http::audit_v2::AuditSessionProjectionRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::audit_v2::AuditSessionProjectionRequest
-impl core::marker::Send for generated::http::audit_v2::AuditSessionProjectionRequest
-impl core::marker::Sync for generated::http::audit_v2::AuditSessionProjectionRequest
-impl core::marker::Unpin for generated::http::audit_v2::AuditSessionProjectionRequest
-impl core::marker::UnsafeUnpin for generated::http::audit_v2::AuditSessionProjectionRequest
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v2::AuditSessionProjectionRequest
-impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v2::AuditSessionProjectionRequest
-pub struct generated::http::audit_v2::AuditSessionProjectionResponse
-impl core::clone::Clone for generated::http::audit_v2::AuditSessionProjectionResponse
-pub fn generated::http::audit_v2::AuditSessionProjectionResponse::clone(&self) -> generated::http::audit_v2::AuditSessionProjectionResponse
-impl core::default::Default for generated::http::audit_v2::AuditSessionProjectionResponse
-pub fn generated::http::audit_v2::AuditSessionProjectionResponse::default() -> Self
-impl core::fmt::Debug for generated::http::audit_v2::AuditSessionProjectionResponse
-pub fn generated::http::audit_v2::AuditSessionProjectionResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::audit_v2::AuditSessionProjectionResponse
-pub fn generated::http::audit_v2::AuditSessionProjectionResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::audit_v2::AuditSessionProjectionResponse
-pub fn generated::http::audit_v2::AuditSessionProjectionResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v2::AuditSessionProjectionResponse
-pub fn generated::http::audit_v2::AuditSessionProjectionResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::audit_v2::AuditSessionProjectionResponse
-impl core::marker::Send for generated::http::audit_v2::AuditSessionProjectionResponse
-impl core::marker::Sync for generated::http::audit_v2::AuditSessionProjectionResponse
-impl core::marker::Unpin for generated::http::audit_v2::AuditSessionProjectionResponse
-impl core::marker::UnsafeUnpin for generated::http::audit_v2::AuditSessionProjectionResponse
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v2::AuditSessionProjectionResponse
-impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v2::AuditSessionProjectionResponse
-pub const generated::http::audit_v2::CONTRACT: vocab::contract::binding::ContractBinding
-pub const generated::http::audit_v2::CONTRACT_ID: &str
 pub mod generated::http::identity_v1
 pub mod generated::http::identity_v1::account_status_get
 pub mod generated::http::identity_v1::account_status_get::error
@@ -3292,6 +3233,7 @@ pub const generated::http::identity_v1::account_status_get::EFFECTS: &[vocab::ht
 pub const generated::http::identity_v1::account_status_get::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::account_status_get::PATH: &str
 pub const generated::http::identity_v1::account_status_get::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::account_status_get::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::account_status_get::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::account_status_get::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::account_status_get::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::account_status_set
@@ -3477,6 +3419,7 @@ pub const generated::http::identity_v1::account_status_set::EMITTED_FACTS: &[voc
 pub const generated::http::identity_v1::account_status_set::PATH: &str
 pub const generated::http::identity_v1::account_status_set::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::account_status_set::RouteMarker>
 pub const generated::http::identity_v1::account_status_set::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::account_status_set::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::account_status_set::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::account_status_set::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::account_status_set::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::login
@@ -3576,6 +3519,7 @@ pub const generated::http::identity_v1::login::EMITTED_FACTS: &[vocab::contract:
 pub const generated::http::identity_v1::login::PATH: &str
 pub const generated::http::identity_v1::login::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::login::RouteMarker>
 pub const generated::http::identity_v1::login::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::login::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::login::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::login::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::login::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::logout
@@ -3671,6 +3615,7 @@ pub const generated::http::identity_v1::logout::EMITTED_FACTS: &[vocab::contract
 pub const generated::http::identity_v1::logout::PATH: &str
 pub const generated::http::identity_v1::logout::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::logout::RouteMarker>
 pub const generated::http::identity_v1::logout::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::logout::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::logout::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::logout::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::logout_all
@@ -3766,6 +3711,7 @@ pub const generated::http::identity_v1::logout_all::EMITTED_FACTS: &[vocab::cont
 pub const generated::http::identity_v1::logout_all::PATH: &str
 pub const generated::http::identity_v1::logout_all::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::logout_all::RouteMarker>
 pub const generated::http::identity_v1::logout_all::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::logout_all::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::logout_all::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::logout_all::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::logout_all::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::password_change
@@ -3906,6 +3852,7 @@ pub const generated::http::identity_v1::password_change::EMITTED_FACTS: &[vocab:
 pub const generated::http::identity_v1::password_change::PATH: &str
 pub const generated::http::identity_v1::password_change::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::password_change::RouteMarker>
 pub const generated::http::identity_v1::password_change::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::password_change::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::password_change::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::password_change::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::password_change::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_create
@@ -4592,6 +4539,7 @@ pub const generated::http::identity_v1::policies_create::EMITTED_FACTS: &[vocab:
 pub const generated::http::identity_v1::policies_create::PATH: &str
 pub const generated::http::identity_v1::policies_create::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::policies_create::RouteMarker>
 pub const generated::http::identity_v1::policies_create::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_create::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::policies_create::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_create::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_create::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_deactivate
@@ -4687,6 +4635,7 @@ pub const generated::http::identity_v1::policies_deactivate::EMITTED_FACTS: &[vo
 pub const generated::http::identity_v1::policies_deactivate::PATH: &str
 pub const generated::http::identity_v1::policies_deactivate::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::policies_deactivate::RouteMarker>
 pub const generated::http::identity_v1::policies_deactivate::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_deactivate::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::policies_deactivate::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_deactivate::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_deactivate::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_get
@@ -5105,6 +5054,7 @@ pub const generated::http::identity_v1::policies_get::EFFECTS: &[vocab::http::Ht
 pub const generated::http::identity_v1::policies_get::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_get::PATH: &str
 pub const generated::http::identity_v1::policies_get::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_get::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::policies_get::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_get::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::policies_get::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_list
@@ -5528,6 +5478,7 @@ pub const generated::http::identity_v1::policies_list::EFFECTS: &[vocab::http::H
 pub const generated::http::identity_v1::policies_list::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_list::PATH: &str
 pub const generated::http::identity_v1::policies_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_list::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::policies_list::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_list::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::policies_list::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::policies_update
@@ -6214,6 +6165,7 @@ pub const generated::http::identity_v1::policies_update::EMITTED_FACTS: &[vocab:
 pub const generated::http::identity_v1::policies_update::PATH: &str
 pub const generated::http::identity_v1::policies_update::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::policies_update::RouteMarker>
 pub const generated::http::identity_v1::policies_update::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::policies_update::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::policies_update::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::policies_update::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::policies_update::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::profile
@@ -6364,6 +6316,7 @@ pub const generated::http::identity_v1::profile::EFFECTS: &[vocab::http::HttpEff
 pub const generated::http::identity_v1::profile::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::profile::PATH: &str
 pub const generated::http::identity_v1::profile::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::profile::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::profile::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::profile::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::profile::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::refresh
@@ -6460,6 +6413,7 @@ pub const generated::http::identity_v1::refresh::EMITTED_FACTS: &[vocab::contrac
 pub const generated::http::identity_v1::refresh::PATH: &str
 pub const generated::http::identity_v1::refresh::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::refresh::RouteMarker>
 pub const generated::http::identity_v1::refresh::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::refresh::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::refresh::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::refresh::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::refresh::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_assign
@@ -6554,6 +6508,7 @@ pub const generated::http::identity_v1::roles_assign::EMITTED_FACTS: &[vocab::co
 pub const generated::http::identity_v1::roles_assign::PATH: &str
 pub const generated::http::identity_v1::roles_assign::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::roles_assign::RouteMarker>
 pub const generated::http::identity_v1::roles_assign::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::roles_assign::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::roles_assign::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_assign::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::roles_assign::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_list
@@ -6662,6 +6617,7 @@ pub const generated::http::identity_v1::roles_list::EFFECTS: &[vocab::http::Http
 pub const generated::http::identity_v1::roles_list::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_list::PATH: &str
 pub const generated::http::identity_v1::roles_list::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::roles_list::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::roles_list::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_list::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::identity_v1::roles_list::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v1::roles_revoke
@@ -6757,6 +6713,7 @@ pub const generated::http::identity_v1::roles_revoke::EMITTED_FACTS: &[vocab::co
 pub const generated::http::identity_v1::roles_revoke::PATH: &str
 pub const generated::http::identity_v1::roles_revoke::PRODUCER: vocab::http::HttpProducerBinding<generated::http::identity_v1::roles_revoke::RouteMarker>
 pub const generated::http::identity_v1::roles_revoke::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::identity_v1::roles_revoke::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::identity_v1::roles_revoke::ROUTE: vocab::http::HttpRouteBinding<generated::http::identity_v1::roles_revoke::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::identity_v1::roles_revoke::SPEC: generated::http::HttpSpec
 pub mod generated::http::identity_v2
@@ -7401,7 +7358,6 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certific
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::Condition
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::Condition
 pub struct generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::command_id: generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
 pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::fence_epoch: core::num::nonzero::NonZeroU64
 pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::generation: core::num::nonzero::NonZeroU64
 pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand::state: generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandState
@@ -7422,51 +7378,6 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_st
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand
-pub struct generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId(_)
-impl core::clone::Clone for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::clone(&self) -> generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::cmp::Eq for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::cmp::Ord for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::cmp(&self, &generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId) -> core::cmp::Ordering
-impl core::cmp::PartialEq for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::eq(&self, &generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId) -> bool
-impl core::cmp::PartialOrd for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::partial_cmp(&self, &generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId) -> core::option::Option<core::cmp::Ordering>
-impl core::convert::From<generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId> for alloc::string::String
-pub fn alloc::string::String::from(generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId) -> Self
-impl core::convert::TryFrom<&alloc::string::String> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
-impl core::convert::TryFrom<&str> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::try_from(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
-impl core::convert::TryFrom<alloc::string::String> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::Error = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
-impl core::fmt::Debug for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::StructuralPartialEq for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::ops::deref::Deref for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::Target = alloc::string::String
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::deref(&self) -> &alloc::string::String
-impl core::str::traits::FromStr for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub type generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::Err = generated::http::identity_v2::device_certificate_status_get::error::ConversionError
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::from_str(&str) -> core::result::Result<Self, generated::http::identity_v2::device_certificate_status_get::error::ConversionError>
-impl secure::redaction::Redact for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-pub fn generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId::deserialize<D>(D) -> core::result::Result<Self, <D as serde_core::de::Deserializer>::Error> where D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::marker::Send for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::marker::Sync for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::marker::Unpin for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
-impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommandCommandId
 pub struct generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData
 pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData::active_command: core::option::Option<generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetActiveCommand>
 pub generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetData::conditions: alloc::vec::Vec<generated::http::identity_v2::device_certificate_status_get::Condition>
@@ -7983,8 +7894,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::in
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimePlacementMode
 pub enum generated::http::runtime_v1::inventory::RuntimePlacementReadiness
 pub generated::http::runtime_v1::inventory::RuntimePlacementReadiness::MtlsSourceUnavailable
-pub generated::http::runtime_v1::inventory::RuntimePlacementReadiness::PeerEndpointUnavailable
-pub generated::http::runtime_v1::inventory::RuntimePlacementReadiness::PeerEndpointUnresolved
 pub generated::http::runtime_v1::inventory::RuntimePlacementReadiness::Ready
 impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimePlacementReadiness
 pub fn generated::http::runtime_v1::inventory::RuntimePlacementReadiness::clone(&self) -> generated::http::runtime_v1::inventory::RuntimePlacementReadiness
@@ -8794,6 +8703,7 @@ pub const generated::http::runtime_v1::inventory::EFFECTS: &[vocab::http::HttpEf
 pub const generated::http::runtime_v1::inventory::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::runtime_v1::inventory::PATH: &str
 pub const generated::http::runtime_v1::inventory::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::runtime_v1::inventory::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::runtime_v1::inventory::ROUTE: vocab::http::HttpRouteBinding<generated::http::runtime_v1::inventory::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::runtime_v1::inventory::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v1
@@ -8892,6 +8802,7 @@ pub const generated::http::settings_v1::EMITTED_FACTS: &[vocab::contract::bindin
 pub const generated::http::settings_v1::PATH: &str
 pub const generated::http::settings_v1::PRODUCER: vocab::http::HttpProducerBinding<generated::http::settings_v1::RouteMarker>
 pub const generated::http::settings_v1::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v1::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::settings_v1::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v1::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v1::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v2
@@ -8989,69 +8900,9 @@ pub const generated::http::settings_v2::EFFECT_PROFILE: vocab::http::HttpEffectP
 pub const generated::http::settings_v2::LOCAL_TX: generated::http::LocalTxSpec
 pub const generated::http::settings_v2::PATH: &str
 pub const generated::http::settings_v2::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v2::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::settings_v2::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v2::RouteMarker, vocab::http::LocalTx>
 pub const generated::http::settings_v2::SPEC: generated::http::HttpSpec
-pub mod generated::http::settings_v3
-pub mod generated::http::settings_v3::error
-pub struct generated::http::settings_v3::error::ConversionError(_)
-impl core::convert::From<&'static str> for generated::http::settings_v3::error::ConversionError
-pub fn generated::http::settings_v3::error::ConversionError::from(&'static str) -> Self
-impl core::convert::From<alloc::string::String> for generated::http::settings_v3::error::ConversionError
-pub fn generated::http::settings_v3::error::ConversionError::from(alloc::string::String) -> Self
-impl core::error::Error for generated::http::settings_v3::error::ConversionError
-impl core::fmt::Debug for generated::http::settings_v3::error::ConversionError
-pub fn generated::http::settings_v3::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
-impl core::fmt::Display for generated::http::settings_v3::error::ConversionError
-pub fn generated::http::settings_v3::error::ConversionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
-impl core::marker::Freeze for generated::http::settings_v3::error::ConversionError
-impl core::marker::Send for generated::http::settings_v3::error::ConversionError
-impl core::marker::Sync for generated::http::settings_v3::error::ConversionError
-impl core::marker::Unpin for generated::http::settings_v3::error::ConversionError
-impl core::marker::UnsafeUnpin for generated::http::settings_v3::error::ConversionError
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v3::error::ConversionError
-impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v3::error::ConversionError
-pub struct generated::http::settings_v3::SettingsConfigProjectionRequest
-impl core::clone::Clone for generated::http::settings_v3::SettingsConfigProjectionRequest
-pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::clone(&self) -> generated::http::settings_v3::SettingsConfigProjectionRequest
-impl core::default::Default for generated::http::settings_v3::SettingsConfigProjectionRequest
-pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::default() -> Self
-impl core::fmt::Debug for generated::http::settings_v3::SettingsConfigProjectionRequest
-pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::settings_v3::SettingsConfigProjectionRequest
-pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::settings_v3::SettingsConfigProjectionRequest
-pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::settings_v3::SettingsConfigProjectionRequest
-pub fn generated::http::settings_v3::SettingsConfigProjectionRequest::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::settings_v3::SettingsConfigProjectionRequest
-impl core::marker::Send for generated::http::settings_v3::SettingsConfigProjectionRequest
-impl core::marker::Sync for generated::http::settings_v3::SettingsConfigProjectionRequest
-impl core::marker::Unpin for generated::http::settings_v3::SettingsConfigProjectionRequest
-impl core::marker::UnsafeUnpin for generated::http::settings_v3::SettingsConfigProjectionRequest
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v3::SettingsConfigProjectionRequest
-impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v3::SettingsConfigProjectionRequest
-pub struct generated::http::settings_v3::SettingsConfigProjectionResponse
-impl core::clone::Clone for generated::http::settings_v3::SettingsConfigProjectionResponse
-pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::clone(&self) -> generated::http::settings_v3::SettingsConfigProjectionResponse
-impl core::default::Default for generated::http::settings_v3::SettingsConfigProjectionResponse
-pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::default() -> Self
-impl core::fmt::Debug for generated::http::settings_v3::SettingsConfigProjectionResponse
-pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl secure::redaction::Redact for generated::http::settings_v3::SettingsConfigProjectionResponse
-pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
-impl serde_core::ser::Serialize for generated::http::settings_v3::SettingsConfigProjectionResponse
-pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
-impl<'de> serde_core::de::Deserialize<'de> for generated::http::settings_v3::SettingsConfigProjectionResponse
-pub fn generated::http::settings_v3::SettingsConfigProjectionResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
-impl core::marker::Freeze for generated::http::settings_v3::SettingsConfigProjectionResponse
-impl core::marker::Send for generated::http::settings_v3::SettingsConfigProjectionResponse
-impl core::marker::Sync for generated::http::settings_v3::SettingsConfigProjectionResponse
-impl core::marker::Unpin for generated::http::settings_v3::SettingsConfigProjectionResponse
-impl core::marker::UnsafeUnpin for generated::http::settings_v3::SettingsConfigProjectionResponse
-impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v3::SettingsConfigProjectionResponse
-impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v3::SettingsConfigProjectionResponse
-pub const generated::http::settings_v3::CONTRACT: vocab::contract::binding::ContractBinding
-pub const generated::http::settings_v3::CONTRACT_ID: &str
 pub mod generated::http::settings_v4
 pub mod generated::http::settings_v4::error
 pub struct generated::http::settings_v4::error::ConversionError(_)
@@ -9153,6 +9004,7 @@ pub const generated::http::settings_v4::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v4::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v4::PATH: &str
 pub const generated::http::settings_v4::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v4::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::settings_v4::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v4::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::settings_v4::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v5
@@ -9230,6 +9082,7 @@ pub const generated::http::settings_v5::EMITTED_FACTS: &[vocab::contract::bindin
 pub const generated::http::settings_v5::PATH: &str
 pub const generated::http::settings_v5::PRODUCER: vocab::http::HttpProducerBinding<generated::http::settings_v5::RouteMarker>
 pub const generated::http::settings_v5::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v5::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::settings_v5::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v5::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v5::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v6
@@ -9326,6 +9179,7 @@ pub const generated::http::settings_v6::EMITTED_FACTS: &[vocab::contract::bindin
 pub const generated::http::settings_v6::PATH: &str
 pub const generated::http::settings_v6::PRODUCER: vocab::http::HttpProducerBinding<generated::http::settings_v6::RouteMarker>
 pub const generated::http::settings_v6::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v6::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::settings_v6::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v6::RouteMarker, vocab::http::OutboxFact>
 pub const generated::http::settings_v6::SPEC: generated::http::HttpSpec
 pub mod generated::http::settings_v7
@@ -9427,6 +9281,7 @@ pub const generated::http::settings_v7::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v7::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v7::PATH: &str
 pub const generated::http::settings_v7::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
+pub const generated::http::settings_v7::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
 pub const generated::http::settings_v7::ROUTE: vocab::http::HttpRouteBinding<generated::http::settings_v7::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::settings_v7::SPEC: generated::http::HttpSpec
 pub enum generated::http::HttpHeaderMode
@@ -9590,6 +9445,13 @@ impl generated::http::HttpResponseBinding for generated::http::identity_v2::devi
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::SCHEMA: &'static str
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::STATUS: u16
+pub mod generated::projection
+pub mod generated::projection::audit_v2
+pub const generated::projection::audit_v2::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::projection::audit_v2::CONTRACT_ID: &str
+pub mod generated::projection::settings_v3
+pub const generated::projection::settings_v3::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::projection::settings_v3::CONTRACT_ID: &str
 pub mod generated::saga
 pub mod generated::saga::audit_v1
 pub mod generated::saga::audit_v1::error

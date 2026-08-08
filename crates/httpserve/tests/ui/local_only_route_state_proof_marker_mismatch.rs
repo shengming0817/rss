@@ -20,6 +20,7 @@ fn main() {
         ),
         "/x",
         "GET",
+        &[],
         vocab::HttpSuccessStatus::new(200),
         vocab::HttpIdempotency::Idempotent,
         vocab::HttpRouteAuth::ServiceOwned,

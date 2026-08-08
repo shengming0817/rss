@@ -157,43 +157,46 @@ impl DomainTransportConfig {
     }
 }
 
-pub(crate) trait RuntimeDomainTransport:
-    distributed::DomainTransport + ManagedResource + Clone + Send + Sync + 'static
+pub(crate) trait RuntimeHttpContractTransport:
+    distributed::HttpContractTransport + ManagedResource + Clone + Send + Sync + 'static
 {
-    fn readiness(&self) -> httpd::DomainHttpReadiness;
+    fn owned_readiness(&self) -> httpd::DomainHttpOwnedReadiness;
 }
 
-impl RuntimeDomainTransport for httpd::SharedDomainHttpTransport {
-    fn readiness(&self) -> httpd::DomainHttpReadiness {
-        httpd::SharedDomainHttpTransport::readiness(self)
+impl RuntimeHttpContractTransport for httpd::SharedDomainHttpTransport {
+    fn owned_readiness(&self) -> httpd::DomainHttpOwnedReadiness {
+        httpd::SharedDomainHttpTransport::owned_readiness(self)
     }
 }
 
 /// Fail-closed in-process stub used when every domain is Local (no remote transport targets).
 #[derive(Clone, Default)]
-pub(crate) struct InProcDomainTransport;
+pub(crate) struct InProcHttpContractTransport;
 
-impl distributed::DomainTransport for InProcDomainTransport {
+impl distributed::HttpContractTransport for InProcHttpContractTransport {
     fn dispatch(
         &self,
-        _request: distributed::DomainRequest,
+        _request: distributed::HttpContractRequest,
     ) -> std::pin::Pin<
         Box<
             dyn std::future::Future<
-                    Output = Result<distributed::DomainResponse, distributed::DomainTransportError>,
+                    Output = Result<
+                        distributed::HttpContractResponse,
+                        distributed::HttpContractTransportError,
+                    >,
                 > + Send
                 + '_,
         >,
     > {
         Box::pin(async {
-            Err(distributed::DomainTransportError::new(
-                distributed::DomainTransportErrorKind::Dispatch,
+            Err(distributed::HttpContractTransportError::new(
+                distributed::HttpContractTransportErrorKind::Dispatch,
             ))
         })
     }
 }
 
-impl ManagedResource for InProcDomainTransport {
+impl ManagedResource for InProcHttpContractTransport {
     fn name(&self) -> &str {
         "domain-transport-inproc"
     }
@@ -203,9 +206,9 @@ impl ManagedResource for InProcDomainTransport {
     }
 }
 
-impl RuntimeDomainTransport for InProcDomainTransport {
-    fn readiness(&self) -> httpd::DomainHttpReadiness {
-        httpd::DomainHttpReadiness::Ready
+impl RuntimeHttpContractTransport for InProcHttpContractTransport {
+    fn owned_readiness(&self) -> httpd::DomainHttpOwnedReadiness {
+        httpd::DomainHttpOwnedReadiness::Ready
     }
 }
 
@@ -217,7 +220,7 @@ pub(crate) struct DomainTransportRuntimeInner<T> {
 
 impl<T> DomainTransportRuntimeInner<T>
 where
-    T: RuntimeDomainTransport,
+    T: RuntimeHttpContractTransport,
 {
     pub(crate) fn new(
         transport: T,
@@ -231,8 +234,8 @@ where
         }
     }
 
-    pub(crate) fn dispatch_handle(&self) -> Arc<dyn distributed::DomainTransport> {
-        Arc::new(distributed::InstrumentedDomainTransport::new(
+    pub(crate) fn dispatch_handle(&self) -> Arc<dyn distributed::HttpContractTransport> {
+        Arc::new(distributed::InstrumentedHttpContractTransport::new(
             self.transport.clone(),
             self.mode,
             Box::new(SystemClock),
@@ -256,11 +259,11 @@ where
 
 pub(crate) enum DomainTransportRuntime {
     Remote(DomainTransportRuntimeInner<httpd::SharedDomainHttpTransport>),
-    InProc(DomainTransportRuntimeInner<InProcDomainTransport>),
+    InProc(DomainTransportRuntimeInner<InProcHttpContractTransport>),
 }
 
 impl DomainTransportRuntime {
-    pub(crate) fn dispatch_handle(&self) -> Arc<dyn distributed::DomainTransport> {
+    pub(crate) fn dispatch_handle(&self) -> Arc<dyn distributed::HttpContractTransport> {
         match self {
             Self::Remote(inner) => inner.dispatch_handle(),
             Self::InProc(inner) => inner.dispatch_handle(),
@@ -278,33 +281,26 @@ impl DomainTransportRuntime {
         match self {
             Self::Remote(inner) => {
                 let transport = inner.transport.clone();
-                Arc::new(move || inventory_readiness(transport.readiness()))
+                Arc::new(move || inventory_readiness(transport.owned_readiness()))
             }
             Self::InProc(inner) => {
                 let transport = inner.transport.clone();
-                Arc::new(move || inventory_readiness(transport.readiness()))
+                Arc::new(move || inventory_readiness(transport.owned_readiness()))
             }
         }
     }
 }
 
 fn inventory_readiness(
-    readiness: httpd::DomainHttpReadiness,
+    readiness: httpd::DomainHttpOwnedReadiness,
 ) -> runtimeexec::inventory::InventoryPlacementReadiness {
     match readiness {
-        httpd::DomainHttpReadiness::Ready => {
+        httpd::DomainHttpOwnedReadiness::Ready => {
             runtimeexec::inventory::InventoryPlacementReadiness::Ready
         }
-        httpd::DomainHttpReadiness::MtlsSourceUnavailable => {
+        httpd::DomainHttpOwnedReadiness::MtlsSourceUnavailable => {
             runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable
         }
-        httpd::DomainHttpReadiness::PeerEndpointUnresolved => {
-            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnresolved
-        }
-        httpd::DomainHttpReadiness::PeerEndpointUnavailable => {
-            runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable
-        }
-        _ => runtimeexec::inventory::InventoryPlacementReadiness::PeerEndpointUnavailable,
     }
 }
 
@@ -317,7 +313,7 @@ pub(crate) struct DomainTransportReadyProbe<T> {
 
 impl<T> DomainTransportReadyProbe<T>
 where
-    T: RuntimeDomainTransport,
+    T: RuntimeHttpContractTransport,
 {
     pub(crate) fn new(transport: T, name: ProbeName) -> Self {
         Self { transport, name }
@@ -326,10 +322,10 @@ where
 
 impl<T> bootstrap::HealthProbe for DomainTransportReadyProbe<T>
 where
-    T: RuntimeDomainTransport,
+    T: RuntimeHttpContractTransport,
 {
     fn check(&self) -> HealthCheck {
-        let readiness = self.transport.readiness();
+        let readiness = self.transport.owned_readiness();
         let status = if readiness.is_ready() {
             HealthStatus::Healthy
         } else {
@@ -347,7 +343,7 @@ pub(crate) async fn wire_domain_transport(
     match config {
         DomainTransportConfig::InProc => Ok(DomainTransportRuntime::InProc(
             DomainTransportRuntimeInner::new(
-                InProcDomainTransport,
+                InProcHttpContractTransport,
                 probe_name,
                 distributed::TransportMode::InProc,
             ),

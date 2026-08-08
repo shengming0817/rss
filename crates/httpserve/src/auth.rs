@@ -1657,6 +1657,7 @@ mod tests {
         TEST_BINDING,
         "/test",
         "GET",
+        &[],
         vocab::HttpSuccessStatus::new(200),
         vocab::HttpIdempotency::Idempotent,
         vocab::HttpRouteAuth::Public,

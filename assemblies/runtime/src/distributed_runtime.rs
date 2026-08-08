@@ -7,7 +7,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use distributed::DomainTransport;
+use distributed::HttpContractTransport;
 
 pub use distributed::{
     CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, OutboxMaintenanceCoordinator,
@@ -36,7 +36,7 @@ impl DistributedWorkerConfig {
 #[derive(Clone)]
 pub struct DistributedRuntimeDeps {
     outbox_maintenance: OutboxMaintenanceCoordinator,
-    domain_transport: Arc<dyn DomainTransport>,
+    domain_transport: Arc<dyn HttpContractTransport>,
 }
 
 impl DistributedRuntimeDeps {
@@ -48,7 +48,7 @@ impl DistributedRuntimeDeps {
 
     /// Shared outbound domain transport dispatch seam.
     #[must_use]
-    pub fn domain_transport(&self) -> Arc<dyn DomainTransport> {
+    pub fn domain_transport(&self) -> Arc<dyn HttpContractTransport> {
         Arc::clone(&self.domain_transport)
     }
 }
@@ -94,28 +94,22 @@ mod tests {
 
     struct NoopDomainTransport;
 
-    impl distributed::DomainTransport for NoopDomainTransport {
+    impl distributed::HttpContractTransport for NoopDomainTransport {
         fn dispatch(
             &self,
-            _request: distributed::DomainRequest,
+            _request: distributed::HttpContractRequest,
         ) -> std::pin::Pin<
             Box<
                 dyn Future<
                         Output = Result<
-                            distributed::DomainResponse,
-                            distributed::DomainTransportError,
+                            distributed::HttpContractResponse,
+                            distributed::HttpContractTransportError,
                         >,
                     > + Send
                     + '_,
             >,
         > {
-            Box::pin(async {
-                Ok(distributed::DomainResponse::new(
-                    204,
-                    Vec::new(),
-                    Vec::new(),
-                ))
-            })
+            Box::pin(async { distributed::HttpContractResponse::try_new(204, Vec::new()) })
         }
     }
 

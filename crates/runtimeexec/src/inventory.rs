@@ -273,8 +273,6 @@ pub enum InventoryPlacementMode {
 pub enum InventoryPlacementReadiness {
     Ready,
     MtlsSourceUnavailable,
-    PeerEndpointUnresolved,
-    PeerEndpointUnavailable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1065,33 +1063,30 @@ mod tests {
             .first_mut()
             .ok_or("fixture must contain a placement")?;
         placement.mode = InventoryPlacementMode::Remote;
-        placement.readiness = InventoryPlacementReadiness::PeerEndpointUnresolved;
+        placement.readiness = InventoryPlacementReadiness::MtlsSourceUnavailable;
         let listeners = exact_listeners(&runtime)?;
         let readiness = Arc::new(AtomicU8::new(0));
         let sampled = Arc::clone(&readiness);
         let (publisher, reader, health_publisher, placement_publisher) =
             deferred_inventory_channel(seed);
         health_publisher.publish(reporter(HealthStatus::Healthy)?)?;
-        placement_publisher.publish(Arc::new(move || match sampled.load(Ordering::Acquire) {
-            0 => InventoryPlacementReadiness::PeerEndpointUnresolved,
-            1 => InventoryPlacementReadiness::Ready,
-            _ => InventoryPlacementReadiness::PeerEndpointUnavailable,
+        placement_publisher.publish(Arc::new(move || {
+            if sampled.load(Ordering::Acquire) == 0 {
+                InventoryPlacementReadiness::MtlsSourceUnavailable
+            } else {
+                InventoryPlacementReadiness::Ready
+            }
         }))?;
         publisher.publish(listeners)?;
 
         assert_eq!(
             reader.read()?.placements()[0].readiness(),
-            InventoryPlacementReadiness::PeerEndpointUnresolved
+            InventoryPlacementReadiness::MtlsSourceUnavailable
         );
         readiness.store(1, Ordering::Release);
         assert_eq!(
             reader.read()?.placements()[0].readiness(),
             InventoryPlacementReadiness::Ready
-        );
-        readiness.store(2, Ordering::Release);
-        assert_eq!(
-            reader.read()?.placements()[0].readiness(),
-            InventoryPlacementReadiness::PeerEndpointUnavailable
         );
         Ok(())
     }

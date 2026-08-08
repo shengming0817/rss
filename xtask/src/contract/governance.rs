@@ -501,13 +501,18 @@ pub(crate) fn validate_workflow_activations(
 /// Raw manifest owner parsing is confined to the governance source owner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ContractImpact {
-    owner: String,
+    id: String,
+    owner: Option<String>,
     subscribers: Vec<String>,
 }
 
 impl ContractImpact {
-    pub(crate) fn owner(&self) -> &str {
-        &self.owner
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+
+    pub(crate) fn owner(&self) -> Option<&str> {
+        self.owner.as_deref()
     }
 
     pub(crate) fn subscribers(&self) -> &[String] {
@@ -517,16 +522,18 @@ impl ContractImpact {
 
 pub(crate) fn contract_impact_from_manifest(source: &str) -> Result<ContractImpact> {
     let manifest = ContractManifest::from_toml_str(source).context("parse impacted contract")?;
-    let owner = manifest
-        .owner_domain()
-        .context("framework-owned contract has no workspace owner")?
-        .to_owned();
+    let id = manifest.id.clone();
+    let owner = manifest.owner_domain().map(str::to_owned);
     let subscribers = manifest
         .subscriptions
         .into_iter()
         .map(|subscription| subscription.consumer)
         .collect();
-    Ok(ContractImpact { owner, subscribers })
+    Ok(ContractImpact {
+        id,
+        owner,
+        subscribers,
+    })
 }
 
 /// Complete validated repository contract IR.

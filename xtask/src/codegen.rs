@@ -1110,6 +1110,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
         HttpIdempotency::Idempotent => "Idempotent",
         HttpIdempotency::NonIdempotent => "NonIdempotent",
     };
+    let query_parameters = render_http_query_parameters(c, method.as_wire())?;
     let effect_profile = render_http_effect_profile_consts(c)?;
     let (local_tx_evidence, local_tx) = render_http_local_tx(c, sup)?;
     let producer_binding = render_http_producer_binding(c, contracts)?;
@@ -1221,6 +1222,9 @@ pub const CONTRACT: ::vocab::ContractBinding =
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "{path}";
 
+/// Query parameter vocabulary derived from this GET contract's request schema.
+pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[{query_parameters}];
+
 /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PROJECTION_FIELDS: &[{sup}HttpProjectionFieldSpec] = &[{projection_fields_body}];
 {effect_profile}
@@ -1235,6 +1239,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consiste
     CONTRACT,
     PATH,
     "{method}",
+    QUERY_PARAMETERS,
     ::vocab::http::HttpSuccessStatus::new({success_status}),
     ::vocab::http::HttpIdempotency::{idempotency},
     {auth},
@@ -1262,6 +1267,45 @@ pub const SPEC: {sup}HttpSpec = {sup}HttpSpec {{
         method = method.as_wire(),
     ));
     Ok(out)
+}
+
+fn render_http_query_parameters(c: &GovernedContract, method: &str) -> Result<String> {
+    if method != "GET" {
+        return Ok(String::new());
+    }
+    let Some(schema_file) = c.manifest().schemas.request.as_deref() else {
+        return Ok(String::new());
+    };
+    let schema_bytes = c
+        .schema_bytes(schema_file)
+        .with_context(|| format!("HTTP request schema {schema_file} was not loaded"))?;
+    let schema: serde_json::Value = serde_json::from_slice(schema_bytes)
+        .with_context(|| format!("parse HTTP request schema {schema_file}"))?;
+    let properties = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+        .with_context(|| format!("GET request schema {schema_file} must declare properties"))?;
+    let required = schema
+        .get("required")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut rendered = Vec::with_capacity(properties.len());
+    for name in properties.keys() {
+        if !is_safe_codegen_string(name) {
+            bail!("GET query parameter name contains unsafe characters: {name:?}");
+        }
+        rendered.push(format!(
+            "\n    ::vocab::http::HttpQueryParameterSpec::from_static(\"{name}\", {}),",
+            required.contains(name.as_str())
+        ));
+    }
+    if !rendered.is_empty() {
+        rendered.push("\n".to_string());
+    }
+    Ok(rendered.concat())
 }
 
 fn render_http_response_bindings(c: &GovernedContract, sup: &str) -> Result<String> {
@@ -4807,6 +4851,50 @@ mod tests {
                 "wire semantics must not create a parallel HttpSpec field: {removed}"
             );
         }
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_binds_get_request_schema_properties_as_query_vocabulary() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-query-parameters");
+        seed_http(&root)?;
+        write_seed_active_http(
+            &root,
+            concat!(
+                "[endpoints.http.auth]\n",
+                "mode = \"permission\"\n",
+                "permission = \"identity:policy:read\"\n",
+            ),
+        )?;
+        let dir = root.join("contracts/http/_seed/v1");
+        let manifest = std::fs::read_to_string(dir.join("contract.toml"))?
+            .replace("method = \"POST\"", "method = \"GET\"");
+        std::fs::write(dir.join("contract.toml"), manifest)?;
+        std::fs::write(
+            dir.join("request.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SeedEchoRequest","type":"object","required":["limit"],"properties":{"cursor":{"type":"string"},"limit":{"type":"integer"}},"additionalProperties":false}"#,
+        )?;
+        let gen_src = root.join("generated/src");
+
+        generate(&root.join("contracts"), &gen_src, false)?;
+
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+        assert_generated_contains(
+            &rendered,
+            "HttpQueryParameterSpec::from_static(\"cursor\", false)",
+            "optional GET query property must be generated",
+        );
+        assert_generated_contains(
+            &rendered,
+            "HttpQueryParameterSpec::from_static(\"limit\", true)",
+            "required GET query property must be generated",
+        );
+        assert_generated_contains(
+            &rendered,
+            "\"GET\",\n        QUERY_PARAMETERS,",
+            "route evidence must own the generated query vocabulary",
+        );
         Ok(())
     }
 

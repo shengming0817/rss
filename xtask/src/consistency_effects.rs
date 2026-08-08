@@ -5633,6 +5633,7 @@ fn test_http_spec_with_owner(
             ),
             "/seed",
             "GET",
+            &[],
             vocab::HttpSuccessStatus::new(200),
             vocab::HttpIdempotency::Idempotent,
             vocab::HttpRouteAuth::Public,

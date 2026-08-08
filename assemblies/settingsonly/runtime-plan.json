@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "assemblyFingerprint": "sha256:c33adf59cd7b89d862eb0d294b7774aa30a9bebd2ca7e37da7b657be38eae012",
-  "runtimePlanFingerprint": "sha256:4db6c3f2a8d27c91221593ecb6916928e0e2d4701012888074ad46a2b216de86",
+  "assemblyFingerprint": "sha256:e12163d2304d8df58e7bd7becfe18ae1ea85b7eb60bd7ee3a00fcec4dbe0b315",
+  "runtimePlanFingerprint": "sha256:11b3dce138fb5c23a226bf55351ca2ae2fee7fdef54c7d61c331dcd934939b9a",
   "providerPlans": [
     {
       "id": "auth-audit-sink",

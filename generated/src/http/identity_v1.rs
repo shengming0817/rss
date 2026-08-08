@@ -220,6 +220,9 @@ pub mod account_status_get {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/accounts/{userId}/status";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -243,6 +246,7 @@ pub mod account_status_get {
             CONTRACT,
             PATH,
             "GET",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(
@@ -596,6 +600,9 @@ pub mod account_status_set {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/accounts/{userId}/status";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -621,6 +628,7 @@ pub mod account_status_set {
             CONTRACT,
             PATH,
             "PUT",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(
@@ -847,6 +855,9 @@ pub mod login {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/login";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -872,6 +883,7 @@ pub mod login {
             CONTRACT,
             PATH,
             "POST",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(201),
             ::vocab::http::HttpIdempotency::NonIdempotent,
             ::vocab::HttpRouteAuth::Public,
@@ -1033,6 +1045,9 @@ pub mod logout {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/logout";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -1058,6 +1073,7 @@ pub mod logout {
             CONTRACT,
             PATH,
             "POST",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(
@@ -1218,6 +1234,9 @@ pub mod logout_all {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/logout-all";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -1243,6 +1262,7 @@ pub mod logout_all {
             CONTRACT,
             PATH,
             "POST",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(
@@ -1490,6 +1510,9 @@ pub mod password_change {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/password/change";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -1515,6 +1538,7 @@ pub mod password_change {
             CONTRACT,
             PATH,
             "POST",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::NonIdempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityProfileWrite),
@@ -3844,6 +3868,9 @@ pub mod policies_create {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/policies";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -3869,6 +3896,7 @@ pub mod policies_create {
             CONTRACT,
             PATH,
             "POST",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(201),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyCreate),
@@ -4048,6 +4076,9 @@ pub mod policies_deactivate {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/policies/{policyId}/deactivate";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -4073,6 +4104,7 @@ pub mod policies_deactivate {
             CONTRACT,
             PATH,
             "POST",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(
@@ -5194,6 +5226,9 @@ pub mod policies_get {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/policies/{policyId}";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -5217,6 +5252,7 @@ pub mod policies_get {
             CONTRACT,
             PATH,
             "GET",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyRead),
@@ -6383,6 +6419,12 @@ pub mod policies_list {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/policies";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[
+        ::vocab::http::HttpQueryParameterSpec::from_static("cursor", false),
+        ::vocab::http::HttpQueryParameterSpec::from_static("limit", false),
+    ];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -6406,6 +6448,7 @@ pub mod policies_list {
             CONTRACT,
             PATH,
             "GET",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyRead),
@@ -8729,6 +8772,9 @@ pub mod policies_update {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/policies/{policyId}";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -8754,6 +8800,7 @@ pub mod policies_update {
             CONTRACT,
             PATH,
             "PUT",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityPolicyUpdate),
@@ -9042,6 +9089,9 @@ pub mod profile {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/profile";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[
         super::super::HttpProjectionFieldSpec {
@@ -9081,6 +9131,7 @@ pub mod profile {
             CONTRACT,
             PATH,
             "GET",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityProfileRead),
@@ -9266,6 +9317,9 @@ pub mod refresh {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/refresh";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -9291,6 +9345,7 @@ pub mod refresh {
             CONTRACT,
             PATH,
             "POST",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(201),
             ::vocab::http::HttpIdempotency::NonIdempotent,
             ::vocab::HttpRouteAuth::Public,
@@ -9457,6 +9512,9 @@ pub mod roles_assign {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles/{roleId}/bindings";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -9482,6 +9540,7 @@ pub mod roles_assign {
             CONTRACT,
             PATH,
             "POST",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(201),
             ::vocab::http::HttpIdempotency::NonIdempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleAssign),
@@ -9721,6 +9780,12 @@ pub mod roles_list {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[
+        ::vocab::http::HttpQueryParameterSpec::from_static("cursor", false),
+        ::vocab::http::HttpQueryParameterSpec::from_static("limit", false),
+    ];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -9744,6 +9809,7 @@ pub mod roles_list {
             CONTRACT,
             PATH,
             "GET",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleRead),
@@ -9893,6 +9959,9 @@ pub mod roles_revoke {
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/identity/roles/{roleId}/bindings/{subject}";
 
+    /// Query parameter vocabulary derived from this GET contract's request schema.
+    pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
     /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PROJECTION_FIELDS: &[super::super::HttpProjectionFieldSpec] = &[];
 
@@ -9918,6 +9987,7 @@ pub mod roles_revoke {
             CONTRACT,
             PATH,
             "DELETE",
+            QUERY_PARAMETERS,
             ::vocab::http::HttpSuccessStatus::new(200),
             ::vocab::http::HttpIdempotency::Idempotent,
             ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::IdentityRoleRevoke),

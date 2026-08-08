@@ -6323,6 +6323,7 @@ mod tests {
                 ),
                 "/api/v1/other/{resourceId}",
                 "GET",
+                &[],
                 vocab::HttpSuccessStatus::new(200),
                 vocab::HttpIdempotency::Idempotent,
                 vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityPolicyRead),

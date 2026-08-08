@@ -158,6 +158,9 @@ pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_st
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/settings/configs/{key}/rollbacks";
 
+/// Query parameter vocabulary derived from this GET contract's request schema.
+pub const QUERY_PARAMETERS: &[::vocab::http::HttpQueryParameterSpec] = &[];
+
 /// Field projection metadata（来自 `contract.toml` `[endpoints.http.projection]`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PROJECTION_FIELDS: &[super::HttpProjectionFieldSpec] = &[];
 
@@ -183,6 +186,7 @@ pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFac
         CONTRACT,
         PATH,
         "POST",
+        QUERY_PARAMETERS,
         ::vocab::http::HttpSuccessStatus::new(201),
         ::vocab::http::HttpIdempotency::NonIdempotent,
         ::vocab::HttpRouteAuth::Permission(::vocab::RoutePermissionId::SettingsConfigRollback),

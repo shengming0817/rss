@@ -1,7 +1,7 @@
 error[E0308]: mismatched types
-  --> tests/ui/localtx_observation_route_marker_mismatch.rs:31:28
+  --> tests/ui/localtx_observation_route_marker_mismatch.rs:32:28
    |
-31 |     accept_password_change(logout);
+32 |     accept_password_change(logout);
    |     ---------------------- ^^^^^^ expected `LocalTxObservation<PasswordChangeRoute>`, found `LocalTxObservation<LogoutRoute>`
    |     |
    |     arguments to this function are incorrect
@@ -9,7 +9,7 @@ error[E0308]: mismatched types
    = note: expected struct `LocalTxObservation<PasswordChangeRoute>`
               found struct `LocalTxObservation<LogoutRoute>`
 note: function defined here
-  --> tests/ui/localtx_observation_route_marker_mismatch.rs:27:4
+  --> tests/ui/localtx_observation_route_marker_mismatch.rs:28:4
    |
-27 | fn accept_password_change(_: LocalTxObservation<PasswordChangeRoute>) {}
+28 | fn accept_password_change(_: LocalTxObservation<PasswordChangeRoute>) {}
    |    ^^^^^^^^^^^^^^^^^^^^^^ ------------------------------------------

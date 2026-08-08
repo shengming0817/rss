@@ -1,7 +1,7 @@
 error[E0308]: mismatched types
-  --> tests/ui/primary_cannot_mount_nonprimary.rs:33:77
+  --> tests/ui/primary_cannot_mount_nonprimary.rs:34:77
    |
-33 |     let _primary = unfinalized_for_test::<httpserve::Primary>(|rb| rb.mount(endpoint()));
+34 |     let _primary = unfinalized_for_test::<httpserve::Primary>(|rb| rb.mount(endpoint()));
    |                                                                       ----- ^^^^^^^^^^ expected `GeneratedPrimaryEndpoint<(), _>`, found `GeneratedEndpoint<(), LocalOnly>`
    |                                                                       |
    |                                                                       arguments to this method are incorrect

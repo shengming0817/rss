@@ -17,9 +17,10 @@ pub use maintenance::{
     CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, OutboxMaintenanceCoordinator,
 };
 pub use transport::{
-    DomainMethod, DomainRequest, DomainResponse, DomainTransport, DomainTransportError,
-    DomainTransportErrorKind, InstrumentedDomainTransport, TransportHeaderError, TransportHeaders,
-    TransportMode, TransportOutcome,
+    HttpContractHeaderError, HttpContractHeaders, HttpContractMethod, HttpContractRequest,
+    HttpContractResponse, HttpContractTarget, HttpContractTransport, HttpContractTransportError,
+    HttpContractTransportErrorKind, InstrumentedHttpContractTransport, TransportMode,
+    TransportOutcome,
 };
 
 /// Fencing token（单调递增；对齐 openraft LogId/Vote 单调语义，防止脑裂写入）。

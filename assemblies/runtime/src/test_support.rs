@@ -326,7 +326,7 @@ pub fn build_shared_runtime_deps(
     vault: vault::VaultRuntimeDeps,
     identity_signer: Arc<vault::VaultSigner>,
     settings_config_value_key_name: diport::KeyName,
-    domain_transport: Arc<dyn distributed::DomainTransport>,
+    domain_transport: Arc<dyn distributed::HttpContractTransport>,
 ) -> SharedRuntimeDeps {
     let settings_readiness = settings_composition::test_support::readiness(pg.readiness_handle());
     SharedRuntimeDeps::from_integration_parts(

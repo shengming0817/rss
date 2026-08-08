@@ -137,6 +137,7 @@ mod tests {
             ),
             path,
             "GET",
+            &[],
             HttpSuccessStatus::new(200),
             HttpIdempotency::Idempotent,
             HttpRouteAuth::ServiceOwned,

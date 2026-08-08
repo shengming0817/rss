@@ -6,7 +6,7 @@ allowedRoots = ["postgres", "redis", "s3", "vault", "oidc", "diport", "primitive
 exactExceptions = [
   "Arc<secure::DigestPasswordBlocklist>",
   "Arc<secure::PseudonymKeyRing>",
-  "Arc<dyn distributed::DomainTransport>",
+  "Arc<dyn distributed::HttpContractTransport>",
   "Arc<oidc::OidcProvider>",
   "postgres::PgRevocationStore",
   "settings_composition::KeyProviderReadinessInterval",
