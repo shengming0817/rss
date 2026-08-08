@@ -264,8 +264,6 @@ pub(crate) enum ExternalProgram {
     Docker,
     SystemPython,
     SystemShell,
-    #[cfg(test)]
-    Bash,
     Git,
     SystemGit,
 }
@@ -277,8 +275,6 @@ impl ExternalProgram {
             Self::Docker => "docker",
             Self::SystemPython => "/usr/bin/python3",
             Self::SystemShell => "/bin/sh",
-            #[cfg(test)]
-            Self::Bash => "bash",
             Self::Git => "git",
             Self::SystemGit => "/usr/bin/git",
         }
@@ -289,7 +285,6 @@ impl ExternalProgram {
 pub(crate) enum CargoSubcommand {
     Xtask,
     Metadata,
-    Tree,
     Check,
     #[cfg(test)]
     GenerateLockfile,
@@ -331,7 +326,6 @@ impl CargoSubcommand {
         match self {
             Self::Xtask => "xtask",
             Self::Metadata => "metadata",
-            Self::Tree => "tree",
             Self::Check => "check",
             #[cfg(test)]
             Self::GenerateLockfile => "generate-lockfile",

@@ -99,8 +99,12 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn run(options: &Options) -> Result<()> {
-    generate_root(&crate::workspace_root()?, options)
+pub(crate) fn run(
+    root: &Path,
+    options: &Options,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> Result<()> {
+    generate_root(root, options, facts)
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -326,7 +330,11 @@ impl ModelBuilder {
     }
 }
 
-fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
+fn build_model(
+    root: &Path,
+    assembly_name: &str,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> Result<GraphModel> {
     validate_name(assembly_name)?;
     let ir = crate::assembly_governance::AssemblyGovernanceIr::<
         crate::assembly_governance::Core,
@@ -335,15 +343,38 @@ fn build_model(root: &Path, assembly_name: &str) -> Result<GraphModel> {
     let assembly = ir
         .assembly(assembly_name)
         .with_context(|| format!("assembly `{assembly_name}` is not governed"))?;
-    let manifest = assembly.manifest();
     crate::assembly_codegen::check_governed_target(root, assembly)
         .context("modules_gen carrier 与 manifest 漂移")?;
-    if root.join("Cargo.toml").is_file() {
-        let assembly_findings = crate::assembly::validate_governed_target(root, assembly)?;
-        reject_findings("assembly graph target validation", &assembly_findings)?;
-    }
+    let assembly_findings = crate::assembly::validate_governed_target(root, assembly, facts)?;
+    reject_findings("assembly graph target validation", &assembly_findings)?;
     let (_, findings) = crate::contract::validate::validate_root(&root.join("contracts"))?;
     reject_findings("assembly graph contract source validation", &findings)?;
+    build_governed_model(root, assembly_name, assembly)
+}
+
+#[cfg(test)]
+fn build_fixture_model_without_cargo(root: &Path, assembly_name: &str) -> Result<GraphModel> {
+    validate_name(assembly_name)?;
+    let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+        crate::assembly_governance::Core,
+    >::load_target(root, assembly_name)?
+    .with_context(|| format!("assembly `{assembly_name}` is not governed"))?;
+    let assembly = ir
+        .assembly(assembly_name)
+        .with_context(|| format!("assembly `{assembly_name}` is not governed"))?;
+    crate::assembly_codegen::check_governed_target(root, assembly)
+        .context("modules_gen carrier 与 manifest 漂移")?;
+    let (_, findings) = crate::contract::validate::validate_root(&root.join("contracts"))?;
+    reject_findings("assembly graph contract source validation", &findings)?;
+    build_governed_model(root, assembly_name, assembly)
+}
+
+fn build_governed_model(
+    root: &Path,
+    assembly_name: &str,
+    assembly: &crate::assembly_governance::GovernedAssembly,
+) -> Result<GraphModel> {
+    let manifest = assembly.manifest();
 
     let domains: BTreeSet<_> = manifest
         .domains()
@@ -686,9 +717,18 @@ fn escape_mermaid(value: &str) -> String {
         .replace('"', "&quot;")
 }
 
-fn generate_root(root: &Path, options: &Options) -> Result<()> {
+fn generate_root(
+    root: &Path,
+    options: &Options,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> Result<()> {
     let assembly = options.assembly_name();
-    let model = build_model(root, assembly)?;
+    let model = build_model(root, assembly, facts)?;
+    generate_model_root(root, options, &model)
+}
+
+fn generate_model_root(root: &Path, options: &Options, model: &GraphModel) -> Result<()> {
+    let assembly = options.assembly_name();
     let base = if assembly == "runtime" {
         root.join("docs/architecture/generated/runtime-assembly")
     } else {
@@ -703,8 +743,8 @@ fn generate_root(root: &Path, options: &Options) -> Result<()> {
     let mut targets = Vec::new();
     for format in formats {
         let (path, content) = match format {
-            Format::Json => (base.with_extension("json"), render_json(&model)?),
-            Format::Mermaid => (base.with_extension("mmd"), render_mermaid(&model)?),
+            Format::Json => (base.with_extension("json"), render_json(model)?),
+            Format::Mermaid => (base.with_extension("mmd"), render_mermaid(model)?),
         };
         ensure_no_symlinks(root, &path)?;
         let actual = if options.is_check() || path.exists() {
@@ -817,6 +857,11 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<()> {
 mod tests {
     use super::*;
 
+    fn generate_fixture_graph_without_cargo(root: &Path, options: &Options) -> Result<()> {
+        build_fixture_model_without_cargo(root, options.assembly_name())
+            .and_then(|model| generate_model_root(root, options, &model))
+    }
+
     #[test]
     fn cli_is_closed_and_defaults_to_runtime_both_formats() -> anyhow::Result<()> {
         assert_eq!(parse_options(&[])?, Options::default());
@@ -858,11 +903,14 @@ mod tests {
         let root = fixture_root("assembly-graph-green")?;
         write_fixture(&root)?;
         crate::assembly_codegen::generate_root(&root, false)?;
-        let model = build_model(&root, "runtime")?;
+        let model = build_fixture_model_without_cargo(&root, "runtime")?;
         assert!(!model.nodes.is_empty() && !model.edges.is_empty());
         let json = render_json(&model)?;
         let mermaid = render_mermaid(&model)?;
-        assert_eq!(json, render_json(&build_model(&root, "runtime")?)?);
+        assert_eq!(
+            json,
+            render_json(&build_fixture_model_without_cargo(&root, "runtime")?)?
+        );
         assert!(json.contains("\"inAssembly\": false"));
         assert!(mermaid.contains("[provider active ephemeral-memory]"));
         assert!(mermaid.contains("[component external] outside"));
@@ -983,7 +1031,7 @@ mod tests {
             let root = fixture_root(&format!("assembly-graph-drift-{mutation}"))?;
             write_fixture(&root)?;
             crate::assembly_codegen::generate_root(&root, false)?;
-            generate_root(&root, &Options::default())?;
+            generate_fixture_graph_without_cargo(&root, &Options::default())?;
             let json = root.join("docs/architecture/generated/runtime-assembly.json");
             let mermaid = root.join("docs/architecture/generated/runtime-assembly.mmd");
             let before_json = std::fs::read(&json)?;
@@ -1029,7 +1077,7 @@ mod tests {
             let content = std::fs::read_to_string(&path)?.replace(from, to);
             std::fs::write(path, content)?;
             assert!(
-                generate_root(&root, &Options::check_runtime()).is_err(),
+                generate_fixture_graph_without_cargo(&root, &Options::check_runtime()).is_err(),
                 "{mutation} drift accepted"
             );
             assert_eq!(std::fs::read(&json)?, before_json);
@@ -1039,18 +1087,18 @@ mod tests {
         let root = fixture_root("assembly-graph-output-tamper")?;
         write_fixture(&root)?;
         crate::assembly_codegen::generate_root(&root, false)?;
-        generate_root(&root, &Options::default())?;
+        generate_fixture_graph_without_cargo(&root, &Options::default())?;
         let json = root.join("docs/architecture/generated/runtime-assembly.json");
         let mermaid = root.join("docs/architecture/generated/runtime-assembly.mmd");
         let original_json = std::fs::read(&json)?;
         std::fs::write(&json, format!("{OWNERSHIP_MARKER_JSON}\n{{}}\n"))?;
         let tampered = std::fs::read(&json)?;
-        assert!(generate_root(&root, &Options::check_runtime()).is_err());
+        assert!(generate_fixture_graph_without_cargo(&root, &Options::check_runtime()).is_err());
         assert_eq!(std::fs::read(&json)?, tampered);
         std::fs::write(&json, original_json)?;
         std::fs::write(&mermaid, format!("{OWNERSHIP_MARKER_MERMAID}\nbroken\n"))?;
         let tampered = std::fs::read(&mermaid)?;
-        assert!(generate_root(&root, &Options::check_runtime()).is_err());
+        assert!(generate_fixture_graph_without_cargo(&root, &Options::check_runtime()).is_err());
         assert_eq!(std::fs::read(&mermaid)?, tampered);
         std::fs::remove_dir_all(root)?;
         Ok(())
@@ -1071,7 +1119,7 @@ mod tests {
             root.join("contracts/event/identity/v1/created/payload.schema.json"),
             duplicate.join("payload.schema.json"),
         )?;
-        let error = match build_model(&root, "runtime") {
+        let error = match build_fixture_model_without_cargo(&root, "runtime") {
             Ok(_) => bail!("duplicate contract id unexpectedly accepted"),
             Err(error) => error,
         };
@@ -1111,7 +1159,7 @@ mod tests {
             };
             std::fs::write(&path, changed)?;
             let error = match crate::assembly_codegen::generate_root(&root, false) {
-                Ok(()) => build_model(&root, "runtime")
+                Ok(()) => build_fixture_model_without_cargo(&root, "runtime")
                     .err()
                     .context("invalid target accepted")?,
                 Err(error) => error,
@@ -1136,7 +1184,7 @@ mod tests {
             root.join("assemblies/identityaudit/assembly.toml"),
             "unrelated invalid manifest = [",
         )?;
-        build_model(&root, "runtime")?;
+        build_fixture_model_without_cargo(&root, "runtime")?;
         std::fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -1146,7 +1194,7 @@ mod tests {
         let root = fixture_root("assembly-graph-non-launch")?;
         write_fixture(&root)?;
         crate::assembly_codegen::generate_root(&root, false)?;
-        let rendered = render_mermaid(&build_model(&root, "settingsonly")?)?;
+        let rendered = render_mermaid(&build_fixture_model_without_cargo(&root, "settingsonly")?)?;
         assert!(!rendered.contains("produces") && !rendered.contains(" live"));
         assert!(rendered.contains("declares output shape"));
         std::fs::remove_dir_all(root)?;
@@ -1164,7 +1212,7 @@ mod tests {
         std::fs::create_dir_all(&outside)?;
         std::fs::create_dir_all(root.join("docs/architecture"))?;
         symlink(&outside, root.join("docs/architecture/generated"))?;
-        assert!(generate_root(&root, &Options::default()).is_err());
+        assert!(generate_fixture_graph_without_cargo(&root, &Options::default()).is_err());
         assert!(!outside.join("runtime-assembly.json").exists());
         std::fs::remove_file(root.join("docs/architecture/generated"))?;
         std::fs::remove_dir_all(root)?;
@@ -1185,7 +1233,7 @@ mod tests {
             manifest("identity", "primary"),
         )?;
         symlink(&outside, root.join("assemblies"))?;
-        assert!(build_model(&root, "runtime").is_err());
+        assert!(build_fixture_model_without_cargo(&root, "runtime").is_err());
         std::fs::remove_file(root.join("assemblies"))?;
         std::fs::remove_dir_all(root)?;
         std::fs::remove_dir_all(outside)?;
@@ -1195,7 +1243,8 @@ mod tests {
     #[test]
     fn committed_runtime_graph_is_non_empty_and_check_clean() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let model = build_model(&root, "runtime")?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let model = build_model(&root, "runtime", command_facts.get()?)?;
         assert!(!model.nodes.is_empty() && !model.edges.is_empty());
         let assembly = model
             .nodes
@@ -1216,7 +1265,7 @@ mod tests {
             .find(|node| node.label == "httpserve")
             .context("httpserve component missing")?;
         assert_eq!(httpserve.in_assembly, Some(true));
-        generate_root(&root, &Options::check_runtime())
+        generate_model_root(&root, &Options::check_runtime(), &model)
     }
 
     fn fixture_root(

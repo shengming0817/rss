@@ -105,7 +105,7 @@ fn selection(
     ]);
     let platform = CargoPlatform::build_target()?;
     Ok(BuildSelection::new(
-        root,
+        root.clone(),
         ResolverVersion::V2,
         feature_selection,
         BuildPlatforms::new(platform.clone(), platform),
@@ -151,6 +151,174 @@ fn all_features_catalog_is_not_a_default_root_selection() -> Result<(), Box<dyn 
         catalog_path.ends_with("target:catalog/catalog-only"),
         "All selection path must end at catalog-only: {catalog_path}"
     );
+    Ok(())
+}
+
+#[test]
+fn selected_dependency_edges_are_root_specific_and_side_aware() -> Result<(), Box<dyn Error>> {
+    let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &feature_metadata())?;
+    let root = facts.package_key("root")?;
+    let middle = facts.package_key("middle")?;
+    let guarded = facts.package_key("guarded")?;
+    let catalog = facts.package_key("catalog")?;
+
+    let default_build = facts.resolve_build(selection(&facts, FeatureSelection::Default)?)?;
+    assert!(default_build.is_dependency_selected(BuildSide::Target, &root, "middle", &middle,));
+    assert!(default_build.is_dependency_selected(BuildSide::Target, &middle, "guarded", &guarded,));
+    assert!(
+        !default_build.is_dependency_selected(BuildSide::Target, &root, "catalog", &catalog,),
+        "an unselected optional declaration must not become a selected direct edge",
+    );
+    assert!(
+        !default_build.is_dependency_selected(BuildSide::Target, &catalog, "guarded", &guarded,),
+        "a package selected elsewhere in the graph must not fabricate a direct edge",
+    );
+    assert!(
+        !default_build.is_dependency_selected(BuildSide::Host, &root, "middle", &middle),
+        "normal target dependency must not leak onto the host side",
+    );
+
+    let all_build = facts.resolve_build(selection(&facts, FeatureSelection::All)?)?;
+    assert!(all_build.is_dependency_selected(BuildSide::Target, &root, "catalog", &catalog,));
+    Ok(())
+}
+
+#[test]
+fn selected_dependency_edges_use_renamed_key_without_package_membership_false_positive()
+-> Result<(), Box<dyn Error>> {
+    let mut metadata: Value = serde_json::from_str(&feature_metadata())?;
+    let packages = metadata["packages"]
+        .as_array_mut()
+        .ok_or("packages must be an array")?;
+    let catalog_id = path_package_id("/workspace/crates/catalog");
+    let root = packages
+        .iter_mut()
+        .find(|package| package["name"] == "root")
+        .ok_or("root package missing")?;
+    let catalog_decl = root["dependencies"]
+        .as_array_mut()
+        .and_then(|dependencies| {
+            dependencies
+                .iter_mut()
+                .find(|dependency| dependency["name"] == "catalog")
+        })
+        .ok_or("root catalog declaration missing")?;
+    catalog_decl["rename"] = json!("catalog_alias");
+    root["features"]["all-only"] = json!(["dep:catalog_alias"]);
+
+    let middle = packages
+        .iter_mut()
+        .find(|package| package["name"] == "middle")
+        .ok_or("middle package missing")?;
+    middle["dependencies"]
+        .as_array_mut()
+        .ok_or("middle dependencies missing")?
+        .push(path_dependency_with_features(
+            "catalog",
+            "/workspace/crates/catalog",
+            false,
+            true,
+            &[],
+        ));
+
+    let nodes = metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .ok_or("resolve nodes missing")?;
+    let root_node = nodes
+        .iter_mut()
+        .find(|node| node["id"] == path_package_id("/workspace/bins/root"))
+        .ok_or("root node missing")?;
+    let root_catalog = root_node["deps"]
+        .as_array_mut()
+        .and_then(|dependencies| {
+            dependencies
+                .iter_mut()
+                .find(|dependency| dependency["pkg"] == catalog_id)
+        })
+        .ok_or("root catalog edge missing")?;
+    root_catalog["name"] = json!("catalog_alias");
+    let middle_node = nodes
+        .iter_mut()
+        .find(|node| node["id"] == path_package_id("/workspace/crates/middle"))
+        .ok_or("middle node missing")?;
+    middle_node["dependencies"]
+        .as_array_mut()
+        .ok_or("middle dependency ids missing")?
+        .push(json!(catalog_id));
+    middle_node["deps"]
+        .as_array_mut()
+        .ok_or("middle deps missing")?
+        .push(json!({
+            "name": "catalog",
+            "pkg": catalog_id,
+            "dep_kinds": [{"kind": null, "target": null}]
+        }));
+
+    let facts = WorkspaceFacts::from_metadata_json(
+        Path::new("/workspace"),
+        &serde_json::to_string(&metadata)?,
+    )?;
+    let root = facts.package_key("root")?;
+    let catalog = facts.package_key("catalog")?;
+    let default_build = facts.resolve_build(selection(&facts, FeatureSelection::Default)?)?;
+    assert!(
+        default_build
+            .workspace_packages(BuildSide::Target)
+            .contains(&catalog),
+        "catalog must be selected transitively through middle",
+    );
+    assert!(!default_build.is_dependency_selected(
+        BuildSide::Target,
+        &root,
+        "catalog_alias",
+        &catalog,
+    ));
+    let all_build = facts.resolve_build(selection(&facts, FeatureSelection::All)?)?;
+    assert!(all_build.is_dependency_selected(BuildSide::Target, &root, "catalog_alias", &catalog,));
+    Ok(())
+}
+
+#[test]
+fn selected_dependency_edges_keep_manifest_key_when_library_target_name_differs()
+-> Result<(), Box<dyn Error>> {
+    let mut metadata: Value = serde_json::from_str(&feature_metadata())?;
+    let packages = metadata["packages"]
+        .as_array_mut()
+        .ok_or("packages must be an array")?;
+    let catalog = packages
+        .iter_mut()
+        .find(|package| package["name"] == "catalog")
+        .ok_or("catalog package missing")?;
+    catalog["targets"][0]["name"] = json!("catalog_runtime");
+
+    let root_node = metadata["resolve"]["nodes"]
+        .as_array_mut()
+        .and_then(|nodes| {
+            nodes
+                .iter_mut()
+                .find(|node| node["id"] == path_package_id("/workspace/bins/root"))
+        })
+        .ok_or("root resolve node missing")?;
+    let catalog_id = path_package_id("/workspace/crates/catalog");
+    let catalog_edge = root_node["deps"]
+        .as_array_mut()
+        .and_then(|dependencies| {
+            dependencies
+                .iter_mut()
+                .find(|dependency| dependency["pkg"] == catalog_id)
+        })
+        .ok_or("catalog resolve edge missing")?;
+    catalog_edge["name"] = json!("catalog_runtime");
+
+    let facts = WorkspaceFacts::from_metadata_json(
+        Path::new("/workspace"),
+        &serde_json::to_string(&metadata)?,
+    )?;
+    let root = facts.package_key("root")?;
+    let catalog = facts.package_key("catalog")?;
+    let build = facts.resolve_build(selection(&facts, FeatureSelection::All)?)?;
+    assert!(build.is_dependency_selected(BuildSide::Target, &root, "catalog", &catalog));
+    assert!(!build.is_dependency_selected(BuildSide::Target, &root, "catalog_runtime", &catalog,));
     Ok(())
 }
 
@@ -489,6 +657,13 @@ fn side_facts_skip_non_workspace_packages_and_mark_proc_macro_initials_host()
     let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &metadata)?;
     let root = facts.package_key("root")?;
     let codegen = facts.package_key("codegen")?;
+    let external = facts
+        .direct_dependencies_for(&root)?
+        .iter()
+        .find(|dependency| dependency.name() == "external_lib")
+        .and_then(|dependency| dependency.resolved())
+        .ok_or("external dependency must resolve")?
+        .clone();
     let expand = facts.feature_key(&codegen, "expand")?;
     assert!(matches!(
         facts.package_key("external_lib"),
@@ -500,7 +675,7 @@ fn side_facts_skip_non_workspace_packages_and_mark_proc_macro_initials_host()
     ));
     let platform = CargoPlatform::build_target()?;
     let build = facts.resolve_build(BuildSelection::new(
-        root,
+        root.clone(),
         ResolverVersion::V2,
         FeatureSelection::Default,
         BuildPlatforms::new(platform.clone(), platform),
@@ -520,6 +695,7 @@ fn side_facts_skip_non_workspace_packages_and_mark_proc_macro_initials_host()
             .any(|package| matches!(package.as_str(), "external_lib" | "serde"))
     );
     assert!(build.is_package_selected(BuildSide::Target, "external_lib"));
+    assert!(build.is_dependency_selected(BuildSide::Target, &root, "external_lib", &external,));
     assert!(build.workspace_packages(BuildSide::Host).contains(&codegen));
     assert!(build.is_feature_enabled(BuildSide::Host, &expand));
     assert!(!build.is_feature_enabled(BuildSide::Target, &expand));

@@ -233,7 +233,6 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use std::path::Path;
-    use syn::visit::Visit;
     use workspacefacts::testing::{
         metadata_json, path_build_dependency_with_features, path_dependency_with_features,
         path_package, path_package_id, registry_package, resolve_node_with_dep_kinds,
@@ -408,25 +407,6 @@ mod tests {
     }
 
     #[test]
-    fn shipped_feature_implementation_has_no_tree_protocol_residual() -> anyhow::Result<()> {
-        let old = "fn old() { let _ = CargoSubcommand::Tree; let _ = \"--invert\"; }";
-        assert!(
-            !tree_protocol_residuals(old)?.is_empty(),
-            "synthetic old implementation must be rejected"
-        );
-
-        let live = include_str!("shipped_feature_guard.rs");
-        let implementation = live
-            .split_once("#[cfg(test)]")
-            .map_or(live, |(implementation, _)| implementation);
-        assert!(
-            tree_protocol_residuals(implementation)?.is_empty(),
-            "live implementation retained cargo tree protocol symbols"
-        );
-        Ok(())
-    }
-
-    #[test]
     fn actual_shipped_feature_graphs_exclude_guarded_features() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -486,93 +466,6 @@ mod tests {
                 .iter()
                 .any(|finding| finding.rule == Rule::RssOperatorCliAbsent),
             "rss without operator-cli must fail anti-vacuity: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[derive(Default)]
-    struct TreeProtocolVisitor {
-        residuals: BTreeSet<&'static str>,
-        in_doc_attr: bool,
-    }
-
-    impl TreeProtocolVisitor {
-        fn record_ident(&mut self, ident: &str) {
-            match ident {
-                "CargoSubcommand" => {
-                    self.residuals.insert("CargoSubcommand");
-                }
-                "cargo_cmd" => {
-                    self.residuals.insert("cargo_cmd");
-                }
-                "shipped_feature_tree" => {
-                    self.residuals.insert("shipped_feature_tree");
-                }
-                "findings_for_tree_output" => {
-                    self.residuals.insert("findings_for_tree_output");
-                }
-                _ => {}
-            }
-        }
-    }
-
-    impl<'ast> Visit<'ast> for TreeProtocolVisitor {
-        fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
-            let was_doc = self.in_doc_attr;
-            self.in_doc_attr = attribute.path().is_ident("doc");
-            syn::visit::visit_attribute(self, attribute);
-            self.in_doc_attr = was_doc;
-        }
-
-        fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
-            self.record_ident(&function.sig.ident.to_string());
-            syn::visit::visit_item_fn(self, function);
-        }
-
-        fn visit_path(&mut self, path: &'ast syn::Path) {
-            let segments = path
-                .segments
-                .iter()
-                .map(|segment| segment.ident.to_string())
-                .collect::<Vec<_>>();
-            for segment in &segments {
-                self.record_ident(segment);
-            }
-            if segments.windows(2).any(|window| window == ["crate", "cmd"]) {
-                self.residuals.insert("crate::cmd");
-            }
-            syn::visit::visit_path(self, path);
-        }
-
-        fn visit_lit_str(&mut self, literal: &'ast syn::LitStr) {
-            let value = literal.value();
-            if value == "--invert" {
-                self.residuals.insert("\"--invert\"");
-            }
-            if !self.in_doc_attr && value.contains("cargo tree") {
-                self.residuals.insert("cargo tree");
-            }
-            syn::visit::visit_lit_str(self, literal);
-        }
-    }
-
-    fn tree_protocol_residuals(source: &str) -> anyhow::Result<Vec<&'static str>> {
-        let syntax = syn::parse_file(source).context("parse shipped feature source")?;
-        let mut visitor = TreeProtocolVisitor::default();
-        visitor.visit_file(&syntax);
-        Ok(visitor.residuals.into_iter().collect())
-    }
-
-    #[test]
-    fn rustdoc_cargo_tree_mentions_are_not_residuals() -> anyhow::Result<()> {
-        let source = r#"
-            //! Migrated off `cargo tree --invert`.
-            /// Still documents cargo tree history.
-            fn live() {}
-        "#;
-        assert!(
-            tree_protocol_residuals(source)?.is_empty(),
-            "rustdoc mentions of cargo tree must not count as protocol residuals"
         );
         Ok(())
     }

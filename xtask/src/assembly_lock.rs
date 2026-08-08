@@ -22,12 +22,20 @@ pub(crate) enum AssemblyLockAction {
     Check,
 }
 
-pub(crate) fn run(action: AssemblyLockAction) -> anyhow::Result<()> {
-    run_root(&crate::workspace_root()?, action).map_err(anyhow::Error::new)
+pub(crate) fn run(
+    root: &Path,
+    action: AssemblyLockAction,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> anyhow::Result<()> {
+    run_root(root, action, facts).map_err(anyhow::Error::new)
 }
 
-fn run_root(root: &Path, action: AssemblyLockAction) -> CommandResult<()> {
-    let ir = preflight(root, action)?;
+fn run_root(
+    root: &Path,
+    action: AssemblyLockAction,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> CommandResult<()> {
+    let ir = preflight(root, facts)?;
     let plan = plan_locks(root, &ir)?;
     match action {
         AssemblyLockAction::Generate => generate(plan),
@@ -37,7 +45,7 @@ fn run_root(root: &Path, action: AssemblyLockAction) -> CommandResult<()> {
 
 fn preflight(
     root: &Path,
-    action: AssemblyLockAction,
+    facts: &workspacefacts::WorkspaceFacts,
 ) -> CommandResult<crate::assembly_governance::AssemblyGovernanceIr<crate::assembly_governance::Core>>
 {
     use crate::assembly_governance::GovernanceLoadStage;
@@ -66,14 +74,8 @@ fn preflight(
             contract_findings.len(),
         )));
     }
-    let (_, mut assembly_findings) = crate::assembly::validate_root(root)
-        .map_err(|_| CommandError::Preflight(PreflightFailure::AssemblyHardError))?;
-    if action == AssemblyLockAction::Generate {
-        // The lock and runtime plan bind each other. Generation may cross exactly that stale
-        // settingsonly golden, while every other closure finding and all check-mode drift remain
-        // fail closed.
-        assembly_findings.retain(|finding| !is_settingsonly_lock_runtime_plan_drift(finding));
-    }
+    let (_, assembly_findings) = crate::assembly::validate_governed_root(root, facts, &ir)
+        .map_err(|error| CommandError::Preflight(assembly_preflight_failure(&error)))?;
     if !assembly_findings.is_empty() {
         return Err(CommandError::Preflight(PreflightFailure::AssemblyFindings(
             assembly_findings.len(),
@@ -92,12 +94,6 @@ fn preflight(
     crate::generated_file::verify_lf_checkout(root, LOCK_LF_RULE, &lock_paths)
         .map_err(CommandError::CheckoutPolicy)?;
     Ok(ir)
-}
-
-fn is_settingsonly_lock_runtime_plan_drift(finding: &crate::assembly::Finding) -> bool {
-    finding.rule == crate::assembly::Rule::SettingsOnlyL2ProductionClosure
-        && finding.subject == "assemblies/settingsonly"
-        && finding.detail.starts_with("field=lock-runtime-plan ")
 }
 
 fn orphan_locks(
@@ -273,9 +269,50 @@ enum PreflightFailure {
     ContractHardError,
     ContractFindings(usize),
     AssemblyHardError,
+    WorkspaceFactsMetadata,
+    WorkspaceFactsUnknownSelection,
+    WorkspaceFactsIncompleteGraph,
+    WorkspaceFactsDependencyQuery,
     AssemblyFindings(usize),
     ModulesAggregate,
     ProvidersAggregate,
+}
+
+fn assembly_preflight_failure(error: &anyhow::Error) -> PreflightFailure {
+    if error.chain().any(|cause| {
+        cause
+            .downcast_ref::<crate::assembly::AssemblyCargoFactsError>()
+            .is_some()
+    }) {
+        return PreflightFailure::WorkspaceFactsDependencyQuery;
+    }
+    let Some(error) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<workspacefacts::WorkspaceFactsError>())
+    else {
+        return PreflightFailure::AssemblyHardError;
+    };
+    use workspacefacts::WorkspaceFactsError;
+    match error {
+        WorkspaceFactsError::UnknownPackage(_)
+        | WorkspaceFactsError::UnknownFeature { .. }
+        | WorkspaceFactsError::UnknownPlatform(_) => {
+            PreflightFailure::WorkspaceFactsUnknownSelection
+        }
+        WorkspaceFactsError::IncompleteFeatureGraph(_)
+        | WorkspaceFactsError::UnexplainedFeatureActivation { .. } => {
+            PreflightFailure::WorkspaceFactsIncompleteGraph
+        }
+        WorkspaceFactsError::AmbiguousDependencyResolution { .. }
+        | WorkspaceFactsError::BuildQuery(_)
+        | WorkspaceFactsError::Query(_) => PreflightFailure::WorkspaceFactsDependencyQuery,
+        WorkspaceFactsError::InvalidMetadata(_)
+        | WorkspaceFactsError::WorkspaceRootMismatch { .. }
+        | WorkspaceFactsError::InvalidWorkspaceRoot(_)
+        | WorkspaceFactsError::WorkspacePathEscape(_)
+        | WorkspaceFactsError::InvalidRepoPath(_)
+        | WorkspaceFactsError::UnknownDependencyKind(_) => PreflightFailure::WorkspaceFactsMetadata,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -316,6 +353,18 @@ impl fmt::Display for CommandError {
             ),
             Self::Preflight(PreflightFailure::AssemblyHardError) => formatter.write_str(
                 "assembly lock: assembly 输入不可读或无效；运行 `cargo xtask assembly validate`",
+            ),
+            Self::Preflight(PreflightFailure::WorkspaceFactsMetadata) => formatter.write_str(
+                "assembly lock: WorkspaceFacts metadata/path 无效；检查 cargo metadata workspace root 与路径",
+            ),
+            Self::Preflight(PreflightFailure::WorkspaceFactsUnknownSelection) => formatter.write_str(
+                "assembly lock: WorkspaceFacts build selection 引用了 unknown package/feature/platform；运行 `cargo xtask assembly validate`",
+            ),
+            Self::Preflight(PreflightFailure::WorkspaceFactsIncompleteGraph) => formatter.write_str(
+                "assembly lock: WorkspaceFacts selected graph incomplete/unexplained；检查 resolver feature graph",
+            ),
+            Self::Preflight(PreflightFailure::WorkspaceFactsDependencyQuery) => formatter.write_str(
+                "assembly lock: WorkspaceFacts dependency resolution ambiguous/query failed；检查 direct dependency 声明与 resolve graph",
             ),
             Self::Preflight(PreflightFailure::AssemblyFindings(count)) => write!(
                 formatter,
@@ -416,35 +465,21 @@ mod tests {
     const INJECTED: &str = "INJECTED_DIAGNOSTIC_LINE";
     type FixtureMutation = fn(&Path) -> anyhow::Result<()>;
 
-    #[test]
-    fn generate_bootstrap_accepts_only_the_settingsonly_lock_runtime_plan_drift() {
-        let accepted = crate::diagnostic::finding(
-            crate::assembly::Rule::SettingsOnlyL2ProductionClosure,
-            "assemblies/settingsonly",
-            "field=lock-runtime-plan committed lock and runtime plan are stale",
-        );
-        assert!(is_settingsonly_lock_runtime_plan_drift(&accepted));
-
-        for rejected in [
-            crate::diagnostic::finding(
-                crate::assembly::Rule::SettingsOnlyL2ProductionClosure,
-                "assemblies/settingsonly",
-                "field=providers production provider closure is stale",
-            ),
-            crate::diagnostic::finding(
-                crate::assembly::Rule::SettingsOnlyL2ProductionClosure,
-                "assemblies/runtime",
-                "field=lock-runtime-plan unrelated assembly drift",
-            ),
-        ] {
-            assert!(!is_settingsonly_lock_runtime_plan_drift(&rejected));
-        }
+    macro_rules! run_fixture_root {
+        ($root:expr, $action:expr) => {{
+            let workspace_root = crate::workspace_root().expect("workspace root");
+            let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&workspace_root);
+            let facts = command_facts
+                .get()
+                .expect("fixture workspace metadata must load");
+            run_root($root, $action, facts)
+        }};
     }
 
     #[test]
     fn committed_locks_are_clean_and_repository_verified() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        run_root(&root, AssemblyLockAction::Check)?;
+        run_fixture_root!(&root, AssemblyLockAction::Check)?;
         let ir = crate::assembly_governance::AssemblyGovernanceIr::<
             crate::assembly_governance::Core,
         >::load(&root)?;
@@ -463,15 +498,17 @@ mod tests {
     #[test]
     fn generate_action_is_end_to_end_deterministic_and_check_clean() -> anyhow::Result<()> {
         let fixture = Fixture::new("generate-action")?;
-        let (_, findings) = crate::assembly::validate_root(&fixture.root)?;
+        let workspace_root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&workspace_root);
+        let (_, findings) = crate::assembly::validate_root(&fixture.root, command_facts.get()?)?;
         anyhow::ensure!(findings.is_empty(), "fixture findings: {findings:?}");
-        run_root(&fixture.root, AssemblyLockAction::Generate)?;
+        run_fixture_root!(&fixture.root, AssemblyLockAction::Generate)?;
         let first = on_disk_locks(&fixture.root)?;
         assert_eq!(first.len(), 3);
 
-        run_root(&fixture.root, AssemblyLockAction::Generate)?;
+        run_fixture_root!(&fixture.root, AssemblyLockAction::Generate)?;
         assert_eq!(first, on_disk_locks(&fixture.root)?);
-        run_root(&fixture.root, AssemblyLockAction::Check)?;
+        run_fixture_root!(&fixture.root, AssemblyLockAction::Check)?;
         Ok(())
     }
 
@@ -615,8 +652,8 @@ mod tests {
                 other => anyhow::bail!("unknown fixture case: {other}"),
             }
             let before = fs::read(&path).ok();
-            let error =
-                run_root(&fixture.root, AssemblyLockAction::Check).expect_err("drift must fail");
+            let error = run_fixture_root!(&fixture.root, AssemblyLockAction::Check)
+                .expect_err("drift must fail");
             let CommandError::Drift(paths) = &error else {
                 anyhow::bail!("expected drift error, got {error}");
             };
@@ -638,7 +675,7 @@ mod tests {
             let fixture = Fixture::new(name)?;
             generate_fixture(&fixture.root)?;
             invalidate(&fixture.root)?;
-            let error = run_root(&fixture.root, AssemblyLockAction::Check)
+            let error = run_fixture_root!(&fixture.root, AssemblyLockAction::Check)
                 .expect_err("invalid preflight input must fail");
             assert_safe_diagnostic(&format!("{error:?} {error}"));
         }
@@ -696,7 +733,7 @@ mod tests {
             format!("{LOCK_LF_RULE}\n"),
         )?;
         assert_eq!(
-            run_root(&fixture.root, AssemblyLockAction::Check),
+            run_fixture_root!(&fixture.root, AssemblyLockAction::Check),
             Err(CommandError::Preflight(PreflightFailure::ModulesAggregate))
         );
         assert_eq!(
@@ -714,7 +751,7 @@ mod tests {
             format!("{}\n", assembly_schema::GENERATED_MODULE_OWNERSHIP_MARKER),
         )?;
         assert_eq!(
-            run_root(&fixture.root, AssemblyLockAction::Generate),
+            run_fixture_root!(&fixture.root, AssemblyLockAction::Generate),
             Err(CommandError::Preflight(PreflightFailure::ModulesAggregate))
         );
         assert!(
@@ -732,7 +769,7 @@ mod tests {
             .join("assemblies/runtime/src/generated/providers_gen.rs");
         fs::remove_file(&provider)?;
         assert_eq!(
-            run_root(&fixture.root, AssemblyLockAction::Check),
+            run_fixture_root!(&fixture.root, AssemblyLockAction::Check),
             Err(CommandError::Preflight(
                 PreflightFailure::ProvidersAggregate
             ))
@@ -752,7 +789,7 @@ mod tests {
             format!("{}\n", assembly_schema::GENERATED_PROVIDER_OWNERSHIP_MARKER),
         )?;
         assert_eq!(
-            run_root(&fixture.root, AssemblyLockAction::Generate),
+            run_fixture_root!(&fixture.root, AssemblyLockAction::Generate),
             Err(CommandError::Preflight(
                 PreflightFailure::ProvidersAggregate
             ))
@@ -771,7 +808,7 @@ mod tests {
         fs::remove_dir_all(&assemblies)?;
         fs::create_dir(&assemblies)?;
         assert_eq!(
-            run_root(&fixture.root, AssemblyLockAction::Check),
+            run_fixture_root!(&fixture.root, AssemblyLockAction::Check),
             Err(CommandError::EmptyUniverse)
         );
         Ok(())
@@ -785,10 +822,56 @@ mod tests {
             "not valid toml = [",
         )?;
         assert_eq!(
-            run_root(&fixture.root, AssemblyLockAction::Check),
+            run_fixture_root!(&fixture.root, AssemblyLockAction::Check),
             Err(CommandError::Preflight(PreflightFailure::AssemblyHardError))
         );
         Ok(())
+    }
+
+    #[test]
+    fn workspace_facts_preflight_has_a_closed_actionable_stage() {
+        use workspacefacts::WorkspaceFactsError;
+        for (error, expected) in [
+            (
+                WorkspaceFactsError::InvalidMetadata("bad metadata".to_owned()),
+                PreflightFailure::WorkspaceFactsMetadata,
+            ),
+            (
+                WorkspaceFactsError::UnknownPackage("missing".to_owned()),
+                PreflightFailure::WorkspaceFactsUnknownSelection,
+            ),
+            (
+                WorkspaceFactsError::IncompleteFeatureGraph("warning".to_owned()),
+                PreflightFailure::WorkspaceFactsIncompleteGraph,
+            ),
+            (
+                WorkspaceFactsError::AmbiguousDependencyResolution {
+                    dependent: "app".to_owned(),
+                    name: "dep".to_owned(),
+                    kind: "normal".to_owned(),
+                    detail: "two candidates".to_owned(),
+                },
+                PreflightFailure::WorkspaceFactsDependencyQuery,
+            ),
+        ] {
+            let error = anyhow::Error::new(error).context("resolve assembly build");
+            assert_eq!(assembly_preflight_failure(&error), expected);
+        }
+        let unresolved = anyhow::Error::new(
+            crate::assembly::AssemblyCargoFactsError::UnresolvedDependency {
+                assembly: "app".to_owned(),
+                dependency: "domain".to_owned(),
+            },
+        );
+        assert_eq!(
+            assembly_preflight_failure(&unresolved),
+            PreflightFailure::WorkspaceFactsDependencyQuery
+        );
+        assert!(
+            CommandError::Preflight(PreflightFailure::WorkspaceFactsUnknownSelection)
+                .to_string()
+                .contains("WorkspaceFacts")
+        );
     }
 
     #[cfg(unix)]

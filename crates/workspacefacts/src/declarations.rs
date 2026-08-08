@@ -35,6 +35,7 @@ pub(crate) struct RawDependency {
     target: Option<String>,
     path: Option<String>,
     source: Option<String>,
+    features: BTreeSet<String>,
 }
 
 #[derive(Debug)]
@@ -148,6 +149,7 @@ fn parse_raw_dependency(value: &Value) -> Result<RawDependency, WorkspaceFactsEr
         target: optional_string(value, "target")?,
         path: optional_string(value, "path")?,
         source: optional_string(value, "source")?,
+        features: required_string_set(value, "features")?,
     })
 }
 
@@ -238,6 +240,27 @@ fn optional_string(value: &Value, field: &str) -> Result<Option<String>, Workspa
     }
 }
 
+fn required_string_set(
+    value: &Value,
+    field: &str,
+) -> Result<BTreeSet<String>, WorkspaceFactsError> {
+    value
+        .get(field)
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            WorkspaceFactsError::InvalidMetadata(format!("missing array field `{field}`"))
+        })?
+        .iter()
+        .map(|item| {
+            item.as_str().map(str::to_owned).ok_or_else(|| {
+                WorkspaceFactsError::InvalidMetadata(format!(
+                    "field `{field}` entries must be strings"
+                ))
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn index_resolve_nodes(nodes: &[RawResolveNode]) -> BTreeMap<&str, &[RawResolveDep]> {
     nodes
         .iter()
@@ -262,6 +285,7 @@ pub(crate) fn project_direct_declarations(
         let (resolution, resolved_package_id) = resolve_declaration(
             dependent,
             &name,
+            &declaration.name,
             declaration.kind,
             declaration.target.as_deref(),
             resolve_deps,
@@ -281,6 +305,7 @@ pub(crate) fn project_direct_declarations(
             kind: declaration.kind,
             source,
             unconditional: declaration.target.is_none(),
+            requested_features: declaration.features.clone(),
         });
     }
     facts.sort_by(|left, right| {
@@ -289,12 +314,14 @@ pub(crate) fn project_direct_declarations(
             left.kind,
             left.unconditional,
             resolution_sort_key(&left.resolution),
+            &left.requested_features,
         )
             .cmp(&(
                 right.name.as_str(),
                 right.kind,
                 right.unconditional,
                 resolution_sort_key(&right.resolution),
+                &right.requested_features,
             ))
     });
     Ok(facts)
@@ -310,6 +337,7 @@ fn resolution_sort_key(resolution: &DependencyResolution) -> &str {
 fn resolve_declaration(
     dependent: &PackageKey,
     name: &str,
+    package_name: &str,
     kind: DependencyKind,
     target: Option<&str>,
     resolve_deps: &[RawResolveDep],
@@ -317,7 +345,12 @@ fn resolve_declaration(
 ) -> Result<(DependencyResolution, Option<String>), WorkspaceFactsError> {
     let mut matched_ids = BTreeSet::new();
     for dep in resolve_deps {
-        if dep.name != name {
+        let resolve_name_matches =
+            dep.name == name || dep.name.replace('_', "-") == name.replace('_', "-");
+        let package_identity_matches = indexes
+            .package(&dep.pkg)
+            .is_some_and(|package| package.name == package_name);
+        if !resolve_name_matches && !package_identity_matches {
             continue;
         }
         if !resolve_dep_matches_declaration(dep, kind, target) {

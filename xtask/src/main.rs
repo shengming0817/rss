@@ -101,10 +101,26 @@ fn dispatch(command: Command) -> Result<()> {
             contract::breaking::run(&against)
         }
         Command::Assembly(AssemblyCommand::Validate) => {
-            diagnostic::run_check(&assembly::AssemblyValidate)
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("assembly validate: load command-scoped workspace facts")?;
+            diagnostic::run_check(&assembly::AssemblyValidate::new(&root, facts))
         }
         Command::Assembly(AssemblyCommand::Artifacts(AssemblyArtifactsCommand::Check)) => {
-            assembly_artifacts::run()
+            let root = workspace_root()?;
+            let prepared = assembly_artifacts::prepare(&root)?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = match command_facts.get() {
+                Ok(facts) => facts,
+                Err(error) => {
+                    assembly_artifacts::report_workspace_facts_failure();
+                    return Err(error)
+                        .context("assembly artifacts: load command-scoped workspace facts");
+                }
+            };
+            assembly_artifacts::run_prepared(&root, facts, prepared)
         }
         Command::Assembly(AssemblyCommand::GenerateModules { check }) => {
             assembly_codegen::run(check)
@@ -115,8 +131,22 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Assembly(AssemblyCommand::GenerateRuntimePlans { check }) => {
             assembly_runtime_plan::run(check)
         }
-        Command::Assembly(AssemblyCommand::Lock(action)) => assembly_lock::run(action),
-        Command::Graph(GraphCommand::Assembly(options)) => graph::run(&options),
+        Command::Assembly(AssemblyCommand::Lock(action)) => {
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("assembly lock: load command-scoped workspace facts")?;
+            assembly_lock::run(&root, action, facts)
+        }
+        Command::Graph(GraphCommand::Assembly(options)) => {
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("assembly graph: load command-scoped workspace facts")?;
+            graph::run(&root, &options, facts)
+        }
         Command::Archrules(ArchrulesCommand::List) => archrules::list(),
         Command::Archrules(ArchrulesCommand::Verify) => {
             diagnostic::run_check(&archrules::ArchRules)

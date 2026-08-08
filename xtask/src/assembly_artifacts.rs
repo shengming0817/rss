@@ -12,6 +12,7 @@ use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Component, Path, PathBuf};
+use workspacefacts::{DependencyKind, DependencySource, PackageKey, TargetKind, WorkspaceFacts};
 
 #[cfg(test)]
 use crate::assembly_governance::ArtifactDeclaration as RawAssembly;
@@ -77,7 +78,6 @@ enum ArtifactRule {
     Health,
     Journey,
     PathSafety,
-    SpecializedBoundary,
 }
 
 type ArtifactFinding = diagnostic::Finding<ArtifactRule>;
@@ -93,16 +93,17 @@ struct Validation {
     findings: Vec<ArtifactFinding>,
 }
 
-/// Validate the workspace matrix and always print its stable observed view before returning status.
-pub(crate) fn run() -> Result<()> {
-    let root = crate::workspace_root()?;
+pub(crate) struct PreparedArtifactMatrix(RawMatrix);
+
+/// Parse the declaration and print the stable observed view without requiring Cargo metadata.
+pub(crate) fn prepare(root: &Path) -> Result<PreparedArtifactMatrix> {
     let path = root.join(MATRIX_PATH);
-    if let Err(error) = ensure_regular_path(&root, MATRIX_PATH) {
+    if let Err(error) = ensure_regular_path(root, MATRIX_PATH) {
         print!("{MARKDOWN_HEADER}");
         print_verification_failure(&[format!("{error:#}")]);
         return Err(error).with_context(|| format!("检查 {} 失败", path.display()));
     }
-    let raw: RawMatrix = match load_artifact_declaration(&root) {
+    let raw: RawMatrix = match load_artifact_declaration(root) {
         Ok(raw) => raw,
         Err(error) => {
             print!("{MARKDOWN_HEADER}");
@@ -110,9 +111,16 @@ pub(crate) fn run() -> Result<()> {
             return Err(error).context("解析 closed artifact matrix 失败");
         }
     };
-    let observed = render_observed(&raw);
-    print!("{observed}");
-    let validation = match validate_matrix(&root, raw) {
+    print!("{}", render_observed(&raw));
+    Ok(PreparedArtifactMatrix(raw))
+}
+
+pub(crate) fn run_prepared(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    prepared: PreparedArtifactMatrix,
+) -> Result<()> {
+    let validation = match validate_matrix(root, facts, prepared.0) {
         Ok(validation) => validation,
         Err(error) => {
             print_verification_failure(&[format!("{error:#}")]);
@@ -135,6 +143,12 @@ pub(crate) fn run() -> Result<()> {
             format_artifact_findings(&validation.findings).join("\n")
         )
     }
+}
+
+pub(crate) fn report_workspace_facts_failure() {
+    print_verification_failure(&[
+        "command-scoped WorkspaceFacts/CargoSet metadata rejected".to_owned()
+    ]);
 }
 
 fn print_verification_failure(errors: &[String]) {
@@ -162,13 +176,13 @@ fn verification_failure_markdown(errors: &[String]) -> String {
 fn validate_root(root: &Path) -> Result<Validation> {
     ensure_regular_path(root, MATRIX_PATH)?;
     let raw = load_artifact_declaration(root)?;
-    validate_matrix(root, raw)
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::for_test_fixture(root);
+    validate_matrix(root, command_facts.get()?, raw)
 }
 
-fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
+fn validate_matrix(root: &Path, facts: &WorkspaceFacts, raw: RawMatrix) -> Result<Validation> {
     let mut findings = Vec::new();
     let ir = AssemblyGovernanceIr::<Core>::load(root)?.join_artifacts(raw)?;
-    let cargo = crate::assembly::CargoTargetCatalog::load(root)?;
     let mut supported = BTreeSet::new();
     let mut identities: BTreeMap<String, String> = BTreeMap::new();
     for row in ir.artifacts() {
@@ -189,7 +203,7 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
                     .manifest();
                 validate_supported(
                     root,
-                    &cargo,
+                    facts,
                     name,
                     manifest,
                     binary,
@@ -230,16 +244,6 @@ fn validate_matrix(root: &Path, raw: RawMatrix) -> Result<Validation> {
                 supported.insert(name.to_owned());
             }
         }
-    }
-    for boundary in crate::assembly::artifact_boundary_findings(root)? {
-        reject!(
-            findings,
-            SpecializedBoundary,
-            boundary.subject,
-            "{:?}: {}",
-            boundary.rule,
-            boundary.detail
-        );
     }
     let verified = findings
         .is_empty()
@@ -390,13 +394,116 @@ fn validate_lifecycle_shape(row: &RawAssembly, findings: &mut Vec<ArtifactFindin
     }
 }
 
+fn target_exists(
+    facts: &WorkspaceFacts,
+    package_name: &str,
+    target_name: &str,
+    target_kind: TargetKind,
+) -> Result<bool> {
+    let Ok(package) = facts.package_key(package_name) else {
+        return Ok(false);
+    };
+    Ok(facts
+        .targets_for(&package)?
+        .iter()
+        .any(|target| target.name() == target_name && target.kind() == target_kind))
+}
+
+fn target_path(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    package_name: &str,
+    target_name: &str,
+    target_kind: TargetKind,
+) -> Result<Option<PathBuf>> {
+    let Ok(package) = facts.package_key(package_name) else {
+        return Ok(None);
+    };
+    Ok(facts
+        .targets_for(&package)?
+        .iter()
+        .find(|target| target.name() == target_name && target.kind() == target_kind)
+        .map(|target| root.join(target.repo_relative_src_path())))
+}
+
+fn binary_belongs_to_assembly(
+    facts: &WorkspaceFacts,
+    assembly: &str,
+    package_name: &str,
+    target_name: &str,
+) -> Result<bool> {
+    let Some(assembly_package) =
+        facts.package_for_repo_path(&PathBuf::from(format!("assemblies/{assembly}/Cargo.toml")))?
+    else {
+        return Ok(false);
+    };
+    let Ok(binary_package) = facts.package_key(package_name) else {
+        return Ok(false);
+    };
+    if !target_exists(facts, package_name, target_name, TargetKind::Binary)? {
+        return Ok(false);
+    }
+    Ok(binary_package == assembly_package
+        || exact_normal_dependency(facts, &binary_package, &assembly_package)?)
+}
+
+fn has_exact_normal_dependency(
+    facts: &WorkspaceFacts,
+    package_name: &str,
+    dependency_name: &str,
+    dependency_manifest: &str,
+) -> Result<bool> {
+    let Ok(package) = facts.package_key(package_name) else {
+        return Ok(false);
+    };
+    let Some(dependency) = facts.package_for_repo_path(Path::new(dependency_manifest))? else {
+        return Ok(false);
+    };
+    if dependency.as_str() != dependency_name {
+        return Ok(false);
+    }
+    exact_normal_dependency(facts, &package, &dependency)
+}
+
+fn exact_normal_dependency(
+    facts: &WorkspaceFacts,
+    package: &PackageKey,
+    dependency: &PackageKey,
+) -> Result<bool> {
+    let dependency_root = facts.repo_relative_root_for(dependency)?;
+    for candidate in facts.direct_dependencies_for(package)? {
+        let source_matches = match candidate.source() {
+            DependencySource::Workspace { repo_relative_root }
+            | DependencySource::Path { repo_relative_root } => {
+                repo_relative_root == dependency_root
+            }
+            _ => false,
+        };
+        if candidate.kind() == DependencyKind::Normal
+            && candidate.unconditional()
+            && candidate.name() == dependency.as_str()
+            && source_matches
+        {
+            let resolved = candidate.resolved().with_context(|| {
+                format!(
+                    "artifact dependency `{}` -> `{}` is unresolved",
+                    package.as_str(),
+                    candidate.name(),
+                )
+            })?;
+            return Ok(resolved == dependency);
+        }
+    }
+    Ok(false)
+}
+
 #[allow(
     clippy::too_many_arguments,
     reason = "the validator mirrors the closed supported-artifact schema fields"
 )]
 fn validate_supported(
     root: &Path,
-    cargo: &crate::assembly::CargoTargetCatalog,
+    facts: &WorkspaceFacts,
     assembly: &str,
     manifest: &CanonicalAssemblyManifestV2,
     binary: &RawBinary,
@@ -408,7 +515,7 @@ fn validate_supported(
 ) -> Result<()> {
     validate_identifier("binary.package", &binary.package, findings);
     validate_identifier("binary.target", &binary.target, findings);
-    if !cargo.binary_belongs_to_assembly(assembly, &binary.package, &binary.target) {
+    if !binary_belongs_to_assembly(facts, assembly, &binary.package, &binary.target)? {
         reject!(
             findings,
             Binary,
@@ -420,8 +527,8 @@ fn validate_supported(
     }
     validate_image(root, assembly, image, binary, config, findings)?;
     validate_config(root, assembly, config, findings)?;
-    validate_health_inventory(root, cargo, assembly, manifest, findings)?;
-    validate_journey(root, cargo, assembly, journey, findings)?;
+    validate_health_inventory(root, facts, assembly, manifest, findings)?;
+    validate_journey(root, facts, assembly, journey, findings)?;
     Ok(())
 }
 
@@ -636,7 +743,7 @@ fn exact_typed_env_capture_call(expression: &syn::Expr) -> bool {
 
 fn validate_health_inventory(
     root: &Path,
-    cargo: &crate::assembly::CargoTargetCatalog,
+    facts: &WorkspaceFacts,
     assembly: &str,
     manifest: &CanonicalAssemblyManifestV2,
     findings: &mut Vec<ArtifactFinding>,
@@ -655,8 +762,12 @@ fn validate_health_inventory(
         );
     }
 
-    if !cargo.has_exact_normal_dependency(assembly, "runtimeexec", "crates/runtimeexec/Cargo.toml")
-    {
+    if !has_exact_normal_dependency(
+        facts,
+        assembly,
+        "runtimeexec",
+        "crates/runtimeexec/Cargo.toml",
+    )? {
         reject!(
             findings,
             Health,
@@ -681,7 +792,7 @@ fn validate_health_inventory(
 
 fn validate_journey(
     root: &Path,
-    cargo: &crate::assembly::CargoTargetCatalog,
+    facts: &WorkspaceFacts,
     assembly: &str,
     journey: &RawJourney,
     findings: &mut Vec<ArtifactFinding>,
@@ -699,7 +810,7 @@ fn validate_journey(
             ] {
                 validate_identifier(label, value, findings);
             }
-            if !cargo.target_exists(package, target, "test") {
+            if !target_exists(facts, package, target, TargetKind::Test)? {
                 reject!(
                     findings,
                     Journey,
@@ -708,7 +819,7 @@ fn validate_journey(
                 );
                 return Ok(());
             }
-            let Some(path) = cargo.target_path(package, target, "test") else {
+            let Some(path) = target_path(root, facts, package, target, TargetKind::Test)? else {
                 reject!(
                     findings,
                     Journey,
@@ -2845,7 +2956,8 @@ services:
     #[test]
     fn health_inventory_rejects_listener_and_runtimeexec_dependency_drift() -> Result<()> {
         let workspace = crate::workspace_root()?;
-        let cargo_catalog = crate::assembly::CargoTargetCatalog::load(&workspace)?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&workspace);
+        let facts = command_facts.get()?;
         let root = temp_root("health")?;
         let assembly_dir = root.join("assemblies/settingsonly");
         std::fs::create_dir_all(&assembly_dir)?;
@@ -2855,7 +2967,7 @@ services:
 
         let mut errors = Vec::new();
         let parsed = AssemblyManifest::from_toml_str(&manifest)?.canonicalize_v2()?;
-        validate_health_inventory(&root, &cargo_catalog, "settingsonly", &parsed, &mut errors)?;
+        validate_health_inventory(&root, facts, "settingsonly", &parsed, &mut errors)?;
         assert!(
             errors.is_empty(),
             "green health inventory failed: {errors:?}"
@@ -2873,27 +2985,90 @@ services:
             assembly_dir.join("assembly.toml"),
         )?)?
         .canonicalize_v2()?;
-        validate_health_inventory(&root, &cargo_catalog, "settingsonly", &parsed, &mut errors)?;
+        validate_health_inventory(&root, facts, "settingsonly", &parsed, &mut errors)?;
         assert!(errors.iter().any(|error| error.rule == ArtifactRule::Health
             && error.detail.contains("Health(domains=[])")));
 
-        assert!(cargo_catalog.has_exact_normal_dependency(
+        assert!(has_exact_normal_dependency(
+            facts,
             "settingsonly",
             "runtimeexec",
             "crates/runtimeexec/Cargo.toml"
-        ));
-        assert!(!cargo_catalog.has_exact_normal_dependency(
+        )?);
+        assert!(!has_exact_normal_dependency(
+            facts,
             "settingsonly",
             "runtimeexec",
             "crates/support/Cargo.toml"
-        ));
-        assert!(!cargo_catalog.has_exact_normal_dependency(
+        )?);
+        assert!(!has_exact_normal_dependency(
+            facts,
             "server",
             "runtimeexec",
             "crates/runtimeexec/Cargo.toml"
-        ));
+        )?);
 
         std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_dependency_resolution_fails_closed() -> Result<()> {
+        use workspacefacts::testing::{
+            metadata_json, path_dependency, path_package, path_package_id, resolve_node, target,
+        };
+        let app_path = "/workspace/assemblies/app";
+        let runtimeexec_path = "/workspace/crates/runtimeexec";
+        let app = path_package(
+            "app",
+            app_path,
+            vec![target(
+                "app",
+                "bin",
+                "/workspace/assemblies/app/src/main.rs",
+                true,
+                &[],
+            )],
+            vec![path_dependency("runtimeexec", runtimeexec_path)],
+            serde_json::json!({}),
+        );
+        let runtimeexec = path_package(
+            "runtimeexec",
+            runtimeexec_path,
+            vec![target(
+                "runtimeexec",
+                "lib",
+                "/workspace/crates/runtimeexec/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![],
+            serde_json::json!({}),
+        );
+        let app_id = path_package_id(app_path);
+        let runtimeexec_id = path_package_id(runtimeexec_path);
+        let metadata = metadata_json(
+            "/workspace",
+            vec![app, runtimeexec],
+            vec![app_id.clone(), runtimeexec_id.clone()],
+            vec![
+                resolve_node(&app_id, &[]),
+                resolve_node(&runtimeexec_id, &[]),
+            ],
+        );
+        let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &metadata)?;
+        let error = match has_exact_normal_dependency(
+            &facts,
+            "app",
+            "runtimeexec",
+            "crates/runtimeexec/Cargo.toml",
+        ) {
+            Ok(value) => anyhow::bail!(
+                "unresolved exact dependency returned Ok({value}) instead of failing closed"
+            ),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("is unresolved"));
         Ok(())
     }
 
@@ -2901,7 +3076,8 @@ services:
     #[allow(clippy::cognitive_complexity)] // anti-vacuity pins every typed supported-row accessor.
     fn real_workspace_matrix_is_exact_and_complete() -> Result<()> {
         let root = crate::workspace_root()?;
-        let cargo_catalog = crate::assembly::CargoTargetCatalog::load(&root)?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
         let raw: RawMatrix = toml::from_str(&read_artifact_utf8(
             &root.join(MATRIX_PATH),
             "test artifact matrix",
@@ -2935,17 +3111,19 @@ services:
                 .map(|row| row.name.clone())
                 .collect()
         );
-        assert!(!cargo_catalog.target_exists("server", "ghost", "bin"));
-        assert!(
-            cargo_catalog
-                .target_path("journeys", "ghost", "test")
-                .is_none()
-        );
-        assert!(!cargo_catalog.binary_belongs_to_assembly(
+        assert!(!target_exists(
+            facts,
+            "server",
+            "ghost",
+            TargetKind::Binary
+        )?);
+        assert!(target_path(&root, facts, "journeys", "ghost", TargetKind::Test)?.is_none());
+        assert!(!binary_belongs_to_assembly(
+            facts,
             "settingsonly",
             "identityaudit",
             "identityaudit-server"
-        ));
+        )?);
         Ok(())
     }
 }

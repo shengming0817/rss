@@ -26,7 +26,7 @@
 //!
 //! 盲区：① 仅 `cargo dylint --all`（接 `cargo xtask verify`，`-D warnings` fail-closed）拦；
 //! ② **跨函数**洗白仍未覆盖（intraprocedural，跟踪 #1085）；③ dylint 不扫未编译的
-//! `#[cfg(test)]` 树，settingsonly 因此另由 `SETTINGSONLY-L2-PRODUCTION-CLOSURE-01` 对完整源码 AST
+//! `#[cfg(test)]` 树，settingsonly 因此另由 `SETTINGSONLY-RAW-JWT-REPARSE-01` 对完整源码 AST
 //! fail-closed 扫描 raw JWT reparse bait。`Authenticated` mint 与 Principal 降维 accessor 均不采用整
 //! crate allowlist，只允许列明的精确 verification wrapper。
 

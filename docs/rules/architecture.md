@@ -122,7 +122,9 @@ rss/
   metadata 成功/失败至多一次），不得绕过 façade 直依赖 guppy，也不得自读成员 `Cargo.toml` 判定
   package / dependency identity。公开面是 owned catalog DTO（字段级语义见 crate rustdoc），不泄漏
   Guppy 类型与 lifetime。`deny.toml` wrappers 与 `cargo xtask layer-deps` 的 WORKSPACEFACTS-CONFINEMENT-01
-  守集合相等及真实 source edge，业务、provider、production assembly 不得消费。
+  守集合相等及真实 source edge，业务、provider、production assembly 不得消费。`WORKSPACEFACTS-COMMAND-FUNNEL-01`
+  另外以 production AST 协议守住 metadata 唯一执行点并拒绝任何 Cargo tree 进程；测试 fixture 不计作
+  production evidence。
 - **域** `identity`/`settings`/`audit`/`contractreg`/`syshealth`:依赖基础+引擎+DI-infra+服务+`generated`(contract 派生);
   **互不依赖**(跨域只经 contract);不依赖 adapters。**定义自身域形 repo/service DI port**(`pub mod ports`,签名引用域内实体,由 adapter 经 DIP 实现,ADR-005);为此可依赖 dynosaur/trait-variant(DIPORT-MACRO-CONFINE-02 白名单)。
 - **adapters/**:实现基础/引擎/DI-infra/服务定义的 trait(DI port 的 provider impl 在此);**不被域依赖**(组合根注入)。**可依赖域 crate 以 impl 其域形 repo/service port**(`adapter→域` = DIP 内向边,`allows(Adapter,Domain)=true` + deny.toml 该域 wrapper 放行 + 真实 source edge 校验,ADR-005;反向「域→adapter」仍禁,依赖反转方向保持)。通用 `Adapter→Service` 合法；provider output 边界另有精确 deny：`adapters/redis|s3|vault → bootstrap` 禁止（package 名为 `redis-adapter|s3|vault`），postgres→bootstrap 与目标 adapter→diport 不受影响（`LAYER-DEPS-PROVIDER-BOOTSTRAP-01`）。`postgres` 的域形实现由无默认值的 `domain-settings` / `domain-identity` / `domain-audit` Cargo feature 精确启用；assembly 必须显式选择，未选择的域依赖不进入目标 package 图。`adapters/memory` 是 **dev/test-only** in-mem DI port provider(测试 / demo)——**禁生产 bin(server/rss)依赖**,只准验收 journey + tooling(`xtask layers.rs` `DEV_ADAPTER_ROOTS`)依赖,机器边界由 `layer-deps` LAYER-DEPS-07(正向收窄 + 反向排除生产 bin)+ deny.toml 收窄 wrapper 守。
@@ -289,8 +291,10 @@ no-compile meta gate。本文档只描述载体原则，不维护落地实例清
   route mounting、auth scheme、provider construction 或 readiness——真实接线仍在 Rust 里经构造器注入完成。
 - active provider 必须与该 assembly `Cargo.toml [dependencies]` + required features 对齐；
   安全关键 port 可追加专门约束（例如 production 撤销 store 必须持久，draft/ephemeral 只允许 demo/test assembly）。
-- 载体：`ASSEMBLY-DOMAIN-CLOSURE-01` 对每个 assembly 的目标 package 独立执行 normal-edge Cargo tree，
-  active domain 必须是同名直接依赖，inactive domain 不得进入该 artifact 闭包。
+- 载体：`ASSEMBLY-DOMAIN-CLOSURE-01` 对每个 assembly 的目标 package消费同一 command-scoped
+  `WorkspaceFacts`，以 CargoSet Resolver-v2 Target-side All/Default selection证明 normal direct edge、
+  active domain 与 inactive artifact 闭包；Host edge、包经其它路径被选中、rename 或 unresolved declaration
+  均不能伪装成 direct dependency。
   workspace 联合 all-features 编译由 CI 另行覆盖，**不**作为单个部署 artifact 的裁剪事实。
 - 字段边界与验证 carrier 见 `docs/rules/runtime-assembly-plan.md`。
 

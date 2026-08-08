@@ -102,7 +102,6 @@ pub(crate) struct GovernedAssembly {
     manifest_label: String,
     cargo_label: String,
     manifest: RepositoryAssemblyManifestV2,
-    cargo_toml: toml::Value,
 }
 
 #[derive(Clone, Copy)]
@@ -504,10 +503,6 @@ impl GovernedAssembly {
 
     pub(crate) fn source_text(&self) -> &str {
         self.manifest.source_text()
-    }
-
-    pub(crate) fn cargo_toml(&self) -> &toml::Value {
-        &self.cargo_toml
     }
 
     pub(crate) fn production(&self) -> Option<ProductionAssembly<'_>> {
@@ -1597,14 +1592,14 @@ fn load_target_source(root: &Path, target: &AssemblyTarget) -> Result<GovernedAs
         .with_context(|| format!("读 {} 失败", cargo_path.display()))?;
     let manifest = RepositoryAssemblyManifestV2::discover_v2(root, target.dir())
         .with_context(|| format!("编译 {}/assembly.toml 失败", target.name()))?;
+    let _: toml::Value = toml::from_str(&cargo_src)
+        .with_context(|| format!("解析 {} 失败", cargo_path.display()))?;
     Ok(GovernedAssembly {
         dir: target.dir().to_path_buf(),
         cargo_path: cargo_path.clone(),
         manifest_label: manifest.source_label().to_owned(),
         cargo_label: relative_label(root, &cargo_path),
         manifest,
-        cargo_toml: toml::from_str(&cargo_src)
-            .with_context(|| format!("解析 {} 失败", cargo_path.display()))?,
     })
 }
 
@@ -2049,10 +2044,12 @@ mod tests {
             .build()?;
         let ir = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "runtime")?
             .context("runtime fixture target")?;
-        let dependencies = ir
+        let cargo_path = ir
             .assembly("runtime")
             .context("runtime fixture assembly")?
-            .cargo_toml()
+            .cargo_path();
+        let cargo: toml::Value = toml::from_str(&std::fs::read_to_string(cargo_path)?)?;
+        let dependencies = cargo
             .get("dependencies")
             .and_then(toml::Value::as_table)
             .context("runtime fixture dependencies")?;

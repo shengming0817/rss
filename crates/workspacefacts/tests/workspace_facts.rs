@@ -583,7 +583,7 @@ fn direct_dependency_metadata() -> String {
                 "rename": null,
                 "optional": false,
                 "uses_default_features": true,
-                "features": [],
+                "features": ["derive"],
                 "target": "cfg(windows)",
                 "registry": null
             }),
@@ -848,6 +848,10 @@ fn direct_dependencies_distinguish_sources_and_target_conditions() -> Result<(),
     let (_facts, _consumer, deps) = load_consumer_direct_deps()?;
 
     let serde = find_dep(&deps, "serde", DependencyKind::Normal).ok_or("serde missing")?;
+    assert_eq!(
+        serde.requested_features(),
+        &BTreeSet::from(["derive".to_owned()])
+    );
     assert!(
         !serde.unconditional(),
         "target-conditioned edge must not claim unconditional"
@@ -889,6 +893,30 @@ fn direct_dependencies_distinguish_sources_and_target_conditions() -> Result<(),
             url: "https://index.crates.io/".to_owned(),
         }
     );
+    Ok(())
+}
+
+#[test]
+fn direct_dependency_requested_features_fail_closed_when_malformed() -> Result<(), Box<dyn Error>> {
+    let mut metadata: serde_json::Value = serde_json::from_str(&direct_dependency_metadata())?;
+    let dependency = metadata["packages"]
+        .as_array_mut()
+        .and_then(|packages| {
+            packages
+                .iter_mut()
+                .find(|package| package["name"] == "consumer")
+        })
+        .and_then(|consumer| consumer["dependencies"].as_array_mut())
+        .and_then(|dependencies| dependencies.first_mut())
+        .ok_or("consumer dependency fixture missing")?;
+    dependency["features"] = json!(["backend", 7]);
+    let error = WorkspaceFacts::from_metadata_json(
+        Path::new("/workspace"),
+        &serde_json::to_string(&metadata)?,
+    )
+    .err()
+    .ok_or("non-string requested feature must fail closed")?;
+    assert!(error.to_string().contains("features"));
     Ok(())
 }
 
@@ -1270,6 +1298,61 @@ fn unmatched_resolve_dep_is_unresolved_not_guessed() -> Result<(), Box<dyn Error
         "resolution() accessor must surface Unresolved"
     );
     assert_eq!(deps[0].resolved(), None);
+    Ok(())
+}
+
+#[test]
+fn direct_dependencies_resolve_cargo_normalized_hyphenated_key() -> Result<(), Box<dyn Error>> {
+    let consumer_path = "/workspace/crates/consumer";
+    let dependency_path = "/workspace/adapters/crypto";
+    let dependency_id = path_package_id(dependency_path);
+    let consumer_id = path_package_id(consumer_path);
+    let dependency = path_package(
+        "crypto-adapter",
+        dependency_path,
+        vec![target(
+            "crypto",
+            "lib",
+            &format!("{dependency_path}/src/lib.rs"),
+            false,
+            &[],
+        )],
+        vec![],
+        json!({}),
+    );
+    let consumer = path_package(
+        "consumer",
+        consumer_path,
+        vec![target(
+            "consumer",
+            "lib",
+            &format!("{consumer_path}/src/lib.rs"),
+            true,
+            &[],
+        )],
+        vec![path_dependency("crypto-adapter", dependency_path)],
+        json!({}),
+    );
+    let metadata = metadata_json(
+        "/workspace",
+        vec![dependency, consumer],
+        vec![dependency_id.clone(), consumer_id.clone()],
+        vec![
+            resolve_node(&dependency_id, &[]),
+            resolve_node(&consumer_id, &[("crypto", &dependency_id)]),
+        ],
+    );
+    let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &metadata)?;
+    let consumer = facts.package_key("consumer")?;
+    let dependency = facts
+        .direct_dependencies_for(&consumer)?
+        .first()
+        .ok_or("hyphenated dependency missing")?;
+    assert_eq!(dependency.name(), "crypto-adapter");
+    assert_eq!(
+        dependency.resolved().map(PackageKey::as_str),
+        Some("crypto-adapter")
+    );
     Ok(())
 }
 

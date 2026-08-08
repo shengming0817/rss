@@ -5,7 +5,7 @@
 //! 但 provider 选择属于组合根部署事实：哪个 assembly 注入哪个 provider、是否持久、是否已 active，必须有机器可读
 //! 声明和 verify 门，避免生产在 dev/demo provider 上静默运行。
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 #[cfg(test)]
 use assembly_schema::AssemblyManifest;
 use assembly_schema::{
@@ -14,11 +14,14 @@ use assembly_schema::{
     ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
 };
 use quote::ToTokens as _;
-use serde::Deserialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::process::Stdio;
-use syn::spanned::Spanned as _;
+use workspacefacts::{
+    BuildFacts, BuildPlatforms, BuildSelection, BuildSide, CargoPlatform, DependencyKind,
+    DependencySource, FeatureSelection, PackageKey, ResolverVersion, WorkspaceFacts,
+};
 
 #[cfg(test)]
 use crate::assembly_governance::AssemblyFixtureBuilder;
@@ -30,6 +33,30 @@ use crate::contract::governance::ContractGovernanceIr;
 use crate::contract::governance::validate_workflow_activations;
 use crate::diagnostic::{self, GovernanceCheck, finding};
 
+#[derive(Debug)]
+pub(crate) enum AssemblyCargoFactsError {
+    UnresolvedDependency {
+        assembly: String,
+        dependency: String,
+    },
+}
+
+impl std::fmt::Display for AssemblyCargoFactsError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnresolvedDependency {
+                assembly,
+                dependency,
+            } => write!(
+                formatter,
+                "assembly `{assembly}` direct normal dependency `{dependency}` is unresolved"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for AssemblyCargoFactsError {}
+
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,32 +67,33 @@ pub(crate) enum Rule {
     ActiveDomainDependency,
     /// 未声明 domain 不得进入 assembly normal dependency closure。
     InactiveDomainDependencyClosure,
-    /// identityaudit 必须保持 #1797 的独立双域 binary/schema/journey/image/production closure。
+    /// production default Cargo graph不得启用 test-support。
     ///
-    /// INVARIANT: IDENTITYAUDIT-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identityaudit_executable_boundary_rejects_lib_only_shape", anti_vacuity = "tests::identityaudit_real_executable_artifact_closure_is_complete" } -- #1797 replaces the demo composition proof with one exact executable package and its closed production transport/artifact closure.
-    IdentityAuditBoundary,
-    /// settingsonly 必须保持 #1796 的独立 binary/schema/精确 journey/image/default-closure 闭包。
+    /// INVARIANT: ASSEMBLY-PRODUCTION-TEST-SUPPORT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::assembly_default_test_support_is_rejected", anti_vacuity = "tests::assembly_domain_real_workspace_closures_match_manifests" }.
+    ProductionTestSupport,
+    /// identityaudit 必须保持独立的 production manifest profile/topology/listener语义。
     ///
-    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_production_artifact_gate_rejects_incomplete_case_closure", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- this target-specific gate closes the settingsonly package and six-case production evidence carrier; artifact identity, image target, and ENTRYPOINT remain owned by ASSEMBLY-ARTIFACT-MATRIX-01.
-    SettingsOnlyExecutableBoundary,
-    /// settingsonly 必须保持 #1836 的唯一 L2 production/durable-isolated 组装闭包。
-    ///
-    /// INVARIANT: SETTINGSONLY-L2-PRODUCTION-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_l2_production_closure_rejects_synthetic_mutations", anti_vacuity = "tests::settingsonly_l2_production_closure_accepts_real_workspace" } -- exact manifest/provider/artifact/config/subscription/auth-funnel facts and the production startup call chain are verified from parsed source; raw JWT reparsing, aliases, function pointers, comments, test-only bait, dead helpers, fallback factories, and nonactivated subscribers are not evidence.
-    SettingsOnlyL2ProductionClosure,
+    /// INVARIANT: IDENTITYAUDIT-MANIFEST-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identityaudit_manifest_boundary_rejects_profile_topology_and_listener_drift", anti_vacuity = "tests::identityaudit_real_manifest_boundary_is_exact" }.
+    IdentityAuditManifestBoundary,
     /// Framework contract declarations must exactly cover active framework-owned contracts.
     FrameworkContractServing,
     /// Workflow activation must exactly join one repository definition and valid lifecycle.
     WorkflowActivation,
-    /// Provider-to-probe inventory bindings may only be minted by the generated/private
-    /// completion receipt funnels.
-    ///
-    /// INVARIANT: RUNTIME-INVENTORY-PROVIDER-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_inventory_provider_binding_rejects_handwritten_production_callsite", anti_vacuity = "tests::runtime_inventory_provider_binding_real_completion_funnels_are_exact" } -- provider IDs and probe names remain coupled to the move-only completion receipts; production assembly code cannot handwrite or alias the raw binding constructor.
-    RuntimeInventoryProviderProvenance,
     /// Listener observations are minted only at the three production launch roots and directly
     /// consume the successfully bound server handle's `local_addr()`.
     ///
-    /// INVARIANT: RUNTIME-INVENTORY-LISTENER-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_inventory_listener_provenance_rejects_detached_or_aliased_construction", anti_vacuity = "tests::runtime_inventory_listener_provenance_real_launch_roots_are_exact" } -- copied addresses, helper aliases, macros, and extra production minting sites cannot masquerade as actual listener publication.
+    /// INVARIANT: RUNTIME-INVENTORY-LISTENER-PROVENANCE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtime_inventory_listener_provenance_rejects_detached_dead_or_swapped_flow", anti_vacuity = "tests::runtime_inventory_listener_provenance_real_launch_roots_are_exact" } -- only run/activate-reachable observations minted from the matching successful bound handle may flow into the typed inventory publisher.
     RuntimeInventoryListenerProvenance,
+    /// Production run/prepare reachability must consume generated provider selection through the
+    /// typed finish/transfer path and inventory publication.
+    ///
+    /// INVARIANT: PROVIDER-CONSTRUCTION-LIVE-JOIN-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::provider_construction_live_join_rejects_bypassed_or_dead_stages", anti_vacuity = "tests::provider_construction_live_join_real_assemblies_are_exact" }.
+    ProviderConstructionLiveJoin,
+    /// Dylint does not compile `#[cfg(test)]` trees, so settingsonly's complete source AST must
+    /// independently reject raw JWT reparse APIs in every cfg branch.
+    ///
+    /// INVARIANT: SETTINGSONLY-RAW-JWT-REPARSE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_raw_jwt_reparse_rejects_cfg_test_alias_and_pointer_bait", anti_vacuity = "tests::settingsonly_raw_jwt_reparse_real_workspace_is_clean" }.
+    SettingsOnlyRawJwtReparse,
     /// production `diport::RevocationStore` provider 必须持久。
     RevocationDurability,
     /// production provider 必须 active 且持久；仅 exact active GovernorLimiter 可为进程内临时态。
@@ -121,9 +149,18 @@ pub(crate) enum Rule {
     RequiredCapability,
 }
 
-pub(crate) struct AssemblyValidate;
+pub(crate) struct AssemblyValidate<'a> {
+    root: &'a Path,
+    facts: &'a WorkspaceFacts,
+}
 
-impl GovernanceCheck for AssemblyValidate {
+impl<'a> AssemblyValidate<'a> {
+    pub(crate) fn new(root: &'a Path, facts: &'a WorkspaceFacts) -> Self {
+        Self { root, facts }
+    }
+}
+
+impl GovernanceCheck for AssemblyValidate<'_> {
     type Rule = Rule;
 
     fn name(&self) -> &'static str {
@@ -131,47 +168,66 @@ impl GovernanceCheck for AssemblyValidate {
     }
 
     fn check(&self) -> Result<(String, Vec<Finding>)> {
-        let root = crate::workspace_root()?;
-        crate::assembly_governance::validate_source_funnel(&root)?;
-        let (count, findings) = validate_root(&root)?;
+        crate::workspace_facts::validate_command_funnel(self.root)?;
+        crate::assembly_governance::validate_source_funnel(self.root)?;
+        let (count, findings) = validate_root(self.root, self.facts)?;
         Ok((format!("{count} assembly 声明全部通过"), findings))
     }
 }
 
-pub(crate) fn validate_root(root: &Path) -> Result<(usize, Vec<Finding>)> {
+pub(crate) fn validate_root(root: &Path, facts: &WorkspaceFacts) -> Result<(usize, Vec<Finding>)> {
     let contract_governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    let ir = AssemblyGovernanceIr::<Core>::load(root)?;
+    validate_governed_root_with_contracts(root, facts, &ir, &contract_governance)
+}
+
+pub(crate) fn validate_governed_root(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    ir: &AssemblyGovernanceIr<Core>,
+) -> Result<(usize, Vec<Finding>)> {
+    let contract_governance = ContractGovernanceIr::load_consumer_workspace(root)?;
+    validate_governed_root_with_contracts(root, facts, ir, &contract_governance)
+}
+
+fn validate_governed_root_with_contracts(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    ir: &AssemblyGovernanceIr<Core>,
+    contract_governance: &ContractGovernanceIr,
+) -> Result<(usize, Vec<Finding>)> {
     contract_governance.read(|contracts| {
-        let (assemblies, mut findings) = discover(root)?;
+        let mut findings = discovery_findings(root, ir);
         findings.extend(validate_workflow_activation_contracts(
-            &assemblies,
+            ir.assemblies(),
             contracts,
         ));
-        findings.extend(validate_framework_contracts(root, &assemblies, contracts));
-        validate_discovered_root(root, assemblies, findings)
+        findings.extend(validate_framework_contracts(
+            root,
+            ir.assemblies(),
+            contracts,
+        ));
+        validate_discovered_root(root, facts, ir, findings)
     })
 }
 
 fn validate_discovered_root(
     root: &Path,
-    assemblies: Vec<GovernedAssembly>,
+    facts: &WorkspaceFacts,
+    ir: &AssemblyGovernanceIr<Core>,
     mut findings: Vec<Finding>,
 ) -> Result<(usize, Vec<Finding>)> {
-    findings.extend(validate_runtime_inventory_provider_provenance(
-        root,
-        &assemblies,
-    )?);
     findings.extend(validate_runtime_inventory_listener_provenance(
         root,
-        &assemblies,
+        ir.assemblies(),
     )?);
-    let metadata = load_workspace_metadata(root)?;
-    for assembly in &assemblies {
+    for assembly in ir.assemblies() {
+        findings.extend(settingsonly_raw_jwt_reparse_findings(assembly)?);
         findings.extend(validate_assembly(assembly));
-        if let Some(metadata) = &metadata {
-            findings.extend(validate_target_domain_closure(root, assembly, metadata)?);
-        }
+        findings.extend(validate_assembly_cargo_facts(root, facts, assembly)?);
+        findings.extend(validate_target_domain_closure(root, facts, assembly)?);
     }
-    Ok((assemblies.len(), findings))
+    Ok((ir.assemblies().len(), findings))
 }
 
 fn validate_workflow_activation_contracts(
@@ -191,242 +247,44 @@ fn validate_workflow_activation_contracts(
     findings
 }
 
-fn validate_runtime_inventory_provider_provenance(
-    root: &Path,
-    assemblies: &[GovernedAssembly],
-) -> Result<Vec<Finding>> {
-    let mut findings = Vec::new();
-    for assembly in assemblies {
-        let source_root = assembly.dir().join("src");
-        // Manifest-only fixtures intentionally validate declarations without forging a runtime
-        // carrier. Executable-boundary gates own the absence of a production source tree.
-        if !source_root.is_dir() {
-            continue;
-        }
-        let mut sources = Vec::new();
-        collect_rust_sources(&source_root, &mut sources)?;
-        let mut sanctioned = 0_usize;
-        for path in sources {
-            if external_module_is_explicit_test_only(&source_root, &path)? {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path)?;
-            let file = syn::parse_file(&source)
-                .with_context(|| format!("parse runtime inventory source {}", path.display()))?;
-            let evidence = production_provider_binding_evidence(&file);
-            if evidence.calls == 0
-                && evidence.imports == 0
-                && evidence.constructor_references == 0
-                && evidence.type_aliases == 0
-                && evidence.macros == 0
-            {
-                continue;
-            }
-            let relative = path
-                .strip_prefix(assembly.dir())
-                .unwrap_or(path.as_path())
-                .to_string_lossy();
-            let allowed = match assembly.manifest().name() {
-                "runtime" => relative == "src/provider_output.rs",
-                "settingsonly" | "identityaudit" => relative == "src/generated/providers_gen.rs",
-                _ => false,
-            };
-            if allowed
-                && evidence.imports == 0
-                && evidence.type_aliases == 0
-                && evidence.macros == 0
-                && evidence.calls > 0
-                && evidence.constructor_references == evidence.calls
-            {
-                sanctioned += 1;
-            } else {
-                findings.push(finding(
-                    Rule::RuntimeInventoryProviderProvenance,
-                    rel_label(root, &path),
-                    format!("ProviderProbeBinding construction/import must stay inside the generated or private consuming completion receipt funnel (calls={}, refs={}, imports={}, aliases={}, macros={})", evidence.calls, evidence.constructor_references, evidence.imports, evidence.type_aliases, evidence.macros),
-                ));
-            }
-        }
-        if matches!(
-            assembly.manifest().name(),
-            "runtime" | "settingsonly" | "identityaudit"
-        ) && sanctioned != 1
-        {
-            findings.push(finding(
-                Rule::RuntimeInventoryProviderProvenance,
-                assembly.manifest_label(),
-                format!(
-                    "runtime inventory provider binding requires exactly one sanctioned completion funnel, found {sanctioned}"
-                ),
-            ));
-        }
-    }
-    Ok(findings)
-}
-
-#[derive(Default)]
-struct ProviderBindingEvidence {
-    calls: usize,
-    imports: usize,
-    constructor_references: usize,
-    type_aliases: usize,
-    macros: usize,
-}
-
-fn production_provider_binding_evidence(file: &syn::File) -> ProviderBindingEvidence {
-    use syn::visit::Visit as _;
-    let mut visitor = ProviderBindingVisitor::default();
-    visitor.visit_file(file);
-    visitor.evidence
-}
-
-#[derive(Default)]
-struct ProviderBindingVisitor {
-    evidence: ProviderBindingEvidence,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for ProviderBindingVisitor {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if has_test_or_test_support_cfg(&node.attrs) {
-            return;
-        }
-        syn::visit::visit_item_mod(self, node);
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if has_test_or_test_support_cfg(&node.attrs) || node.attrs.iter().any(is_test_attribute) {
-            return;
-        }
-        syn::visit::visit_item_fn(self, node);
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if has_test_or_test_support_cfg(&node.attrs) || node.attrs.iter().any(is_test_attribute) {
-            return;
-        }
-        syn::visit::visit_impl_item_fn(self, node);
-    }
-
-    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        if node
-            .to_token_stream()
-            .to_string()
-            .contains("ProviderProbeBinding")
-        {
-            self.evidence.imports += 1;
-        }
-        syn::visit::visit_item_use(self, node);
-    }
-
-    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
-        if node
-            .ty
-            .to_token_stream()
-            .to_string()
-            .contains("ProviderProbeBinding")
-        {
-            self.evidence.type_aliases += 1;
-        }
-        syn::visit::visit_item_type(self, node);
-    }
-
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if node.tokens.to_string().contains("ProviderProbeBinding") {
-            self.evidence.macros += 1;
-        }
-        syn::visit::visit_macro(self, node);
-    }
-
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        let segments = path_segments(&node.path);
-        if segments.ends_with(&["ProviderProbeBinding".to_owned(), "new".to_owned()]) {
-            self.evidence.constructor_references += 1;
-        }
-        syn::visit::visit_expr_path(self, node);
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = node.func.as_ref() {
-            let segments = path_segments(&path.path);
-            if segments.ends_with(&["ProviderProbeBinding".to_owned(), "new".to_owned()]) {
-                self.evidence.calls += 1;
-            }
-        }
-        syn::visit::visit_expr_call(self, node);
-    }
-}
-
-fn path_segments(path: &syn::Path) -> Vec<String> {
-    path.segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect()
-}
-
 fn validate_runtime_inventory_listener_provenance(
-    root: &Path,
+    _root: &Path,
     assemblies: &[GovernedAssembly],
 ) -> Result<Vec<Finding>> {
     let mut findings = Vec::new();
     for assembly in assemblies {
-        let source_root = assembly.dir().join("src");
-        if !source_root.is_dir() {
-            continue;
-        }
-        let (allowed_file, expected_calls): (Option<&str>, &[ExpectedListenerObservation]) =
-            match assembly.manifest().name() {
-                "runtime" => (Some("src/launch.rs"), RUNTIME_LISTENER_OBSERVATIONS),
-                "settingsonly" | "identityaudit" => (
-                    Some("src/listeners.rs"),
-                    match assembly.manifest().name() {
-                        "settingsonly" => SETTINGSONLY_LISTENER_OBSERVATIONS,
-                        _ => IDENTITYAUDIT_LISTENER_OBSERVATIONS,
-                    },
-                ),
-                _ => (None, &[]),
-            };
-        let expected_call_count = expected_calls.len();
-        let mut valid_calls = 0_usize;
-        let mut sources = Vec::new();
-        collect_rust_sources(&source_root, &mut sources)?;
-        for path in sources {
-            if external_module_is_explicit_test_only(&source_root, &path)? {
-                continue;
-            }
-            let source = std::fs::read_to_string(&path)?;
-            let file = syn::parse_file(&source)
-                .with_context(|| format!("parse listener inventory source {}", path.display()))?;
-            let evidence = production_listener_observation_evidence(&file);
-            if evidence.is_empty() {
-                continue;
-            }
-            let relative = path
-                .strip_prefix(assembly.dir())
-                .unwrap_or(path.as_path())
-                .to_string_lossy();
-            let exact_funnel = allowed_file.is_some_and(|allowed| relative == allowed)
-                && evidence.imports == 0
-                && evidence.type_aliases == 0
-                && evidence.macros == 0
-                && evidence.constructor_references == evidence.calls
-                && evidence.calls == evidence.direct_local_addr_calls
-                && evidence.has_exact_observations(expected_calls);
-            if exact_funnel {
-                valid_calls += evidence.calls;
+        let expected_calls = match assembly.manifest().name() {
+            "runtime" => RUNTIME_LISTENER_OBSERVATIONS,
+            "settingsonly" => SETTINGSONLY_LISTENER_OBSERVATIONS,
+            "identityaudit" => IDENTITYAUDIT_LISTENER_OBSERVATIONS,
+            _ => continue,
+        };
+        let evidence = security_closeout_evidence_from_sources(assembly.dir())?;
+        if !evidence.listener_publish_flow
+            || !listener_observations_match(&evidence.listener_observations, expected_calls)
+        {
+            let (missing, unexpected) =
+                listener_observation_drift(&evidence.listener_observations, expected_calls);
+            let flow_stage = if evidence.listener_observations.is_empty() {
+                "bound-local-addr-observation"
+            } else if !evidence.listener_publish_sink_seen {
+                "inventory-publish-sink"
+            } else if !evidence.listener_publish_flow {
+                "observation-to-publish-argument"
             } else {
-                findings.push(finding(
-                    Rule::RuntimeInventoryListenerProvenance,
-                    rel_label(root, &path),
-                    format!("BoundListenerObservation must be constructed only at the exact launch root with local_addr() passed directly from the bound handle (calls={}, direct={}, refs={}, imports={}, aliases={}, macros={})", evidence.calls, evidence.direct_local_addr_calls, evidence.constructor_references, evidence.imports, evidence.type_aliases, evidence.macros),
-                ));
-            }
-        }
-        if allowed_file.is_some() && valid_calls != expected_call_count {
+                "listener-identity-role-join"
+            };
             findings.push(finding(
                 Rule::RuntimeInventoryListenerProvenance,
                 assembly.manifest_label(),
                 format!(
-                    "runtime listener inventory requires {expected_call_count} exact id/kind/auth/bound observation constructors, found {valid_calls}"
+                    "runtime listener inventory requires run/activate-reachable bound local_addr observations to flow into a typed inventory publish (flow_stage={flow_stage}, expected={}, observed={}, publish_sink_seen={}, publish_flow={}, missing=[{}], unexpected=[{}])",
+                    expected_calls.len(),
+                    evidence.listener_observations.len(),
+                    evidence.listener_publish_sink_seen,
+                    evidence.listener_publish_flow,
+                    missing.join(", "),
+                    unexpected.join(", "),
                 ),
             ));
         }
@@ -439,7 +297,6 @@ struct ExpectedListenerObservation {
     id: &'static str,
     kind: &'static str,
     auth: &'static str,
-    receiver: &'static str,
 }
 
 const RUNTIME_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] =
@@ -447,26 +304,22 @@ const RUNTIME_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] =
         id: "self.id.clone()",
         kind: "kind",
         auth: "auth",
-        receiver: "self.bound",
     }];
 const SETTINGSONLY_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] = &[
     ExpectedListenerObservation {
         id: "\"primary-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Primary",
         auth: "assembly_schema::ListenerAuth::FederatedAccessToken",
-        receiver: "prepared.primary_front.as_ref().map_or(&prepared.primary.bound,|front|&front.bound)",
     },
     ExpectedListenerObservation {
         id: "\"admin-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Admin",
         auth: "assembly_schema::ListenerAuth::FederatedAccessToken",
-        receiver: "prepared.admin_front.as_ref().map_or(&prepared.admin.bound,|front|&front.bound)",
     },
     ExpectedListenerObservation {
         id: "\"health-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Health",
         auth: "assembly_schema::ListenerAuth::NoAuth",
-        receiver: "prepared.health_front.as_ref().map_or(&prepared.health.bound,|front|&front.bound)",
     },
 ];
 const IDENTITYAUDIT_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] = &[
@@ -474,23 +327,20 @@ const IDENTITYAUDIT_LISTENER_OBSERVATIONS: &[ExpectedListenerObservation] = &[
         id: "\"primary-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Primary",
         auth: "assembly_schema::ListenerAuth::RssAccessToken",
-        receiver: "prepared.primary_front.as_ref().map_or(&prepared.primary.bound,|front|&front.bound)",
     },
     ExpectedListenerObservation {
         id: "\"admin-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Admin",
         auth: "assembly_schema::ListenerAuth::RssAccessToken",
-        receiver: "prepared.admin_front.as_ref().map_or(&prepared.admin.bound,|front|&front.bound)",
     },
     ExpectedListenerObservation {
         id: "\"health-main\"",
         kind: "assembly_schema::AssemblyListenerKind::Health",
         auth: "assembly_schema::ListenerAuth::NoAuth",
-        receiver: "prepared.health_front.as_ref().map_or(&prepared.health.bound,|front|&front.bound)",
     },
 ];
 
-#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct ListenerObservationCall {
     id: String,
     kind: String,
@@ -498,143 +348,94 @@ struct ListenerObservationCall {
     receiver: String,
 }
 
-#[derive(Default)]
-struct ListenerObservationEvidence {
-    calls: usize,
-    direct_local_addr_calls: usize,
-    constructor_references: usize,
-    imports: usize,
-    type_aliases: usize,
-    macros: usize,
-    direct_observations: Vec<ListenerObservationCall>,
+fn listener_observations_match(
+    actual: &[ListenerObservationCall],
+    expected: &[ExpectedListenerObservation],
+) -> bool {
+    if actual.len() != expected.len() {
+        return false;
+    }
+    expected.iter().all(|expected| {
+        actual.iter().any(|actual| {
+            actual.id == expected.id
+                && actual.kind == expected.kind
+                && actual.auth == expected.auth
+                && listener_receiver_matches_role(&actual.receiver, expected.id)
+        })
+    })
 }
 
-impl ListenerObservationEvidence {
-    fn is_empty(&self) -> bool {
-        self.calls == 0
-            && self.constructor_references == 0
-            && self.imports == 0
-            && self.type_aliases == 0
-            && self.macros == 0
-    }
-
-    fn has_exact_observations(&self, expected: &[ExpectedListenerObservation]) -> bool {
-        let mut actual = self.direct_observations.clone();
-        actual.sort();
-        let mut expected = expected
-            .iter()
-            .map(|call| ListenerObservationCall {
-                id: call.id.to_owned(),
-                kind: call.kind.to_owned(),
-                auth: call.auth.to_owned(),
-                receiver: call.receiver.to_owned(),
-            })
-            .collect::<Vec<_>>();
-        expected.sort();
-        actual == expected
-    }
+fn listener_observation_drift(
+    actual: &[ListenerObservationCall],
+    expected: &[ExpectedListenerObservation],
+) -> (Vec<String>, Vec<String>) {
+    let matches = |actual: &ListenerObservationCall, expected: &ExpectedListenerObservation| {
+        actual.id == expected.id
+            && actual.kind == expected.kind
+            && actual.auth == expected.auth
+            && listener_receiver_matches_role(&actual.receiver, expected.id)
+    };
+    let mut missing = expected
+        .iter()
+        .filter(|expected| !actual.iter().any(|actual| matches(actual, expected)))
+        .map(|expected| format!("{}:{}:{}", expected.id, expected.kind, expected.auth))
+        .collect::<Vec<_>>();
+    let mut unexpected = actual
+        .iter()
+        .filter(|actual| !expected.iter().any(|expected| matches(actual, expected)))
+        .map(|actual| {
+            format!(
+                "{}:{}:{}@{}",
+                actual.id, actual.kind, actual.auth, actual.receiver
+            )
+        })
+        .collect::<Vec<_>>();
+    missing.sort();
+    unexpected.sort();
+    (missing, unexpected)
 }
 
-fn production_listener_observation_evidence(file: &syn::File) -> ListenerObservationEvidence {
-    use syn::visit::Visit as _;
-    let mut visitor = ListenerObservationVisitor::default();
-    visitor.visit_file(file);
-    visitor.evidence
+fn listener_receiver_matches_role(receiver: &str, id: &str) -> bool {
+    if id == "self.id.clone()" {
+        return receiver.starts_with("self.") || receiver == "self";
+    }
+    ["primary", "admin", "health"]
+        .into_iter()
+        .find(|role| id.contains(role))
+        .is_some_and(|role| receiver.contains(role))
 }
 
-#[derive(Default)]
-struct ListenerObservationVisitor {
-    evidence: ListenerObservationEvidence,
+fn listener_observation_call(node: &syn::ExprCall) -> Option<ListenerObservationCall> {
+    if !call_path_ends_with(node.func.as_ref(), "from_bound") || node.args.len() != 5 {
+        return None;
+    }
+    let syn::Expr::MethodCall(address) = ungroup_profile_expression(&node.args[4]) else {
+        return None;
+    };
+    if address.method != "local_addr" || !address.args.is_empty() {
+        return None;
+    }
+    Some(ListenerObservationCall {
+        id: token_key(&node.args[0]),
+        kind: token_key(&node.args[1]),
+        auth: token_key(&node.args[2]),
+        receiver: token_key(address.receiver.as_ref()),
+    })
 }
 
-impl<'ast> syn::visit::Visit<'ast> for ListenerObservationVisitor {
-    fn visit_item_mod(&mut self, node: &'ast syn::ItemMod) {
-        if has_test_or_test_support_cfg(&node.attrs) {
-            return;
-        }
-        syn::visit::visit_item_mod(self, node);
-    }
-
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        if has_test_or_test_support_cfg(&node.attrs) || node.attrs.iter().any(is_test_attribute) {
-            return;
-        }
-        syn::visit::visit_item_fn(self, node);
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        if has_test_or_test_support_cfg(&node.attrs) || node.attrs.iter().any(is_test_attribute) {
-            return;
-        }
-        syn::visit::visit_impl_item_fn(self, node);
-    }
-
-    fn visit_item_use(&mut self, node: &'ast syn::ItemUse) {
-        if node
-            .to_token_stream()
-            .to_string()
-            .contains("BoundListenerObservation")
-        {
-            self.evidence.imports += 1;
-        }
-        syn::visit::visit_item_use(self, node);
-    }
-
-    fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
-        if node
-            .ty
-            .to_token_stream()
-            .to_string()
-            .contains("BoundListenerObservation")
-        {
-            self.evidence.type_aliases += 1;
-        }
-        syn::visit::visit_item_type(self, node);
-    }
-
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if node.tokens.to_string().contains("BoundListenerObservation") {
-            self.evidence.macros += 1;
-        }
-        syn::visit::visit_macro(self, node);
-    }
-
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        let segments = path_segments(&node.path);
-        if segments.ends_with(&[
-            "BoundListenerObservation".to_owned(),
-            "from_bound".to_owned(),
-        ]) {
-            self.evidence.constructor_references += 1;
-        }
-        syn::visit::visit_expr_path(self, node);
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if let syn::Expr::Path(path) = node.func.as_ref() {
-            let segments = path_segments(&path.path);
-            if segments.ends_with(&[
-                "BoundListenerObservation".to_owned(),
-                "from_bound".to_owned(),
-            ]) {
-                self.evidence.calls += 1;
-                if node.args.iter().nth(4).is_some_and(|argument| {
-                    matches!(argument, syn::Expr::MethodCall(call) if call.method == "local_addr" && call.args.is_empty())
-                }) {
-                    self.evidence.direct_local_addr_calls += 1;
-                    if let Some(syn::Expr::MethodCall(call)) = node.args.iter().nth(4) {
-                        self.evidence.direct_observations.push(ListenerObservationCall {
-                            id: token_key(&node.args[0]),
-                            kind: token_key(&node.args[1]),
-                            auth: token_key(&node.args[2]),
-                            receiver: token_key(call.receiver.as_ref()),
-                        });
-                    }
-                }
+fn expression_contains_listener_observation(expression: &syn::Expr) -> bool {
+    struct Detector(bool);
+    impl<'ast> syn::visit::Visit<'ast> for Detector {
+        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+            self.0 |= listener_observation_call(node).is_some();
+            if !self.0 {
+                syn::visit::visit_expr_call(self, node);
             }
         }
-        syn::visit::visit_expr_call(self, node);
     }
+    let mut detector = Detector(false);
+    syn::visit::Visit::visit_expr(&mut detector, expression);
+    detector.0
 }
 
 fn token_key(tokens: &impl quote::ToTokens) -> String {
@@ -851,33 +652,8 @@ fn signature_binding_names(signature: &syn::Signature) -> BTreeSet<String> {
         .collect()
 }
 
-/// Target-specific artifact semantics shared with `assembly artifacts check`.
-/// The matrix owns inventory identity; these existing rules remain the single source for the
-/// settingsonly/identityaudit behavior witnesses.
-pub(crate) fn artifact_boundary_findings(root: &Path) -> Result<Vec<Finding>> {
-    let (assemblies, mut findings) = discover(root)?;
-    let metadata = load_workspace_metadata(root)?;
-    for assembly in assemblies
-        .iter()
-        .filter(|assembly| matches!(assembly.manifest().name(), "identityaudit" | "settingsonly"))
-    {
-        if let Some(metadata) = &metadata {
-            findings.extend(validate_target_domain_closure(root, assembly, metadata)?);
-        }
-    }
-    Ok(findings
-        .into_iter()
-        .filter(|finding| {
-            matches!(
-                finding.rule,
-                Rule::IdentityAuditBoundary
-                    | Rule::SettingsOnlyExecutableBoundary
-                    | Rule::SettingsOnlyL2ProductionClosure
-            )
-        })
-        .collect())
-}
-
+/// Validate the bidirectional lifecycle and ownership join between governed assemblies and
+/// framework contract declarations.
 fn validate_framework_contracts(
     root: &Path,
     assemblies: &[GovernedAssembly],
@@ -938,17 +714,6 @@ fn validate_framework_contracts(
     findings
 }
 
-/// 对单个目标执行与 aggregate gate 相同的完整验证，不读取其它 assembly。
-#[cfg(test)]
-pub(crate) fn validate_target(root: &Path, name: &str) -> Result<Vec<Finding>> {
-    let ir = AssemblyGovernanceIr::<Core>::load_target(root, name)?
-        .with_context(|| format!("assembly `{name}` 不存在"))?;
-    let assembly = ir
-        .assembly(name)
-        .with_context(|| format!("assembly `{name}` 不存在"))?;
-    validate_governed_target(root, assembly)
-}
-
 /// Validate an assembly already selected by the governance owner.
 ///
 /// Callers that already hold a Core IR must use this entry point so target-scoped
@@ -956,214 +721,159 @@ pub(crate) fn validate_target(root: &Path, name: &str) -> Result<Vec<Finding>> {
 pub(crate) fn validate_governed_target(
     root: &Path,
     assembly: &GovernedAssembly,
+    facts: &WorkspaceFacts,
 ) -> Result<Vec<Finding>> {
     let mut findings = validate_assembly(assembly);
-    if let Some(metadata) = load_workspace_metadata(root)? {
-        findings.extend(validate_target_domain_closure(root, assembly, &metadata)?);
-    }
+    findings.extend(settingsonly_raw_jwt_reparse_findings(assembly)?);
+    findings.extend(validate_assembly_cargo_facts(root, facts, assembly)?);
+    findings.extend(validate_target_domain_closure(root, facts, assembly)?);
     Ok(findings)
 }
 
 fn validate_target_domain_closure(
     root: &Path,
+    facts: &WorkspaceFacts,
     assembly: &GovernedAssembly,
-    metadata: &CargoMetadata,
 ) -> Result<Vec<Finding>> {
     // INVARIANT: ASSEMBLY-DOMAIN-CLOSURE-01 { level = "Medium", exec = "check", source = "code" } —
-    // 每个 assembly.toml 的 active domain 必须是目标 assembly package 当前 target 图中同名、未 rename、
-    // 指向同名 workspace domain crate 的直接 normal dependency；inactive domain 不得进入该目标 package 的
-    // normal dependency closure。真实 Cargo fixture 覆盖 alias、target cfg、dev/build、optional、
-    // direct/transitive red case。
-    let package = package_by_manifest(metadata, assembly.cargo_path()).with_context(|| {
-        format!(
-            "{} 未出现在 cargo metadata packages 中；manifest_path={}",
-            assembly.cargo_label(),
-            assembly.cargo_path().display()
-        )
-    })?;
-    let declared_direct_domains = direct_normal_domain_deps(root, metadata, package)?;
-    let target_direct_domains = cargo_tree_domains(root, assembly, metadata, Some(1))?;
-    let direct_domains = declared_direct_domains
-        .intersection(&target_direct_domains)
-        .cloned()
-        .collect();
-    let closure_domains = cargo_tree_domains(root, assembly, metadata, None)?;
-    let mut findings = validate_domain_sets(assembly, direct_domains, closure_domains)?;
-    if assembly.manifest().name() == "identityaudit" {
-        let (closure_packages, test_support_enabled) =
-            cargo_tree_default_normal_evidence(root, assembly, metadata)?;
-        findings.extend(validate_identityaudit_boundary(
-            assembly.manifest_label(),
-            assembly.cargo_label(),
-            &package.targets,
-            &closure_packages,
-        ));
-        let schema_is_closed =
-            identityaudit_schema_is_closed(&assembly.dir().join("config.schema.json"))?;
-        let sample_is_regular_file =
-            is_regular_file_without_symlink(&assembly.dir().join("identityaudit.example.toml"))?;
-        let artifact_acceptance = identityaudit_artifact_acceptance_evidence(root)?;
-        let (journey_target_declared, required_journey_test_declared) =
-            identityaudit_journey_evidence(root)?;
-        let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))
-            .context("读取 identityaudit image source Dockerfile 失败")?;
-        let runtimeexec_launch_is_live = subset_runtimeexec_launch_is_live(root, "identityaudit")?;
-        findings.extend(validate_identityaudit_executable_evidence(
-            IdentityAuditExecutableEvidence {
-                test_support_enabled,
-                schema_is_closed,
-                sample_is_regular_file,
-                artifact_acceptance,
-                journey_target_declared,
-                required_journey_test_declared,
-                runtimeexec_launch_is_live,
-                dockerfile: &dockerfile,
-            },
-        ));
+    // AssemblyGovernanceIr owns the declared domains; WorkspaceFacts/CargoSet owns the current
+    // root-specific selected normal graph. Direct edges keep manifest rename/path provenance.
+    let package = assembly_package_key(root, facts, assembly)?;
+    let all_build = resolve_assembly_build(facts, &package, FeatureSelection::All)?;
+    let default_build = resolve_assembly_build(facts, &package, FeatureSelection::Default)?;
+    let domains = workspace_domain_packages(facts)?;
+
+    let mut direct_domains = BTreeSet::new();
+    for dependency in facts.direct_dependencies_for(&package)? {
+        if dependency.kind() != DependencyKind::Normal {
+            continue;
+        }
+        let source_root = match dependency.source() {
+            DependencySource::Workspace { repo_relative_root }
+            | DependencySource::Path { repo_relative_root } => Some(repo_relative_root.as_path()),
+            _ => None,
+        };
+        let domain_candidate = domains.iter().find(|(domain, name)| {
+            dependency.name() == name.as_str()
+                || source_root.is_some_and(|root| {
+                    facts
+                        .repo_relative_root_for(domain)
+                        .is_ok_and(|expected| expected == root)
+                })
+        });
+        let Some((domain, name)) = domain_candidate else {
+            continue;
+        };
+        let resolved =
+            dependency
+                .resolved()
+                .ok_or_else(|| AssemblyCargoFactsError::UnresolvedDependency {
+                    assembly: assembly.cargo_label().to_owned(),
+                    dependency: dependency.name().to_owned(),
+                })?;
+        let source_matches = source_root.is_some_and(|root| {
+            facts
+                .repo_relative_root_for(domain)
+                .is_ok_and(|expected| expected == root)
+        });
+        if resolved == domain
+            && dependency.name() == name
+            && source_matches
+            && all_build.is_dependency_selected(
+                BuildSide::Target,
+                &package,
+                dependency.name(),
+                domain,
+            )
+        {
+            direct_domains.insert(name.clone());
+        }
     }
-    if assembly.manifest().name() == "settingsonly" {
-        let (closure_packages, test_support_enabled) =
-            cargo_tree_default_normal_evidence(root, assembly, metadata)?;
-        let schema_is_regular_file =
-            is_regular_file_without_symlink(&assembly.dir().join("config.schema.json"))?;
-        let sample_is_regular_file =
-            is_regular_file_without_symlink(&assembly.dir().join("settingsonly.example.toml"))?;
-        let (production_artifact_target_declared, production_artifact) =
-            settingsonly_production_artifact_evidence(root)?;
-        let (journey_target_declared, required_journey_test_declared) =
-            settingsonly_journey_evidence(root)?;
-        let runtimeexec_launch_is_live = subset_runtimeexec_launch_is_live(root, "settingsonly")?;
-        let dockerignore_contracts_included = dockerignore_includes_contracts(root)?;
-        findings.extend(validate_settingsonly_executable_evidence(
-            SettingsOnlyExecutableEvidence {
-                targets: &package.targets,
-                closure_packages: &closure_packages,
-                test_support_enabled,
-                schema_is_regular_file,
-                sample_is_regular_file,
-                production_artifact_target_declared,
-                production_artifact,
-                journey_target_declared,
-                required_journey_test_declared,
-                runtimeexec_launch_is_live,
-                dockerignore_contracts_included,
-            },
-        ));
-        findings.extend(validate_settingsonly_l2_production_closure(
-            root,
-            assembly,
-            &closure_packages,
-        )?);
+
+    let closure_domains = all_build
+        .workspace_packages(BuildSide::Target)
+        .iter()
+        .filter_map(|package| domains.get(package).cloned())
+        .collect();
+    let mut findings = validate_domain_sets(assembly, direct_domains, closure_domains)?;
+
+    if assembly.production().is_some() {
+        let enabled_test_support = default_build
+            .enabled_features(BuildSide::Target)
+            .iter()
+            .filter(|feature| feature.name() == "test-support")
+            .map(|feature| feature.package().as_str().to_owned())
+            .collect::<BTreeSet<_>>();
+        if !enabled_test_support.is_empty() {
+            findings.push(finding(
+                Rule::ProductionTestSupport,
+                assembly.cargo_label(),
+                format!(
+                    "production default Cargo graph enables test-support in {enabled_test_support:?}"
+                ),
+            ));
+        }
     }
     Ok(findings)
 }
 
-#[derive(Clone)]
-struct SettingsOnlyL2Evidence {
-    manifest: CanonicalAssemblyManifestV2,
-    cargo_toml: toml::Value,
-    closure_packages: BTreeSet<String>,
-    providers_gen: String,
-    modules_gen: String,
-    lock: serde_json::Value,
-    runtime_plan: serde_json::Value,
-    config_schema: serde_json::Value,
-    config_sample: toml::Value,
-    lib_rs: String,
-    runtime_rs: String,
-    eventing_rs: String,
-    bridge_rs: String,
-    auth_bridge_rs: String,
-    providers_rs: String,
-    config_rs: String,
-    dlx_rs: String,
-}
-
-fn load_settingsonly_l2_evidence(
+fn assembly_package_key(
     root: &Path,
+    facts: &WorkspaceFacts,
     assembly: &GovernedAssembly,
-    closure_packages: &BTreeSet<String>,
-) -> Result<SettingsOnlyL2Evidence> {
-    let read = |path: &Path| -> Result<String> {
-        std::fs::read_to_string(path)
-            .with_context(|| format!("read settingsonly L2 evidence {}", path.display()))
-    };
-    let read_json = |path: &Path| -> Result<serde_json::Value> {
-        serde_json::from_str(&read(path)?)
-            .with_context(|| format!("parse settingsonly L2 evidence {}", path.display()))
-    };
-    Ok(SettingsOnlyL2Evidence {
-        manifest: assembly.manifest().clone(),
-        cargo_toml: assembly.cargo_toml().clone(),
-        closure_packages: closure_packages.clone(),
-        providers_gen: read(&assembly.dir().join("src/generated/providers_gen.rs"))?,
-        modules_gen: read(&assembly.dir().join("src/generated/modules_gen.rs"))?,
-        lock: read_json(&assembly.dir().join("assembly.lock.json"))?,
-        runtime_plan: read_json(&assembly.dir().join("runtime-plan.json"))?,
-        config_schema: read_json(&assembly.dir().join("config.schema.json"))?,
-        config_sample: toml::from_str(&read(&assembly.dir().join("settingsonly.example.toml"))?)
-            .context("parse settingsonly v2 sample")?,
-        lib_rs: read(&assembly.dir().join("src/lib.rs"))?,
-        runtime_rs: read(&assembly.dir().join("src/runtime.rs"))?,
-        eventing_rs: read(&assembly.dir().join("src/eventing.rs"))?,
-        bridge_rs: read(&root.join("composition/eventing/src/lib.rs"))?,
-        auth_bridge_rs: read(&assembly.dir().join("src/auth_bridge.rs"))?,
-        providers_rs: read(&assembly.dir().join("src/providers.rs"))?,
-        config_rs: read(&assembly.dir().join("src/config.rs"))?,
-        dlx_rs: read(&assembly.dir().join("src/dlx.rs"))?,
+) -> Result<PackageKey> {
+    let cargo_path = assembly.cargo_path().strip_prefix(root).with_context(|| {
+        format!(
+            "{} Cargo manifest escaped workspace root: {}",
+            assembly.manifest_label(),
+            assembly.cargo_path().display(),
+        )
+    })?;
+    facts.package_for_repo_path(cargo_path)?.with_context(|| {
+        format!(
+            "{} is not owned by a workspace package; manifest_path={}",
+            assembly.cargo_label(),
+            assembly.cargo_path().display(),
+        )
     })
 }
 
-fn validate_settingsonly_l2_production_closure(
-    root: &Path,
-    assembly: &GovernedAssembly,
-    closure_packages: &BTreeSet<String>,
-) -> Result<Vec<Finding>> {
-    let evidence = load_settingsonly_l2_evidence(root, assembly, closure_packages)?;
-    Ok(validate_settingsonly_l2_evidence(&evidence))
+fn resolve_assembly_build(
+    facts: &WorkspaceFacts,
+    package: &PackageKey,
+    features: FeatureSelection,
+) -> Result<BuildFacts> {
+    let platform =
+        CargoPlatform::build_target().context("resolve assembly Cargo build target platform")?;
+    facts
+        .resolve_build(BuildSelection::new(
+            package.clone(),
+            ResolverVersion::V2,
+            features,
+            BuildPlatforms::new(platform.clone(), platform),
+            BTreeSet::new(),
+        ))
+        .with_context(|| {
+            format!(
+                "resolve {:?} normal Cargo build for workspace package `{}`",
+                features,
+                package.as_str(),
+            )
+        })
 }
 
-fn l2_finding(field: &str, message: impl Into<String>) -> Finding {
-    finding(
-        Rule::SettingsOnlyL2ProductionClosure,
-        "assemblies/settingsonly",
-        format!("field={field} {}", message.into()),
-    )
-}
-
-fn production_item_tokens(source: &str, name: &str) -> Option<String> {
-    let file = syn::parse_file(source).ok()?;
-    let mut matches = Vec::new();
-    for item in file.items {
-        match item {
-            syn::Item::Fn(item)
-                if item.sig.ident == name && !has_test_or_test_support_cfg(&item.attrs) =>
-            {
-                matches.push(item.to_token_stream().to_string());
-            }
-            syn::Item::Impl(item) if !has_test_or_test_support_cfg(&item.attrs) => {
-                for impl_item in item.items {
-                    if let syn::ImplItem::Fn(method) = impl_item
-                        && method.sig.ident == name
-                        && !has_test_or_test_support_cfg(&method.attrs)
-                    {
-                        matches.push(method.to_token_stream().to_string());
-                    }
-                }
-            }
-            syn::Item::Const(item)
-                if item.ident == name && !has_test_or_test_support_cfg(&item.attrs) =>
-            {
-                matches.push(item.to_token_stream().to_string());
-            }
-            _ => {}
-        }
-    }
-    (matches.len() == 1).then(|| {
-        strip_string_literals(&matches.remove(0))
-            .split_whitespace()
-            .collect()
-    })
+fn workspace_domain_packages(facts: &WorkspaceFacts) -> Result<BTreeMap<PackageKey, String>> {
+    Ok(facts
+        .workspace_packages()
+        .into_iter()
+        .filter(|package| {
+            crate::layers::classify(
+                package.key().as_str(),
+                &package.repo_relative_root().display().to_string(),
+            ) == Some(crate::layers::Layer::Domain)
+        })
+        .map(|package| (package.key().clone(), package.key().as_str().to_owned()))
+        .collect())
 }
 
 fn strip_string_literals(tokens: &str) -> String {
@@ -1190,241 +900,6 @@ fn strip_string_literals(tokens: &str) -> String {
     output
 }
 
-fn tokens_have_all(source: &str, item: &str, required: &[&str]) -> bool {
-    production_item_tokens(source, item)
-        .is_some_and(|tokens| required.iter().all(|needle| tokens.contains(needle)))
-}
-
-fn function_local_initializer_has_all(
-    source: &str,
-    function: &str,
-    binding: &str,
-    required: &[&str],
-) -> bool {
-    let Ok(file) = syn::parse_file(source) else {
-        return false;
-    };
-    let mut initializers = file.items.into_iter().filter_map(|item| {
-        let syn::Item::Fn(item) = item else {
-            return None;
-        };
-        if item.sig.ident != function || has_test_or_test_support_cfg(&item.attrs) {
-            return None;
-        }
-        let matches = item
-            .block
-            .stmts
-            .iter()
-            .filter_map(|statement| {
-                let syn::Stmt::Local(local) = statement else {
-                    return None;
-                };
-                (local_binding_ident(&local.pat)? == binding)
-                    .then_some(local.init.as_ref())
-                    .flatten()
-                    .map(|init| {
-                        strip_string_literals(&init.expr.to_token_stream().to_string())
-                            .split_whitespace()
-                            .collect::<String>()
-                    })
-            })
-            .collect::<Vec<_>>();
-        (matches.len() == 1)
-            .then(|| matches.into_iter().next())
-            .flatten()
-    });
-    let Some(tokens) = initializers.next() else {
-        return false;
-    };
-    initializers.next().is_none() && required.iter().all(|needle| tokens.contains(needle))
-}
-
-fn impl_method_has_all(source: &str, type_name: &str, method: &str, required: &[&str]) -> bool {
-    let Ok(file) = syn::parse_file(source) else {
-        return false;
-    };
-    let mut matches = file.items.into_iter().filter_map(|item| {
-        let syn::Item::Impl(item) = item else {
-            return None;
-        };
-        let syn::Type::Path(path) = item.self_ty.as_ref() else {
-            return None;
-        };
-        if path.path.segments.last()?.ident != type_name
-            || has_test_or_test_support_cfg(&item.attrs)
-        {
-            return None;
-        }
-        item.items.into_iter().find_map(|item| match item {
-            syn::ImplItem::Fn(item)
-                if item.sig.ident == method && !has_test_or_test_support_cfg(&item.attrs) =>
-            {
-                Some(
-                    strip_string_literals(&item.to_token_stream().to_string())
-                        .split_whitespace()
-                        .collect::<String>(),
-                )
-            }
-            _ => None,
-        })
-    });
-    let Some(tokens) = matches.next() else {
-        return false;
-    };
-    matches.next().is_none() && required.iter().all(|needle| tokens.contains(needle))
-}
-
-fn exact_non_optional_struct_fields(source: &str, name: &str, fields: &[&str]) -> bool {
-    let Ok(file) = syn::parse_file(source) else {
-        return false;
-    };
-    let Some(item) = file.items.into_iter().find_map(|item| match item {
-        syn::Item::Struct(item)
-            if item.ident == name && !has_test_or_test_support_cfg(&item.attrs) =>
-        {
-            Some(item)
-        }
-        _ => None,
-    }) else {
-        return false;
-    };
-    let syn::Fields::Named(named) = item.fields else {
-        return false;
-    };
-    let actual = named
-        .named
-        .iter()
-        .filter_map(|field| field.ident.as_ref().map(ToString::to_string))
-        .collect::<BTreeSet<_>>();
-    let expected = fields
-        .iter()
-        .map(|field| (*field).to_owned())
-        .collect::<BTreeSet<_>>();
-    actual == expected
-        && named.named.iter().all(|field| {
-            !matches!(&field.ty, syn::Type::Path(path) if path.path.segments.last().is_some_and(|segment| segment.ident == "Option"))
-        })
-}
-
-fn schema_objects_are_closed_and_required(value: &serde_json::Value) -> bool {
-    match value {
-        serde_json::Value::Object(object) => {
-            let own_shape_ok = object.get("properties").is_none_or(|properties| {
-                let Some(properties) = properties.as_object() else {
-                    return false;
-                };
-                let property_names = properties
-                    .keys()
-                    .map(String::as_str)
-                    .collect::<BTreeSet<_>>();
-                let required = object
-                    .get("required")
-                    .and_then(serde_json::Value::as_array)
-                    .map(|fields| {
-                        fields
-                            .iter()
-                            .filter_map(serde_json::Value::as_str)
-                            .collect::<BTreeSet<_>>()
-                    });
-                object
-                    .get("additionalProperties")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(false)
-                    && required.as_ref() == Some(&property_names)
-            });
-            own_shape_ok && object.values().all(schema_objects_are_closed_and_required)
-        }
-        serde_json::Value::Array(values) => {
-            values.iter().all(schema_objects_are_closed_and_required)
-        }
-        _ => true,
-    }
-}
-
-fn production_items_forbid_identifier(source: &str, forbidden: &str) -> bool {
-    let Ok(file) = syn::parse_file(source) else {
-        return false;
-    };
-    file.items
-        .into_iter()
-        .filter(|item| !item_attrs(item).is_some_and(has_test_or_test_support_cfg))
-        .all(|item| {
-            !item
-                .to_token_stream()
-                .to_string()
-                .to_ascii_lowercase()
-                .contains(forbidden)
-        })
-}
-
-#[derive(Default)]
-struct SettingsOnlyAuthBridgeVisitor {
-    wrapper_count: usize,
-    exact_wrapper_count: usize,
-    raw_reparse_found: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for SettingsOnlyAuthBridgeVisitor {
-    fn visit_item_fn(&mut self, item: &'ast syn::ItemFn) {
-        if item.sig.ident == "federated_evidence" {
-            self.wrapper_count += 1;
-            let signature_is_exact = matches!(item.vis, syn::Visibility::Inherited)
-                && !has_test_or_test_support_cfg(&item.attrs)
-                && token_key(&item.sig.inputs) == "access:&authn::VerifiedFederatedAccess"
-                && token_key(&item.sig.output) == "->Authenticated";
-            let body = token_key(&item.block);
-            if signature_is_exact
-                && body.contains("access.principal()")
-                && body.contains("access.permissions()")
-                && body.contains("Authenticated::new_federated(")
-            {
-                self.exact_wrapper_count += 1;
-            }
-        }
-        syn::visit::visit_item_fn(self, item);
-    }
-
-    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
-        let path = token_key(expression);
-        if path.ends_with("Jwt::parse") || path.ends_with("VerifiedJwt::raw") {
-            self.raw_reparse_found = true;
-        }
-        syn::visit::visit_expr_path(self, expression);
-    }
-
-    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
-        if expression.method == "raw" || expression.method == "verified_jwt" {
-            self.raw_reparse_found = true;
-        }
-        syn::visit::visit_expr_method_call(self, expression);
-    }
-}
-
-fn settingsonly_auth_bridge_is_closed(source: &str) -> bool {
-    let Ok(file) = syn::parse_file(source) else {
-        return false;
-    };
-    let mut visitor = SettingsOnlyAuthBridgeVisitor::default();
-    syn::visit::Visit::visit_file(&mut visitor, &file);
-    let request_wrapper = production_item_tokens(source, "verify_request");
-    visitor.wrapper_count == 1
-        && visitor.exact_wrapper_count == 1
-        && !visitor.raw_reparse_found
-        && request_wrapper.is_some_and(|tokens| {
-            [
-                "letaccess=Arc::new(access)",
-                "letprincipal=access.principal_arc()",
-                "letevidence=federated_evidence(access.as_ref())",
-                "PendingScopeCtx::new(ctx)",
-                "extensions_mut().insert(evidence)",
-                "extensions_mut().insert(principal)",
-            ]
-            .iter()
-            .all(|required| tokens.contains(required))
-                && !tokens.contains("extensions_mut().insert(access)")
-        })
-}
-
 fn item_attrs(item: &syn::Item) -> Option<&[syn::Attribute]> {
     match item {
         syn::Item::Const(item) => Some(&item.attrs),
@@ -1441,552 +916,36 @@ fn item_attrs(item: &syn::Item) -> Option<&[syn::Attribute]> {
     }
 }
 
-fn upper_camel_kebab(value: &str) -> String {
-    value
-        .split('-')
-        .map(|part| {
-            let mut chars = part.chars();
-            chars
-                .next()
-                .map(|first| first.to_ascii_uppercase().to_string() + chars.as_str())
-                .unwrap_or_default()
-        })
-        .collect()
-}
-
-fn validate_settingsonly_l2_evidence(evidence: &SettingsOnlyL2Evidence) -> Vec<Finding> {
+fn discovery_findings(root: &Path, ir: &AssemblyGovernanceIr<Core>) -> Vec<Finding> {
     let mut findings = Vec::new();
-    if !settingsonly_auth_bridge_is_closed(&evidence.auth_bridge_rs) {
-        findings.push(l2_finding(
-            "federated-auth-funnel",
-            "requires one private VerifiedFederatedAccess-consuming wrapper and only its minimal evidence/principal/tenant projections; full access extension insertion, raw JWT parse/reparse, aliases, function pointers, and cfg(test) bait are forbidden",
-        ));
-    }
-    if evidence.manifest.profile() != AssemblyProfile::Production
-        || evidence.manifest.topology() != AssemblyTopology::DurableIsolated
-        || evidence.manifest.domains() != [AssemblyDomain::Settings]
-    {
-        findings.push(l2_finding(
-            "manifest",
-            "requires exact production/durable-isolated/settings topology; demo is forbidden",
-        ));
-    }
-
-    let actual_provider_facts = evidence
-        .manifest
-        .diport_providers()
-        .iter()
-        .map(|provider| {
-            let mut outputs = provider
-                .outputs
-                .iter()
-                .map(|output| output.as_str())
-                .collect::<Vec<_>>();
-            outputs.sort_unstable();
-            (provider.id.as_str(), provider.durability.as_str(), outputs)
-        })
-        .collect::<BTreeSet<_>>();
-    if evidence.manifest.diport_providers().len() != actual_provider_facts.len()
-        || evidence
-            .manifest
-            .diport_providers()
-            .iter()
-            .any(|provider| provider.lifecycle != ProviderLifecycle::Active)
-    {
-        findings.push(l2_finding(
-            "providers",
-            "settingsonly manifest provider facts must be unique and active; duplicate or draft providers are forbidden",
-        ));
-    }
-
-    let expected_closure = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
-        .iter()
-        .copied()
-        .map(str::to_owned)
-        .collect::<BTreeSet<_>>();
-    let provider_features_ok = [
-        ("amqp", &["backend"][..]),
-        ("oidc", &["backend"][..]),
-        ("postgres", &["auth-audit-sink", "domain-settings"][..]),
-        ("redis", &["backend"][..]),
-        ("s3", &["backend"][..]),
-        ("vault", &["backend"][..]),
-        ("eventing-composition", &["settings-consumers"][..]),
-    ]
-    .iter()
-    .all(|(name, required)| {
-        dependency_features(&evidence.cargo_toml, name)
-            .is_some_and(|features| required.iter().all(|feature| features.contains(*feature)))
-    });
-    if evidence.closure_packages != expected_closure || !provider_features_ok {
-        findings.push(l2_finding("cargo-closure", "normal workspace closure and production backend features must be exact; fallback factories/test-support are forbidden"));
-    }
-
-    let provider_catalog = production_item_tokens(&evidence.providers_gen, "PROVIDER_CATALOG");
-    let generated_roles_ok = provider_catalog.as_ref().is_some_and(|tokens| {
-        actual_provider_facts
-            .iter()
-            .all(|(id, durability, outputs)| {
-                let role = format!("ProviderRole::{}", upper_camel_kebab(id));
-                let Some(start) = tokens.find(&role) else {
-                    return false;
-                };
-                if tokens.matches(&role).count() != 1 {
-                    return false;
-                }
-                let tail = &tokens[start..];
-                let end = tail
-                    .find("),ProviderCatalogEntry::checked")
-                    .unwrap_or(tail.len());
-                let entry = &tail[..end];
-                let durability = format!("ProviderDurability::{}", upper_camel_kebab(durability));
-                let outputs = outputs
-                    .iter()
-                    .map(|output| format!("LifecycleChannel::{}", upper_camel_kebab(output)))
-                    .collect::<Vec<_>>();
-                entry.contains(&durability)
-                    && entry.matches("LifecycleChannel::").count() == outputs.len()
-                    && outputs.iter().all(|output| entry.contains(output))
-            })
-            && tokens.matches("ProviderCatalogEntry::checked").count()
-                == actual_provider_facts.len()
-    });
-    let generated_modules_ok = production_item_tokens(&evidence.modules_gen, "wire_domains")
-        .is_some_and(|tokens| {
-            tokens.matches("::module(").count() == 1
-                && tokens.contains("crate::domains::settings::module(")
-                && tokens.contains(".await")
-        });
-    if !generated_roles_ok || !generated_modules_ok {
-        findings.push(l2_finding("generated", "generated provider catalog/modules must contain the exact production execution body; dead or cfg(test) helpers are not evidence"));
-    }
-
-    let lock_ok = evidence
-        .lock
-        .pointer("/identity/name")
-        .and_then(serde_json::Value::as_str)
-        == Some("settingsonly")
-        && evidence
-            .lock
-            .pointer("/identity/profile")
-            .and_then(serde_json::Value::as_str)
-            == Some("production")
-        && evidence.lock.pointer("/fingerprint")
-            == evidence.runtime_plan.pointer("/assemblyFingerprint")
-        && evidence
-            .lock
-            .pointer("/digests/manifest")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|digest| {
-                evidence
-                    .providers_gen
-                    .contains(&format!("Source-Manifest-Digest: {digest}"))
-                    && evidence
-                        .modules_gen
-                        .contains(&format!("Source-Manifest-Digest: {digest}"))
-            });
-    let plan_facts = evidence
-        .runtime_plan
-        .pointer("/providerPlans")
-        .and_then(serde_json::Value::as_array)
-        .map(|plans| {
-            plans
-                .iter()
-                .filter_map(|plan| {
-                    let id = plan.get("id")?.as_str()?;
-                    let mut outputs = plan
-                        .get("outputs")?
-                        .as_array()?
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .collect::<Vec<_>>();
-                    outputs.sort_unstable();
-                    Some((id, outputs))
-                })
-                .collect::<BTreeSet<_>>()
-        });
-    let plan_count = evidence
-        .runtime_plan
-        .pointer("/providerPlans")
-        .and_then(serde_json::Value::as_array)
-        .map(Vec::len);
-    let expected_plan = actual_provider_facts
-        .iter()
-        .map(|(id, _, outputs)| (*id, outputs.clone()))
-        .collect::<BTreeSet<_>>();
-    if !lock_ok
-        || plan_facts.as_ref() != Some(&expected_plan)
-        || plan_count != Some(expected_plan.len())
-    {
-        findings.push(l2_finding(
-            "lock-runtime-plan",
-            "committed lock and runtime plan must bind the exact manifest provider closure",
-        ));
-    }
-
-    let expected_config_fields = [
-        "dlx",
-        "drain",
-        "eventing",
-        "federated",
-        "listeners",
-        "postgres",
-        "profile",
-        "readiness",
-        "redis",
-        "s3",
-        "schemaVersion",
-        "tenantAuthority",
-        "topology",
-        "vault",
-    ]
-    .into_iter()
-    .collect::<BTreeSet<_>>();
-    let schema_required = evidence
-        .config_schema
-        .get("required")
-        .and_then(serde_json::Value::as_array)
-        .map(|fields| {
-            fields
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .collect::<BTreeSet<_>>()
-        });
-    let schema_ok = schema_required.as_ref() == Some(&expected_config_fields)
-        && evidence
-            .config_schema
-            .pointer("/properties/schemaVersion/const")
-            .and_then(serde_json::Value::as_u64)
-            == Some(2)
-        && evidence
-            .config_schema
-            .get("additionalProperties")
-            .and_then(serde_json::Value::as_bool)
-            == Some(false)
-        && evidence
-            .config_schema
-            .pointer("/definitions/ProjectionConfig")
-            .is_none()
-        && schema_objects_are_closed_and_required(&evidence.config_schema);
-    let sample_fields = evidence
-        .config_sample
-        .as_table()
-        .map(|table| table.keys().map(String::as_str).collect::<BTreeSet<_>>());
-    let sample_ok = sample_fields.as_ref() == Some(&expected_config_fields)
-        && evidence
-            .config_sample
-            .get("schemaVersion")
-            .and_then(toml::Value::as_integer)
-            == Some(2)
-        && evidence
-            .config_sample
-            .get("profile")
-            .and_then(toml::Value::as_str)
-            == Some("production")
-        && evidence
-            .config_sample
-            .get("topology")
-            .and_then(toml::Value::as_str)
-            == Some("durable-isolated");
-    if !schema_ok || !sample_ok {
-        findings.push(l2_finding("config-v2", "closed config schema and sample must be version 2 production/durable-isolated, omit plan-owned projection identity, and deny unknown fields"));
-    }
-
-    let manifest_target_generation = evidence
-        .manifest
-        .workflow_activations()
-        .iter()
-        .find(|activation| activation.id() == "settings.config-projection")
-        .and_then(assembly_schema::WorkflowActivation::projection_target_generation);
-    let runtime_target_generation = evidence
-        .runtime_plan
-        .pointer("/workflowPlans")
-        .and_then(serde_json::Value::as_array)
-        .and_then(|plans| {
-            plans.iter().find(|plan| {
-                plan.get("id").and_then(serde_json::Value::as_str)
-                    == Some("settings.config-projection")
-            })
-        })
-        .and_then(|plan| plan.get("targetGeneration"))
-        .and_then(serde_json::Value::as_str);
-    if manifest_target_generation != Some("v3") || runtime_target_generation != Some("v3") {
-        findings.push(l2_finding(
-            "projection-target-generation",
-            "manifest and RuntimePlan must independently pin settings.config-projection targetGeneration=v3",
-        ));
-    }
-
-    let startup_ok = tokens_have_all(
-        &evidence.lib_rs,
-        "run",
-        &["config::capture(", "runtime::launch_captured("],
-    ) && tokens_have_all(
-        &evidence.runtime_rs,
-        "prepare",
-        &[
-            "crate::providers::build(",
-            "AssemblyStartupInputs::production(",
-        ],
-    ) && tokens_have_all(
-        &evidence.runtime_rs,
-        "prepare_assembly",
-        &["crate::eventing::wire(", "role_closer.finish("],
-    ) && tokens_have_all(
-        &evidence.runtime_rs,
-        "launch_captured",
-        &["launch(", "ProductionStartup::new("],
-    );
-    if !startup_ok {
-        findings.push(l2_finding("run-reachability", "run must reach providers::build, eventing::wire, and role_closer.finish through the production startup funnel; aliases, dead helpers, comments, and cfg(test) bait are rejected"));
-    }
-
-    let provider_build_ok =
-        tokens_have_all(
-            &evidence.providers_rs,
-            "build",
-            &[
-                "build_postgres(",
-                "build_vault(",
-                "build_federated_access_provider(",
-                "build_production_infra(",
-            ],
-        ) && tokens_have_all(
-            &evidence.providers_rs,
-            "build_production_infra",
-            &[
-                "build_s3_archive_store(",
-                "build_redis(",
-                "RedisReadyProbe{",
-                "RedisReadinessWorker::spawn(",
-                "AmqpPrivateCa::from_pem(",
-                "AmqpPublisherEndpoint::new(",
-                "AmqpSubscriberEndpoint::new(",
-                "AmqpRuntimeDeps::connect_with_private_ca(",
-                "split_startup_resource(",
-                "build_tenant_authority(",
-                "VaultKeyProvider::new(",
-                "PgDlxLifecycleRuntime::preflight_identities(",
-                "PgDlxLifecycleRuntime::setup(",
-                "crate::dlx::wire(",
-                "SettingsOnlyProductionInfra{",
-            ],
-        ) && tokens_have_all(
-            &evidence.providers_rs,
-            "build_redis",
-            &[
-                "RedisPrivateCa::from_pem(",
-                "RedisRuntimeDeps::connect_with_private_ca(",
-            ],
-        ) && function_local_initializer_has_all(
-            &evidence.providers_rs,
-            "build_production_infra",
-            "redis_output",
-            &[
-                "RedisReadyProbe{",
-                "RedisReadinessWorker::spawn(",
-                "redis.runtime_resources()",
-            ],
-        ) && exact_non_optional_struct_fields(
-            &evidence.providers_rs,
-            "SettingsOnlyProductionInfra",
-            &[
-                "eventing",
-                "distributed_lock_store",
-                "dlx_archive_key_provider",
-                "dlx_archive_store",
-                "dlx_hot_key_provider",
-                "dlx_lifecycle_repository",
-                "readiness_startup_timeout",
-                "amqp_publisher_activation",
-                "amqp_subscriber_activation",
-                "provider_activations",
-            ],
-        ) && production_items_forbid_identifier(&evidence.providers_rs, "fallback");
-    let secret_fields_ok = exact_non_optional_struct_fields(
-        &evidence.config_rs,
-        "ServingSecretBundle",
-        &[
-            "pg_writer_password",
-            "pg_reader_password",
-            "pg_dlx_archiver_password",
-            "pg_dlx_verifier_password",
-            "pg_dlx_purger_password",
-            "pg_projection_worker_password",
-            "vault_token",
-            "settings_amqp_publisher_url",
-            "settings_amqp_subscriber_url",
-            "redis_url",
-            "tenant_authority_key",
-            "dlx_hot_vault_token",
-            "dlx_archive_vault_token",
-            "s3_access_key_id",
-            "s3_secret_access_key",
-        ],
-    );
-    let secret_capture_ok = tokens_have_all(
-        &evidence.config_rs,
-        "capture_from",
-        &[
-            "SERVING_SECRET_BUNDLE_PATH",
-            "FORBIDDEN_SHARED_AMQP_URL_ENV",
-            "read_secret_bundle(",
-        ],
-    );
-    let secret_validate_ok = impl_method_has_all(
-        &evidence.config_rs,
-        "ResolvedSecrets",
-        "validate",
-        &[
-            "validate_tls_endpoint(&self.settings_amqp_publisher_url,\"\",\"\"",
-            "validate_tls_endpoint(&self.settings_amqp_subscriber_url,\"\",\"\"",
-            "self.settings_amqp_publisher_url==self.settings_amqp_subscriber_url",
-            "validate_tls_endpoint(&self.redis_url,\"\",\"\")",
-            "self.vault_token==self.dlx_hot_vault_token",
-            "self.vault_token==self.dlx_archive_vault_token",
-            "self.dlx_hot_vault_token==self.dlx_archive_vault_token",
-        ],
-    );
-    let secret_bundle_ok = secret_fields_ok && secret_capture_ok && secret_validate_ok;
-    let dlx_readiness_ok = tokens_have_all(
-        &evidence.dlx_rs,
-        "wire",
-        &[
-            "DLX_ARCHIVE_KEY_READINESS_PROBE",
-            "DLX_HOT_KEY_READINESS_PROBE",
-            "archive_key_readiness_worker(",
-            "key_readiness_worker(",
-        ],
-    ) && tokens_have_all(
-        &evidence.dlx_rs,
-        "key_readiness_loop",
-        &["verify_key_canary(", "apply_key_readiness("],
-    ) && tokens_have_all(
-        &evidence.dlx_rs,
-        "apply_key_readiness",
-        &["apply_key_provider_result(", "DlxLifecycleHealth::Degraded"],
-    ) && tokens_have_all(
-        &evidence.dlx_rs,
-        "apply_key_provider_result",
-        &[
-            "DlxLifecycleHealth::Healthy",
-            "DlxLifecycleHealth::Degraded",
-        ],
-    ) && tokens_have_all(
-        &evidence.dlx_rs,
-        "required_health_status",
-        &["HealthStatus::Degraded", "HealthStatus::Unhealthy"],
-    ) && impl_method_has_all(
-        &evidence.dlx_rs,
-        "WorkerProbe",
-        "check",
-        &["required_health_status("],
-    ) && function_local_initializer_has_all(
-        &evidence.dlx_rs,
-        "wire",
-        "dlx_hot_key_provider",
-        &[
-            "hot_key_probe_name",
-            "key_readiness_worker(",
-            "KeyReadinessSpec::hot()",
-        ],
-    ) && function_local_initializer_has_all(
-        &evidence.dlx_rs,
-        "wire",
-        "dlx_archive_key_provider",
-        &["archive_key_probe_name", "archive_key_readiness_worker("],
-    ) && tokens_have_all(
-        &evidence.providers_rs,
-        "build_production_infra",
-        &[
-            "hot_output.merge(dlx_outputs.dlx_hot_key_provider);",
-            "archive_output.merge(dlx_outputs.dlx_archive_key_provider);",
-            ".finish(archive_output)",
-        ],
-    );
-    if !provider_build_ok || !secret_bundle_ok || !dlx_readiness_ok {
-        findings.push(l2_finding(
-            "production-implementation",
-            format!("run-reachable typed provider/config/DLX construction must remain mandatory, fallback-free, and readiness-backed (provider={provider_build_ok}, secret-fields={secret_fields_ok}, secret-capture={secret_capture_ok}, secret-validate={secret_validate_ok}, dlx={dlx_readiness_ok})"),
-        ));
-    }
-
-    let exact_bridge = tokens_have_all(
-        &evidence.eventing_rs,
-        "wire",
-        &[
-            "eventing_composition::bridge_generated_settings_subscriptions(",
-            "validate_settings_closure(",
-            "wire_amqp_readiness(",
-        ],
-    ) && tokens_have_all(
-        &evidence.bridge_rs,
-        "bridge_generated_settings_subscriptions",
-        &[
-            "admitted_settings_dispatch",
-            "settings_v1::CONTRACT_ID",
-            "settings_v1::TOPIC",
-            "schema_version()==\"\"",
-            "consumer()==\"\"",
-            "group().as_str()==generated::event::settings_v1::TOPIC",
-            "SubscriberReadiness::Required",
-            "SettingsConfigVersionChangedV1Settings",
-            "ExternalEffectPolicy::Reconcile",
-        ],
-    ) && tokens_have_all(
-        &evidence.eventing_rs,
-        "wire_amqp_readiness",
-        &[
-            "publisher_readiness().is_ready()",
-            "subscriber_readiness().is_ready()",
-            "AmqpReadinessRole::Publisher",
-            "AmqpReadinessRole::Subscriber",
-        ],
-    ) && tokens_have_all(
-        &evidence.eventing_rs,
-        "required_health_status",
-        &["HealthStatus::Degraded", "HealthStatus::Unhealthy"],
-    ) && impl_method_has_all(
-        &evidence.eventing_rs,
-        "WorkerProbe",
-        "check",
-        &["required_health_status("],
-    );
-    if !exact_bridge {
-        findings.push(l2_finding("subscription", "requires exactly one activated config-version-changed@v1/settings reconcile/readiness-required bridge; generic, fallback, or nonactivated subscribers are forbidden"));
+    for target in ir.targets() {
+        let cargo_path = target.cargo_path();
+        if !target.has_manifest() && target.has_cargo_manifest() {
+            let label = target
+                .dir()
+                .strip_prefix(root)
+                .unwrap_or(target.dir())
+                .display()
+                .to_string();
+            findings.push(finding(
+                Rule::MissingManifest,
+                &label,
+                format!(
+                    "assembly crate 必须声明 {label}/assembly.toml；source={}",
+                    rel_label(root, &cargo_path),
+                ),
+            ));
+        }
     }
     findings
 }
 
+#[cfg(test)]
 fn discover(root: &Path) -> Result<(Vec<GovernedAssembly>, Vec<Finding>)> {
     let ir = AssemblyGovernanceIr::<Core>::load(root)?;
-    let mut findings = Vec::new();
-    for target in ir.targets() {
-        let cargo_path = target.cargo_path();
-        if !target.has_manifest() {
-            if target.has_cargo_manifest() {
-                let label = target
-                    .dir()
-                    .strip_prefix(root)
-                    .unwrap_or(target.dir())
-                    .display()
-                    .to_string();
-                findings.push(finding(
-                    Rule::MissingManifest,
-                    &label,
-                    format!(
-                        "assembly crate 必须声明 {}/assembly.toml；source={}",
-                        label,
-                        rel_label(root, &cargo_path)
-                    ),
-                ));
-            }
-            continue;
-        }
-    }
+    let findings = discovery_findings(root, &ir);
     Ok((ir.assemblies().to_vec(), findings))
 }
-
 fn validate_assembly(a: &GovernedAssembly) -> Vec<Finding> {
     let mut findings = Vec::new();
     validate_identityaudit_manifest_boundary(a, &mut findings);
@@ -2010,20 +969,6 @@ fn validate_assembly(a: &GovernedAssembly) -> Vec<Finding> {
                 Rule::RevocationDurability,
                 &subject,
                 "field=durability/profile production diport::RevocationStore provider 必须 durability=persistent；ephemeral-memory 只能用于 demo/test assembly",
-            ));
-        }
-
-        if provider.lifecycle == ProviderLifecycle::Active
-            && dependency_features(a.cargo_toml(), &provider.provider_crate).is_none()
-        {
-            findings.push(finding(
-                Rule::ActiveProviderDependency,
-                &subject,
-                format!(
-                    "field=providerCrate active providerCrate `{}` 必须出现在 {} [dependencies]",
-                    provider.provider_crate,
-                    a.cargo_label()
-                ),
             ));
         }
 
@@ -2061,31 +1006,6 @@ fn validate_assembly(a: &GovernedAssembly) -> Vec<Finding> {
                             "field=providerCrate provider `{}` 的实现 crate 是 `{}`，manifest 不得声明为 `{}`",
                             constructor,
                             constructor.provider_crate(),
-                            provider.provider_crate
-                        ),
-                    ));
-                }
-            }
-
-            let required_features = required_features(provider);
-            if let Some(actual_features) =
-                dependency_features(a.cargo_toml(), &provider.provider_crate)
-            {
-                let missing: Vec<_> = required_features
-                    .iter()
-                    .filter(|feature| !actual_features.contains(**feature))
-                    .cloned()
-                    .collect();
-                if !missing.is_empty() {
-                    findings.push(finding(
-                        Rule::ActiveProviderFeature,
-                        &subject,
-                        format!(
-                            "field=requiredFeatures active provider `{}` for port `{}` 需要启用 Cargo feature {:?}；检查 {} [dependencies].{}",
-                            provider.provider,
-                            provider.port,
-                            missing,
-                            a.cargo_label(),
                             provider.provider_crate
                         ),
                     ));
@@ -2502,37 +1422,10 @@ fn validate_required_capability(
 ) {
     match spec.expectation {
         RequiredCapabilityExpectation::CargoDependency {
-            dependency,
-            required_features,
-        } => match dependency_features(a.cargo_toml(), dependency) {
-            None => findings.push(finding(
-                Rule::RequiredCapability,
-                a.cargo_label(),
-                format!(
-                    "field=dependencies domain={domain} capability={} expected exact [dependencies].{dependency} in {}; actual=missing-dependency",
-                    spec.capability, a.cargo_label()
-                ),
-            )),
-            Some(features)
-                if required_features
-                    .iter()
-                    .any(|required| !features.iter().any(|actual| actual == required)) =>
-            {
-                findings.push(finding(
-                    Rule::RequiredCapability,
-                    a.cargo_label(),
-                    format!(
-                        "field=dependencies domain={domain} capability={} expected [dependencies].{dependency} features {:?}; actual={features:?}",
-                        spec.capability, required_features
-                    ),
-                ));
-            }
-            Some(_) => {}
-        }
-        RequiredCapabilityExpectation::ActivePersistentProvider {
-            provider,
-            consumer,
-        } => {
+            dependency: _,
+            required_features: _,
+        } => {}
+        RequiredCapabilityExpectation::ActivePersistentProvider { provider, consumer } => {
             if !has_active_persistent_provider(a, provider, consumer) {
                 findings.push(finding(
                     Rule::RequiredCapability,
@@ -2606,346 +1499,6 @@ fn provider_state(provider: &DiportProvider) -> String {
     )
 }
 
-#[derive(Debug, Deserialize)]
-struct CargoMetadata {
-    packages: Vec<MetadataPackage>,
-    workspace_members: BTreeSet<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataPackage {
-    id: String,
-    name: String,
-    manifest_path: PathBuf,
-    #[serde(default)]
-    dependencies: Vec<MetadataDependency>,
-    #[serde(default)]
-    targets: Vec<MetadataTarget>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct MetadataTarget {
-    #[serde(default)]
-    name: String,
-    #[serde(default)]
-    kind: Vec<String>,
-    #[serde(default)]
-    src_path: PathBuf,
-    #[serde(default, rename = "required-features")]
-    required_features: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct MetadataDependency {
-    name: String,
-    kind: Option<String>,
-    rename: Option<String>,
-    path: Option<PathBuf>,
-    target: Option<String>,
-}
-
-fn load_workspace_metadata(root: &Path) -> Result<Option<CargoMetadata>> {
-    let manifest = root.join("Cargo.toml");
-    if !manifest.exists() {
-        return Ok(None);
-    }
-
-    let manifest_arg = manifest.display().to_string();
-    let args = cargo_metadata_args(manifest_arg.as_str());
-    let mut cmd = crate::cmd::cargo_cmd(
-        crate::cmd::CargoSubcommand::Metadata,
-        &args[1..],
-        &[],
-        Some(root),
-    );
-    let output = cmd
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .with_context(|| format!("执行 cargo metadata 失败：{}", manifest.display()))?;
-    if !output.status.success() {
-        bail!(
-            "cargo metadata --locked 失败（{}）：{}",
-            manifest.display(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    let metadata = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("解析 cargo metadata JSON 失败：{}", manifest.display()))?;
-    Ok(Some(metadata))
-}
-
-/// One private Cargo metadata snapshot shared by artifact checks. Raw metadata DTOs never cross
-/// this façade, and every identity query is restricted to workspace packages.
-pub(crate) struct CargoTargetCatalog {
-    root: PathBuf,
-    metadata: Option<CargoMetadata>,
-}
-
-impl CargoTargetCatalog {
-    pub(crate) fn load(root: &Path) -> Result<Self> {
-        Ok(Self {
-            root: root.to_path_buf(),
-            metadata: load_workspace_metadata(root)?,
-        })
-    }
-
-    pub(crate) fn target_exists(
-        &self,
-        package_name: &str,
-        target_name: &str,
-        target_kind: &str,
-    ) -> bool {
-        self.package(package_name).is_some_and(|package| {
-            package.targets.iter().any(|target| {
-                target.name == target_name && target.kind.iter().any(|kind| kind == target_kind)
-            })
-        })
-    }
-
-    pub(crate) fn target_path(
-        &self,
-        package_name: &str,
-        target_name: &str,
-        target_kind: &str,
-    ) -> Option<PathBuf> {
-        self.package(package_name).and_then(|package| {
-            package.targets.iter().find_map(|target| {
-                (target.name == target_name && target.kind.iter().any(|kind| kind == target_kind))
-                    .then(|| target.src_path.clone())
-            })
-        })
-    }
-
-    pub(crate) fn binary_belongs_to_assembly(
-        &self,
-        assembly: &str,
-        package_name: &str,
-        target_name: &str,
-    ) -> bool {
-        let assembly_manifest = self
-            .root
-            .join("assemblies")
-            .join(assembly)
-            .join("Cargo.toml");
-        let Some(assembly_package) = self.package_by_manifest(&assembly_manifest) else {
-            return false;
-        };
-        let Some(binary_package) = self.package(package_name) else {
-            return false;
-        };
-        if !binary_package.targets.iter().any(|target| {
-            target.name == target_name && target.kind.iter().any(|kind| kind == "bin")
-        }) {
-            return false;
-        }
-        binary_package.id == assembly_package.id
-            || exact_normal_dependency(binary_package, assembly_package)
-    }
-
-    pub(crate) fn has_exact_normal_dependency(
-        &self,
-        package_name: &str,
-        dependency_name: &str,
-        dependency_manifest: &str,
-    ) -> bool {
-        let Some(package) = self.package(package_name) else {
-            return false;
-        };
-        let expected_manifest = self.root.join(dependency_manifest);
-        let Some(dependency) = self.package_by_manifest(&expected_manifest) else {
-            return false;
-        };
-        dependency.name == dependency_name && exact_normal_dependency(package, dependency)
-    }
-
-    fn package(&self, name: &str) -> Option<&MetadataPackage> {
-        let metadata = self.metadata.as_ref()?;
-        metadata.packages.iter().find(|package| {
-            package.name == name && metadata.workspace_members.contains(&package.id)
-        })
-    }
-
-    fn package_by_manifest(&self, manifest: &Path) -> Option<&MetadataPackage> {
-        let metadata = self.metadata.as_ref()?;
-        metadata.packages.iter().find(|package| {
-            package.manifest_path == manifest && metadata.workspace_members.contains(&package.id)
-        })
-    }
-}
-
-fn exact_normal_dependency(package: &MetadataPackage, dependency: &MetadataPackage) -> bool {
-    let Some(dependency_dir) = dependency.manifest_path.parent() else {
-        return false;
-    };
-    package.dependencies.iter().any(|candidate| {
-        candidate.kind.is_none()
-            && candidate.rename.is_none()
-            && candidate.target.is_none()
-            && candidate.name == dependency.name
-            && candidate.path.as_deref() == Some(dependency_dir)
-    })
-}
-
-fn cargo_metadata_args(manifest_arg: &str) -> [&str; 6] {
-    [
-        "metadata",
-        "--format-version=1",
-        "--locked",
-        "--all-features",
-        "--manifest-path",
-        manifest_arg,
-    ]
-}
-
-fn cargo_tree_stdout(
-    root: &Path,
-    assembly: &GovernedAssembly,
-    depth: Option<usize>,
-    all_features: bool,
-) -> Result<String> {
-    let manifest = assembly.cargo_path().display().to_string();
-    let depth_value = depth.map(|value| value.to_string());
-    let mut args = vec![
-        "tree",
-        "--manifest-path",
-        manifest.as_str(),
-        "--edges",
-        "normal",
-        "--prefix",
-        "none",
-        "--format",
-        "{p}|{f}",
-    ];
-    if all_features {
-        args.insert(5, "--all-features");
-    }
-    if let Some(value) = depth_value.as_deref() {
-        args.extend(["--depth", value]);
-    }
-    let output = crate::cmd::cargo_cmd(
-        crate::cmd::CargoSubcommand::Tree,
-        &args[1..],
-        &[],
-        Some(root),
-    )
-    .stdout(Stdio::piped())
-    .stderr(Stdio::piped())
-    .output()
-    .with_context(|| format!("执行 cargo tree 失败：{}", assembly.cargo_label()))?;
-    if !output.status.success() {
-        bail!(
-            "cargo tree 失败（{}）：{}",
-            assembly.cargo_label(),
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-
-    String::from_utf8(output.stdout)
-        .with_context(|| format!("cargo tree 输出不是 UTF-8：{}", assembly.cargo_label()))
-}
-
-fn cargo_tree_domains(
-    root: &Path,
-    assembly: &GovernedAssembly,
-    metadata: &CargoMetadata,
-    depth: Option<usize>,
-) -> Result<BTreeSet<String>> {
-    let stdout = cargo_tree_stdout(root, assembly, depth, true)?;
-    let mut domains = BTreeSet::new();
-    for package in metadata
-        .packages
-        .iter()
-        .filter(|package| package_is_workspace_domain(root, metadata, package))
-    {
-        let Some(package_dir) = package.manifest_path.parent() else {
-            continue;
-        };
-        let path_marker = format!("({})", package_dir.display());
-        if stdout
-            .lines()
-            .filter_map(|line| line.split_once('|'))
-            .any(|(line, _)| {
-                line.starts_with(&format!("{} ", package.name)) && line.ends_with(&path_marker)
-            })
-        {
-            domains.insert(package.name.clone());
-        }
-    }
-    Ok(domains)
-}
-
-fn cargo_tree_default_normal_evidence(
-    root: &Path,
-    assembly: &GovernedAssembly,
-    metadata: &CargoMetadata,
-) -> Result<(BTreeSet<String>, bool)> {
-    let stdout = cargo_tree_stdout(root, assembly, None, false)?;
-    let mut packages = BTreeSet::new();
-    let mut test_support_enabled = false;
-    for (package, features) in stdout.lines().filter_map(|line| line.split_once('|')) {
-        if let Some(name) = package.split_whitespace().next() {
-            packages.insert(name.to_owned());
-        }
-        test_support_enabled |= features
-            .split(',')
-            .map(str::trim)
-            .any(|feature| feature == "test-support");
-    }
-    let workspace_packages = metadata
-        .packages
-        .iter()
-        .filter(|package| metadata.workspace_members.contains(&package.id))
-        .filter(|package| packages.contains(&package.name))
-        .map(|package| package.name.clone())
-        .collect();
-    Ok((workspace_packages, test_support_enabled))
-}
-
-fn package_by_manifest<'a>(
-    metadata: &'a CargoMetadata,
-    manifest_path: &Path,
-) -> Option<&'a MetadataPackage> {
-    metadata
-        .packages
-        .iter()
-        .find(|package| package.manifest_path == manifest_path)
-}
-
-fn direct_normal_domain_deps(
-    root: &Path,
-    metadata: &CargoMetadata,
-    assembly: &MetadataPackage,
-) -> Result<BTreeSet<String>> {
-    let mut domains = BTreeSet::new();
-    for dependency in assembly
-        .dependencies
-        .iter()
-        .filter(|dep| dep.kind.is_none())
-    {
-        if dependency.rename.is_some() {
-            continue;
-        }
-        let Some(path) = &dependency.path else {
-            continue;
-        };
-        for package in metadata
-            .packages
-            .iter()
-            .filter(|package| package_is_workspace_domain(root, metadata, package))
-        {
-            let Some(package_dir) = package.manifest_path.parent() else {
-                continue;
-            };
-            if dependency.name == package.name && path == package_dir {
-                domains.insert(package.name.clone());
-            }
-        }
-    }
-    Ok(domains)
-}
-
 fn validate_domain_sets(
     a: &GovernedAssembly,
     direct_domains: BTreeSet<String>,
@@ -2986,78 +1539,6 @@ fn validate_domain_sets(
     Ok(findings)
 }
 
-fn validate_identityaudit_boundary(
-    manifest_label: &str,
-    cargo_label: &str,
-    targets: &[MetadataTarget],
-    closure_packages: &BTreeSet<String>,
-) -> Vec<Finding> {
-    let mut findings = Vec::new();
-    let exact_targets = targets.len() == 5
-        && targets.iter().any(|target| {
-            target.name == "build-script-build" && target.kind.as_slice() == ["custom-build"]
-        })
-        && targets
-            .iter()
-            .any(|target| target.name == "identityaudit" && target.kind.as_slice() == ["lib"])
-        && targets.iter().any(|target| {
-            target.name == "identityaudit-server" && target.kind.as_slice() == ["bin"]
-        })
-        && targets.iter().any(|target| {
-            target.name == IDENTITYAUDIT_ARTIFACT_BINARY_TEST
-                && target.kind.as_slice() == ["test"]
-                && target.required_features.is_empty()
-        })
-        && targets.iter().any(|target| {
-            target.name == IDENTITYAUDIT_ARTIFACT_IMAGE_TEST
-                && target.kind.as_slice() == ["test"]
-                && target.required_features.as_slice() == [IDENTITYAUDIT_ARTIFACT_FEATURE]
-        });
-    if !exact_targets {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            manifest_label,
-            format!(
-                "field=package.targets {cargo_label} expected exactly repository-attestation build script, lib `identityaudit`, bin `identityaudit-server`, default binary test `{IDENTITYAUDIT_ARTIFACT_BINARY_TEST}`, and feature-gated image test `{IDENTITYAUDIT_ARTIFACT_IMAGE_TEST}`"
-            ),
-        ));
-    }
-
-    let expected = IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES
-        .iter()
-        .map(|package| (*package).to_owned())
-        .collect::<BTreeSet<_>>();
-    let missing = expected
-        .difference(closure_packages)
-        .cloned()
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            manifest_label,
-            format!(
-                "field=default-normal-workspace-closure {cargo_label} missing required identityaudit packages: {}",
-                missing.join(", ")
-            ),
-        ));
-    }
-    let unexpected = closure_packages
-        .difference(&expected)
-        .cloned()
-        .collect::<Vec<_>>();
-    if !unexpected.is_empty() {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            manifest_label,
-            format!(
-                "field=default-normal-workspace-closure {cargo_label} unexpected packages entered identityaudit: {}",
-                unexpected.join(", ")
-            ),
-        ));
-    }
-    findings
-}
-
 fn validate_identityaudit_manifest_boundary(a: &GovernedAssembly, findings: &mut Vec<Finding>) {
     if a.manifest().name() != "identityaudit" {
         return;
@@ -3087,7 +1568,7 @@ fn validate_identityaudit_manifest_boundary(a: &GovernedAssembly, findings: &mut
         || listeners != expected_listeners
     {
         findings.push(finding(
-            Rule::IdentityAuditBoundary,
+            Rule::IdentityAuditManifestBoundary,
             a.manifest_label(),
             format!(
                 "field=profile/topology/listeners identityaudit requires profile=production, topology=durable-isolated, and exact Primary(identity)+Admin(audit)+Health(empty); actual profile={} topology={} listeners={listeners:?}",
@@ -3096,437 +1577,6 @@ fn validate_identityaudit_manifest_boundary(a: &GovernedAssembly, findings: &mut
             ),
         ));
     }
-}
-
-const IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
-    "amqp",
-    "assembly-schema",
-    "audit",
-    "audit-composition",
-    "authmint",
-    "authn",
-    "bootstrap",
-    "consistency",
-    "crypto-adapter",
-    "deviceloop",
-    "diagctx",
-    "diport",
-    "distributed",
-    "eventexec",
-    "eventing-composition",
-    "generated",
-    "httpd",
-    "httpserve",
-    "identity",
-    "identity-composition",
-    "identityaudit",
-    "ids",
-    "observ",
-    "oidc",
-    "postgres",
-    "postgres-migration-inventory",
-    "primitives",
-    "prometheus-adapter",
-    "ratelimit",
-    "redis-adapter",
-    "runctx",
-    "sagaauthmint",
-    "runtimeexec",
-    "secure",
-    "securederive",
-    "support",
-    "tracewire",
-    "vault",
-    "vocab",
-];
-
-#[derive(Clone)]
-struct IdentityAuditExecutableEvidence<'a> {
-    test_support_enabled: bool,
-    schema_is_closed: bool,
-    sample_is_regular_file: bool,
-    artifact_acceptance: IdentityAuditArtifactAcceptanceEvidence,
-    journey_target_declared: bool,
-    required_journey_test_declared: bool,
-    runtimeexec_launch_is_live: bool,
-    dockerfile: &'a str,
-}
-
-fn validate_identityaudit_executable_evidence(
-    evidence: IdentityAuditExecutableEvidence<'_>,
-) -> Vec<Finding> {
-    let subject = "assemblies/identityaudit";
-    let mut findings = Vec::new();
-    if evidence.test_support_enabled {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            "field=default-normal-features `test-support` must stay disabled in the production closure",
-        ));
-    }
-    if !evidence.schema_is_closed {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            "field=config-schema expected a non-symlink closed object schema at assemblies/identityaudit/config.schema.json",
-        ));
-    }
-    if !evidence.sample_is_regular_file {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            "field=config-sample expected a non-symlink regular file at assemblies/identityaudit/identityaudit.example.toml",
-        ));
-    }
-    if !evidence.artifact_acceptance.is_closed() {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            evidence.artifact_acceptance.detail(),
-        ));
-    }
-    if !evidence.journey_target_declared || !evidence.required_journey_test_declared {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            "field=journey expected explicit `identityaudit_runtime` target with non-ignored `identityaudit_login_audit_ready_sigterm_drain`",
-        ));
-    }
-    if !evidence.runtimeexec_launch_is_live {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            "field=health-runtime-wiring run must reach launch_captured, which must construct StartupPlan and call runtimeexec::launch_startup",
-        ));
-    }
-    if !identityaudit_docker_target_is_closed(evidence.dockerfile) {
-        findings.push(finding(
-            Rule::IdentityAuditBoundary,
-            subject,
-            "field=Dockerfile expected migration-free serving builder and identityaudit-runtime on the distroless nonroot base, while runtime remains the default final stage",
-        ));
-    }
-    findings
-}
-
-const SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES: &[&str] = &[
-    "amqp",
-    "assembly-schema",
-    "authmint",
-    "authn",
-    "bootstrap",
-    "consistency",
-    "crypto-adapter",
-    "diagctx",
-    "diport",
-    "distributed",
-    "eventexec",
-    "eventing-composition",
-    "generated",
-    "httpd",
-    "httpserve",
-    "ids",
-    "observ",
-    "oidc",
-    "postgres",
-    "postgres-migration-inventory",
-    "primitives",
-    "prometheus-adapter",
-    "ratelimit",
-    "redis-adapter",
-    "runctx",
-    "sagaauthmint",
-    "runtimeexec",
-    "secure",
-    "securederive",
-    "settings",
-    "settings-composition",
-    "settingsonly",
-    "s3",
-    "support",
-    "tracewire",
-    "vault",
-    "vocab",
-];
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArtifactClosureStage {
-    SourceRead,
-    Parse,
-    EntryLink,
-    TestInventory,
-    CaseInventory,
-    EvidenceId,
-    TestName,
-    Dispatch,
-    Scenario,
-    ReceiptProvenance,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ArtifactClosurePath {
-    Entry,
-    Support,
-}
-
-impl ArtifactClosurePath {
-    const fn as_str(self) -> &'static str {
-        match self {
-            Self::Entry => "journeys/tests/settingsonly_production_artifact.rs",
-            Self::Support => "journeys/tests/support/settingsonly_production_artifact.rs",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct ArtifactClosureSpan {
-    start_line: usize,
-    start_column: usize,
-    end_line: usize,
-    end_column: usize,
-}
-
-impl ArtifactClosureSpan {
-    fn from_span(span: proc_macro2::Span) -> Self {
-        let start = span.start();
-        let end = span.end();
-        Self {
-            start_line: start.line,
-            start_column: start.column,
-            end_line: end.line,
-            end_column: end.column,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ArtifactClosureViolation {
-    stage: ArtifactClosureStage,
-    case: Option<String>,
-    path: ArtifactClosurePath,
-    span: Option<ArtifactClosureSpan>,
-    expected: String,
-    actual: String,
-}
-
-impl ArtifactClosureViolation {
-    fn new(
-        stage: ArtifactClosureStage,
-        case: Option<impl Into<String>>,
-        path: ArtifactClosurePath,
-        span: Option<proc_macro2::Span>,
-        expected: impl Into<String>,
-        actual: impl Into<String>,
-    ) -> Self {
-        Self {
-            stage,
-            case: case.map(Into::into),
-            path,
-            span: span.map(ArtifactClosureSpan::from_span),
-            expected: expected.into(),
-            actual: actual.into(),
-        }
-    }
-
-    fn detail(&self) -> String {
-        let case = self.case.as_deref().unwrap_or("<carrier>");
-        let span = self.span.map_or_else(
-            || "span=<none>".to_owned(),
-            |span| {
-                format!(
-                    "span={}:{}-{}:{}",
-                    span.start_line, span.start_column, span.end_line, span.end_column
-                )
-            },
-        );
-        format!(
-            "stage={:?} case={case} path={} {span} expected={} actual={}",
-            self.stage,
-            self.path.as_str(),
-            self.expected,
-            self.actual
-        )
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ArtifactClosureCertificate {
-    cases: BTreeSet<String>,
-}
-
-impl ArtifactClosureCertificate {
-    #[cfg(test)]
-    fn case_count(&self) -> usize {
-        self.cases.len()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ArtifactClosureEvidence {
-    Certified(ArtifactClosureCertificate),
-    Violations(Vec<ArtifactClosureViolation>),
-}
-
-impl ArtifactClosureEvidence {
-    #[cfg(test)]
-    fn certificate(cases: impl IntoIterator<Item = impl Into<String>>) -> Self {
-        Self::Certified(ArtifactClosureCertificate {
-            cases: cases.into_iter().map(Into::into).collect(),
-        })
-    }
-}
-
-#[derive(Clone)]
-struct SettingsOnlyExecutableEvidence<'a> {
-    targets: &'a [MetadataTarget],
-    closure_packages: &'a BTreeSet<String>,
-    test_support_enabled: bool,
-    schema_is_regular_file: bool,
-    sample_is_regular_file: bool,
-    production_artifact_target_declared: bool,
-    production_artifact: ArtifactClosureEvidence,
-    journey_target_declared: bool,
-    required_journey_test_declared: bool,
-    runtimeexec_launch_is_live: bool,
-    dockerignore_contracts_included: bool,
-}
-
-fn validate_settingsonly_executable_evidence(
-    evidence: SettingsOnlyExecutableEvidence<'_>,
-) -> Vec<Finding> {
-    let subject = "assemblies/settingsonly";
-    let mut findings = Vec::new();
-    let exact_targets = evidence.targets.len() == 3
-        && evidence.targets.iter().any(|target| {
-            target.name == "build-script-build" && target.kind.as_slice() == ["custom-build"]
-        })
-        && evidence
-            .targets
-            .iter()
-            .any(|target| target.name == "settingsonly" && target.kind.as_slice() == ["lib"])
-        && evidence.targets.iter().any(|target| {
-            target.name == "settingsonly-server" && target.kind.as_slice() == ["bin"]
-        });
-    if !exact_targets {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=package.targets expected exactly repository-attestation build script, lib `settingsonly`, and bin `settingsonly-server`",
-        ));
-    }
-
-    let allowed = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
-        .iter()
-        .map(|package| (*package).to_owned())
-        .collect::<BTreeSet<_>>();
-    let missing = allowed
-        .difference(evidence.closure_packages)
-        .cloned()
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            format!(
-                "field=default-normal-workspace-closure missing allowed settingsonly packages: {}",
-                missing.join(", ")
-            ),
-        ));
-    }
-    let unexpected = evidence
-        .closure_packages
-        .difference(&allowed)
-        .cloned()
-        .collect::<Vec<_>>();
-    if !unexpected.is_empty() {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            format!(
-                "field=default-normal-workspace-closure unexpected packages entered settingsonly: {}",
-                unexpected.join(", ")
-            ),
-        ));
-    }
-    if evidence.test_support_enabled {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=default-normal-features `test-support` must stay disabled in the production closure",
-        ));
-    }
-    if !evidence.schema_is_regular_file {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=config-schema expected a non-symlink regular file at assemblies/settingsonly/config.schema.json",
-        ));
-    }
-    if !evidence.sample_is_regular_file {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=config-sample expected a non-symlink regular file at assemblies/settingsonly/settingsonly.example.toml",
-        ));
-    }
-    if !evidence.production_artifact_target_declared {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=production-artifact stage=Target path=journeys/Cargo.toml expected one exact integration-only `settingsonly_production_artifact` target",
-        ));
-    }
-    if let ArtifactClosureEvidence::Violations(violations) = evidence.production_artifact {
-        findings.extend(violations.into_iter().map(|violation| {
-            finding(
-                Rule::SettingsOnlyExecutableBoundary,
-                violation.path.as_str(),
-                format!("field=production-artifact {}", violation.detail()),
-            )
-        }));
-    }
-    if !evidence.journey_target_declared || !evidence.required_journey_test_declared {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=journey expected explicit `settingsonly_runtime` target with non-ignored `settingsonly_lifecycle_fixture_ready_request_sigterm_drain`",
-        ));
-    }
-    if !evidence.runtimeexec_launch_is_live {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=health-runtime-wiring run must reach launch_captured, which must construct StartupPlan and call runtimeexec::launch_startup",
-        ));
-    }
-    if !evidence.dockerignore_contracts_included {
-        findings.push(finding(
-            Rule::SettingsOnlyExecutableBoundary,
-            subject,
-            "field=.dockerignore contracts/ must remain in the settingsonly-runtime build context",
-        ));
-    }
-    findings
-}
-
-fn is_regular_file_without_symlink(path: &Path) -> Result<bool> {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => Ok(metadata.is_file() && !metadata.file_type().is_symlink()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error).with_context(|| format!("检查 {} 失败", path.display())),
-    }
-}
-
-fn identityaudit_schema_is_closed(path: &Path) -> Result<bool> {
-    if !is_regular_file_without_symlink(path)? {
-        return Ok(false);
-    }
-    let source =
-        std::fs::read_to_string(path).with_context(|| format!("读取 {} 失败", path.display()))?;
-    let Ok(schema) = serde_json::from_str::<serde_json::Value>(&source) else {
-        return Ok(false);
-    };
-    Ok(schema_objects_are_closed(&schema))
 }
 
 pub(crate) fn schema_objects_are_closed(value: &serde_json::Value) -> bool {
@@ -3617,2415 +1667,6 @@ pub(crate) fn schema_objects_are_closed(value: &serde_json::Value) -> bool {
     true
 }
 
-fn identityaudit_journey_evidence(root: &Path) -> Result<(bool, bool)> {
-    let manifest_path = root.join("journeys/Cargo.toml");
-    let manifest: toml::Value = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?
-        .parse()
-        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
-    let target_declared = manifest
-        .get("test")
-        .and_then(toml::Value::as_array)
-        .is_some_and(|targets| {
-            targets.iter().any(|target| {
-                target.get("name").and_then(toml::Value::as_str) == Some("identityaudit_runtime")
-                    && target.get("path").and_then(toml::Value::as_str)
-                        == Some("tests/identityaudit_runtime.rs")
-            })
-        });
-    let source_path = root.join("journeys/tests/identityaudit_runtime.rs");
-    let required_test_declared = match std::fs::read_to_string(&source_path) {
-        Ok(source) => identityaudit_journey_has_required_test(&source)
-            .with_context(|| format!("解析 {} 失败", source_path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(error).with_context(|| format!("读取 {} 失败", source_path.display()));
-        }
-    };
-    Ok((target_declared, required_test_declared))
-}
-
-fn identityaudit_journey_has_required_test(source: &str) -> Result<bool> {
-    const REQUIRED_TEST: &str = "identityaudit_login_audit_ready_sigterm_drain";
-    for item in syn::parse_file(source)?.items {
-        let syn::Item::Fn(function) = item else {
-            continue;
-        };
-        if function.sig.ident != REQUIRED_TEST
-            || !function.attrs.iter().any(is_test_attribute)
-            || function.attrs.iter().any(is_ignore_attribute)
-            || function.attrs.iter().any(is_conditional_attribute)
-        {
-            continue;
-        }
-        if function.block.stmts.iter().any(stmt_is_control_flow) {
-            return Ok(false);
-        }
-        let mut visitor = IdentityAuditJourneyVisitor::default();
-        syn::visit::Visit::visit_block(&mut visitor, &function.block);
-        return Ok(visitor.is_complete());
-    }
-    Ok(false)
-}
-
-fn stmt_is_control_flow(statement: &syn::Stmt) -> bool {
-    matches!(
-        statement,
-        syn::Stmt::Expr(
-            syn::Expr::If(_)
-                | syn::Expr::Match(_)
-                | syn::Expr::Loop(_)
-                | syn::Expr::While(_)
-                | syn::Expr::ForLoop(_),
-            _,
-        )
-    )
-}
-
-macro_rules! skip_opaque_witness_scopes {
-    () => {
-        fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {}
-
-        fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {}
-
-        fn visit_expr_const(&mut self, _node: &'ast syn::ExprConst) {}
-
-        fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {}
-
-        fn visit_item_const(&mut self, _node: &'ast syn::ItemConst) {}
-
-        fn visit_item_static(&mut self, _node: &'ast syn::ItemStatic) {}
-    };
-}
-
-fn subset_runtimeexec_launch_is_live(root: &Path, assembly: &str) -> Result<bool> {
-    let base = root.join("assemblies").join(assembly).join("src");
-    let lib = std::fs::read_to_string(base.join("lib.rs"))
-        .with_context(|| format!("读取 {assembly} lib runtime wiring 失败"))?;
-    let runtime = std::fs::read_to_string(base.join("runtime.rs"))
-        .with_context(|| format!("读取 {assembly} runtimeexec wiring 失败"))?;
-    subset_runtimeexec_launch_sources_are_live(&lib, &runtime)
-}
-
-fn subset_runtimeexec_launch_sources_are_live(lib: &str, runtime: &str) -> Result<bool> {
-    fn function_calls(source: &str, owner: &str) -> Result<Option<RuntimeLaunchCallVisitor>> {
-        let file = syn::parse_file(source)?;
-        let Some(function) = file.items.iter().find_map(|item| match item {
-            syn::Item::Fn(function)
-                if function.sig.ident == owner
-                    && !function.attrs.iter().any(is_conditional_attribute) =>
-            {
-                Some(function)
-            }
-            _ => None,
-        }) else {
-            return Ok(None);
-        };
-        if function.block.stmts.iter().any(stmt_is_control_flow) {
-            return Ok(None);
-        }
-        let mut visitor = RuntimeLaunchCallVisitor::default();
-        syn::visit::Visit::visit_block(&mut visitor, &function.block);
-        Ok(Some(visitor))
-    }
-
-    let Some(run) = function_calls(lib, "run")? else {
-        return Ok(false);
-    };
-    let Some(launch) = function_calls(runtime, "launch_captured")? else {
-        return Ok(false);
-    };
-    let direct = launch.startup_plan && launch.launch_startup;
-    let delegated = if launch.launch_helper {
-        function_calls(runtime, "launch")?
-            .is_some_and(|helper| helper.startup_plan && helper.launch_startup)
-    } else {
-        false
-    };
-    Ok(run.launch_captured && (direct || delegated))
-}
-
-#[derive(Default)]
-struct RuntimeLaunchCallVisitor {
-    launch_captured: bool,
-    startup_plan: bool,
-    launch_startup: bool,
-    launch_helper: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for RuntimeLaunchCallVisitor {
-    skip_opaque_witness_scopes!();
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        self.launch_captured |=
-            expression_path_ends_with(node.func.as_ref(), &["runtime", "launch_captured"]);
-        self.startup_plan |=
-            expression_path_ends_with(node.func.as_ref(), &["runtimeexec", "StartupPlan", "new"]);
-        self.launch_startup |=
-            expression_path_ends_with(node.func.as_ref(), &["runtimeexec", "launch_startup"]);
-        self.launch_helper |= expression_path_ends_with(node.func.as_ref(), &["launch"]);
-        syn::visit::visit_expr_call(self, node);
-    }
-}
-
-#[derive(Default)]
-struct IdentityAuditJourneyVisitor {
-    runtime_start: bool,
-    wait_until_ready: bool,
-    login: bool,
-    wait_for_auth_audit: bool,
-    wait_for_session_created_hash_chain: bool,
-    send_sigterm: bool,
-    wait_for_drain: bool,
-}
-
-impl IdentityAuditJourneyVisitor {
-    fn is_complete(&self) -> bool {
-        self.runtime_start
-            && self.wait_until_ready
-            && self.login
-            && self.wait_for_auth_audit
-            && self.wait_for_session_created_hash_chain
-            && self.send_sigterm
-            && self.wait_for_drain
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for IdentityAuditJourneyVisitor {
-    skip_opaque_witness_scopes!();
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        self.runtime_start |= expression_path_ends_with(
-            node.func.as_ref(),
-            &["RuntimeFixture", "start"],
-        ) && matches!(node.args.first(), Some(syn::Expr::Path(path)) if path.path.is_ident("providers"));
-        self.wait_for_auth_audit |= expression_path_ends_with(
-            node.func.as_ref(),
-            &["wait_for_auth_audit"],
-        ) && matches!(node.args.first(), Some(syn::Expr::Reference(pool)) if matches!(pool.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("pool")));
-        self.wait_for_session_created_hash_chain |= expression_path_ends_with(
-            node.func.as_ref(),
-            &["wait_for_session_created_hash_chain"],
-        ) && matches!(node.args.first(), Some(syn::Expr::Reference(pool)) if matches!(pool.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("pool")))
-            && matches!(node.args.iter().nth(1), Some(syn::Expr::Reference(login)) if matches!(login.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("login")));
-        syn::visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        let runtime = matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("runtime"));
-        self.wait_until_ready |= runtime && node.method == "wait_until_ready";
-        self.login |= runtime && node.method == "login";
-        self.send_sigterm |= runtime && node.method == "send_sigterm";
-        self.wait_for_drain |= runtime && node.method == "wait_for_drain";
-        syn::visit::visit_expr_method_call(self, node);
-    }
-}
-
-fn identityaudit_artifact_acceptance_evidence(
-    root: &Path,
-) -> Result<IdentityAuditArtifactAcceptanceEvidence> {
-    let manifest_path = root.join(IDENTITYAUDIT_ARTIFACT_MANIFEST_REL);
-    let mut evidence = IdentityAuditArtifactAcceptanceEvidence::default();
-    if !is_regular_file_without_symlink(&manifest_path)? {
-        evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE);
-        return Ok(evidence);
-    }
-    let manifest: toml::Value = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?
-        .parse()
-        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
-
-    let binary_path = root.join(IDENTITYAUDIT_ARTIFACT_BINARY_SOURCE_REL);
-    let image_path = root.join(IDENTITYAUDIT_ARTIFACT_IMAGE_SOURCE_REL);
-    let support_path = root.join(IDENTITYAUDIT_ARTIFACT_SUPPORT_SOURCE_REL);
-    let binary = read_optional_regular_rust_source(&binary_path)?;
-    let image = read_optional_regular_rust_source(&image_path)?;
-    let support = read_optional_regular_rust_source(&support_path)?;
-    identityaudit_artifact_acceptance_from_sources(
-        Some(&manifest),
-        binary.as_deref(),
-        image.as_deref(),
-        support.as_deref(),
-    )
-}
-
-fn read_optional_regular_rust_source(path: &Path) -> Result<Option<String>> {
-    if !is_regular_file_without_symlink(path)? {
-        return Ok(None);
-    }
-    Ok(Some(std::fs::read_to_string(path).with_context(|| {
-        format!("读取 {} 失败", path.display())
-    })?))
-}
-
-const IDENTITYAUDIT_ARTIFACT_FEATURE: &str = "artifact-acceptance";
-const IDENTITYAUDIT_ARTIFACT_BINARY_TEST: &str = "identityaudit_artifact_acceptance";
-const IDENTITYAUDIT_ARTIFACT_IMAGE_TEST: &str = "identityaudit_runtime_image_acceptance";
-const IDENTITYAUDIT_ARTIFACT_BINARY_PATH: &str = "tests/artifact_acceptance.rs";
-const IDENTITYAUDIT_ARTIFACT_IMAGE_PATH: &str = "tests/runtime_image_acceptance.rs";
-const IDENTITYAUDIT_ARTIFACT_MANIFEST_REL: &str = "assemblies/identityaudit/Cargo.toml";
-const IDENTITYAUDIT_ARTIFACT_BINARY_SOURCE_REL: &str =
-    "assemblies/identityaudit/tests/artifact_acceptance.rs";
-const IDENTITYAUDIT_ARTIFACT_IMAGE_SOURCE_REL: &str =
-    "assemblies/identityaudit/tests/runtime_image_acceptance.rs";
-const IDENTITYAUDIT_ARTIFACT_SUPPORT_SOURCE_REL: &str =
-    "assemblies/identityaudit/tests/support/mod.rs";
-const IDENTITYAUDIT_ARTIFACT_BINARY_FN: &str =
-    "identityaudit_server_binary_is_an_executable_artifact";
-const IDENTITYAUDIT_ARTIFACT_IMAGE_FN: &str =
-    "identityaudit_runtime_image_is_an_executable_artifact";
-const IDENTITYAUDIT_ARTIFACT_LAYER_MANIFEST: &str = "manifest";
-const IDENTITYAUDIT_ARTIFACT_LAYER_BINARY: &str = "binary source";
-const IDENTITYAUDIT_ARTIFACT_LAYER_IMAGE: &str = "image source";
-const IDENTITYAUDIT_ARTIFACT_LAYER_SUPPORT: &str = "support source";
-const IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE: &str = "missing file";
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-struct IdentityAuditArtifactAcceptanceEvidence {
-    failures: Vec<&'static str>,
-}
-
-impl IdentityAuditArtifactAcceptanceEvidence {
-    fn is_closed(&self) -> bool {
-        self.failures.is_empty()
-    }
-
-    fn push_failure(&mut self, layer: &'static str) {
-        if !self.failures.contains(&layer) {
-            self.failures.push(layer);
-        }
-    }
-
-    fn detail(&self) -> String {
-        format!(
-            "field=artifact-acceptance failed layers: {}",
-            self.failures.join(", ")
-        )
-    }
-}
-
-fn identityaudit_artifact_acceptance_from_sources(
-    manifest: Option<&toml::Value>,
-    binary: Option<&str>,
-    image: Option<&str>,
-    support: Option<&str>,
-) -> Result<IdentityAuditArtifactAcceptanceEvidence> {
-    let mut evidence = IdentityAuditArtifactAcceptanceEvidence::default();
-    match manifest {
-        Some(manifest) if identityaudit_artifact_manifest_is_closed(manifest) => {}
-        Some(_) => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MANIFEST),
-        None => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE),
-    }
-    match binary {
-        Some(source) => {
-            if !identityaudit_artifact_case_source_is_closed(
-                source,
-                ArtifactCaseExpectation {
-                    expected_ident: IDENTITYAUDIT_ARTIFACT_BINARY_FN,
-                    forbidden_ident: IDENTITYAUDIT_ARTIFACT_IMAGE_FN,
-                    kind: ArtifactContractKind::Binary,
-                    require_image_env: false,
-                },
-            )? {
-                evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_BINARY);
-            }
-        }
-        None => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE),
-    }
-    match image {
-        Some(source) => {
-            if !identityaudit_artifact_case_source_is_closed(
-                source,
-                ArtifactCaseExpectation {
-                    expected_ident: IDENTITYAUDIT_ARTIFACT_IMAGE_FN,
-                    forbidden_ident: IDENTITYAUDIT_ARTIFACT_BINARY_FN,
-                    kind: ArtifactContractKind::Image,
-                    require_image_env: true,
-                },
-            )? {
-                evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_IMAGE);
-            }
-        }
-        None => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE),
-    }
-    match support {
-        Some(source) => {
-            if !identityaudit_artifact_support_is_closed(source)? {
-                evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_SUPPORT);
-            }
-        }
-        None => evidence.push_failure(IDENTITYAUDIT_ARTIFACT_LAYER_MISSING_FILE),
-    }
-    Ok(evidence)
-}
-
-fn identityaudit_artifact_manifest_is_closed(manifest: &toml::Value) -> bool {
-    let feature_ok = manifest
-        .get("features")
-        .and_then(|features| features.get(IDENTITYAUDIT_ARTIFACT_FEATURE))
-        .and_then(toml::Value::as_array)
-        .is_some_and(Vec::is_empty);
-    let tests = manifest
-        .get("test")
-        .and_then(toml::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let binary_ok = tests.iter().any(|target| {
-        target.get("name").and_then(toml::Value::as_str) == Some(IDENTITYAUDIT_ARTIFACT_BINARY_TEST)
-            && target.get("path").and_then(toml::Value::as_str)
-                == Some(IDENTITYAUDIT_ARTIFACT_BINARY_PATH)
-            && target
-                .get("required-features")
-                .and_then(toml::Value::as_array)
-                .is_none_or(Vec::is_empty)
-    });
-    let image_ok = tests.iter().any(|target| {
-        target.get("name").and_then(toml::Value::as_str) == Some(IDENTITYAUDIT_ARTIFACT_IMAGE_TEST)
-            && target.get("path").and_then(toml::Value::as_str)
-                == Some(IDENTITYAUDIT_ARTIFACT_IMAGE_PATH)
-            && target
-                .get("required-features")
-                .and_then(toml::Value::as_array)
-                .is_some_and(|features| {
-                    matches!(features.as_slice(), [feature]
-                        if feature.as_str() == Some(IDENTITYAUDIT_ARTIFACT_FEATURE))
-                })
-    });
-    feature_ok && binary_ok && image_ok && tests.len() == 2
-}
-
-#[derive(Clone, Copy)]
-struct ArtifactCaseExpectation {
-    expected_ident: &'static str,
-    forbidden_ident: &'static str,
-    kind: ArtifactContractKind,
-    require_image_env: bool,
-}
-
-fn identityaudit_artifact_case_source_is_closed(
-    source: &str,
-    expectation: ArtifactCaseExpectation,
-) -> Result<bool> {
-    let syntax = syn::parse_file(source)?;
-    let mut expected = false;
-    let mut support_module = false;
-    for item in &syntax.items {
-        match item {
-            syn::Item::Mod(module)
-                if module.ident == "support"
-                    && !module.attrs.iter().any(is_conditional_attribute) =>
-            {
-                support_module = true;
-            }
-            syn::Item::Fn(function)
-                if function.attrs.iter().any(is_test_attribute)
-                    && !function.attrs.iter().any(is_conditional_attribute) =>
-            {
-                if function.sig.ident == expectation.forbidden_ident {
-                    return Ok(false);
-                }
-                if function.sig.ident == expectation.expected_ident
-                    && !function.attrs.iter().any(is_ignore_attribute)
-                    && identityaudit_artifact_contract_tail(function, expectation.kind)
-                    && (!expectation.require_image_env || image_environment_is_loaded(function))
-                {
-                    expected = true;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(expected && support_module)
-}
-
-#[cfg(test)]
-fn identityaudit_binary_artifact_source_is_closed(source: &str) -> Result<bool> {
-    identityaudit_artifact_case_source_is_closed(
-        source,
-        ArtifactCaseExpectation {
-            expected_ident: IDENTITYAUDIT_ARTIFACT_BINARY_FN,
-            forbidden_ident: IDENTITYAUDIT_ARTIFACT_IMAGE_FN,
-            kind: ArtifactContractKind::Binary,
-            require_image_env: false,
-        },
-    )
-}
-
-#[cfg(test)]
-fn identityaudit_image_artifact_source_is_closed(source: &str) -> Result<bool> {
-    identityaudit_artifact_case_source_is_closed(
-        source,
-        ArtifactCaseExpectation {
-            expected_ident: IDENTITYAUDIT_ARTIFACT_IMAGE_FN,
-            forbidden_ident: IDENTITYAUDIT_ARTIFACT_BINARY_FN,
-            kind: ArtifactContractKind::Image,
-            require_image_env: true,
-        },
-    )
-}
-
-fn identityaudit_artifact_support_is_closed(source: &str) -> Result<bool> {
-    let syntax = syn::parse_file(source)?;
-    let mut executable_contract = false;
-    let mut command_binary = false;
-    let mut command_docker = false;
-    let mut docker_end_of_options = false;
-    for item in syntax.items {
-        match item {
-            syn::Item::Fn(function)
-                if function.sig.ident == "assert_executable_contract"
-                    && !function.attrs.iter().any(is_conditional_attribute) =>
-            {
-                let mut visitor = IdentityAuditExecutableContractVisitor::default();
-                syn::visit::Visit::visit_block(&mut visitor, &function.block);
-                executable_contract = visitor.is_complete();
-            }
-            syn::Item::Impl(item_impl) => {
-                for impl_item in item_impl.items {
-                    let syn::ImplItem::Fn(method) = impl_item else {
-                        continue;
-                    };
-                    if method.sig.ident != "execute"
-                        || method.attrs.iter().any(is_conditional_attribute)
-                    {
-                        continue;
-                    }
-                    let mut visitor = IdentityAuditArtifactExecuteVisitor::default();
-                    syn::visit::Visit::visit_block(&mut visitor, &method.block);
-                    command_binary = visitor.command_binary;
-                    command_docker = visitor.command_docker;
-                    docker_end_of_options = visitor.docker_end_of_options;
-                }
-            }
-            _ => {}
-        }
-    }
-    Ok(executable_contract && command_binary && command_docker && docker_end_of_options)
-}
-
-#[derive(Default)]
-struct IdentityAuditArtifactExecuteVisitor {
-    command_binary: bool,
-    command_docker: bool,
-    docker_end_of_options: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for IdentityAuditArtifactExecuteVisitor {
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if expression_path_ends_with(node.func.as_ref(), &["Command", "new"]) {
-            match node.args.first() {
-                Some(syn::Expr::Path(path)) if path.path.get_ident().is_some() => {
-                    self.command_binary = true;
-                }
-                Some(syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(literal),
-                    ..
-                })) if literal.value() == "docker" => {
-                    self.command_docker = true;
-                }
-                _ => {}
-            }
-        }
-        syn::visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == "args" {
-            let array = match node.args.first() {
-                Some(syn::Expr::Reference(reference)) => match reference.expr.as_ref() {
-                    syn::Expr::Array(array) => Some(array),
-                    _ => None,
-                },
-                Some(syn::Expr::Array(array)) => Some(array),
-                _ => None,
-            };
-            if let Some(array) = array
-                && array.elems.len() == 4
-            {
-                let elems = array.elems.iter().collect::<Vec<_>>();
-                if str_lit_eq(elems[0], "run")
-                    && str_lit_eq(elems[1], "--rm")
-                    && str_lit_eq(elems[2], "--")
-                    && matches!(elems[3], syn::Expr::Path(path) if path.path.is_ident("image"))
-                {
-                    self.docker_end_of_options = true;
-                }
-            }
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
-}
-
-fn str_lit_eq(expression: &syn::Expr, expected: &str) -> bool {
-    matches!(
-        expression,
-        syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Str(literal),
-            ..
-        }) if literal.value() == expected
-    )
-}
-
-#[derive(Default)]
-struct IdentityAuditExecutableContractVisitor {
-    help_execution: bool,
-    missing_config_execution: bool,
-    assertions: usize,
-}
-
-impl IdentityAuditExecutableContractVisitor {
-    fn is_complete(&self) -> bool {
-        self.help_execution && self.missing_config_execution && self.assertions >= 4
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for IdentityAuditExecutableContractVisitor {
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if node.method == "execute"
-            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("artifact"))
-            && let Some(syn::Expr::Reference(arguments)) = node.args.first()
-            && let syn::Expr::Array(arguments) = arguments.expr.as_ref()
-        {
-            match arguments.elems.first() {
-                Some(syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(argument),
-                    ..
-                })) if arguments.elems.len() == 1 && argument.value() == "--help" => {
-                    self.help_execution = true;
-                }
-                None => self.missing_config_execution = true,
-                _ => {}
-            }
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        if node.path.is_ident("assert") {
-            self.assertions = self.assertions.saturating_add(1);
-        }
-        syn::visit::visit_macro(self, node);
-    }
-}
-
-fn identityaudit_artifact_contract_tail(
-    function: &syn::ItemFn,
-    kind: ArtifactContractKind,
-) -> bool {
-    let Some(syn::Stmt::Expr(syn::Expr::Call(assertion), None)) = function.block.stmts.last()
-    else {
-        return false;
-    };
-    if !expression_path_ends_with(assertion.func.as_ref(), &["assert_executable_contract"])
-        || assertion.args.len() != 1
-    {
-        return false;
-    }
-    let Some(syn::Expr::Call(artifact)) = assertion.args.first() else {
-        return false;
-    };
-    let expected = match kind {
-        ArtifactContractKind::Binary => "Binary",
-        ArtifactContractKind::Image => "Image",
-    };
-    if !expression_path_ends_with(artifact.func.as_ref(), &["Artifact", expected])
-        || artifact.args.len() != 1
-    {
-        return false;
-    }
-    match (kind, artifact.args.first()) {
-        (ArtifactContractKind::Binary, Some(syn::Expr::Macro(expression))) => {
-            expression.mac.path.is_ident("env")
-                && syn::parse2::<syn::LitStr>(expression.mac.tokens.clone())
-                    .is_ok_and(|literal| literal.value() == "CARGO_BIN_EXE_identityaudit-server")
-        }
-        (ArtifactContractKind::Image, Some(syn::Expr::Reference(reference))) => {
-            matches!(reference.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("image"))
-        }
-        _ => false,
-    }
-}
-
-fn subset_builder_is_closed(builder: &DockerStage<'_>, package: &str, target: &str) -> bool {
-    let cook = format!(
-        "cargo chef cook --release --locked --recipe-path recipe.json --package {package} --bin {target}"
-    );
-    let build = format!("cargo build --release --locked --package {package} --bin {target}");
-    let strip = format!("strip target/release/{target}");
-    let expected = [
-        ("COPY", "--from=planner /app/recipe.json recipe.json"),
-        ("RUN", cook.as_str()),
-        ("COPY", ". ."),
-        ("RUN", build.as_str()),
-        ("RUN", strip.as_str()),
-    ];
-    builder.base == "chef"
-        && builder.instructions.len() == expected.len()
-        && builder
-            .instructions
-            .iter()
-            .zip(expected)
-            .all(|(instruction, (keyword, arguments))| {
-                docker_instruction_arguments(instruction, keyword) == Some(arguments)
-            })
-}
-
-fn identityaudit_docker_target_is_closed(source: &str) -> bool {
-    let stages = docker_stages(source);
-    let builders = stages
-        .iter()
-        .filter(|stage| stage.name == "identityaudit-builder")
-        .collect::<Vec<_>>();
-    let runtimes = stages
-        .iter()
-        .filter(|stage| stage.name == "identityaudit-runtime")
-        .collect::<Vec<_>>();
-    let ([builder], [runtime]) = (builders.as_slice(), runtimes.as_slice()) else {
-        return false;
-    };
-    let builder_ok = subset_builder_is_closed(builder, "identityaudit", "identityaudit-server");
-    const RUNTIME_INSTRUCTIONS: &[(&str, &str)] = &[
-        (
-            "COPY",
-            "--from=identityaudit-builder /app/target/release/identityaudit-server /usr/local/bin/identityaudit-server",
-        ),
-        (
-            "COPY",
-            "--from=identityaudit-builder /app/assemblies/identityaudit/config.schema.json /usr/share/rss/identityaudit/config.schema.json",
-        ),
-        ("ENTRYPOINT", "[\"/usr/local/bin/identityaudit-server\"]"),
-    ];
-    let runtime_ok = runtime.base == "gcr.io/distroless/cc-debian12:nonroot"
-        && runtime.instructions.len() == RUNTIME_INSTRUCTIONS.len()
-        && runtime.instructions.iter().zip(RUNTIME_INSTRUCTIONS).all(
-            |(instruction, (keyword, arguments))| {
-                docker_instruction_arguments(instruction, keyword) == Some(*arguments)
-            },
-        );
-    let default_runtime_unchanged = stages.last().is_some_and(|stage| stage.name == "runtime");
-    builder_ok && runtime_ok && default_runtime_unchanged
-}
-
-fn settingsonly_journey_evidence(root: &Path) -> Result<(bool, bool)> {
-    let manifest_path = root.join("journeys/Cargo.toml");
-    let manifest: toml::Value = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?
-        .parse()
-        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
-    let target_declared = manifest
-        .get("test")
-        .and_then(toml::Value::as_array)
-        .is_some_and(|targets| {
-            targets.iter().any(|target| {
-                target.get("name").and_then(toml::Value::as_str) == Some("settingsonly_runtime")
-                    && target.get("path").and_then(toml::Value::as_str)
-                        == Some("tests/settingsonly_runtime.rs")
-            })
-        });
-    let source_path = root.join("journeys/tests/settingsonly_runtime.rs");
-    let required_test_declared = match std::fs::read_to_string(&source_path) {
-        Ok(source) => settingsonly_journey_has_required_test(&source)
-            .with_context(|| format!("解析 {} 失败", source_path.display()))?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-        Err(error) => {
-            return Err(error).with_context(|| format!("读取 {} 失败", source_path.display()));
-        }
-    };
-    Ok((target_declared, required_test_declared))
-}
-
-fn settingsonly_journey_has_required_test(source: &str) -> Result<bool> {
-    const REQUIRED_TEST: &str = "settingsonly_lifecycle_fixture_ready_request_sigterm_drain";
-    const CHILD_IDENT: &str = "settingsonly_lifecycle_fixture_child";
-    const SUBPROCESS_MACRO: &str = "settingsonly_lifecycle_subprocess";
-    const EXACT_NAME_FN: &str = "settingsonly_lifecycle_subprocess_exact_name";
-    let syntax = syn::parse_file(source)?;
-    if !settingsonly_subprocess_macro_closure_is_exact(&syntax, SUBPROCESS_MACRO, CHILD_IDENT)? {
-        return Ok(false);
-    }
-    let parent = syntax.items.iter().find(|item| {
-        matches!(item, syn::Item::Fn(function)
-            if function.sig.ident == REQUIRED_TEST
-                && function.attrs.iter().any(is_test_attribute)
-                && !function.attrs.iter().any(is_ignore_attribute)
-                && !function.attrs.iter().any(is_conditional_attribute))
-    });
-    let Some(syn::Item::Fn(parent)) = parent else {
-        return Ok(false);
-    };
-    let mut parent_witness = SettingsJourneyVisitor::default();
-    for statement in &parent.block.stmts {
-        if !stmt_is_control_flow(statement) {
-            syn::visit::Visit::visit_stmt(&mut parent_witness, statement);
-        }
-    }
-    let spawn = syntax.items.iter().find(
-        |item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "spawn_child"),
-    );
-    let Some(syn::Item::Fn(spawn)) = spawn else {
-        return Ok(false);
-    };
-    if !settingsonly_spawn_uses_macro_exact_selector(&spawn.block, EXACT_NAME_FN) {
-        return Ok(false);
-    }
-    let exercise = syntax.items.iter().find(
-        |item| matches!(item, syn::Item::Fn(function) if function.sig.ident == "exercise_child"),
-    );
-    let Some(syn::Item::Fn(exercise)) = exercise else {
-        return Ok(false);
-    };
-    let mut exercise_witness = SettingsJourneyVisitor::default();
-    syn::visit::Visit::visit_block(&mut exercise_witness, &exercise.block);
-    Ok(parent_witness.parent_is_complete() && exercise_witness.exercise_is_complete())
-}
-
-/// Prove the local subprocess macro binds `#[ignore]` child and `--exact` selector to one `$name`.
-fn settingsonly_subprocess_macro_closure_is_exact(
-    syntax: &syn::File,
-    macro_name: &str,
-    child_ident: &str,
-) -> Result<bool> {
-    let Some(syn::Item::Macro(definition)) = syntax.items.iter().find(|item| {
-        matches!(item, syn::Item::Macro(mac)
-            if mac.mac.path.is_ident("macro_rules")
-                && mac.ident.as_ref().is_some_and(|ident| ident == macro_name))
-    }) else {
-        return Ok(false);
-    };
-    let body = definition.mac.tokens.to_string();
-    let has_name_matcher = body.contains("$ name : ident") || body.contains("$name:ident");
-    let has_stringify = body.contains("stringify ! ($ name)") || body.contains("stringify!($name)");
-    let has_ignore = body.contains("# [ignore") || body.contains("#[ignore");
-    let has_fn_name = body.contains("fn $ name") || body.contains("fn $name");
-    if !(has_name_matcher && has_stringify && has_ignore && has_fn_name) {
-        return Ok(false);
-    }
-    let invoked = syntax.items.iter().any(|item| {
-        matches!(item, syn::Item::Macro(invocation)
-            if invocation.mac.path.is_ident(macro_name)
-                && invocation.ident.is_none()
-                && invocation.mac.tokens.to_string().replace(' ', "") == child_ident)
-    });
-    Ok(invoked)
-}
-
-fn settingsonly_spawn_uses_macro_exact_selector(block: &syn::Block, exact_name_fn: &str) -> bool {
-    #[derive(Default)]
-    struct SpawnSelectorWitness<'a> {
-        exact_name_fn: &'a str,
-        calls_exact_name: bool,
-        ignored_flag: bool,
-        exact_flag: bool,
-    }
-    impl<'ast> syn::visit::Visit<'ast> for SpawnSelectorWitness<'_> {
-        fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-            self.calls_exact_name |=
-                expression_path_ends_with(node.func.as_ref(), &[self.exact_name_fn]);
-            syn::visit::visit_expr_call(self, node);
-        }
-        fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-            if node.method == "args" {
-                for arg in &node.args {
-                    if let syn::Expr::Array(array) = arg {
-                        for element in &array.elems {
-                            if let syn::Expr::Lit(syn::ExprLit {
-                                lit: syn::Lit::Str(value),
-                                ..
-                            }) = element
-                            {
-                                match value.value().as_str() {
-                                    "--ignored" => self.ignored_flag = true,
-                                    "--exact" => self.exact_flag = true,
-                                    _ => {}
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            syn::visit::visit_expr_method_call(self, node);
-        }
-    }
-    let mut witness = SpawnSelectorWitness {
-        exact_name_fn,
-        ..SpawnSelectorWitness::default()
-    };
-    syn::visit::Visit::visit_block(&mut witness, block);
-    witness.calls_exact_name && witness.ignored_flag && witness.exact_flag
-}
-
-#[derive(Default)]
-struct SettingsJourneyVisitor {
-    reserve_addresses: bool,
-    child_logs: bool,
-    spawn_child: bool,
-    exercise_child: bool,
-    remove_logs: bool,
-    activation_accept: bool,
-    health_contract: bool,
-    primary_contract: bool,
-    send_sigterm: bool,
-    wait_for_child: bool,
-    released_ports: usize,
-}
-
-impl SettingsJourneyVisitor {
-    fn parent_is_complete(&self) -> bool {
-        self.reserve_addresses
-            && self.child_logs
-            && self.spawn_child
-            && self.exercise_child
-            && self.remove_logs
-    }
-
-    fn exercise_is_complete(&self) -> bool {
-        self.activation_accept
-            && self.health_contract
-            && self.primary_contract
-            && self.send_sigterm
-            && self.wait_for_child
-            && self.released_ports >= 2
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for SettingsJourneyVisitor {
-    skip_opaque_witness_scopes!();
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        for (name, seen) in [
-            ("reserve_listener_addresses", &mut self.reserve_addresses),
-            ("spawn_child", &mut self.spawn_child),
-            ("exercise_child", &mut self.exercise_child),
-            ("assert_health_contract", &mut self.health_contract),
-            ("assert_primary_fails_closed", &mut self.primary_contract),
-            ("send_sigterm", &mut self.send_sigterm),
-            ("wait_for_child", &mut self.wait_for_child),
-        ] {
-            *seen |= expression_path_ends_with(node.func.as_ref(), &[name]);
-        }
-        self.child_logs |= expression_path_ends_with(node.func.as_ref(), &["ChildLogs", "create"]);
-        if expression_path_ends_with(node.func.as_ref(), &["assert_port_released"]) {
-            self.released_ports += 1;
-        }
-        syn::visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        self.remove_logs |= node.method == "remove"
-            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("logs"));
-        self.activation_accept |= node.method == "accept"
-            && matches!(node.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident("activation_gate"));
-        syn::visit::visit_expr_method_call(self, node);
-    }
-}
-
-fn settingsonly_production_artifact_evidence(
-    root: &Path,
-) -> Result<(bool, ArtifactClosureEvidence)> {
-    let manifest_path = root.join("journeys/Cargo.toml");
-    let manifest: toml::Value = std::fs::read_to_string(&manifest_path)
-        .with_context(|| format!("读取 {} 失败", manifest_path.display()))?
-        .parse()
-        .with_context(|| format!("解析 {} 失败", manifest_path.display()))?;
-    let target_declared = settingsonly_production_artifact_target_is_exact(&manifest);
-    let entry_path = root.join("journeys/tests/settingsonly_production_artifact.rs");
-    let support_path = root.join("journeys/tests/support/settingsonly_production_artifact.rs");
-    let entry = match std::fs::read_to_string(&entry_path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((
-                target_declared,
-                ArtifactClosureEvidence::Violations(vec![ArtifactClosureViolation::new(
-                    ArtifactClosureStage::SourceRead,
-                    None::<String>,
-                    ArtifactClosurePath::Entry,
-                    None,
-                    "regular Rust source",
-                    "missing",
-                )]),
-            ));
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("读取 {} 失败", entry_path.display()));
-        }
-    };
-    let support = match std::fs::read_to_string(&support_path) {
-        Ok(source) => source,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok((
-                target_declared,
-                ArtifactClosureEvidence::Violations(vec![ArtifactClosureViolation::new(
-                    ArtifactClosureStage::SourceRead,
-                    None::<String>,
-                    ArtifactClosurePath::Support,
-                    None,
-                    "regular Rust source",
-                    "missing",
-                )]),
-            ));
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("读取 {} 失败", support_path.display()));
-        }
-    };
-    Ok((
-        target_declared,
-        settingsonly_production_artifact_sources_are_closed(&entry, &support),
-    ))
-}
-
-fn settingsonly_production_artifact_target_is_exact(manifest: &toml::Value) -> bool {
-    manifest
-        .get("test")
-        .and_then(toml::Value::as_array)
-        .is_some_and(|targets| {
-            let matching = targets
-                .iter()
-                .filter(|target| {
-                    target.get("name").and_then(toml::Value::as_str)
-                        == Some("settingsonly_production_artifact")
-                })
-                .collect::<Vec<_>>();
-            matches!(matching.as_slice(), [target]
-                if target.get("path").and_then(toml::Value::as_str)
-                    == Some("tests/settingsonly_production_artifact.rs")
-                    && target.get("required-features").and_then(toml::Value::as_array)
-                        .is_some_and(|features| matches!(features.as_slice(), [feature]
-                            if feature.as_str() == Some("integration"))))
-        })
-}
-
-fn settingsonly_production_artifact_sources_are_closed(
-    entry: &str,
-    support: &str,
-) -> ArtifactClosureEvidence {
-    let entry = match parse_artifact_source(entry, ArtifactClosurePath::Entry) {
-        Ok(source) => source,
-        Err(violation) => return ArtifactClosureEvidence::Violations(vec![violation]),
-    };
-    let support = match parse_artifact_source(support, ArtifactClosurePath::Support) {
-        Ok(source) => source,
-        Err(violation) => return ArtifactClosureEvidence::Violations(vec![violation]),
-    };
-    let mut violations = Vec::new();
-    if !production_entry_links_exact_support(&entry) {
-        violations.push(ArtifactClosureViolation::new(
-            ArtifactClosureStage::EntryLink,
-            None::<String>,
-            ArtifactClosurePath::Entry,
-            None,
-            "one non-conditional exact support module and import",
-            "missing, aliased, duplicated, or conditional link",
-        ));
-    }
-
-    let evidence_enums = support
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Enum(item) if item.ident == "EvidenceCase" => Some(item),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [evidence_enum] = evidence_enums.as_slice() else {
-        violations.push(ArtifactClosureViolation::new(
-            ArtifactClosureStage::CaseInventory,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            None,
-            "one closed EvidenceCase enum",
-            format!("{} EvidenceCase enums", evidence_enums.len()),
-        ));
-        return ArtifactClosureEvidence::Violations(violations);
-    };
-    let cases = collect_evidence_cases(evidence_enum, &mut violations);
-    let ids = collect_case_string_projection(
-        &support,
-        "id",
-        ArtifactClosureStage::EvidenceId,
-        &mut violations,
-    );
-    let test_names = collect_case_string_projection(
-        &support,
-        "test_name",
-        ArtifactClosureStage::TestName,
-        &mut violations,
-    );
-    let wrappers = collect_case_test_wrappers(&entry, &mut violations);
-    let dispatch = collect_case_dispatch(&support, &mut violations);
-    reconcile_case_inventory(
-        &cases,
-        &ids,
-        &test_names,
-        &wrappers,
-        &dispatch,
-        &mut violations,
-    );
-    certify_case_ids(&cases, &ids, &mut violations);
-    certify_case_test_names(&cases, &test_names, &wrappers, &mut violations);
-    certify_case_dispatch_names(&cases, &dispatch, &mut violations);
-    certify_typed_receipt_scenarios(&support, &cases, &dispatch, &mut violations);
-
-    if violations.is_empty() {
-        ArtifactClosureEvidence::Certified(ArtifactClosureCertificate { cases })
-    } else {
-        ArtifactClosureEvidence::Violations(violations)
-    }
-}
-
-fn parse_artifact_source(
-    source: &str,
-    path: ArtifactClosurePath,
-) -> std::result::Result<syn::File, ArtifactClosureViolation> {
-    syn::parse_file(source).map_err(|error| {
-        ArtifactClosureViolation::new(
-            ArtifactClosureStage::Parse,
-            None::<String>,
-            path,
-            Some(error.span()),
-            "valid Rust source",
-            error.to_string(),
-        )
-    })
-}
-
-fn collect_evidence_cases(
-    evidence_enum: &syn::ItemEnum,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) -> BTreeSet<String> {
-    let mut cases = BTreeSet::new();
-    if evidence_enum.attrs.iter().any(is_conditional_attribute) {
-        violations.push(ArtifactClosureViolation::new(
-            ArtifactClosureStage::CaseInventory,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            Some(evidence_enum.ident.span()),
-            "unconditional closed enum",
-            "conditional EvidenceCase enum",
-        ));
-    }
-    for variant in &evidence_enum.variants {
-        let case = variant.ident.to_string();
-        if !matches!(variant.fields, syn::Fields::Unit)
-            || variant.discriminant.is_some()
-            || variant.attrs.iter().any(is_conditional_attribute)
-        {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::CaseInventory,
-                Some(case.clone()),
-                ArtifactClosurePath::Support,
-                Some(variant.span()),
-                "unconditional unit variant without discriminant",
-                variant.to_token_stream().to_string(),
-            ));
-        }
-        if !cases.insert(case.clone()) {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::CaseInventory,
-                Some(case),
-                ArtifactClosurePath::Support,
-                Some(variant.ident.span()),
-                "unique case variant",
-                "duplicate variant",
-            ));
-        }
-    }
-    if cases.len() != 6 {
-        violations.push(ArtifactClosureViolation::new(
-            ArtifactClosureStage::CaseInventory,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            Some(evidence_enum.ident.span()),
-            "six evidence cases",
-            format!("{} evidence cases: {cases:?}", cases.len()),
-        ));
-    }
-    cases
-}
-
-fn collect_case_string_projection(
-    support: &syn::File,
-    method_name: &str,
-    stage: ArtifactClosureStage,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) -> BTreeMap<String, String> {
-    let methods = support
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Impl(item)
-                if matches!(item.self_ty.as_ref(), syn::Type::Path(path)
-                if path.path.is_ident("EvidenceCase")) =>
-            {
-                item.items
-                    .iter()
-                    .filter_map(|item| match item {
-                        syn::ImplItem::Fn(method) if method.sig.ident == method_name => {
-                            Some(method)
-                        }
-                        _ => None,
-                    })
-                    .next()
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [method] = methods.as_slice() else {
-        violations.push(ArtifactClosureViolation::new(
-            stage,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            None,
-            format!("one exhaustive EvidenceCase::{method_name} projection"),
-            format!("{} projection methods", methods.len()),
-        ));
-        return BTreeMap::new();
-    };
-    if method.attrs.iter().any(is_conditional_attribute) || method.block.stmts.len() != 1 {
-        violations.push(ArtifactClosureViolation::new(
-            stage,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            Some(method.sig.ident.span()),
-            "unconditional single exhaustive match",
-            method.to_token_stream().to_string(),
-        ));
-        return BTreeMap::new();
-    }
-    let syn::Stmt::Expr(syn::Expr::Match(case_match), None) = &method.block.stmts[0] else {
-        violations.push(ArtifactClosureViolation::new(
-            stage,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            Some(method.block.span()),
-            "match self without wildcard",
-            method.block.to_token_stream().to_string(),
-        ));
-        return BTreeMap::new();
-    };
-    if !matches!(case_match.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self")) {
-        violations.push(ArtifactClosureViolation::new(
-            stage,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            Some(case_match.expr.span()),
-            "self scrutinee",
-            case_match.expr.to_token_stream().to_string(),
-        ));
-    }
-    let mut projection = BTreeMap::new();
-    for arm in &case_match.arms {
-        let Some(case) = case_pattern_name(&arm.pat) else {
-            violations.push(ArtifactClosureViolation::new(
-                stage,
-                None::<String>,
-                ArtifactClosurePath::Support,
-                Some(arm.pat.span()),
-                "explicit Self::<Case> arm without wildcard",
-                arm.pat.to_token_stream().to_string(),
-            ));
-            continue;
-        };
-        let syn::Expr::Lit(syn::ExprLit {
-            lit: syn::Lit::Str(value),
-            ..
-        }) = arm.body.as_ref()
-        else {
-            violations.push(ArtifactClosureViolation::new(
-                stage,
-                Some(case),
-                ArtifactClosurePath::Support,
-                Some(arm.body.span()),
-                "string literal projection",
-                arm.body.to_token_stream().to_string(),
-            ));
-            continue;
-        };
-        if arm.guard.is_some() || projection.insert(case.clone(), value.value()).is_some() {
-            violations.push(ArtifactClosureViolation::new(
-                stage,
-                Some(case),
-                ArtifactClosurePath::Support,
-                Some(arm.span()),
-                "one unguarded projection arm",
-                "guarded or duplicate arm",
-            ));
-        }
-    }
-    projection
-}
-
-fn case_pattern_name(pattern: &syn::Pat) -> Option<String> {
-    let syn::Pat::Path(path) = pattern else {
-        return None;
-    };
-    let segments = path.path.segments.iter().collect::<Vec<_>>();
-    matches!(segments.as_slice(), [owner, _] if owner.ident == "Self" || owner.ident == "EvidenceCase")
-        .then(|| segments[1].ident.to_string())
-}
-
-fn collect_case_test_wrappers(
-    entry: &syn::File,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) -> BTreeMap<String, String> {
-    let mut wrappers = BTreeMap::new();
-    for item in &entry.items {
-        let syn::Item::Fn(function) = item else {
-            continue;
-        };
-        if !function.attrs.iter().any(is_test_attribute) {
-            continue;
-        }
-        let test_name = function.sig.ident.to_string();
-        if function.attrs.iter().any(is_ignore_attribute)
-            || function.attrs.iter().any(is_conditional_attribute)
-            || function
-                .attrs
-                .iter()
-                .any(|attribute| attribute.path().is_ident("should_panic"))
-            || function.block.stmts.len() != 1
-        {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::TestInventory,
-                None::<String>,
-                ArtifactClosurePath::Entry,
-                Some(function.sig.ident.span()),
-                "one live unconditional non-empty run_case carrier",
-                test_name,
-            ));
-            continue;
-        }
-        let syn::Stmt::Expr(syn::Expr::Await(awaited), None) = &function.block.stmts[0] else {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::TestInventory,
-                None::<String>,
-                ArtifactClosurePath::Entry,
-                Some(function.block.span()),
-                "tail-awaited run_case(EvidenceCase::<Case>)",
-                function.block.to_token_stream().to_string(),
-            ));
-            continue;
-        };
-        let syn::Expr::Call(call) = awaited.base.as_ref() else {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::TestInventory,
-                None::<String>,
-                ArtifactClosurePath::Entry,
-                Some(awaited.span()),
-                "run_case call",
-                awaited.to_token_stream().to_string(),
-            ));
-            continue;
-        };
-        let case = if expression_path_ends_with(call.func.as_ref(), &["run_case"])
-            && call.args.len() == 1
-        {
-            call.args.first().and_then(|argument| match argument {
-                syn::Expr::Path(path) => {
-                    let segments = path.path.segments.iter().collect::<Vec<_>>();
-                    matches!(segments.as_slice(), [owner, _] if owner.ident == "EvidenceCase")
-                        .then(|| segments[1].ident.to_string())
-                }
-                _ => None,
-            })
-        } else {
-            None
-        };
-        let Some(case) = case else {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::TestInventory,
-                None::<String>,
-                ArtifactClosurePath::Entry,
-                Some(call.span()),
-                "run_case(EvidenceCase::<Case>)",
-                call.to_token_stream().to_string(),
-            ));
-            continue;
-        };
-        if let Some(previous) = wrappers.insert(case.clone(), test_name.clone()) {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::TestInventory,
-                Some(case),
-                ArtifactClosurePath::Entry,
-                Some(function.sig.ident.span()),
-                "one test carrier per case",
-                format!("duplicate carriers {previous} and {test_name}"),
-            ));
-        }
-    }
-    wrappers
-}
-
-fn collect_case_dispatch(
-    support: &syn::File,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) -> BTreeMap<String, String> {
-    let methods = support
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Impl(item)
-                if matches!(item.self_ty.as_ref(), syn::Type::Path(path)
-                    if path.path.is_ident("EvidenceCase")) =>
-            {
-                item.items.iter().find_map(|item| match item {
-                    syn::ImplItem::Fn(method) if method.sig.ident == "dispatch" => Some(method),
-                    _ => None,
-                })
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [method] = methods.as_slice() else {
-        violations.push(dispatch_violation(
-            None,
-            "one exhaustive EvidenceCase::dispatch method",
-            format!("{} dispatch methods", methods.len()),
-        ));
-        return BTreeMap::new();
-    };
-    let fixture_ident = method
-        .sig
-        .inputs
-        .iter()
-        .find_map(|argument| match argument {
-            syn::FnArg::Typed(argument)
-                if matches!(argument.ty.as_ref(), syn::Type::Reference(reference)
-                if matches!(reference.elem.as_ref(), syn::Type::Path(path)
-                    if path.path.is_ident("Fixture"))) =>
-            {
-                match argument.pat.as_ref() {
-                    syn::Pat::Ident(ident) => Some(&ident.ident),
-                    _ => None,
-                }
-            }
-            _ => None,
-        });
-    let Some(fixture_ident) = fixture_ident else {
-        violations.push(dispatch_violation(
-            Some(method.sig.span()),
-            "one mutable Fixture parameter",
-            method.sig.to_token_stream().to_string(),
-        ));
-        return BTreeMap::new();
-    };
-    let [syn::Stmt::Expr(syn::Expr::Match(case_match), None)] = method.block.stmts.as_slice()
-    else {
-        violations.push(dispatch_violation(
-            Some(method.block.span()),
-            "single exhaustive match self",
-            method.block.to_token_stream().to_string(),
-        ));
-        return BTreeMap::new();
-    };
-    if method.sig.asyncness.is_none()
-        || method.attrs.iter().any(is_conditional_attribute)
-        || !matches!(case_match.expr.as_ref(), syn::Expr::Path(path) if path.path.is_ident("self"))
-    {
-        violations.push(dispatch_violation(
-            Some(method.sig.span()),
-            "unconditional async dispatch matching self",
-            method.to_token_stream().to_string(),
-        ));
-    }
-    let mut dispatch = BTreeMap::new();
-    for arm in &case_match.arms {
-        let Some(case) = case_pattern_name(&arm.pat) else {
-            violations.push(dispatch_violation(
-                Some(arm.pat.span()),
-                "explicit EvidenceCase arm without wildcard",
-                arm.pat.to_token_stream().to_string(),
-            ));
-            continue;
-        };
-        let scenario = match arm.body.as_ref() {
-            syn::Expr::Await(awaited) => match awaited.base.as_ref() {
-                syn::Expr::MethodCall(call)
-                    if call.args.is_empty()
-                        && matches!(call.receiver.as_ref(), syn::Expr::Path(path)
-                            if path.path.is_ident(fixture_ident)) =>
-                {
-                    Some(call.method.to_string())
-                }
-                _ => None,
-            },
-            _ => None,
-        };
-        let Some(scenario) = scenario else {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::Dispatch,
-                Some(case),
-                ArtifactClosurePath::Support,
-                Some(arm.body.span()),
-                "awaited zero-argument call on the Fixture parameter",
-                arm.body.to_token_stream().to_string(),
-            ));
-            continue;
-        };
-        let expected_scenario = snake_case(&case);
-        if scenario != expected_scenario {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::Dispatch,
-                Some(case.clone()),
-                ArtifactClosurePath::Support,
-                Some(arm.body.span()),
-                expected_scenario,
-                scenario.clone(),
-            ));
-        }
-        if arm.guard.is_some() || dispatch.insert(case.clone(), scenario).is_some() {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::Dispatch,
-                Some(case),
-                ArtifactClosurePath::Support,
-                Some(arm.span()),
-                "one unguarded dispatch arm",
-                arm.to_token_stream().to_string(),
-            ));
-        }
-    }
-
-    validate_production_runner(support, violations);
-    dispatch
-}
-
-fn validate_production_runner(support: &syn::File, violations: &mut Vec<ArtifactClosureViolation>) {
-    let runners = support
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Fn(function) if function.sig.ident == "run_case" => Some(function),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [runner] = runners.as_slice() else {
-        violations.push(ArtifactClosureViolation::new(
-            ArtifactClosureStage::Dispatch,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            None,
-            "one run_case function",
-            format!("{} run_case functions", runners.len()),
-        ));
-        return;
-    };
-    let Some((case_ident, _)) = runner
-        .sig
-        .inputs
-        .first()
-        .and_then(|argument| match argument {
-            syn::FnArg::Typed(argument) => match (argument.pat.as_ref(), argument.ty.as_ref()) {
-                (syn::Pat::Ident(ident), syn::Type::Path(path))
-                    if path_has_suffix(&path.path, &["EvidenceCase"]) =>
-                {
-                    Some((&ident.ident, path))
-                }
-                _ => None,
-            },
-            _ => None,
-        })
-    else {
-        violations.push(ArtifactClosureViolation::new(
-            ArtifactClosureStage::Dispatch,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            Some(runner.sig.span()),
-            "one EvidenceCase parameter",
-            runner.sig.to_token_stream().to_string(),
-        ));
-        return;
-    };
-    let mut fixture_binding = None;
-    let mut result_binding = None;
-    let mut start_index = None;
-    let mut dispatch_index = None;
-    let mut finish_index = None;
-    for (index, statement) in runner.block.stmts.iter().enumerate() {
-        let syn::Stmt::Local(local) = statement else {
-            continue;
-        };
-        let syn::Pat::Ident(binding) = &local.pat else {
-            continue;
-        };
-        let Some(init) = &local.init else {
-            continue;
-        };
-        if fixture_start_consumes_case(init.expr.as_ref(), case_ident) {
-            if fixture_binding.replace(binding.ident.clone()).is_some() {
-                violations.push(dispatch_violation(
-                    Some(binding.ident.span()),
-                    "one Fixture::start binding",
-                    "duplicate Fixture::start",
-                ));
-            }
-            start_index = Some(index);
-        }
-        if fixture_binding.as_ref().is_some_and(|fixture| {
-            expression_contains_case_dispatch(init.expr.as_ref(), case_ident, fixture)
-        }) {
-            result_binding = Some(binding.ident.clone());
-            dispatch_index = Some(index);
-        }
-    }
-    if let (Some(fixture), Some(result)) = (&fixture_binding, &result_binding) {
-        for (index, statement) in runner.block.stmts.iter().enumerate() {
-            if finish_consumes_bindings(statement, fixture, result)
-                && finish_index.replace(index).is_some()
-            {
-                violations.push(dispatch_violation(
-                    Some(statement.span()),
-                    "one fixture.finish(result)",
-                    "duplicate finish",
-                ));
-            }
-        }
-    }
-    let mut flow = ProductionRunnerFlow::default();
-    syn::visit::Visit::visit_block(&mut flow, &runner.block);
-    if runner.sig.asyncness.is_none()
-        || runner.attrs.iter().any(is_conditional_attribute)
-        || runner.sig.inputs.len() != 1
-        || flow.fixture_starts != 1
-        || flow.finishes != 1
-        || flow.extra_control_flow
-        || !matches!((start_index, dispatch_index, finish_index), (Some(start), Some(dispatch), Some(finish)) if start < dispatch && dispatch < finish)
-    {
-        violations.push(dispatch_violation(
-            Some(runner.sig.ident.span()),
-            "ordered Fixture::start -> case.dispatch -> fixture.finish(result)",
-            runner.block.to_token_stream().to_string(),
-        ));
-    }
-}
-
-fn expression_contains_case_dispatch(
-    expression: &syn::Expr,
-    case_ident: &syn::Ident,
-    fixture_ident: &syn::Ident,
-) -> bool {
-    struct DispatchCall<'a> {
-        case_ident: &'a syn::Ident,
-        fixture_ident: &'a syn::Ident,
-        count: usize,
-    }
-    impl<'ast> syn::visit::Visit<'ast> for DispatchCall<'_> {
-        fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
-            if call.method == "dispatch"
-                && matches!(call.receiver.as_ref(), syn::Expr::Path(path)
-                    if path.path.is_ident(self.case_ident))
-                && matches!(call.args.first(), Some(syn::Expr::Reference(reference))
-                    if reference.mutability.is_some()
-                        && matches!(reference.expr.as_ref(), syn::Expr::Path(path)
-                            if path.path.is_ident(self.fixture_ident)))
-                && call.args.len() == 1
-            {
-                self.count += 1;
-            }
-            syn::visit::visit_expr_method_call(self, call);
-        }
-    }
-    let mut visitor = DispatchCall {
-        case_ident,
-        fixture_ident,
-        count: 0,
-    };
-    syn::visit::Visit::visit_expr(&mut visitor, expression);
-    visitor.count == 1
-}
-
-fn fixture_start_consumes_case(expression: &syn::Expr, case_ident: &syn::Ident) -> bool {
-    let syn::Expr::Try(tried) = expression else {
-        return false;
-    };
-    let syn::Expr::Await(awaited) = tried.expr.as_ref() else {
-        return false;
-    };
-    let syn::Expr::Call(call) = awaited.base.as_ref() else {
-        return false;
-    };
-    expression_path_ends_with(call.func.as_ref(), &["Fixture", "start"])
-        && call.args.len() == 2
-        && matches!(call.args.iter().nth(1), Some(syn::Expr::MethodCall(id))
-            if id.method == "id" && id.args.is_empty()
-                && matches!(id.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident(case_ident)))
-}
-
-fn finish_consumes_bindings(
-    statement: &syn::Stmt,
-    fixture: &syn::Ident,
-    result: &syn::Ident,
-) -> bool {
-    let syn::Stmt::Expr(syn::Expr::Await(awaited), None) = statement else {
-        return false;
-    };
-    matches!(awaited.base.as_ref(), syn::Expr::MethodCall(call)
-        if call.method == "finish" && call.args.len() == 1
-            && matches!(call.receiver.as_ref(), syn::Expr::Path(path) if path.path.is_ident(fixture))
-            && matches!(call.args.first(), Some(syn::Expr::Path(path)) if path.path.is_ident(result)))
-}
-
-fn dispatch_violation(
-    span: Option<proc_macro2::Span>,
-    expected: impl Into<String>,
-    actual: impl Into<String>,
-) -> ArtifactClosureViolation {
-    ArtifactClosureViolation::new(
-        ArtifactClosureStage::Dispatch,
-        None::<String>,
-        ArtifactClosurePath::Support,
-        span,
-        expected,
-        actual,
-    )
-}
-
-fn reconcile_case_inventory(
-    cases: &BTreeSet<String>,
-    ids: &BTreeMap<String, String>,
-    test_names: &BTreeMap<String, String>,
-    wrappers: &BTreeMap<String, String>,
-    dispatch: &BTreeMap<String, String>,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) {
-    for (stage, path, label, actual) in [
-        (
-            ArtifactClosureStage::EvidenceId,
-            ArtifactClosurePath::Support,
-            "EvidenceCase::id arms",
-            ids.keys().cloned().collect::<BTreeSet<_>>(),
-        ),
-        (
-            ArtifactClosureStage::TestName,
-            ArtifactClosurePath::Support,
-            "EvidenceCase::test_name arms",
-            test_names.keys().cloned().collect(),
-        ),
-        (
-            ArtifactClosureStage::TestInventory,
-            ArtifactClosurePath::Entry,
-            "test wrappers",
-            wrappers.keys().cloned().collect(),
-        ),
-        (
-            ArtifactClosureStage::Dispatch,
-            ArtifactClosurePath::Support,
-            "dispatch arms",
-            dispatch.keys().cloned().collect(),
-        ),
-    ] {
-        for missing in cases.difference(&actual) {
-            violations.push(ArtifactClosureViolation::new(
-                stage,
-                Some(missing.clone()),
-                path,
-                None,
-                format!("{label} contains the enum case"),
-                "missing",
-            ));
-        }
-        for stale in actual.difference(cases) {
-            violations.push(ArtifactClosureViolation::new(
-                stage,
-                Some(stale.clone()),
-                path,
-                None,
-                format!("{label} contains only enum cases"),
-                "stale or unknown case",
-            ));
-        }
-    }
-}
-
-fn certify_case_ids(
-    cases: &BTreeSet<String>,
-    ids: &BTreeMap<String, String>,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) {
-    let mut seen = BTreeSet::new();
-    for case in cases {
-        let expected = format!("SETTINGSONLY-T3-{}-01", screaming_kebab_case(case));
-        let actual = ids
-            .get(case)
-            .cloned()
-            .unwrap_or_else(|| "missing".to_owned());
-        if actual != expected || !seen.insert(actual.clone()) {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::EvidenceId,
-                Some(case.clone()),
-                ArtifactClosurePath::Support,
-                None,
-                expected,
-                actual,
-            ));
-        }
-    }
-}
-
-fn screaming_kebab_case(value: &str) -> String {
-    let chars = value.chars().collect::<Vec<_>>();
-    let mut result = String::new();
-    for (index, ch) in chars.iter().copied().enumerate() {
-        let previous = index
-            .checked_sub(1)
-            .and_then(|index| chars.get(index))
-            .copied();
-        let next = chars.get(index + 1).copied();
-        if index > 0
-            && ((ch.is_ascii_uppercase()
-                && previous.is_some_and(|previous| previous.is_ascii_lowercase())
-                || ch.is_ascii_uppercase()
-                    && previous.is_some_and(|previous| previous.is_ascii_uppercase())
-                    && next.is_some_and(|next| next.is_ascii_lowercase()))
-                || !ch.is_ascii_digit()
-                    && previous.is_some_and(|previous| previous.is_ascii_digit()))
-        {
-            result.push('-');
-        }
-        result.push(ch.to_ascii_uppercase());
-    }
-    result
-}
-
-fn certify_case_test_names(
-    cases: &BTreeSet<String>,
-    test_names: &BTreeMap<String, String>,
-    wrappers: &BTreeMap<String, String>,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) {
-    let mut seen = BTreeSet::new();
-    for case in cases {
-        let expected = test_names
-            .get(case)
-            .cloned()
-            .unwrap_or_else(|| "missing".to_owned());
-        let actual = wrappers
-            .get(case)
-            .cloned()
-            .unwrap_or_else(|| "missing".to_owned());
-        if expected != actual || !seen.insert(expected.clone()) {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::TestName,
-                Some(case.clone()),
-                if actual == "missing" {
-                    ArtifactClosurePath::Entry
-                } else {
-                    ArtifactClosurePath::Support
-                },
-                None,
-                expected,
-                actual,
-            ));
-        }
-    }
-}
-
-fn certify_case_dispatch_names(
-    cases: &BTreeSet<String>,
-    dispatch: &BTreeMap<String, String>,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) {
-    for case in cases {
-        let expected = snake_case(case);
-        let actual = dispatch
-            .get(case)
-            .cloned()
-            .unwrap_or_else(|| "missing".to_owned());
-        if actual != expected {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::Dispatch,
-                Some(case.clone()),
-                ArtifactClosurePath::Support,
-                None,
-                expected,
-                actual,
-            ));
-        }
-    }
-}
-
-fn snake_case(value: &str) -> String {
-    screaming_kebab_case(value)
-        .to_ascii_lowercase()
-        .replace('-', "_")
-}
-
-fn certify_typed_receipt_scenarios(
-    support: &syn::File,
-    cases: &BTreeSet<String>,
-    dispatch: &BTreeMap<String, String>,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) {
-    certify_receipt_type_boundaries(support, violations);
-    let fixture_methods = support
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Impl(item)
-                if matches!(item.self_ty.as_ref(), syn::Type::Path(path)
-                    if path.path.is_ident("Fixture")) =>
-            {
-                Some(item)
-            }
-            _ => None,
-        })
-        .flat_map(|item| item.items.iter())
-        .filter_map(|item| match item {
-            syn::ImplItem::Fn(method) => Some((method.sig.ident.to_string(), method)),
-            _ => None,
-        })
-        .collect::<BTreeMap<_, _>>();
-    let async_methods = fixture_methods
-        .iter()
-        .filter_map(|(name, method)| method.sig.asyncness.is_some().then_some(name.clone()))
-        .collect::<BTreeSet<_>>();
-
-    certify_hazard_receipt_minter(
-        &fixture_methods,
-        "UnackedReceipt",
-        &["wait_claimed", "wait_broker_delivery"],
-        violations,
-    );
-    certify_hazard_receipt_minter(
-        &fixture_methods,
-        "InflightReceipt",
-        &["wait_claimed", "wait_for_waiter"],
-        violations,
-    );
-
-    for case in cases {
-        let Some(name) = dispatch.get(case) else {
-            continue;
-        };
-        let Some(method) = fixture_methods.get(name) else {
-            violations.push(scenario_violation(
-                case,
-                None,
-                "dispatched Fixture scenario method",
-                format!("missing Fixture::{name}"),
-            ));
-            continue;
-        };
-        let mut flow = ScenarioFlowVisitor::default();
-        syn::visit::Visit::visit_block(&mut flow, &method.block);
-        if method.sig.asyncness.is_none()
-            || method.attrs.iter().any(is_conditional_attribute)
-            || method.block.stmts.is_empty()
-            || flow.forbidden
-        {
-            violations.push(scenario_violation(
-                case,
-                Some(method.sig.ident.span()),
-                "live unconditional transparent async scenario",
-                method.to_token_stream().to_string(),
-            ));
-            continue;
-        }
-        let mut calls = ScenarioCallFlow::new(&async_methods);
-        syn::visit::Visit::visit_block(&mut calls, &method.block);
-        for call in calls.invalid {
-            violations.push(scenario_violation(
-                case,
-                Some(call.span),
-                "async witness awaited and its Result consumed",
-                call.actual,
-            ));
-        }
-        for (name, spans) in calls.consumed {
-            if spans.len() > 1 {
-                violations.push(scenario_violation(
-                    case,
-                    spans.first().copied(),
-                    format!("one live {name} witness"),
-                    format!("{} witnesses", spans.len()),
-                ));
-            }
-        }
-        for construction in calls.receipt_constructions {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::ReceiptProvenance,
-                Some(case.clone()),
-                ArtifactClosurePath::Support,
-                Some(construction.1),
-                "receipt minted by a typed Fixture method",
-                format!("direct {} construction", construction.0),
-            ));
-        }
-    }
-}
-
-fn certify_receipt_type_boundaries(
-    support: &syn::File,
-    violations: &mut Vec<ArtifactClosureViolation>,
-) {
-    for receipt in support.items.iter().filter_map(|item| match item {
-        syn::Item::Struct(receipt) if receipt.ident.to_string().ends_with("Receipt") => {
-            Some(receipt)
-        }
-        _ => None,
-    }) {
-        let cloneable = receipt.attrs.iter().any(|attribute| {
-            attribute.path().is_ident("derive") && {
-                let derive = attribute.meta.to_token_stream().to_string();
-                derive
-                    .split(|ch: char| !ch.is_ascii_alphanumeric())
-                    .any(|trait_name| matches!(trait_name, "Clone" | "Copy"))
-            }
-        });
-        let private_fields = receipt
-            .fields
-            .iter()
-            .all(|field| matches!(field.vis, syn::Visibility::Inherited));
-        if cloneable || !matches!(receipt.vis, syn::Visibility::Inherited) || !private_fields {
-            violations.push(ArtifactClosureViolation::new(
-                ArtifactClosureStage::ReceiptProvenance,
-                None::<String>,
-                ArtifactClosurePath::Support,
-                Some(receipt.ident.span()),
-                "private non-Clone non-Copy receipt with private fields",
-                receipt.to_token_stream().to_string(),
-            ));
-        }
-    }
-}
-
-fn certify_hazard_receipt_minter(
-    fixture_methods: &BTreeMap<String, &syn::ImplItemFn>,
-    receipt: &str,
-    ordered_observations: &[&str],
-    violations: &mut Vec<ArtifactClosureViolation>,
-) {
-    let minters = fixture_methods
-        .values()
-        .filter(|method| method_result_receipt(method).as_deref() == Some(receipt))
-        .copied()
-        .collect::<Vec<_>>();
-    let [minter] = minters.as_slice() else {
-        violations.push(ArtifactClosureViolation::new(
-            ArtifactClosureStage::ReceiptProvenance,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            None,
-            format!("one typed {receipt} minter"),
-            format!("{} minters", minters.len()),
-        ));
-        return;
-    };
-    let mut flow = ReceiptMinterFlow::default();
-    syn::visit::Visit::visit_block(&mut flow, &minter.block);
-    let positions = ordered_observations
-        .iter()
-        .map(|expected| {
-            (flow
-                .calls
-                .iter()
-                .filter(|actual| *actual == expected)
-                .count()
-                == 1)
-                .then(|| {
-                    flow.calls
-                        .iter()
-                        .position(|actual| actual == expected)
-                        .map(|position| (expected, position))
-                })
-                .flatten()
-        })
-        .collect::<Option<Vec<_>>>();
-    let ordered = positions
-        .as_ref()
-        .is_some_and(|positions| positions.windows(2).all(|pair| pair[0].1 < pair[1].1));
-    if minter.sig.asyncness.is_none()
-        || minter.attrs.iter().any(is_conditional_attribute)
-        || flow
-            .constructed
-            .iter()
-            .filter(|name| *name == receipt)
-            .count()
-            != 1
-        || flow.invalid_consumption
-        || !ordered
-    {
-        violations.push(ArtifactClosureViolation::new(
-            ArtifactClosureStage::ReceiptProvenance,
-            None::<String>,
-            ArtifactClosurePath::Support,
-            Some(minter.sig.ident.span()),
-            format!(
-                "typed {receipt} minter with ordered {}",
-                ordered_observations.join(" -> ")
-            ),
-            format!("calls={:?} constructed={:?}", flow.calls, flow.constructed),
-        ));
-    }
-}
-
-fn method_result_receipt(method: &syn::ImplItemFn) -> Option<String> {
-    let syn::ReturnType::Type(_, return_type) = &method.sig.output else {
-        return None;
-    };
-    let syn::Type::Path(result) = return_type.as_ref() else {
-        return None;
-    };
-    let arguments = match &result.path.segments.last()?.arguments {
-        syn::PathArguments::AngleBracketed(arguments) => &arguments.args,
-        _ => return None,
-    };
-    arguments.iter().find_map(|argument| match argument {
-        syn::GenericArgument::Type(syn::Type::Path(path)) => path
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string())
-            .filter(|name| name.ends_with("Receipt")),
-        _ => None,
-    })
-}
-
-#[derive(Default)]
-struct ReceiptMinterFlow {
-    calls: Vec<String>,
-    constructed: Vec<String>,
-    await_depth: usize,
-    try_depth: usize,
-    invalid_consumption: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for ReceiptMinterFlow {
-    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
-        self.await_depth += 1;
-        syn::visit::visit_expr_await(self, node);
-        self.await_depth -= 1;
-    }
-
-    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
-        self.try_depth += 1;
-        syn::visit::visit_expr_try(self, node);
-        self.try_depth -= 1;
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        self.calls.push(node.method.to_string());
-        if matches!(
-            node.method.to_string().as_str(),
-            "wait_claimed" | "wait_broker_delivery" | "wait_for_waiter"
-        ) && (self.await_depth == 0 || self.try_depth == 0)
-        {
-            self.invalid_consumption = true;
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-        if let Some(name) = node.path.segments.last() {
-            self.constructed.push(name.ident.to_string());
-        }
-        syn::visit::visit_expr_struct(self, node);
-    }
-}
-
-fn scenario_violation(
-    case: &str,
-    span: Option<proc_macro2::Span>,
-    expected: impl Into<String>,
-    actual: impl Into<String>,
-) -> ArtifactClosureViolation {
-    ArtifactClosureViolation::new(
-        ArtifactClosureStage::Scenario,
-        Some(case.to_owned()),
-        ArtifactClosurePath::Support,
-        span,
-        expected,
-        actual,
-    )
-}
-
-struct InvalidScenarioCall {
-    span: proc_macro2::Span,
-    actual: String,
-}
-
-struct ScenarioCallFlow<'a> {
-    async_methods: &'a BTreeSet<String>,
-    await_depth: usize,
-    try_depth: usize,
-    consumed: BTreeMap<String, Vec<proc_macro2::Span>>,
-    invalid: Vec<InvalidScenarioCall>,
-    receipt_constructions: Vec<(String, proc_macro2::Span)>,
-}
-
-impl<'a> ScenarioCallFlow<'a> {
-    fn new(async_methods: &'a BTreeSet<String>) -> Self {
-        Self {
-            async_methods,
-            await_depth: 0,
-            try_depth: 0,
-            consumed: BTreeMap::new(),
-            invalid: Vec::new(),
-            receipt_constructions: Vec::new(),
-        }
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for ScenarioCallFlow<'_> {
-    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
-        self.await_depth += 1;
-        syn::visit::visit_expr_await(self, node);
-        self.await_depth -= 1;
-    }
-
-    fn visit_expr_try(&mut self, node: &'ast syn::ExprTry) {
-        self.try_depth += 1;
-        syn::visit::visit_expr_try(self, node);
-        self.try_depth -= 1;
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        let name = node.method.to_string();
-        if self.async_methods.contains(&name) {
-            if self.await_depth == 0 || self.try_depth == 0 {
-                self.invalid.push(InvalidScenarioCall {
-                    span: node.span(),
-                    actual: format!(
-                        "{name}: await_depth={}, try_depth={}",
-                        self.await_depth, self.try_depth
-                    ),
-                });
-            } else {
-                self.consumed.entry(name).or_default().push(node.span());
-            }
-        }
-        syn::visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-        if let Some(name) = node
-            .path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string())
-            && name.ends_with("Receipt")
-        {
-            self.receipt_constructions.push((name, node.span()));
-        }
-        syn::visit::visit_expr_struct(self, node);
-    }
-}
-
-fn production_entry_links_exact_support(entry: &syn::File) -> bool {
-    let modules = entry
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Mod(module) if module.ident == "settingsonly_production_artifact" => {
-                Some(module)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [module] = modules.as_slice() else {
-        return false;
-    };
-    let exact_path = module.attrs.iter().filter_map(|attribute| {
-        if !attribute.path().is_ident("path") {
-            return None;
-        }
-        match &attribute.meta {
-            syn::Meta::NameValue(value) => match &value.value {
-                syn::Expr::Lit(syn::ExprLit {
-                    lit: syn::Lit::Str(path),
-                    ..
-                }) => Some(path.value()),
-                _ => Some(String::new()),
-            },
-            _ => Some(String::new()),
-        }
-    });
-    if module.content.is_some()
-        || module.attrs.iter().any(is_conditional_attribute)
-        || exact_path.collect::<Vec<_>>() != ["support/settingsonly_production_artifact.rs"]
-    {
-        return false;
-    }
-
-    let imports = entry
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Use(item)
-                if use_tree_root_is(&item.tree, "settingsonly_production_artifact") =>
-            {
-                Some(item)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [import] = imports.as_slice() else {
-        return false;
-    };
-    !import.attrs.iter().any(is_conditional_attribute)
-        && import.to_token_stream().to_string()
-            == "use settingsonly_production_artifact :: { EvidenceCase , run_case } ;"
-}
-
-fn use_tree_root_is(tree: &syn::UseTree, expected: &str) -> bool {
-    matches!(tree, syn::UseTree::Path(path) if path.ident == expected)
-}
-
-#[derive(Default)]
-struct ProductionRunnerFlow {
-    fixture_starts: usize,
-    finishes: usize,
-    extra_control_flow: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for ProductionRunnerFlow {
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        self.fixture_starts += usize::from(expression_path_ends_with(
-            node.func.as_ref(),
-            &["Fixture", "start"],
-        ));
-        syn::visit::visit_expr_call(self, node);
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        self.finishes += usize::from(node.method == "finish");
-        syn::visit::visit_expr_method_call(self, node);
-    }
-
-    fn visit_expr_if(&mut self, _node: &'ast syn::ExprIf) {
-        self.extra_control_flow = true;
-    }
-
-    fn visit_expr_loop(&mut self, _node: &'ast syn::ExprLoop) {
-        self.extra_control_flow = true;
-    }
-
-    fn visit_expr_while(&mut self, _node: &'ast syn::ExprWhile) {
-        self.extra_control_flow = true;
-    }
-
-    fn visit_expr_for_loop(&mut self, _node: &'ast syn::ExprForLoop) {
-        self.extra_control_flow = true;
-    }
-
-    fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
-        self.extra_control_flow = true;
-    }
-}
-
-#[derive(Default)]
-struct ScenarioFlowVisitor {
-    forbidden: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for ScenarioFlowVisitor {
-    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
-        self.forbidden |= is_conditional_attribute(node);
-        syn::visit::visit_attribute(self, node);
-    }
-
-    fn visit_expr_closure(&mut self, _node: &'ast syn::ExprClosure) {
-        self.forbidden = true;
-    }
-
-    fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {
-        self.forbidden = true;
-    }
-
-    fn visit_expr_const(&mut self, _node: &'ast syn::ExprConst) {
-        self.forbidden = true;
-    }
-
-    fn visit_expr_if(&mut self, _node: &'ast syn::ExprIf) {
-        self.forbidden = true;
-    }
-
-    fn visit_expr_match(&mut self, _node: &'ast syn::ExprMatch) {
-        self.forbidden = true;
-    }
-
-    fn visit_expr_loop(&mut self, _node: &'ast syn::ExprLoop) {
-        self.forbidden = true;
-    }
-
-    fn visit_expr_while(&mut self, _node: &'ast syn::ExprWhile) {
-        self.forbidden = true;
-    }
-
-    fn visit_expr_for_loop(&mut self, _node: &'ast syn::ExprForLoop) {
-        self.forbidden = true;
-    }
-
-    fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
-        self.forbidden = true;
-    }
-}
-
-fn path_has_suffix(path: &syn::Path, expected: &[&str]) -> bool {
-    let segments = path.segments.iter().collect::<Vec<_>>();
-    segments.len() >= expected.len()
-        && segments[segments.len() - expected.len()..]
-            .iter()
-            .zip(expected)
-            .all(|(segment, expected)| segment.ident == *expected)
-}
-
-fn dockerignore_includes_contracts(root: &Path) -> Result<bool> {
-    let path = root.join(".dockerignore");
-    let source =
-        std::fs::read_to_string(&path).with_context(|| format!("读取 {} 失败", path.display()))?;
-    Ok(!source.lines().map(str::trim).any(|line| {
-        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
-            return false;
-        }
-        let pattern = line.trim_start_matches('/').trim_end_matches('/');
-        pattern == "contracts"
-            || pattern.starts_with("contracts/")
-            || pattern == "**/contracts"
-            || pattern.starts_with("**/contracts/")
-    }))
-}
-
-#[derive(Clone, Copy)]
-enum ArtifactContractKind {
-    Binary,
-    Image,
-}
-
-fn image_environment_is_loaded(function: &syn::ItemFn) -> bool {
-    let mut visitor = SettingsOnlyImageEnvironmentVisitor::default();
-    syn::visit::Visit::visit_block(&mut visitor, &function.block);
-    visitor.image_environment
-}
-
-#[derive(Default)]
-struct SettingsOnlyImageEnvironmentVisitor {
-    image_environment: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for SettingsOnlyImageEnvironmentVisitor {
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if expression_path_ends_with(node.func.as_ref(), &["env", "var"])
-            && node.args.len() == 1
-            && matches!(node.args.first(), Some(syn::Expr::Path(path)) if path.path.is_ident("IMAGE_ENV"))
-        {
-            self.image_environment = true;
-        }
-        syn::visit::visit_expr_call(self, node);
-    }
-}
-
-fn expression_path_ends_with(expression: &syn::Expr, expected: &[&str]) -> bool {
-    let syn::Expr::Path(path) = expression else {
-        return false;
-    };
-    let segments = path.path.segments.iter().collect::<Vec<_>>();
-    segments.len() >= expected.len()
-        && segments[segments.len() - expected.len()..]
-            .iter()
-            .zip(expected)
-            .all(|(segment, expected)| segment.ident == *expected)
-}
-
 fn is_test_attribute(attribute: &syn::Attribute) -> bool {
     let segments = attribute
         .path()
@@ -6035,10 +1676,6 @@ fn is_test_attribute(attribute: &syn::Attribute) -> bool {
         .collect::<Vec<_>>();
     matches!(segments.as_slice(), [test] if test == "test")
         || matches!(segments.as_slice(), [runtime, test] if runtime == "tokio" && test == "test")
-}
-
-fn is_ignore_attribute(attribute: &syn::Attribute) -> bool {
-    attribute.path().is_ident("ignore")
 }
 
 fn is_conditional_attribute(attribute: &syn::Attribute) -> bool {
@@ -6090,27 +1727,6 @@ pub(crate) fn docker_instruction_arguments<'a>(
     keyword
         .eq_ignore_ascii_case(expected)
         .then(|| arguments.trim_start())
-}
-
-fn package_is_workspace_domain(
-    root: &Path,
-    metadata: &CargoMetadata,
-    package: &MetadataPackage,
-) -> bool {
-    workspace_package_layer(root, metadata, package) == Some(crate::layers::Layer::Domain)
-}
-
-fn workspace_package_layer(
-    root: &Path,
-    metadata: &CargoMetadata,
-    package: &MetadataPackage,
-) -> Option<crate::layers::Layer> {
-    if !metadata.workspace_members.contains(&package.id) {
-        return None;
-    }
-    let package_dir = package.manifest_path.parent()?;
-    let member_path = package_dir.strip_prefix(root).ok()?;
-    crate::layers::classify(&package.name, &member_path.display().to_string())
 }
 
 struct CriticalProviderSpec {
@@ -6171,7 +1787,7 @@ fn validate_production_security_closeout(a: ProductionAssembly<'_>, findings: &m
         ];
 
     for spec in CRITICAL_PROVIDERS {
-        if (spec.required)(&a) && !has_active_persistent_backend_provider(&a, spec) {
+        if (spec.required)(&a) && !has_active_persistent_critical_provider(&a, spec) {
             findings.push(finding(
                 Rule::ProductionSecurityCriticalProvider,
                 a.manifest_label(),
@@ -6188,6 +1804,20 @@ fn validate_production_security_closeout(a: ProductionAssembly<'_>, findings: &m
     }
 
     let evidence = security_closeout_evidence_from_sources(a.dir()).unwrap_or_default();
+    if !evidence.has_provider_construction_live_join() {
+        findings.push(finding(
+            Rule::ProviderConstructionLiveJoin,
+            a.manifest_label(),
+            format!(
+                "source=rust-ast-run-reachable profile=production gate=provider-live-join requires typed plan selection followed by a typed provider finish and the same finished output's transfer or runtime inventory publication; present selection={} typed_finish={} finish_transfer={} runtime_finish={} publish={}",
+                evidence.provider_selection,
+                evidence.provider_typed_finish,
+                evidence.provider_finish_transfer,
+                evidence.runtime_provider_finish,
+                evidence.inventory_publish,
+            ),
+        ));
+    }
     let listener_pdp_owns_jwks_lifecycle = a.manifest().diport_providers().iter().any(|provider| {
         provider.id == ProviderRole::ListenerPdp
             && provider.outputs.as_slice()
@@ -6467,7 +2097,7 @@ fn validate_token_profile_trust_chain(
     }
 }
 
-fn has_active_persistent_backend_provider(
+fn has_active_persistent_critical_provider(
     a: &GovernedAssembly,
     spec: &CriticalProviderSpec,
 ) -> bool {
@@ -6477,8 +2107,6 @@ fn has_active_persistent_backend_provider(
             && provider.port == spec.provider.port()
             && provider.provider == spec.provider
             && provider.provider_crate == spec.provider.provider_crate()
-            && dependency_features(a.cargo_toml(), spec.provider.provider_crate())
-                .is_some_and(|features| features.contains("backend"))
     })
 }
 
@@ -6515,35 +2143,159 @@ fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
     Ok(())
 }
 
-fn external_module_is_explicit_test_only(source_root: &Path, path: &Path) -> Result<bool> {
-    let relative = path.strip_prefix(source_root).unwrap_or(path);
-    let Some(module_name) = relative.file_stem().and_then(|stem| stem.to_str()) else {
-        return Ok(false);
-    };
-    if matches!(module_name, "lib" | "main" | "mod") {
-        return Ok(false);
+struct RawJwtReparseVisitor {
+    forbidden_calls: usize,
+    jwt_types: BTreeSet<String>,
+    verified_jwt_types: BTreeSet<String>,
+}
+
+impl RawJwtReparseVisitor {
+    fn bind_type_alias(&mut self, bound: String, target: &str) {
+        self.jwt_types.remove(&bound);
+        self.verified_jwt_types.remove(&bound);
+        if target == "Jwt" {
+            self.jwt_types.insert(bound);
+        } else if target == "VerifiedJwt" {
+            self.verified_jwt_types.insert(bound);
+        }
     }
-    let parent = path.parent().unwrap_or(source_root);
-    let mut owners = if parent == source_root {
-        vec![source_root.join("lib.rs"), source_root.join("main.rs")]
-    } else {
-        vec![parent.with_extension("rs"), parent.join("mod.rs")]
-    };
-    owners.retain(|owner| owner.is_file());
-    let mut declarations = Vec::new();
-    for owner in owners {
-        let source = std::fs::read_to_string(&owner)?;
-        let file = syn::parse_file(&source)
-            .with_context(|| format!("parse module owner {}", owner.display()))?;
-        declarations.extend(file.items.into_iter().filter_map(|item| {
-            let syn::Item::Mod(module) = item else {
-                return None;
-            };
-            (module.ident == module_name && module.content.is_none())
-                .then(|| has_test_or_test_support_cfg(&module.attrs))
+
+    fn collect_use_tree(&mut self, tree: &syn::UseTree) {
+        match tree {
+            syn::UseTree::Path(path) => self.collect_use_tree(&path.tree),
+            syn::UseTree::Name(name) => {
+                self.bind_type_alias(name.ident.to_string(), &name.ident.to_string());
+            }
+            syn::UseTree::Rename(rename) => {
+                self.bind_type_alias(rename.rename.to_string(), &rename.ident.to_string());
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    self.collect_use_tree(item);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_scope_items<'a>(&mut self, items: impl Iterator<Item = &'a syn::Item>) {
+        for item in items {
+            match item {
+                syn::Item::Use(item) => self.collect_use_tree(&item.tree),
+                syn::Item::Type(item) => {
+                    if let syn::Type::Path(path) = item.ty.as_ref()
+                        && let Some(target) = path.path.segments.last()
+                    {
+                        self.bind_type_alias(item.ident.to_string(), &target.ident.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl<'ast> syn::visit::Visit<'ast> for RawJwtReparseVisitor {
+    fn visit_file(&mut self, file: &'ast syn::File) {
+        let saved_jwt = self.jwt_types.clone();
+        let saved_verified = self.verified_jwt_types.clone();
+        self.collect_scope_items(file.items.iter());
+        for item in &file.items {
+            syn::visit::visit_item(self, item);
+        }
+        self.jwt_types = saved_jwt;
+        self.verified_jwt_types = saved_verified;
+    }
+
+    fn visit_item_mod(&mut self, item: &'ast syn::ItemMod) {
+        let Some((_, items)) = &item.content else {
+            return;
+        };
+        let saved_jwt = self.jwt_types.clone();
+        let saved_verified = self.verified_jwt_types.clone();
+        self.collect_scope_items(items.iter());
+        for item in items {
+            syn::visit::visit_item(self, item);
+        }
+        self.jwt_types = saved_jwt;
+        self.verified_jwt_types = saved_verified;
+    }
+
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        let saved_jwt = self.jwt_types.clone();
+        let saved_verified = self.verified_jwt_types.clone();
+        self.collect_scope_items(block.stmts.iter().filter_map(|statement| match statement {
+            syn::Stmt::Item(item) => Some(item),
+            _ => None,
         }));
+        for statement in &block.stmts {
+            syn::visit::visit_stmt(self, statement);
+        }
+        self.jwt_types = saved_jwt;
+        self.verified_jwt_types = saved_verified;
     }
-    Ok(!declarations.is_empty() && declarations.into_iter().all(|test_only| test_only))
+
+    fn visit_expr_path(&mut self, expression: &'ast syn::ExprPath) {
+        let mut segments = expression.path.segments.iter().rev();
+        let method = segments.next().map(|segment| segment.ident.to_string());
+        let owner = segments.next().map(|segment| segment.ident.to_string());
+        if (matches!(method.as_deref(), Some("parse"))
+            && owner
+                .as_ref()
+                .is_some_and(|owner| self.jwt_types.contains(owner)))
+            || (matches!(method.as_deref(), Some("raw"))
+                && owner
+                    .as_ref()
+                    .is_some_and(|owner| self.verified_jwt_types.contains(owner)))
+        {
+            self.forbidden_calls = self.forbidden_calls.saturating_add(1);
+        }
+        syn::visit::visit_expr_path(self, expression);
+    }
+
+    fn visit_expr_method_call(&mut self, expression: &'ast syn::ExprMethodCall) {
+        if expression.method == "raw" || expression.method == "verified_jwt" {
+            self.forbidden_calls = self.forbidden_calls.saturating_add(1);
+        }
+        syn::visit::visit_expr_method_call(self, expression);
+    }
+}
+
+fn file_raw_jwt_reparse_count(file: &syn::File) -> usize {
+    let mut visitor = RawJwtReparseVisitor {
+        forbidden_calls: 0,
+        jwt_types: BTreeSet::from(["Jwt".to_owned()]),
+        verified_jwt_types: BTreeSet::from(["VerifiedJwt".to_owned()]),
+    };
+    syn::visit::Visit::visit_file(&mut visitor, file);
+    visitor.forbidden_calls
+}
+
+fn settingsonly_raw_jwt_reparse_findings(assembly: &GovernedAssembly) -> Result<Vec<Finding>> {
+    if assembly.manifest().name() != "settingsonly" {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    collect_rust_sources(&assembly.dir().join("src"), &mut files)?;
+    files.sort();
+    let mut findings = Vec::new();
+    for path in files {
+        let source = std::fs::read_to_string(&path)?;
+        let syntax = syn::parse_file(&source)
+            .with_context(|| format!("parse settingsonly source {}", path.display()))?;
+        let count = file_raw_jwt_reparse_count(&syntax);
+        if count != 0 {
+            findings.push(finding(
+                Rule::SettingsOnlyRawJwtReparse,
+                assembly.manifest_label(),
+                format!(
+                    "settingsonly source {} contains {count} raw JWT reparse path(s); cfg(test), aliases and function pointers are not exempt because dylint does not compile that tree",
+                    path.strip_prefix(assembly.dir()).unwrap_or(&path).display()
+                ),
+            ));
+        }
+    }
+    Ok(findings)
 }
 
 fn file_has_distributed_consumer_evidence(file: &syn::File) -> bool {
@@ -6695,24 +2447,22 @@ fn expr_path_is_exact(expr: &syn::Expr, expected: &[&str]) -> bool {
     )
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 struct SecurityCloseoutEvidence {
+    provider_selection: bool,
+    provider_typed_finish: bool,
+    provider_finish_transfer: bool,
+    runtime_provider_finish: bool,
+    inventory_publish: bool,
+    listener_publish_flow: bool,
+    listener_publish_sink_seen: bool,
+    listener_observations: Vec<ListenerObservationCall>,
     runtime_oidc_provider_build: bool,
     runtime_oidc_provider_handle: bool,
     runtime_oidc_managed_resource: bool,
     jwks_load_and_watch: bool,
     jwks_keys_jwks: bool,
     jwks_ready_probe: bool,
-    typed_listener_pdp_receipt_commit: bool,
-    typed_listener_pdp_receipt_provenance: bool,
-    runtime_rss_listener_pdp_receipt_builder: bool,
-    runtime_federated_listener_pdp_receipt_builder: bool,
-    settings_federated_listener_pdp_receipt_builder: bool,
-    identity_rss_listener_pdp_receipt_builder: bool,
-    runtime_direct_listener_pdp_receipt_commit: bool,
-    runtime_funnel_listener_pdp_receipt_commit: bool,
-    settings_federated_listener_pdp_receipt_commit: bool,
-    identity_rss_listener_pdp_receipt_commit: bool,
     mtls_server_from_spire: bool,
     domain_transport_from_spire: bool,
     domain_transport_ready_probe: bool,
@@ -6747,30 +2497,21 @@ struct SecurityCloseoutEvidence {
 
 impl SecurityCloseoutEvidence {
     fn merge(&mut self, other: Self) {
+        self.provider_selection |= other.provider_selection;
+        self.provider_typed_finish |= other.provider_typed_finish;
+        self.provider_finish_transfer |= other.provider_finish_transfer;
+        self.runtime_provider_finish |= other.runtime_provider_finish;
+        self.inventory_publish |= other.inventory_publish;
+        self.listener_publish_flow |= other.listener_publish_flow;
+        self.listener_publish_sink_seen |= other.listener_publish_sink_seen;
+        self.listener_observations
+            .extend(other.listener_observations);
         self.runtime_oidc_provider_build |= other.runtime_oidc_provider_build;
         self.runtime_oidc_provider_handle |= other.runtime_oidc_provider_handle;
         self.runtime_oidc_managed_resource |= other.runtime_oidc_managed_resource;
         self.jwks_load_and_watch |= other.jwks_load_and_watch;
         self.jwks_keys_jwks |= other.jwks_keys_jwks;
         self.jwks_ready_probe |= other.jwks_ready_probe;
-        self.typed_listener_pdp_receipt_commit |= other.typed_listener_pdp_receipt_commit;
-        self.typed_listener_pdp_receipt_provenance |= other.typed_listener_pdp_receipt_provenance;
-        self.runtime_rss_listener_pdp_receipt_builder |=
-            other.runtime_rss_listener_pdp_receipt_builder;
-        self.runtime_federated_listener_pdp_receipt_builder |=
-            other.runtime_federated_listener_pdp_receipt_builder;
-        self.settings_federated_listener_pdp_receipt_builder |=
-            other.settings_federated_listener_pdp_receipt_builder;
-        self.identity_rss_listener_pdp_receipt_builder |=
-            other.identity_rss_listener_pdp_receipt_builder;
-        self.runtime_direct_listener_pdp_receipt_commit |=
-            other.runtime_direct_listener_pdp_receipt_commit;
-        self.runtime_funnel_listener_pdp_receipt_commit |=
-            other.runtime_funnel_listener_pdp_receipt_commit;
-        self.settings_federated_listener_pdp_receipt_commit |=
-            other.settings_federated_listener_pdp_receipt_commit;
-        self.identity_rss_listener_pdp_receipt_commit |=
-            other.identity_rss_listener_pdp_receipt_commit;
         self.mtls_server_from_spire |= other.mtls_server_from_spire;
         self.domain_transport_from_spire |= other.domain_transport_from_spire;
         self.domain_transport_ready_probe |= other.domain_transport_ready_probe;
@@ -6810,6 +2551,12 @@ impl SecurityCloseoutEvidence {
         self.split_scheme_provider_binding |= other.split_scheme_provider_binding;
     }
 
+    fn has_provider_construction_live_join(&self) -> bool {
+        self.provider_selection
+            && self.provider_typed_finish
+            && (self.provider_finish_transfer || self.runtime_provider_finish)
+    }
+
     fn has_jwks_closeout(&self) -> bool {
         self.runtime_oidc_provider_build
             && self.runtime_oidc_provider_handle
@@ -6817,8 +2564,6 @@ impl SecurityCloseoutEvidence {
             && self.jwks_load_and_watch
             && self.jwks_keys_jwks
             && self.jwks_ready_probe
-            && self.typed_listener_pdp_receipt_commit
-            && self.typed_listener_pdp_receipt_provenance
     }
 
     fn jwks_closeout_missing(&self, listener_pdp_owns_jwks_lifecycle: bool) -> Vec<&'static str> {
@@ -6840,12 +2585,6 @@ impl SecurityCloseoutEvidence {
         }
         if !self.jwks_ready_probe {
             missing.push("jwksReadyProbe");
-        }
-        if !self.typed_listener_pdp_receipt_commit {
-            missing.push("typedListenerPdpReceiptCommit");
-        }
-        if !self.typed_listener_pdp_receipt_provenance {
-            missing.push("typedListenerPdpReceiptProvenance");
         }
         if !listener_pdp_owns_jwks_lifecycle {
             missing.push("manifestListenerPdpOutputs=probes+resources");
@@ -7001,13 +2740,15 @@ impl DivergingCallTargets {
     }
 
     fn knows_method_owner(&self, owner: &str) -> bool {
-        self.methods.iter().any(|(candidate, _)| candidate == owner)
+        self.methods
+            .iter()
+            .any(|(candidate, _)| type_identity_matches(candidate, owner))
     }
 
     fn knows_struct(&self, owner: &str) -> bool {
         self.struct_fields
             .keys()
-            .any(|(candidate, _)| candidate == owner)
+            .any(|(candidate, _)| type_identity_matches(candidate, owner))
     }
 
     fn knows_method_return_owner(&self, owner: &str) -> bool {
@@ -7046,6 +2787,10 @@ impl DivergingCallTargets {
         self.methods
             .contains(&(owner.to_string(), method.to_string()))
     }
+}
+
+fn type_identity_matches(left: &str, right: &str) -> bool {
+    left == right || left.ends_with(&format!("::{right}")) || right.ends_with(&format!("::{left}"))
 }
 
 fn type_path_name(
@@ -7163,9 +2908,22 @@ fn expression_type_name(
             let base_ty = expression_type_name(field.base.as_ref(), aliases, targets, value_types)?;
             targets
                 .struct_fields
-                .get(&(base_ty, name.to_string()))
+                .get(&(base_ty.clone(), name.to_string()))
                 .filter(|returned| targets.knows_tracked_type(returned))
                 .cloned()
+                .or_else(|| {
+                    let mut matches = targets
+                        .struct_fields
+                        .iter()
+                        .filter(|((owner, field_name), returned)| {
+                            field_name == &name.to_string()
+                                && (owner.ends_with(&base_ty) || base_ty.ends_with(owner))
+                                && targets.knows_tracked_type(returned)
+                        })
+                        .map(|(_, returned)| returned.clone());
+                    let first = matches.next()?;
+                    matches.next().is_none().then_some(first)
+                })
         }
         _ => None,
     }
@@ -7181,6 +2939,107 @@ fn expression_method_owner(
         .filter(|owner| targets.knows_method_owner(owner))
 }
 
+fn is_provider_finish_owner(owner: &str) -> bool {
+    owner.ends_with("ProviderBuild") || owner.ends_with("ProviderRoleBatches")
+}
+
+fn in_provider_role_closer_finish(visitor: &SecurityCloseoutVisitor) -> bool {
+    visitor
+        .impl_stack
+        .last()
+        .is_some_and(|owner| owner == "ProviderRoleCloser")
+        && visitor
+            .current_function()
+            .is_some_and(|function| function.ends_with("::finish"))
+}
+
+fn provider_role_closer_field_has_type(
+    expression: &syn::Expr,
+    targets: &DivergingCallTargets,
+    expected_suffix: &str,
+) -> bool {
+    let syn::Expr::Field(field) = ungroup_profile_expression(expression) else {
+        return false;
+    };
+    let syn::Member::Named(name) = &field.member else {
+        return false;
+    };
+    targets.struct_fields.iter().any(|((owner, field), ty)| {
+        owner.ends_with("ProviderRoleCloser")
+            && field == &name.to_string()
+            && ty.ends_with(expected_suffix)
+    })
+}
+
+fn direct_type_receiver_name(expression: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(path) = ungroup_profile_expression(expression) else {
+        return None;
+    };
+    let name = path.path.segments.last()?.ident.to_string();
+    name.chars()
+        .next()
+        .is_some_and(char::is_uppercase)
+        .then_some(name)
+}
+
+fn field_receiver_owner(expression: &syn::Expr, targets: &DivergingCallTargets) -> Option<String> {
+    let syn::Expr::Field(field) = ungroup_profile_expression(expression) else {
+        return None;
+    };
+    let syn::Member::Named(name) = &field.member else {
+        return None;
+    };
+    let mut owners = targets
+        .struct_fields
+        .iter()
+        .filter(|((_, field), _)| field == &name.to_string())
+        .map(|(_, owner)| owner.clone());
+    let first = owners.next()?;
+    owners.all(|owner| owner == first).then_some(first)
+}
+
+fn method_is_provider_build(call: &syn::ExprMethodCall) -> bool {
+    call.method == "provider_build" && call.args.is_empty()
+}
+
+fn provider_finish_expression(
+    expression: &syn::Expr,
+    aliases: &StandardPathAliases,
+    targets: &DivergingCallTargets,
+    value_types: &BTreeMap<String, String>,
+) -> bool {
+    let syn::Expr::MethodCall(finish) = ungroup_profile_expression(expression) else {
+        return false;
+    };
+    finish.method == "finish"
+        && (expression_method_owner(
+            ungroup_profile_expression(finish.receiver.as_ref()),
+            aliases,
+            targets,
+            value_types,
+        )
+        .or_else(|| direct_type_receiver_name(finish.receiver.as_ref()))
+        .is_some_and(|owner| owner.ends_with("Constructor"))
+            || provider_role_closer_field_has_type(
+                finish.receiver.as_ref(),
+                targets,
+                "Constructor",
+            ))
+}
+
+fn provider_transfer_expression(
+    expression: &syn::Expr,
+    aliases: &StandardPathAliases,
+    targets: &DivergingCallTargets,
+    value_types: &BTreeMap<String, String>,
+) -> bool {
+    let syn::Expr::MethodCall(transfer) = ungroup_profile_expression(expression) else {
+        return false;
+    };
+    transfer.method == "transfer"
+        && provider_finish_expression(transfer.receiver.as_ref(), aliases, targets, value_types)
+}
+
 fn local_method_owner(
     pattern: &syn::Pat,
     initializer: &syn::Expr,
@@ -7194,6 +3053,19 @@ fn local_method_owner(
         return Some(owner);
     }
     expression_type_name(initializer, aliases, targets, value_types)
+        .or_else(|| expression_constructor_owner(initializer, aliases))
+}
+
+fn expression_constructor_owner(
+    expression: &syn::Expr,
+    aliases: &StandardPathAliases,
+) -> Option<String> {
+    let expression = ungroup_profile_expression(expression);
+    let syn::Expr::Call(call) = expression else {
+        return None;
+    };
+    let path = aliases.resolve_expression_path(call.func.as_ref())?;
+    path.rsplit_once("::").map(|(owner, _)| owner.to_string())
 }
 
 fn signature_method_owners(
@@ -7209,7 +3081,8 @@ fn signature_method_owners(
                 return None;
             };
             let binding = local_binding_ident(argument.pat.as_ref())?.to_string();
-            let owner = type_path_owner(argument.ty.as_ref(), aliases, targets)?;
+            let owner = type_path_owner(argument.ty.as_ref(), aliases, targets)
+                .or_else(|| type_path_name(argument.ty.as_ref(), aliases, None))?;
             Some((binding, owner))
         })
         .collect()
@@ -7227,8 +3100,45 @@ fn pattern_method_owners(
         return BTreeMap::new();
     };
     type_path_owner(typed.ty.as_ref(), aliases, targets)
+        .or_else(|| type_path_name(typed.ty.as_ref(), aliases, None))
         .map(|owner| BTreeMap::from([(binding.to_string(), owner)]))
         .unwrap_or_default()
+}
+
+fn struct_pattern_method_owners(
+    pattern: &syn::Pat,
+    targets: &DivergingCallTargets,
+) -> BTreeMap<String, String> {
+    let syn::Pat::Struct(pattern) = pattern else {
+        return BTreeMap::new();
+    };
+    let owner = pattern
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string());
+    pattern
+        .fields
+        .iter()
+        .filter_map(|field| {
+            let syn::Member::Named(member) = &field.member else {
+                return None;
+            };
+            let binding = local_binding_ident(&field.pat)?.to_string();
+            let returned =
+                targets
+                    .struct_fields
+                    .iter()
+                    .find_map(|((receiver, name), returned)| {
+                        (name == &member.to_string()
+                            && owner
+                                .as_ref()
+                                .is_some_and(|owner| receiver.ends_with(owner)))
+                        .then(|| returned.clone())
+                    })?;
+            Some((binding, returned))
+        })
+        .collect()
 }
 
 fn signature_value_types(
@@ -7371,6 +3281,27 @@ impl<'ast> syn::visit::Visit<'ast> for DivergingFunctionNameVisitor {
                 .insert((owner.clone(), name.to_string()), field_ty);
         }
         syn::visit::visit_item_struct(self, node);
+    }
+
+    fn visit_item_enum(&mut self, node: &'ast syn::ItemEnum) {
+        if has_non_production_attributes(&node.attrs) {
+            return;
+        }
+        let aliases = self.current_aliases();
+        for variant in &node.variants {
+            let owner = variant.ident.to_string();
+            for field in &variant.fields {
+                let (Some(name), Some(field_ty)) = (
+                    field.ident.as_ref(),
+                    type_path_name(&field.ty, &aliases, None),
+                ) else {
+                    continue;
+                };
+                self.struct_fields
+                    .insert((owner.clone(), name.to_string()), field_ty);
+            }
+        }
+        syn::visit::visit_item_enum(self, node);
     }
 
     fn visit_trait_item_fn(&mut self, _node: &'ast syn::TraitItemFn) {}
@@ -7525,6 +3456,62 @@ impl DivergenceEscapeVisitor {
     }
 }
 
+fn static_bool(expression: &syn::Expr) -> Option<bool> {
+    match expression {
+        syn::Expr::Lit(syn::ExprLit {
+            lit: syn::Lit::Bool(value),
+            ..
+        }) => Some(value.value),
+        syn::Expr::Group(group) => static_bool(&group.expr),
+        syn::Expr::Paren(paren) => static_bool(&paren.expr),
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Not(_)) => {
+            static_bool(&unary.expr).map(|value| !value)
+        }
+        syn::Expr::Binary(binary) => match binary.op {
+            syn::BinOp::And(_) => Some(static_bool(&binary.left)? && static_bool(&binary.right)?),
+            syn::BinOp::Or(_) => Some(static_bool(&binary.left)? || static_bool(&binary.right)?),
+            syn::BinOp::Eq(_) => {
+                Some(static_literal(&binary.left)? == static_literal(&binary.right)?)
+            }
+            syn::BinOp::Ne(_) => {
+                Some(static_literal(&binary.left)? != static_literal(&binary.right)?)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn static_literal(expression: &syn::Expr) -> Option<String> {
+    match expression {
+        syn::Expr::Lit(literal) => Some(token_key(&literal.lit)),
+        syn::Expr::Group(group) => static_literal(&group.expr),
+        syn::Expr::Paren(paren) => static_literal(&paren.expr),
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
+            Some(format!("-{}", static_literal(&unary.expr)?))
+        }
+        _ => None,
+    }
+}
+
+fn pattern_matches_literal(pattern: &syn::Pat, literal: &str) -> Option<bool> {
+    match pattern {
+        syn::Pat::Lit(pattern) => Some(token_key(&pattern.lit) == literal),
+        syn::Pat::Wild(_) | syn::Pat::Rest(_) => Some(true),
+        syn::Pat::Paren(paren) => pattern_matches_literal(&paren.pat, literal),
+        syn::Pat::Reference(reference) => pattern_matches_literal(&reference.pat, literal),
+        syn::Pat::Or(or) => {
+            let matches = or
+                .cases
+                .iter()
+                .map(|case| pattern_matches_literal(case, literal))
+                .collect::<Option<Vec<_>>>()?;
+            Some(matches.into_iter().any(|matched| matched))
+        }
+        _ => None,
+    }
+}
+
 impl<'ast> syn::visit::Visit<'ast> for DivergenceEscapeVisitor {
     fn visit_expr_return(&mut self, _node: &'ast syn::ExprReturn) {
         self.found = true;
@@ -7543,7 +3530,7 @@ impl<'ast> syn::visit::Visit<'ast> for DivergenceEscapeVisitor {
     }
 
     fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
-        if let Some(condition) = ListenerPdpReceiptDataflowVisitor::constant_bool(&node.cond) {
+        if let Some(condition) = static_bool(&node.cond) {
             if condition {
                 syn::visit::Visit::visit_block(self, &node.then_branch);
             } else if let Some((_, otherwise)) = &node.else_branch {
@@ -7555,20 +3542,16 @@ impl<'ast> syn::visit::Visit<'ast> for DivergenceEscapeVisitor {
     }
 
     fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-        let Some(literal) = ListenerPdpReceiptDataflowVisitor::static_literal(&node.expr) else {
+        let Some(literal) = static_literal(&node.expr) else {
             syn::visit::visit_expr_match(self, node);
             return;
         };
         for arm in &node.arms {
-            let pattern_match =
-                ListenerPdpReceiptDataflowVisitor::pattern_matches_literal(&arm.pat, &literal);
+            let pattern_match = pattern_matches_literal(&arm.pat, &literal);
             if pattern_match == Some(false) {
                 continue;
             }
-            let guard = arm
-                .guard
-                .as_ref()
-                .and_then(|(_, guard)| ListenerPdpReceiptDataflowVisitor::constant_bool(guard));
+            let guard = arm.guard.as_ref().and_then(|(_, guard)| static_bool(guard));
             if guard == Some(false) {
                 continue;
             }
@@ -7583,7 +3566,7 @@ impl<'ast> syn::visit::Visit<'ast> for DivergenceEscapeVisitor {
     }
 
     fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        if ListenerPdpReceiptDataflowVisitor::constant_bool(&node.cond) == Some(false) {
+        if static_bool(&node.cond) == Some(false) {
             return;
         }
         syn::visit::visit_expr_while(self, node);
@@ -7949,27 +3932,7 @@ struct SecurityCloseoutProgram {
     legacy_token_surface: bool,
     mixed_key_provider: bool,
     split_scheme_provider_binding: bool,
-    listener_pdp_commit_definitions: usize,
-    exact_listener_pdp_commit_definitions: usize,
-    listener_pdp_receipt_builder_definitions: usize,
-    exact_listener_pdp_receipt_builder_definitions: usize,
-    invalid_listener_pdp_receipt_construction: bool,
-    listener_pdp_aggregate_definitions: usize,
-    exact_listener_pdp_aggregate_definitions: usize,
-    listener_pdp_materializer_definitions: usize,
-    exact_listener_pdp_materializer_definitions: usize,
-    listener_pdp_output_sink_definitions: usize,
-    exact_listener_pdp_output_sink_definitions: usize,
-    provider_output_new_definitions: usize,
-    exact_provider_output_new_definitions: usize,
-    listener_pdp_generated_finish_definitions: usize,
-    exact_listener_pdp_generated_finish_definitions: usize,
-    listener_pdp_generated_transfer_definitions: usize,
-    exact_listener_pdp_generated_transfer_definitions: usize,
-    listener_pdp_funnel_add_definitions: usize,
-    exact_listener_pdp_funnel_add_definitions: usize,
-    listener_pdp_funnel_take_definitions: usize,
-    exact_listener_pdp_funnel_take_definitions: usize,
+    listener_observation_producers: BTreeSet<String>,
 }
 
 impl SecurityCloseoutProgram {
@@ -7984,68 +3947,8 @@ impl SecurityCloseoutProgram {
         self.legacy_token_surface |= other.legacy_token_surface;
         self.mixed_key_provider |= other.mixed_key_provider;
         self.split_scheme_provider_binding |= other.split_scheme_provider_binding;
-        self.listener_pdp_commit_definitions = self
-            .listener_pdp_commit_definitions
-            .saturating_add(other.listener_pdp_commit_definitions);
-        self.exact_listener_pdp_commit_definitions = self
-            .exact_listener_pdp_commit_definitions
-            .saturating_add(other.exact_listener_pdp_commit_definitions);
-        self.listener_pdp_receipt_builder_definitions = self
-            .listener_pdp_receipt_builder_definitions
-            .saturating_add(other.listener_pdp_receipt_builder_definitions);
-        self.exact_listener_pdp_receipt_builder_definitions = self
-            .exact_listener_pdp_receipt_builder_definitions
-            .saturating_add(other.exact_listener_pdp_receipt_builder_definitions);
-        self.invalid_listener_pdp_receipt_construction |=
-            other.invalid_listener_pdp_receipt_construction;
-        self.listener_pdp_aggregate_definitions = self
-            .listener_pdp_aggregate_definitions
-            .saturating_add(other.listener_pdp_aggregate_definitions);
-        self.exact_listener_pdp_aggregate_definitions = self
-            .exact_listener_pdp_aggregate_definitions
-            .saturating_add(other.exact_listener_pdp_aggregate_definitions);
-        self.listener_pdp_materializer_definitions = self
-            .listener_pdp_materializer_definitions
-            .saturating_add(other.listener_pdp_materializer_definitions);
-        self.exact_listener_pdp_materializer_definitions = self
-            .exact_listener_pdp_materializer_definitions
-            .saturating_add(other.exact_listener_pdp_materializer_definitions);
-        self.listener_pdp_output_sink_definitions = self
-            .listener_pdp_output_sink_definitions
-            .saturating_add(other.listener_pdp_output_sink_definitions);
-        self.exact_listener_pdp_output_sink_definitions = self
-            .exact_listener_pdp_output_sink_definitions
-            .saturating_add(other.exact_listener_pdp_output_sink_definitions);
-        self.provider_output_new_definitions = self
-            .provider_output_new_definitions
-            .saturating_add(other.provider_output_new_definitions);
-        self.exact_provider_output_new_definitions = self
-            .exact_provider_output_new_definitions
-            .saturating_add(other.exact_provider_output_new_definitions);
-        self.listener_pdp_generated_finish_definitions = self
-            .listener_pdp_generated_finish_definitions
-            .saturating_add(other.listener_pdp_generated_finish_definitions);
-        self.exact_listener_pdp_generated_finish_definitions = self
-            .exact_listener_pdp_generated_finish_definitions
-            .saturating_add(other.exact_listener_pdp_generated_finish_definitions);
-        self.listener_pdp_generated_transfer_definitions = self
-            .listener_pdp_generated_transfer_definitions
-            .saturating_add(other.listener_pdp_generated_transfer_definitions);
-        self.exact_listener_pdp_generated_transfer_definitions = self
-            .exact_listener_pdp_generated_transfer_definitions
-            .saturating_add(other.exact_listener_pdp_generated_transfer_definitions);
-        self.listener_pdp_funnel_add_definitions = self
-            .listener_pdp_funnel_add_definitions
-            .saturating_add(other.listener_pdp_funnel_add_definitions);
-        self.exact_listener_pdp_funnel_add_definitions = self
-            .exact_listener_pdp_funnel_add_definitions
-            .saturating_add(other.exact_listener_pdp_funnel_add_definitions);
-        self.listener_pdp_funnel_take_definitions = self
-            .listener_pdp_funnel_take_definitions
-            .saturating_add(other.listener_pdp_funnel_take_definitions);
-        self.exact_listener_pdp_funnel_take_definitions = self
-            .exact_listener_pdp_funnel_take_definitions
-            .saturating_add(other.exact_listener_pdp_funnel_take_definitions);
+        self.listener_observation_producers
+            .extend(other.listener_observation_producers);
         self.startup_adapter_roots
             .extend(other.startup_adapter_roots);
         self.invalid_functions.extend(other.invalid_functions);
@@ -8090,6 +3993,19 @@ impl SecurityCloseoutProgram {
         definitions.next().is_none().then_some(definition)
     }
 
+    fn resolve_listener_producer(&self, symbol: &str) -> Option<String> {
+        if let Some(name) = symbol.strip_prefix("listener-producer-name::") {
+            let suffix = format!("::{name}");
+            let mut matches = self
+                .listener_observation_producers
+                .iter()
+                .filter(|identity| identity.ends_with(&suffix));
+            let first = matches.next()?.clone();
+            return matches.next().is_none().then_some(first);
+        }
+        self.resolve_function(symbol)
+    }
+
     fn reachable_evidence_from_run(&self) -> SecurityCloseoutEvidence {
         let mut out = SecurityCloseoutEvidence {
             legacy_service_token_migration: self.legacy_service_token_migration,
@@ -8099,6 +4015,7 @@ impl SecurityCloseoutProgram {
             ..SecurityCloseoutEvidence::default()
         };
         let mut seen = BTreeSet::new();
+        let mut listener_publish_sources = BTreeSet::new();
         let mut stack = self
             .resolve_function("free::crate::run")
             .into_iter()
@@ -8115,10 +4032,16 @@ impl SecurityCloseoutProgram {
                 continue;
             };
             out.merge(info.evidence.clone());
+            listener_publish_sources.extend(info.listener_publish_sources.iter().cloned());
             stack.extend(
                 info.calls
                     .iter()
                     .filter_map(|call| self.resolve_function(call)),
+            );
+            stack.extend(
+                info.listener_publish_sources
+                    .iter()
+                    .filter_map(|call| self.resolve_listener_producer(call)),
             );
         }
         out.exact_profile_binding_mapping =
@@ -8127,57 +4050,11 @@ impl SecurityCloseoutProgram {
         out.legacy_token_surface = self.legacy_token_surface;
         out.mixed_key_provider = self.mixed_key_provider;
         out.split_scheme_provider_binding = self.split_scheme_provider_binding;
-        let exact_runtime_builders = out.runtime_rss_listener_pdp_receipt_builder
-            && out.runtime_federated_listener_pdp_receipt_builder
-            && !out.settings_federated_listener_pdp_receipt_builder
-            && !out.identity_rss_listener_pdp_receipt_builder
-            && self.listener_pdp_receipt_builder_definitions == 2;
-        let exact_runtime_funnel = self.listener_pdp_funnel_add_definitions == 1
-            && self.exact_listener_pdp_funnel_add_definitions == 1
-            && self.listener_pdp_funnel_take_definitions == 1
-            && self.exact_listener_pdp_funnel_take_definitions == 1;
-        let exact_runtime_aggregate = self.listener_pdp_aggregate_definitions == 1
-            && self.exact_listener_pdp_aggregate_definitions == 1;
-        let exact_materializer = self.listener_pdp_materializer_definitions == 1
-            && self.exact_listener_pdp_materializer_definitions == 1;
-        let exact_runtime_sink = self.listener_pdp_output_sink_definitions == 1
-            && self.exact_listener_pdp_output_sink_definitions == 1
-            && self.provider_output_new_definitions == 1
-            && self.exact_provider_output_new_definitions == 1;
-        let exact_generated_sink = self.listener_pdp_generated_finish_definitions == 1
-            && self.exact_listener_pdp_generated_finish_definitions == 1
-            && self.listener_pdp_generated_transfer_definitions == 1
-            && self.exact_listener_pdp_generated_transfer_definitions == 1;
-        let exact_runtime_dataflow = exact_runtime_aggregate
-            && exact_materializer
-            && exact_runtime_sink
-            && (out.runtime_direct_listener_pdp_receipt_commit
-                || (out.runtime_funnel_listener_pdp_receipt_commit && exact_runtime_funnel));
-        let exact_settings_builder = !out.runtime_rss_listener_pdp_receipt_builder
-            && !out.runtime_federated_listener_pdp_receipt_builder
-            && out.settings_federated_listener_pdp_receipt_builder
-            && !out.identity_rss_listener_pdp_receipt_builder
-            && self.listener_pdp_receipt_builder_definitions == 1;
-        let exact_identity_builder = !out.runtime_rss_listener_pdp_receipt_builder
-            && !out.runtime_federated_listener_pdp_receipt_builder
-            && !out.settings_federated_listener_pdp_receipt_builder
-            && out.identity_rss_listener_pdp_receipt_builder
-            && self.listener_pdp_receipt_builder_definitions == 1;
-        out.typed_listener_pdp_receipt_provenance = out.typed_listener_pdp_receipt_commit
-            && self.listener_pdp_commit_definitions == 1
-            && self.exact_listener_pdp_commit_definitions == 1
-            && self.listener_pdp_receipt_builder_definitions
-                == self.exact_listener_pdp_receipt_builder_definitions
-            && !self.invalid_listener_pdp_receipt_construction
-            && ((exact_runtime_builders && exact_runtime_dataflow)
-                || (exact_settings_builder
-                    && exact_materializer
-                    && exact_generated_sink
-                    && out.settings_federated_listener_pdp_receipt_commit)
-                || (exact_identity_builder
-                    && exact_materializer
-                    && exact_generated_sink
-                    && out.identity_rss_listener_pdp_receipt_commit));
+        out.listener_publish_flow |= listener_publish_sources.into_iter().any(|source| {
+            self.resolve_listener_producer(&source)
+                .is_some_and(|producer| self.listener_observation_producers.contains(&producer))
+        });
+        out.inventory_publish |= out.listener_publish_flow;
         out
     }
 }
@@ -8186,12 +4063,15 @@ impl SecurityCloseoutProgram {
 struct SecurityFunctionEvidence {
     evidence: SecurityCloseoutEvidence,
     calls: BTreeSet<String>,
+    listener_publish_sources: BTreeSet<String>,
 }
 
 impl SecurityFunctionEvidence {
     fn merge(&mut self, other: Self) {
         self.evidence.merge(other.evidence);
         self.calls.extend(other.calls);
+        self.listener_publish_sources
+            .extend(other.listener_publish_sources);
     }
 }
 
@@ -8223,1536 +4103,6 @@ fn file_security_closeout_program_at(
     visitor.program
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ListenerPdpReceiptBuilderKind {
-    RuntimeRss,
-    RuntimeFederated,
-    SettingsFederated,
-    IdentityRss,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ListenerPdpCommitKind {
-    Runtime,
-    Generated,
-}
-
-/// Exact Hard fingerprint for one listener-PDP receipt builder kind.
-/// `source` names the owning production path so fingerprint drift stays reviewable.
-struct ListenerPdpReceiptBuilderShape {
-    kind: ListenerPdpReceiptBuilderKind,
-    #[allow(dead_code)] // DX annotation for fingerprint drift reviews / kind-locked tests
-    source: &'static str,
-    name: &'static str,
-    input: &'static str,
-    output: &'static str,
-    body: &'static str,
-}
-
-/// Exact Hard fingerprint for one listener-PDP commit kind.
-struct ListenerPdpCommitShape {
-    #[allow(dead_code)] // keyed by kind-locked tests; predicate matches inputs/output/body
-    kind: ListenerPdpCommitKind,
-    #[allow(dead_code)] // DX annotation for fingerprint drift reviews / kind-locked tests
-    source: &'static str,
-    inputs: &'static [&'static str],
-    output: &'static str,
-    body: &'static str,
-}
-
-const LISTENER_PDP_RECEIPT_BUILDER_SHAPES: &[ListenerPdpReceiptBuilderShape] = &[
-    ListenerPdpReceiptBuilderShape {
-        kind: ListenerPdpReceiptBuilderKind::RuntimeRss,
-        source: "assemblies/runtime/src/infra/oidc.rs::build_rss_listener_pdp_jwks_lifecycle",
-        name: "build_rss_listener_pdp_jwks_lifecycle",
-        input: "provider:&RuntimeAccessProvider<RssAccessProfile>",
-        output: "->ListenerPdpJwksLifecycle",
-        body: "{ListenerPdpJwksLifecycle::new(provider.managed_resource(),AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),)}",
-    },
-    ListenerPdpReceiptBuilderShape {
-        kind: ListenerPdpReceiptBuilderKind::RuntimeFederated,
-        source: "assemblies/runtime/src/infra/oidc.rs::build_federated_listener_pdp_jwks_lifecycle",
-        name: "build_federated_listener_pdp_jwks_lifecycle",
-        input: "provider:&RuntimeAccessProvider<FederatedAccessProfile>",
-        output: "->ListenerPdpJwksLifecycle",
-        body: "{ListenerPdpJwksLifecycle::new(provider.managed_resource(),AccessTokenJwksReadyProbe::federated_access(provider.jwks_readiness()).into_registration(),)}",
-    },
-    ListenerPdpReceiptBuilderShape {
-        kind: ListenerPdpReceiptBuilderKind::SettingsFederated,
-        source: "assemblies/settingsonly/src/providers.rs::build_federated_listener_pdp_jwks_lifecycle",
-        name: "build_federated_listener_pdp_jwks_lifecycle",
-        input: "federated:FederatedProvider",
-        output: "->(crate::providers_gen::ListenerPdpConstructor,ListenerPdpJwksLifecycle,)",
-        body: "{letmanaged_resource=federated.managed_resource();letready_probe=AccessTokenJwksReadyProbe::federated_access(federated.probe_name.clone(),federated.readiness.clone(),);letFederatedProvider{provider:_,provider_constructor,probe_name,readiness:_,}=federated;(provider_constructor,ListenerPdpJwksLifecycle{probe_name,probe:Box::new(ready_probe),managed_resource,},)}",
-    },
-    ListenerPdpReceiptBuilderShape {
-        kind: ListenerPdpReceiptBuilderKind::IdentityRss,
-        source: "assemblies/identityaudit/src/providers.rs::build_rss_listener_pdp_jwks_lifecycle",
-        name: "build_rss_listener_pdp_jwks_lifecycle",
-        input: "products:OidcProducts",
-        output: "->(Arc<oidc::OidcProvider<diport::RssAccessProfile>>,Arc<identity::AuthGrantValidationService>,ListenerPdpJwksLifecycle,)",
-        body: "{letprovider=products.provider();letOidcProducts{provider:_,grants,probe_name,probe,}=products;letmanaged_resource=SharedManagedResource::boxed(Arc::clone(&provider),\"identityaudit-rss-access-verifier\");(provider,grants,ListenerPdpJwksLifecycle{jwks_probe:(probe_name,Box::new(probe)),managed_resource,},)}",
-    },
-];
-
-const LISTENER_PDP_COMMIT_SHAPES: &[ListenerPdpCommitShape] = &[
-    ListenerPdpCommitShape {
-        kind: ListenerPdpCommitKind::Runtime,
-        source: "assemblies/runtime/src/provider_output.rs::commit_listener_pdp_jwks_lifecycle",
-        inputs: &[
-            "lifecycle:crate::infra::oidc::ListenerPdpJwksLifecycle",
-            "permit:ListenerPdpPermit",
-        ],
-        output: "->ProviderOutput",
-        body: "{ProviderOutput::listener_pdp(lifecycle,permit)}",
-    },
-    ListenerPdpCommitShape {
-        kind: ListenerPdpCommitKind::Generated,
-        source: "assemblies/{settingsonly,identityaudit}/src/providers.rs::commit_listener_pdp_jwks_lifecycle",
-        inputs: &[
-            "constructor:crate::providers_gen::ListenerPdpConstructor",
-            "lifecycle:ListenerPdpJwksLifecycle",
-        ],
-        output: "->anyhow::Result<crate::providers_gen::ListenerPdpBatch>",
-        body: "{constructor.finish(lifecycle)}",
-    },
-];
-
-fn exact_listener_pdp_commit_function(function: &syn::ItemFn) -> bool {
-    if function.sig.ident != "commit_listener_pdp_jwks_lifecycle"
-        || !function.sig.generics.params.is_empty()
-        || function.sig.inputs.len() != 2
-    {
-        return false;
-    }
-    let inputs = function
-        .sig
-        .inputs
-        .iter()
-        .map(token_key)
-        .collect::<Vec<_>>();
-    let output = token_key(&function.sig.output);
-    let body = token_key(&function.block);
-    LISTENER_PDP_COMMIT_SHAPES.iter().any(|shape| {
-        shape.inputs.len() == inputs.len()
-            && shape
-                .inputs
-                .iter()
-                .zip(inputs.iter())
-                .all(|(expected, actual)| *expected == actual.as_str())
-            && shape.output == output
-            && shape.body == body
-    })
-}
-
-fn is_listener_pdp_receipt_builder_name(ident: &syn::Ident) -> bool {
-    matches!(
-        ident.to_string().as_str(),
-        "build_rss_listener_pdp_jwks_lifecycle" | "build_federated_listener_pdp_jwks_lifecycle"
-    )
-}
-
-fn exact_listener_pdp_receipt_builder(
-    function: &syn::ItemFn,
-) -> Option<ListenerPdpReceiptBuilderKind> {
-    if !function.sig.generics.params.is_empty() || function.sig.inputs.len() != 1 {
-        return None;
-    }
-    let ident = function.sig.ident.to_string();
-    let input = function.sig.inputs.first().map(token_key)?;
-    let output = token_key(&function.sig.output);
-    let body = token_key(&function.block);
-    LISTENER_PDP_RECEIPT_BUILDER_SHAPES
-        .iter()
-        .find_map(|shape| {
-            (shape.name == ident
-                && shape.input == input
-                && shape.output == output
-                && shape.body == body)
-                .then_some(shape.kind)
-        })
-}
-
-fn exact_runtime_listener_pdp_new(function: &syn::ImplItemFn) -> bool {
-    function.sig.ident == "new"
-        && function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == [
-                "resource:Box<DynManagedResource<'static>>",
-                "readiness:(ProbeName,Box<dynbootstrap::HealthProbe>)",
-            ]
-        && token_key(&function.sig.output) == "->Self"
-        && token_key(&function.block)
-            == "{Self{module:bootstrap::DomainModuleResult{probes:vec![readiness],resources:vec![resource],..bootstrap::DomainModuleResult::default()},}}"
-}
-
-fn exact_runtime_listener_pdp_merge(function: &syn::ImplItemFn) -> bool {
-    function.sig.ident == "merge"
-        && function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == ["mutself", "other:Self"]
-        && token_key(&function.sig.output) == "->Self"
-        && token_key(&function.block) == "{self.module.merge(other.module);self}"
-}
-
-fn exact_listener_pdp_materializer(function: &syn::ImplItemFn) -> bool {
-    if function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == ["self"]
-        && token_key(&function.sig.output) == "->bootstrap::DomainModuleResult"
-    {
-        match function.sig.ident.to_string().as_str() {
-            "into_module" => token_key(&function.block) == "{self.module}",
-            "into_output" => matches!(
-                token_key(&function.block).as_str(),
-                "{bootstrap::DomainModuleResult{probes:vec![(self.probe_name,self.probe)],resources:vec![self.managed_resource],..Default::default()}}"
-                    | "{bootstrap::DomainModuleResult{probes:vec![self.jwks_probe],resources:vec![self.managed_resource],..Default::default()}}"
-            ),
-            _ => false,
-        }
-    } else {
-        false
-    }
-}
-
-fn exact_listener_pdp_output_sink(function: &syn::ImplItemFn) -> bool {
-    function.sig.ident == "listener_pdp"
-        && function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == [
-                "lifecycle:ListenerPdpJwksLifecycle",
-                "permit:ListenerPdpPermit",
-            ]
-        && token_key(&function.sig.output) == "->Self"
-        && token_key(&function.block)
-            == "{Self::new(lifecycle.into_module(),vec![ProviderReceipt::ListenerPdp(permit.0)],\"listener-pdp\",CHANNELS_PROBES_RESOURCES,)}"
-}
-
-fn exact_provider_output_new(function: &syn::ImplItemFn) -> bool {
-    function.sig.ident == "new"
-        && function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == [
-                "module:DomainModuleResult",
-                "receipts:Vec<ProviderReceipt>",
-                "batch:&'staticstr",
-                "expected_channels:&'static[LifecycleChannel]",
-            ]
-        && token_key(&function.sig.output) == "->Self"
-        && token_key(&function.block)
-            == "{Self{batches:vec![ProviderBatch{module,receipts,batch,expected_channels,}],}}"
-}
-
-fn exact_listener_pdp_generated_finish(function: &syn::ImplItemFn) -> bool {
-    function.sig.ident == "finish"
-        && function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == ["self", "output:crate::providers::ListenerPdpJwksLifecycle"]
-        && token_key(&function.sig.output) == "->anyhow::Result<ListenerPdpBatch>"
-        && token_key(&function.block)
-            == "{letoutput=output.into_output();validate_lifecycle_output(self.entry,&output)?;Ok(ListenerPdpBatch(output))}"
-}
-
-fn exact_listener_pdp_generated_transfer(function: &syn::ImplItemFn) -> bool {
-    function.sig.ident == "transfer"
-        && function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == ["self", "inventory:&mutbootstrap::DomainModuleResult"]
-        && token_key(&function.sig.output) == "->ListenerPdpReceipt"
-        && token_key(&function.block)
-            == "{letprobe_names=self.0.probes.iter().map(|(name,_)|name.clone()).collect();letreceipt=ListenerPdpReceipt{probes:self.0.probes.len(),resources:self.0.resources.len(),workers:self.0.workers.len(),probe_names,};inventory.merge(self.0);receipt}"
-}
-
-fn exact_listener_pdp_funnel_add(function: &syn::ImplItemFn) -> bool {
-    function.sig.ident == "add"
-        && function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == ["&mutself", "lifecycle:ListenerPdpJwksLifecycle"]
-        && matches!(function.sig.output, syn::ReturnType::Default)
-        && token_key(&function.block)
-            == "{ifself.committed{unreachable!(\"{}\",TOKEN_MODULE_COMMITTED_ONCE);}self.lifecycle=Some(matchself.lifecycle.take(){Some(current)=>current.merge(lifecycle),None=>lifecycle,});}"
-}
-
-fn exact_listener_pdp_funnel_take(function: &syn::ImplItemFn) -> bool {
-    function.sig.ident == "take"
-        && function.sig.generics.params.is_empty()
-        && function
-            .sig
-            .inputs
-            .iter()
-            .map(token_key)
-            .collect::<Vec<_>>()
-            == ["&mutself"]
-        && token_key(&function.sig.output) == "->Option<ListenerPdpJwksLifecycle>"
-        && token_key(&function.block)
-            == "{ifstd::mem::replace(&mutself.committed,true){unreachable!(\"{}\",TOKEN_MODULE_COMMITTED_ONCE);}self.lifecycle.take()}"
-}
-
-const LISTENER_PDP_RSS_RECEIPT: u8 = 1;
-const LISTENER_PDP_FEDERATED_RECEIPT: u8 = 2;
-const LISTENER_PDP_ALL_RECEIPTS: u8 = LISTENER_PDP_RSS_RECEIPT | LISTENER_PDP_FEDERATED_RECEIPT;
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct ListenerPdpReceiptFlow {
-    profiles: u8,
-    via_funnel: bool,
-    generated_batch: bool,
-    runtime_output: bool,
-}
-
-impl ListenerPdpReceiptFlow {
-    fn merge(self, other: Self) -> Self {
-        if self.profiles == 0
-            || other.profiles == 0
-            || self.via_funnel
-            || other.via_funnel
-            || self.generated_batch
-            || other.generated_batch
-            || self.runtime_output
-            || other.runtime_output
-        {
-            return Self::default();
-        }
-        Self {
-            profiles: self.profiles | other.profiles,
-            via_funnel: false,
-            generated_batch: false,
-            runtime_output: false,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
-struct ListenerPdpCommitDataflow {
-    runtime_direct: bool,
-    runtime_funnel: bool,
-    generated_rss: bool,
-    generated_federated: bool,
-}
-
-#[derive(Clone, PartialEq, Eq)]
-enum ListenerPdpStaticLiteral {
-    String(String),
-    ByteString(Vec<u8>),
-    CString(Vec<u8>),
-    Char(char),
-    Integer(String),
-    Bool(bool),
-}
-
-#[derive(Clone, Default)]
-struct ListenerPdpReceiptDataflowVisitor {
-    scopes: Vec<BTreeMap<String, u64>>,
-    next_binding_id: u64,
-    locals: BTreeMap<u64, ListenerPdpReceiptFlow>,
-    binding_method_owners: BTreeMap<u64, String>,
-    funnels: BTreeMap<u64, BTreeSet<u8>>,
-    canonical_funnels: BTreeSet<u64>,
-    canonical_provider_builds: BTreeSet<u64>,
-    commit: ListenerPdpCommitDataflow,
-    reachable: bool,
-    diverging_function_names: DivergingCallTargets,
-    path_aliases: StandardPathAliases,
-    shadowed_call_names: BTreeSet<String>,
-}
-
-struct ListenerPdpTrackedReferenceVisitor<'a> {
-    dataflow: &'a ListenerPdpReceiptDataflowVisitor,
-    bindings: BTreeSet<u64>,
-}
-
-#[derive(Default)]
-struct ConditionalCompilationVisitor {
-    found: bool,
-}
-
-impl<'ast> syn::visit::Visit<'ast> for ConditionalCompilationVisitor {
-    fn visit_attribute(&mut self, node: &'ast syn::Attribute) {
-        self.found |= is_conditional_attribute(node);
-        syn::visit::visit_attribute(self, node);
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for ListenerPdpTrackedReferenceVisitor<'_> {
-    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
-        if let Some(name) = node.path.get_ident()
-            && let Some(binding_id) = self.dataflow.resolve_binding(&name.to_string())
-            && (self.dataflow.canonical_funnels.contains(&binding_id)
-                || self.dataflow.locals.contains_key(&binding_id))
-        {
-            self.bindings.insert(binding_id);
-        }
-        syn::visit::visit_expr_path(self, node);
-    }
-}
-
-fn listener_pdp_receipt_commit_dataflow(
-    block: &syn::Block,
-    signature: &syn::Signature,
-    diverging_function_names: &DivergingCallTargets,
-    path_aliases: &StandardPathAliases,
-) -> ListenerPdpCommitDataflow {
-    let mut conditional = ConditionalCompilationVisitor::default();
-    syn::visit::Visit::visit_block(&mut conditional, block);
-    if conditional.found {
-        return ListenerPdpCommitDataflow::default();
-    }
-    let mut visitor = ListenerPdpReceiptDataflowVisitor {
-        reachable: true,
-        diverging_function_names: diverging_function_names.clone(),
-        path_aliases: path_aliases.clone(),
-        shadowed_call_names: signature_binding_names(signature),
-        ..Default::default()
-    };
-    syn::visit::Visit::visit_block(&mut visitor, block);
-    visitor.commit
-}
-
-impl ListenerPdpReceiptDataflowVisitor {
-    fn compare_decimal_integers(left: &str, right: &str) -> std::cmp::Ordering {
-        fn parts(value: &str) -> (bool, &str) {
-            let (negative, digits) = value
-                .strip_prefix('-')
-                .map_or((false, value), |digits| (true, digits));
-            let digits = digits.trim_start_matches('0');
-            (
-                negative && !digits.is_empty(),
-                if digits.is_empty() { "0" } else { digits },
-            )
-        }
-
-        let (left_negative, left_digits) = parts(left);
-        let (right_negative, right_digits) = parts(right);
-        match (left_negative, right_negative) {
-            (true, false) => std::cmp::Ordering::Less,
-            (false, true) => std::cmp::Ordering::Greater,
-            _ => {
-                let magnitude = left_digits
-                    .len()
-                    .cmp(&right_digits.len())
-                    .then_with(|| left_digits.cmp(right_digits));
-                if left_negative {
-                    magnitude.reverse()
-                } else {
-                    magnitude
-                }
-            }
-        }
-    }
-
-    fn compare_static_literals(
-        left: &ListenerPdpStaticLiteral,
-        right: &ListenerPdpStaticLiteral,
-    ) -> Option<std::cmp::Ordering> {
-        match (left, right) {
-            (ListenerPdpStaticLiteral::Integer(left), ListenerPdpStaticLiteral::Integer(right)) => {
-                Some(Self::compare_decimal_integers(left, right))
-            }
-            (ListenerPdpStaticLiteral::String(left), ListenerPdpStaticLiteral::String(right)) => {
-                Some(left.cmp(right))
-            }
-            (
-                ListenerPdpStaticLiteral::ByteString(left),
-                ListenerPdpStaticLiteral::ByteString(right),
-            )
-            | (ListenerPdpStaticLiteral::CString(left), ListenerPdpStaticLiteral::CString(right)) => {
-                Some(left.cmp(right))
-            }
-            (ListenerPdpStaticLiteral::Char(left), ListenerPdpStaticLiteral::Char(right)) => {
-                Some(left.cmp(right))
-            }
-            (ListenerPdpStaticLiteral::Bool(left), ListenerPdpStaticLiteral::Bool(right)) => {
-                Some(left.cmp(right))
-            }
-            _ => None,
-        }
-    }
-
-    fn push_scope(&mut self) {
-        self.scopes.push(BTreeMap::new());
-    }
-
-    #[allow(clippy::expect_used)] // reason: empty scope stack is an invariant break; fail-closed.
-    fn pop_scope(&mut self) {
-        let scope = self.scopes.pop().expect("receipt dataflow block scope");
-        for binding_id in scope.into_values() {
-            self.locals.remove(&binding_id);
-            self.binding_method_owners.remove(&binding_id);
-            self.funnels.remove(&binding_id);
-            self.canonical_funnels.remove(&binding_id);
-            self.canonical_provider_builds.remove(&binding_id);
-        }
-    }
-
-    fn merge_control_flow(&mut self, branches: Vec<Self>) {
-        let branches = branches
-            .into_iter()
-            .filter(|branch| branch.reachable)
-            .collect::<Vec<_>>();
-        let Some(first) = branches.first() else {
-            self.reachable = false;
-            self.locals.clear();
-            self.binding_method_owners.clear();
-            self.funnels.clear();
-            self.commit = ListenerPdpCommitDataflow::default();
-            return;
-        };
-        self.reachable = true;
-        self.scopes = first.scopes.clone();
-        self.next_binding_id = branches
-            .iter()
-            .map(|branch| branch.next_binding_id)
-            .max()
-            .unwrap_or(self.next_binding_id);
-
-        self.canonical_funnels = first.canonical_funnels.clone();
-        self.canonical_funnels.retain(|binding_id| {
-            branches
-                .iter()
-                .all(|branch| branch.canonical_funnels.contains(binding_id))
-        });
-        self.canonical_provider_builds = first.canonical_provider_builds.clone();
-        self.canonical_provider_builds.retain(|binding_id| {
-            branches
-                .iter()
-                .all(|branch| branch.canonical_provider_builds.contains(binding_id))
-        });
-
-        let funnel_ids = branches
-            .iter()
-            .flat_map(|branch| branch.funnels.keys().copied())
-            .collect::<BTreeSet<_>>();
-        self.funnels.clear();
-        for binding_id in funnel_ids {
-            let mut states = BTreeSet::new();
-            for branch in &branches {
-                if let Some(branch_states) = branch.funnels.get(&binding_id) {
-                    states.extend(branch_states.iter().copied());
-                } else {
-                    states.insert(0);
-                }
-            }
-            self.funnels.insert(binding_id, states);
-        }
-
-        self.locals = first.locals.clone();
-        self.locals.retain(|binding_id, flow| {
-            branches
-                .iter()
-                .all(|branch| branch.locals.get(binding_id) == Some(flow))
-        });
-        self.binding_method_owners = first.binding_method_owners.clone();
-        self.binding_method_owners.retain(|binding_id, owner| {
-            branches
-                .iter()
-                .all(|branch| branch.binding_method_owners.get(binding_id) == Some(owner))
-        });
-
-        self.commit = ListenerPdpCommitDataflow {
-            runtime_direct: branches.iter().all(|branch| branch.commit.runtime_direct),
-            runtime_funnel: branches.iter().all(|branch| branch.commit.runtime_funnel),
-            generated_rss: branches.iter().all(|branch| branch.commit.generated_rss),
-            generated_federated: branches
-                .iter()
-                .all(|branch| branch.commit.generated_federated),
-        };
-    }
-
-    fn invalidate_unknown_lifecycle_uses(&mut self, expression: &syn::Expr) {
-        let mut references = ListenerPdpTrackedReferenceVisitor {
-            dataflow: self,
-            bindings: BTreeSet::new(),
-        };
-        syn::visit::Visit::visit_expr(&mut references, expression);
-        for binding_id in references.bindings {
-            self.locals.remove(&binding_id);
-            self.funnels.remove(&binding_id);
-        }
-    }
-
-    fn invalidate_all_lifecycles(&mut self) {
-        self.locals.clear();
-        self.funnels.clear();
-    }
-
-    fn security_state_eq(&self, other: &Self) -> bool {
-        self.locals == other.locals
-            && self.binding_method_owners == other.binding_method_owners
-            && self.funnels == other.funnels
-            && self.canonical_funnels == other.canonical_funnels
-            && self.canonical_provider_builds == other.canonical_provider_builds
-            && self.commit == other.commit
-    }
-
-    fn call_is_known_diverging(&self, call: &syn::ExprCall) -> bool {
-        let syn::Expr::Path(function) = call.func.as_ref() else {
-            return false;
-        };
-        if function.path.segments.len() == 1
-            && function.path.segments.last().is_some_and(|segment| {
-                let name = segment.ident.to_string();
-                self.shadowed_call_names.contains(&name) || self.resolve_binding(&name).is_some()
-            })
-        {
-            return false;
-        }
-        let free_function_path = function.path.segments.len() == 1
-            || function.path.segments.first().is_some_and(|segment| {
-                matches!(
-                    segment.ident.to_string().as_str(),
-                    "self" | "crate" | "super"
-                )
-            });
-        (free_function_path
-            && function.path.segments.last().is_some_and(|function| {
-                self.diverging_function_names
-                    .contains(&function.ident.to_string())
-            }))
-            || self
-                .diverging_function_names
-                .associated_function_is_diverging(call.func.as_ref(), &self.path_aliases)
-            || self.path_aliases.is_process_terminator(call.func.as_ref())
-    }
-
-    fn constant_bool(expression: &syn::Expr) -> Option<bool> {
-        match expression {
-            syn::Expr::Lit(literal) => match &literal.lit {
-                syn::Lit::Bool(value) => Some(value.value),
-                _ => None,
-            },
-            syn::Expr::Group(group) => Self::constant_bool(group.expr.as_ref()),
-            syn::Expr::Paren(paren) => Self::constant_bool(paren.expr.as_ref()),
-            syn::Expr::Block(block)
-                if block.label.is_none()
-                    && block.block.stmts.len() == 1
-                    && matches!(block.block.stmts.first(), Some(syn::Stmt::Expr(_, None))) =>
-            {
-                let Some(syn::Stmt::Expr(expression, None)) = block.block.stmts.first() else {
-                    return None;
-                };
-                Self::constant_bool(expression)
-            }
-            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Not(_)) => {
-                Self::constant_bool(unary.expr.as_ref()).map(|value| !value)
-            }
-            syn::Expr::Binary(binary) => Self::constant_bool_binary(binary),
-            _ => None,
-        }
-    }
-
-    fn constant_bool_binary(binary: &syn::ExprBinary) -> Option<bool> {
-        match binary.op {
-            syn::BinOp::And(_) => match Self::constant_bool(binary.left.as_ref())? {
-                false => Some(false),
-                true => Self::constant_bool(binary.right.as_ref()),
-            },
-            syn::BinOp::Or(_) => match Self::constant_bool(binary.left.as_ref())? {
-                true => Some(true),
-                false => Self::constant_bool(binary.right.as_ref()),
-            },
-            syn::BinOp::Eq(_) => {
-                match (
-                    Self::static_literal(binary.left.as_ref()),
-                    Self::static_literal(binary.right.as_ref()),
-                ) {
-                    (Some(left), Some(right)) => Some(left == right),
-                    _ => Some(
-                        Self::constant_bool(binary.left.as_ref())?
-                            == Self::constant_bool(binary.right.as_ref())?,
-                    ),
-                }
-            }
-            syn::BinOp::Ne(_) => {
-                match (
-                    Self::static_literal(binary.left.as_ref()),
-                    Self::static_literal(binary.right.as_ref()),
-                ) {
-                    (Some(left), Some(right)) => Some(left != right),
-                    _ => Some(
-                        Self::constant_bool(binary.left.as_ref())?
-                            != Self::constant_bool(binary.right.as_ref())?,
-                    ),
-                }
-            }
-            syn::BinOp::Lt(_) => Some(
-                Self::compare_static_literals(
-                    &Self::static_literal(binary.left.as_ref())?,
-                    &Self::static_literal(binary.right.as_ref())?,
-                )? == std::cmp::Ordering::Less,
-            ),
-            syn::BinOp::Le(_) => Some(
-                Self::compare_static_literals(
-                    &Self::static_literal(binary.left.as_ref())?,
-                    &Self::static_literal(binary.right.as_ref())?,
-                )? != std::cmp::Ordering::Greater,
-            ),
-            syn::BinOp::Gt(_) => Some(
-                Self::compare_static_literals(
-                    &Self::static_literal(binary.left.as_ref())?,
-                    &Self::static_literal(binary.right.as_ref())?,
-                )? == std::cmp::Ordering::Greater,
-            ),
-            syn::BinOp::Ge(_) => Some(
-                Self::compare_static_literals(
-                    &Self::static_literal(binary.left.as_ref())?,
-                    &Self::static_literal(binary.right.as_ref())?,
-                )? != std::cmp::Ordering::Less,
-            ),
-            _ => None,
-        }
-    }
-
-    fn is_closed_constant_expression(expression: &syn::Expr) -> bool {
-        match expression {
-            syn::Expr::Lit(_) => true,
-            syn::Expr::Group(group) => Self::is_closed_constant_expression(group.expr.as_ref()),
-            syn::Expr::Paren(paren) => Self::is_closed_constant_expression(paren.expr.as_ref()),
-            syn::Expr::Unary(unary) => Self::is_closed_constant_expression(unary.expr.as_ref()),
-            syn::Expr::Binary(binary) => {
-                Self::is_closed_constant_expression(binary.left.as_ref())
-                    && Self::is_closed_constant_expression(binary.right.as_ref())
-            }
-            syn::Expr::Cast(cast) => Self::is_closed_constant_expression(cast.expr.as_ref()),
-            syn::Expr::Block(block)
-                if block.label.is_none()
-                    && block.block.stmts.len() == 1
-                    && matches!(block.block.stmts.first(), Some(syn::Stmt::Expr(_, None))) =>
-            {
-                let Some(syn::Stmt::Expr(expression, None)) = block.block.stmts.first() else {
-                    return false;
-                };
-                Self::is_closed_constant_expression(expression)
-            }
-            _ => false,
-        }
-    }
-
-    fn semantic_literal(literal: &syn::Lit) -> Option<ListenerPdpStaticLiteral> {
-        match literal {
-            syn::Lit::Str(value) => Some(ListenerPdpStaticLiteral::String(value.value())),
-            syn::Lit::ByteStr(value) => Some(ListenerPdpStaticLiteral::ByteString(value.value())),
-            syn::Lit::CStr(value) => Some(ListenerPdpStaticLiteral::CString(
-                value.value().into_bytes(),
-            )),
-            // Rust byte literals have type u8 and are semantically interchangeable
-            // with integer patterns (for example b'a' and 97).
-            syn::Lit::Byte(value) => {
-                Some(ListenerPdpStaticLiteral::Integer(value.value().to_string()))
-            }
-            syn::Lit::Char(value) => Some(ListenerPdpStaticLiteral::Char(value.value())),
-            syn::Lit::Int(value) => {
-                let digits = value.base10_digits();
-                let digits =
-                    if digits.starts_with('-') && digits[1..].bytes().all(|digit| digit == b'0') {
-                        "0"
-                    } else {
-                        digits
-                    };
-                Some(ListenerPdpStaticLiteral::Integer(digits.to_owned()))
-            }
-            syn::Lit::Bool(value) => Some(ListenerPdpStaticLiteral::Bool(value.value)),
-            // Float patterns are rejected by Rust, and verbatim literals do not
-            // have a stable semantic representation here. Keep both fail-closed.
-            syn::Lit::Float(_) | syn::Lit::Verbatim(_) => None,
-            _ => None,
-        }
-    }
-
-    fn static_literal(expression: &syn::Expr) -> Option<ListenerPdpStaticLiteral> {
-        match expression {
-            syn::Expr::Lit(literal) => Self::semantic_literal(&literal.lit),
-            syn::Expr::Group(group) => Self::static_literal(group.expr.as_ref()),
-            syn::Expr::Paren(paren) => Self::static_literal(paren.expr.as_ref()),
-            syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Neg(_)) => {
-                let syn::Expr::Lit(literal) = unary.expr.as_ref() else {
-                    return None;
-                };
-                let syn::Lit::Int(value) = &literal.lit else {
-                    return None;
-                };
-                let digits = value.base10_digits();
-                Some(ListenerPdpStaticLiteral::Integer(if digits == "0" {
-                    "0".to_owned()
-                } else {
-                    format!("-{digits}")
-                }))
-            }
-            syn::Expr::Block(block)
-                if block.label.is_none()
-                    && block.block.stmts.len() == 1
-                    && matches!(block.block.stmts.first(), Some(syn::Stmt::Expr(_, None))) =>
-            {
-                let Some(syn::Stmt::Expr(expression, None)) = block.block.stmts.first() else {
-                    return None;
-                };
-                Self::static_literal(expression)
-            }
-            _ => None,
-        }
-    }
-
-    fn pattern_matches_literal(
-        pattern: &syn::Pat,
-        literal: &ListenerPdpStaticLiteral,
-    ) -> Option<bool> {
-        match pattern {
-            syn::Pat::Lit(pattern) => {
-                Self::semantic_literal(&pattern.lit).map(|pattern| pattern == *literal)
-            }
-            syn::Pat::Wild(_) | syn::Pat::Rest(_) => Some(true),
-            // A bare identifier can be either an irrefutable binding or a resolved
-            // constant. Without name resolution, accepting it as a definite match
-            // would let an impossible arm contribute lifecycle evidence.
-            syn::Pat::Ident(_) => None,
-            syn::Pat::Paren(paren) => Self::pattern_matches_literal(paren.pat.as_ref(), literal),
-            syn::Pat::Reference(reference) => {
-                Self::pattern_matches_literal(reference.pat.as_ref(), literal)
-            }
-            syn::Pat::Or(or) => {
-                let matches = or
-                    .cases
-                    .iter()
-                    .map(|case| Self::pattern_matches_literal(case, literal))
-                    .collect::<Vec<_>>();
-                if matches.contains(&Some(true)) {
-                    Some(true)
-                } else if matches.iter().all(|matches| *matches == Some(false)) {
-                    Some(false)
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
-
-    fn builder_call_flow(&self, call: &syn::ExprCall) -> ListenerPdpReceiptFlow {
-        if call.args.len() != 1 {
-            return ListenerPdpReceiptFlow::default();
-        }
-        let rss = expr_path_is_exact(
-            call.func.as_ref(),
-            &[
-                "crate",
-                "infra",
-                "oidc",
-                "build_rss_listener_pdp_jwks_lifecycle",
-            ],
-        ) || expr_path_is_exact(
-            call.func.as_ref(),
-            &["self", "build_rss_listener_pdp_jwks_lifecycle"],
-        );
-        let federated = expr_path_is_exact(
-            call.func.as_ref(),
-            &[
-                "crate",
-                "infra",
-                "oidc",
-                "build_federated_listener_pdp_jwks_lifecycle",
-            ],
-        ) || expr_path_is_exact(
-            call.func.as_ref(),
-            &["self", "build_federated_listener_pdp_jwks_lifecycle"],
-        );
-        ListenerPdpReceiptFlow {
-            profiles: if rss {
-                LISTENER_PDP_RSS_RECEIPT
-            } else if federated {
-                LISTENER_PDP_FEDERATED_RECEIPT
-            } else {
-                0
-            },
-            via_funnel: false,
-            generated_batch: false,
-            runtime_output: false,
-        }
-    }
-
-    fn is_canonical_funnel_initializer(expression: &syn::Expr) -> bool {
-        let syn::Expr::Call(call) = expression else {
-            return false;
-        };
-        call.args.is_empty()
-            && expr_path_is_exact(
-                call.func.as_ref(),
-                &["self", "UncommittedListenerPdpLifecycle", "new"],
-            )
-    }
-
-    fn is_canonical_provider_build_initializer(expression: &syn::Expr) -> bool {
-        match expression {
-            syn::Expr::Try(value) => Self::is_canonical_provider_build_initializer(&value.expr),
-            syn::Expr::MethodCall(call) if call.method == "context" && call.args.len() == 1 => {
-                Self::is_canonical_provider_build_initializer(&call.receiver)
-            }
-            syn::Expr::Call(call) => {
-                call.args.len() == 2
-                    && expr_path_is_exact(
-                        call.func.as_ref(),
-                        &["crate", "provider_output", "ProviderBuild", "from_plan"],
-                    )
-            }
-            _ => false,
-        }
-    }
-
-    fn resolve_binding(&self, name: &str) -> Option<u64> {
-        self.scopes
-            .iter()
-            .rev()
-            .find_map(|scope| scope.get(name).copied())
-    }
-
-    fn value_type_map(&self) -> BTreeMap<String, String> {
-        let mut value_types = BTreeMap::new();
-        for scope in &self.scopes {
-            for (name, binding_id) in scope {
-                if let Some(owner) = self.binding_method_owners.get(binding_id) {
-                    value_types.insert(name.clone(), owner.clone());
-                } else {
-                    value_types.remove(name);
-                }
-            }
-        }
-        value_types
-    }
-
-    #[allow(clippy::expect_used)] // reason: missing block scope is an invariant break; fail-closed.
-    fn declare_ident(
-        &mut self,
-        ident: &syn::PatIdent,
-        flow: ListenerPdpReceiptFlow,
-        canonical_funnel: bool,
-    ) {
-        let binding_id = self.next_binding_id;
-        self.next_binding_id = self.next_binding_id.saturating_add(1);
-        let name = ident.ident.to_string();
-        if let Some(replaced) = self
-            .scopes
-            .last_mut()
-            .expect("receipt dataflow always has a block scope")
-            .insert(name, binding_id)
-        {
-            self.locals.remove(&replaced);
-            self.binding_method_owners.remove(&replaced);
-            self.funnels.remove(&replaced);
-            self.canonical_funnels.remove(&replaced);
-            self.canonical_provider_builds.remove(&replaced);
-        }
-        if flow.profiles != 0 {
-            self.locals.insert(binding_id, flow);
-        }
-        if canonical_funnel {
-            self.canonical_funnels.insert(binding_id);
-        }
-    }
-
-    fn declare_pattern(
-        &mut self,
-        pattern: &syn::Pat,
-        flow: ListenerPdpReceiptFlow,
-        canonical_funnel: bool,
-    ) {
-        match pattern {
-            syn::Pat::Ident(ident) => {
-                self.declare_ident(ident, flow, canonical_funnel);
-                if let Some((_, subpattern)) = &ident.subpat {
-                    self.declare_pattern(
-                        subpattern.as_ref(),
-                        ListenerPdpReceiptFlow::default(),
-                        false,
-                    );
-                }
-            }
-            syn::Pat::Tuple(tuple) => {
-                for (index, element) in tuple.elems.iter().enumerate() {
-                    let element_flow = if index + 1 == tuple.elems.len() {
-                        flow
-                    } else {
-                        ListenerPdpReceiptFlow::default()
-                    };
-                    self.declare_pattern(element, element_flow, false);
-                }
-            }
-            syn::Pat::Type(typed) => {
-                self.declare_pattern(typed.pat.as_ref(), flow, canonical_funnel);
-            }
-            syn::Pat::Struct(structure) => {
-                for field in &structure.fields {
-                    self.declare_pattern(
-                        field.pat.as_ref(),
-                        ListenerPdpReceiptFlow::default(),
-                        false,
-                    );
-                }
-            }
-            syn::Pat::TupleStruct(tuple) => {
-                let option_some = tuple.path.segments.len() == 1
-                    && tuple.path.segments[0].ident == "Some"
-                    && tuple.elems.len() == 1;
-                for element in &tuple.elems {
-                    self.declare_pattern(
-                        element,
-                        if option_some {
-                            flow
-                        } else {
-                            ListenerPdpReceiptFlow::default()
-                        },
-                        false,
-                    );
-                }
-            }
-            syn::Pat::Slice(slice) => {
-                for element in &slice.elems {
-                    self.declare_pattern(element, ListenerPdpReceiptFlow::default(), false);
-                }
-            }
-            syn::Pat::Reference(reference) => {
-                self.declare_pattern(
-                    reference.pat.as_ref(),
-                    ListenerPdpReceiptFlow::default(),
-                    false,
-                );
-            }
-            syn::Pat::Paren(paren) => {
-                self.declare_pattern(paren.pat.as_ref(), flow, canonical_funnel);
-            }
-            syn::Pat::Or(or) => {
-                for case in &or.cases {
-                    self.declare_pattern(case, ListenerPdpReceiptFlow::default(), false);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    #[allow(clippy::expect_used)] // reason: matched arity makes missing args an invariant break; fail-closed.
-    fn expression_flow(&self, expression: &syn::Expr) -> ListenerPdpReceiptFlow {
-        match expression {
-            syn::Expr::Await(value) => self.expression_flow(value.base.as_ref()),
-            syn::Expr::Group(value) => self.expression_flow(value.expr.as_ref()),
-            syn::Expr::Paren(value) => self.expression_flow(value.expr.as_ref()),
-            syn::Expr::Try(value) => self.expression_flow(value.expr.as_ref()),
-            syn::Expr::Path(path) => path
-                .path
-                .get_ident()
-                .and_then(|ident| self.resolve_binding(&ident.to_string()))
-                .and_then(|binding_id| self.locals.get(&binding_id))
-                .copied()
-                .unwrap_or_default(),
-            syn::Expr::Call(call) => {
-                let builder = self.builder_call_flow(call);
-                if builder.profiles != 0 {
-                    builder
-                } else if call.args.len() == 2
-                    && expr_path_is_exact(
-                        call.func.as_ref(),
-                        &["self", "commit_listener_pdp_jwks_lifecycle"],
-                    )
-                {
-                    let mut flow = self.expression_flow(
-                        call.args
-                            .last()
-                            .expect("generated commit lifecycle argument"),
-                    );
-                    flow.generated_batch = flow.profiles != 0;
-                    flow
-                } else if call.args.len() == 2
-                    && expr_path_is_exact(
-                        call.func.as_ref(),
-                        &[
-                            "crate",
-                            "provider_output",
-                            "commit_listener_pdp_jwks_lifecycle",
-                        ],
-                    )
-                {
-                    let mut flow = self.expression_flow(
-                        call.args
-                            .first()
-                            .expect("runtime commit lifecycle argument"),
-                    );
-                    flow.runtime_output = flow.profiles == LISTENER_PDP_ALL_RECEIPTS;
-                    flow
-                } else {
-                    ListenerPdpReceiptFlow::default()
-                }
-            }
-            syn::Expr::MethodCall(call) if call.method == "merge" && call.args.len() == 1 => self
-                .expression_flow(call.receiver.as_ref())
-                .merge(self.expression_flow(call.args.first().expect("one merge argument"))),
-            syn::Expr::MethodCall(call) if call.method == "take" && call.args.is_empty() => {
-                simple_path_ident(call.receiver.as_ref())
-                    .and_then(|name| self.resolve_binding(&name))
-                    .filter(|binding_id| self.canonical_funnels.contains(binding_id))
-                    .and_then(|binding_id| self.funnels.get(&binding_id))
-                    .filter(|states| states.contains(&LISTENER_PDP_ALL_RECEIPTS))
-                    .map(|_| ListenerPdpReceiptFlow {
-                        profiles: LISTENER_PDP_ALL_RECEIPTS,
-                        via_funnel: true,
-                        generated_batch: false,
-                        runtime_output: false,
-                    })
-                    .unwrap_or_default()
-            }
-            _ => ListenerPdpReceiptFlow::default(),
-        }
-    }
-}
-
-impl<'ast> syn::visit::Visit<'ast> for ListenerPdpReceiptDataflowVisitor {
-    fn visit_item_fn(&mut self, _node: &'ast syn::ItemFn) {}
-
-    fn visit_stmt_macro(&mut self, _node: &'ast syn::StmtMacro) {
-        self.invalidate_all_lifecycles();
-        self.reachable = false;
-    }
-
-    fn visit_expr_closure(&mut self, node: &'ast syn::ExprClosure) {
-        self.invalidate_unknown_lifecycle_uses(node.body.as_ref());
-    }
-
-    fn visit_expr_async(&mut self, _node: &'ast syn::ExprAsync) {
-        self.invalidate_all_lifecycles();
-    }
-
-    fn visit_expr_await(&mut self, node: &'ast syn::ExprAwait) {
-        if let syn::Expr::Async(block) = node.base.as_ref() {
-            self.visit_block(&block.block);
-        } else {
-            self.visit_expr(node.base.as_ref());
-        }
-    }
-
-    fn visit_block(&mut self, node: &'ast syn::Block) {
-        self.push_scope();
-        for statement in &node.stmts {
-            if !self.reachable {
-                break;
-            }
-            self.visit_stmt(statement);
-        }
-        self.pop_scope();
-    }
-
-    fn visit_expr_return(&mut self, node: &'ast syn::ExprReturn) {
-        if let Some(expression) = &node.expr {
-            self.visit_expr(expression.as_ref());
-        }
-        self.reachable = false;
-    }
-
-    fn visit_expr_if(&mut self, node: &'ast syn::ExprIf) {
-        self.visit_expr(node.cond.as_ref());
-        let base = self.clone();
-        if !base.reachable {
-            return;
-        }
-
-        if let Some(condition) = Self::constant_bool(node.cond.as_ref()) {
-            if condition {
-                self.push_scope();
-                for statement in &node.then_branch.stmts {
-                    if !self.reachable {
-                        break;
-                    }
-                    self.visit_stmt(statement);
-                }
-                self.pop_scope();
-            } else if let Some((_, expression)) = &node.else_branch {
-                self.visit_expr(expression.as_ref());
-            }
-            return;
-        }
-
-        // A closed expression is compile-time deterministic. If this deliberately
-        // small evaluator cannot prove its value, accepting evidence from just one
-        // branch would be unsound; reject instead of guessing Rust const semantics.
-        if Self::is_closed_constant_expression(node.cond.as_ref()) {
-            self.invalidate_all_lifecycles();
-            self.reachable = false;
-            return;
-        }
-
-        let mut then_branch = base.clone();
-        then_branch.push_scope();
-        if let syn::Expr::Let(binding) = node.cond.as_ref() {
-            let flow = then_branch.expression_flow(binding.expr.as_ref());
-            then_branch.declare_pattern(binding.pat.as_ref(), flow, false);
-        }
-        for statement in &node.then_branch.stmts {
-            if !then_branch.reachable {
-                break;
-            }
-            then_branch.visit_stmt(statement);
-        }
-        then_branch.pop_scope();
-
-        let mut else_branch = base.clone();
-        if let Some((_, expression)) = &node.else_branch {
-            else_branch.visit_expr(expression.as_ref());
-        }
-        let branches = [then_branch, else_branch];
-        if branches.iter().any(|branch| !branch.reachable)
-            && branches
-                .iter()
-                .filter(|branch| branch.reachable)
-                .any(|branch| !branch.security_state_eq(&base))
-        {
-            self.invalidate_all_lifecycles();
-            self.reachable = false;
-            return;
-        }
-        self.merge_control_flow(Vec::from(branches));
-    }
-
-    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
-        let static_literal = Self::static_literal(node.expr.as_ref());
-        self.visit_expr(node.expr.as_ref());
-        let base = self.clone();
-        if !base.reachable {
-            return;
-        }
-        // Dynamic matches require name resolution and exhaustive pattern semantics
-        // to distinguish a runtime binding from a const path. This closeout gate is
-        // intentionally fail-closed rather than accepting evidence from a branch
-        // that may be statically impossible.
-        if static_literal.is_none() {
-            self.invalidate_all_lifecycles();
-            self.reachable = false;
-            return;
-        }
-        let mut branches = Vec::with_capacity(node.arms.len());
-        for arm in &node.arms {
-            let pattern_match = static_literal
-                .as_ref()
-                .and_then(|literal| Self::pattern_matches_literal(&arm.pat, literal));
-            if static_literal.is_some() && pattern_match.is_none() {
-                self.invalidate_all_lifecycles();
-                self.reachable = false;
-                return;
-            }
-            if pattern_match == Some(false) {
-                continue;
-            }
-            let guard = arm
-                .guard
-                .as_ref()
-                .and_then(|(_, guard)| Self::constant_bool(guard.as_ref()));
-            if arm.guard.is_some() && guard.is_none() {
-                self.invalidate_all_lifecycles();
-                self.reachable = false;
-                return;
-            }
-            if guard == Some(false) {
-                continue;
-            }
-            let mut branch = base.clone();
-            branch.push_scope();
-            branch.declare_pattern(&arm.pat, ListenerPdpReceiptFlow::default(), false);
-            if let Some((_, guard)) = &arm.guard {
-                branch.visit_expr(guard.as_ref());
-            }
-            branch.visit_expr(arm.body.as_ref());
-            branch.pop_scope();
-            branches.push(branch);
-            if static_literal.is_some()
-                && pattern_match == Some(true)
-                && guard != Some(false)
-                && (arm.guard.is_none() || guard == Some(true))
-            {
-                break;
-            }
-        }
-        self.merge_control_flow(branches);
-    }
-
-    fn visit_expr_binary(&mut self, node: &'ast syn::ExprBinary) {
-        if matches!(node.op, syn::BinOp::And(_) | syn::BinOp::Or(_)) {
-            self.visit_expr(node.left.as_ref());
-            let skipped = self.clone();
-            let mut evaluated = skipped.clone();
-            evaluated.visit_expr(node.right.as_ref());
-            self.merge_control_flow(vec![skipped, evaluated]);
-        } else {
-            syn::visit::visit_expr_binary(self, node);
-            if matches!(
-                node.op,
-                syn::BinOp::AddAssign(_)
-                    | syn::BinOp::SubAssign(_)
-                    | syn::BinOp::MulAssign(_)
-                    | syn::BinOp::DivAssign(_)
-                    | syn::BinOp::RemAssign(_)
-                    | syn::BinOp::BitXorAssign(_)
-                    | syn::BinOp::BitAndAssign(_)
-                    | syn::BinOp::BitOrAssign(_)
-                    | syn::BinOp::ShlAssign(_)
-                    | syn::BinOp::ShrAssign(_)
-            ) {
-                self.invalidate_unknown_lifecycle_uses(node.left.as_ref());
-            }
-        }
-    }
-
-    fn visit_expr_reference(&mut self, node: &'ast syn::ExprReference) {
-        syn::visit::visit_expr_reference(self, node);
-        if node.mutability.is_some() {
-            self.invalidate_unknown_lifecycle_uses(node.expr.as_ref());
-        }
-    }
-
-    fn visit_expr_raw_addr(&mut self, node: &'ast syn::ExprRawAddr) {
-        syn::visit::visit_expr_raw_addr(self, node);
-        self.invalidate_unknown_lifecycle_uses(node.expr.as_ref());
-    }
-
-    fn visit_expr_for_loop(&mut self, node: &'ast syn::ExprForLoop) {
-        self.visit_expr(node.expr.as_ref());
-        self.invalidate_all_lifecycles();
-        self.reachable = false;
-    }
-
-    fn visit_expr_while(&mut self, node: &'ast syn::ExprWhile) {
-        self.visit_expr(node.cond.as_ref());
-        self.invalidate_all_lifecycles();
-        self.reachable = false;
-    }
-
-    fn visit_expr_loop(&mut self, _node: &'ast syn::ExprLoop) {
-        self.invalidate_all_lifecycles();
-        self.reachable = false;
-    }
-
-    fn visit_expr_macro(&mut self, _node: &'ast syn::ExprMacro) {
-        self.invalidate_all_lifecycles();
-        self.reachable = false;
-    }
-
-    fn visit_local(&mut self, node: &'ast syn::Local) {
-        let method_owner = node.init.as_ref().and_then(|init| {
-            local_method_owner(
-                &node.pat,
-                init.expr.as_ref(),
-                &self.path_aliases,
-                &self.diverging_function_names,
-                &self.value_type_map(),
-            )
-        });
-        let canonical_provider_build = node
-            .init
-            .as_ref()
-            .is_some_and(|init| Self::is_canonical_provider_build_initializer(init.expr.as_ref()));
-        let (flow, canonical_funnel) =
-            node.init
-                .as_ref()
-                .map_or((ListenerPdpReceiptFlow::default(), false), |init| {
-                    (
-                        self.expression_flow(init.expr.as_ref()),
-                        Self::is_canonical_funnel_initializer(init.expr.as_ref()),
-                    )
-                });
-        if let Some(init) = &node.init {
-            self.visit_expr(init.expr.as_ref());
-        }
-        if flow.profiles == 0
-            && !canonical_funnel
-            && let Some(init) = &node.init
-        {
-            self.invalidate_unknown_lifecycle_uses(init.expr.as_ref());
-        }
-        self.declare_pattern(&node.pat, flow, canonical_funnel);
-        if let (Some(owner), Some(binding)) = (method_owner, local_binding_ident(&node.pat))
-            && let Some(binding_id) = self.resolve_binding(&binding.to_string())
-        {
-            self.binding_method_owners.insert(binding_id, owner);
-        }
-        if canonical_provider_build
-            && let syn::Pat::Ident(ident) = &node.pat
-            && let Some(binding_id) = self.resolve_binding(&ident.ident.to_string())
-        {
-            self.canonical_provider_builds.insert(binding_id);
-        }
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        let receiver_binding =
-            simple_path_ident(node.receiver.as_ref()).and_then(|name| self.resolve_binding(&name));
-        let value_types = self.value_type_map();
-        let diverges = receiver_binding
-            .and_then(|binding_id| self.binding_method_owners.get(&binding_id))
-            .is_some_and(|owner| {
-                self.diverging_function_names
-                    .owner_method_is_diverging(owner, &node.method)
-            })
-            || self.diverging_function_names.method_is_diverging(
-                node.receiver.as_ref(),
-                &node.method,
-                &self.path_aliases,
-                &value_types,
-            );
-        let recorded = (node.method == "record"
-            && node.args.len() == 1
-            && receiver_binding
-                .is_some_and(|binding_id| self.canonical_provider_builds.contains(&binding_id)))
-        .then(|| {
-            #[allow(clippy::expect_used)]
-            // reason: record arity already matched; missing arg is invariant break.
-            {
-                self.expression_flow(node.args.first().expect("provider record output argument"))
-            }
-        });
-        let transferred = (node.method == "transfer"
-            && node.args.len() == 1
-            && node.args.first().is_some_and(|argument| {
-                token_key(argument) == "transaction.provider_output_mut()"
-            }))
-        .then(|| self.expression_flow(node.receiver.as_ref()));
-        let canonical_receiver =
-            receiver_binding.is_some_and(|binding_id| self.canonical_funnels.contains(&binding_id));
-        let known_add = node.method == "add" && node.args.len() == 1 && canonical_receiver;
-        let known_take = node.method == "take" && node.args.is_empty() && canonical_receiver;
-        let added = if known_add {
-            node.args
-                .first()
-                .map(|argument| self.expression_flow(argument))
-                .unwrap_or_default()
-        } else {
-            ListenerPdpReceiptFlow::default()
-        };
-        syn::visit::visit_expr_method_call(self, node);
-        // known_add && profiles==0 is a deliberate no-op that retains funnel state.
-        // Only unknown methods on a canonical receiver clear the funnel.
-        if known_add {
-            #[allow(clippy::expect_used)] // reason: known_add implies canonical_receiver binding.
-            let binding_id = receiver_binding.expect("canonical receiver binding");
-            if added.profiles != 0 {
-                let current = self
-                    .funnels
-                    .entry(binding_id)
-                    .or_insert_with(|| BTreeSet::from([0]));
-                *current = current
-                    .iter()
-                    .map(|profiles| profiles | added.profiles)
-                    .collect();
-            }
-        } else if canonical_receiver && !known_take {
-            #[allow(clippy::expect_used)] // reason: canonical_receiver implies binding present.
-            {
-                self.funnels
-                    .remove(&receiver_binding.expect("canonical receiver binding"));
-            }
-        }
-        if !canonical_receiver {
-            self.invalidate_unknown_lifecycle_uses(node.receiver.as_ref());
-        }
-        for argument in &node.args {
-            self.invalidate_unknown_lifecycle_uses(argument);
-        }
-        if known_take {
-            #[allow(clippy::expect_used)] // reason: known_take implies canonical_receiver binding.
-            {
-                self.funnels
-                    .remove(&receiver_binding.expect("canonical receiver binding"));
-            }
-        }
-        if let Some(flow) = transferred.filter(|flow| flow.generated_batch) {
-            self.commit.generated_rss |= flow.profiles == LISTENER_PDP_RSS_RECEIPT;
-            self.commit.generated_federated |= flow.profiles == LISTENER_PDP_FEDERATED_RECEIPT;
-        }
-        if let Some(flow) = recorded.filter(|flow| flow.runtime_output) {
-            if flow.via_funnel {
-                self.commit.runtime_funnel = true;
-            } else {
-                self.commit.runtime_direct = true;
-            }
-        }
-        if diverges {
-            self.invalidate_all_lifecycles();
-            self.reachable = false;
-        }
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        let diverges = self.call_is_known_diverging(node);
-        syn::visit::visit_expr_call(self, node);
-        for argument in &node.args {
-            self.invalidate_unknown_lifecycle_uses(argument);
-        }
-        if diverges {
-            self.invalidate_all_lifecycles();
-            self.reachable = false;
-        }
-    }
-
-    fn visit_expr_assign(&mut self, node: &'ast syn::ExprAssign) {
-        syn::visit::visit_expr_assign(self, node);
-        self.invalidate_unknown_lifecycle_uses(node.right.as_ref());
-        if let Some(name) = simple_path_ident(node.left.as_ref()) {
-            let Some(binding_id) = self.resolve_binding(&name) else {
-                return;
-            };
-            self.locals.remove(&binding_id);
-            self.binding_method_owners.remove(&binding_id);
-            self.funnels.remove(&binding_id);
-            self.canonical_funnels.remove(&binding_id);
-            self.canonical_provider_builds.remove(&binding_id);
-            if Self::is_canonical_funnel_initializer(node.right.as_ref()) {
-                self.canonical_funnels.insert(binding_id);
-            }
-            if let Some(owner) = expression_method_owner(
-                node.right.as_ref(),
-                &self.path_aliases,
-                &self.diverging_function_names,
-                &self.value_type_map(),
-            ) {
-                self.binding_method_owners.insert(binding_id, owner);
-            }
-        } else {
-            self.invalidate_unknown_lifecycle_uses(node.left.as_ref());
-        }
-    }
-}
-
 #[derive(Default)]
 struct SecurityCloseoutVisitor {
     program: SecurityCloseoutProgram,
@@ -9768,12 +4118,13 @@ struct SecurityCloseoutVisitor {
     typed_token_provider_bindings: Vec<BTreeSet<String>>,
     typed_listener_spec_bindings: Vec<BTreeSet<String>>,
     plan_auth_scheme_locals: Vec<BTreeSet<String>>,
-    exact_listener_pdp_builder_stack: Vec<bool>,
-    exact_listener_pdp_constructor_stack: Vec<bool>,
     diverging_function_names: DivergingCallTargets,
     path_aliases: StandardPathAliases,
     value_binding_scopes: Vec<BTreeSet<String>>,
     value_binding_method_owners: Vec<BTreeMap<String, String>>,
+    listener_observation_locals: Vec<BTreeSet<String>>,
+    inventory_publication_type_params: Vec<BTreeSet<String>>,
+    provider_transferred_receipt_locals: Vec<BTreeSet<String>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -9813,32 +4164,6 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if has_non_production_attributes(&node.attrs) {
             return;
         }
-        let is_commit = node.sig.ident == "commit_listener_pdp_jwks_lifecycle";
-        let receipt_builder = exact_listener_pdp_receipt_builder(node);
-        if is_commit {
-            self.program.listener_pdp_commit_definitions = self
-                .program
-                .listener_pdp_commit_definitions
-                .saturating_add(1);
-        }
-        if exact_listener_pdp_commit_function(node) {
-            self.program.exact_listener_pdp_commit_definitions = self
-                .program
-                .exact_listener_pdp_commit_definitions
-                .saturating_add(1);
-        }
-        if is_listener_pdp_receipt_builder_name(&node.sig.ident) {
-            self.program.listener_pdp_receipt_builder_definitions = self
-                .program
-                .listener_pdp_receipt_builder_definitions
-                .saturating_add(1);
-        }
-        if receipt_builder.is_some() {
-            self.program.exact_listener_pdp_receipt_builder_definitions = self
-                .program
-                .exact_listener_pdp_receipt_builder_definitions
-                .saturating_add(1);
-        }
         let symbol = self.free_function_symbol(&node.sig.ident.to_string());
         let identity = self.definition_identity(&symbol);
         self.program.register_function(
@@ -9848,6 +4173,11 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                 Self::short_free_function_symbol(&node.sig.ident.to_string()),
             ],
         );
+        if signature_returns_listener_observations(&node.sig) {
+            self.program
+                .listener_observation_producers
+                .insert(identity.clone());
+        }
         self.function_stack.push(identity);
         self.push_value_binding_scope(
             signature_binding_names(&node.sig),
@@ -9864,41 +4194,9 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         self.typed_listener_spec_bindings
             .push(listener_execution_spec_parameters(&node.sig));
         self.plan_auth_scheme_locals.push(BTreeSet::new());
-        self.exact_listener_pdp_builder_stack
-            .push(receipt_builder.is_some());
-        let commit_dataflow = listener_pdp_receipt_commit_dataflow(
-            &node.block,
-            &node.sig,
-            &self.diverging_function_names,
-            &self.path_aliases,
-        );
-        self.record_evidence(|e| {
-            e.runtime_direct_listener_pdp_receipt_commit |= commit_dataflow.runtime_direct;
-            e.runtime_funnel_listener_pdp_receipt_commit |= commit_dataflow.runtime_funnel;
-            e.settings_federated_listener_pdp_receipt_commit |= commit_dataflow.generated_federated;
-            e.identity_rss_listener_pdp_receipt_commit |= commit_dataflow.generated_rss;
-        });
-        if exact_listener_pdp_commit_function(node) {
-            self.record_evidence(|e| e.typed_listener_pdp_receipt_commit = true);
-        }
-        if let Some(kind) = receipt_builder {
-            self.record_evidence(|e| match kind {
-                ListenerPdpReceiptBuilderKind::RuntimeRss => {
-                    e.runtime_rss_listener_pdp_receipt_builder = true;
-                }
-                ListenerPdpReceiptBuilderKind::RuntimeFederated => {
-                    e.runtime_federated_listener_pdp_receipt_builder = true;
-                }
-                ListenerPdpReceiptBuilderKind::SettingsFederated => {
-                    e.settings_federated_listener_pdp_receipt_builder = true;
-                }
-                ListenerPdpReceiptBuilderKind::IdentityRss => {
-                    e.identity_rss_listener_pdp_receipt_builder = true;
-                }
-            });
-        }
+        self.listener_observation_locals.push(BTreeSet::new());
         syn::visit::visit_item_fn(self, node);
-        self.exact_listener_pdp_builder_stack.pop();
+        self.listener_observation_locals.pop();
         self.plan_auth_scheme_locals.pop();
         self.typed_listener_spec_bindings.pop();
         self.typed_token_provider_bindings.pop();
@@ -9930,21 +4228,47 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                     )
                 })
             });
-            if is_startup_adapter
-                && node.items.iter().any(|item| {
-                    matches!(item, syn::ImplItem::Fn(function) if function.sig.ident == "prepare")
-                })
-            {
-                let symbol = Self::qualified_method_symbol(&owner_identity, "prepare");
-                self.program
-                    .startup_adapter_roots
-                    .insert(self.definition_identity(&symbol));
+            if is_startup_adapter {
+                for method in ["prepare", "activate"] {
+                    if node.items.iter().any(|item| {
+                        matches!(item, syn::ImplItem::Fn(function) if function.sig.ident == method)
+                    }) {
+                        let symbol = Self::qualified_method_symbol(&owner_identity, method);
+                        self.program
+                            .startup_adapter_roots
+                            .insert(self.definition_identity(&symbol));
+                    }
+                }
             }
             self.impl_stack.push(owner);
             self.impl_identity_stack.push(owner_identity);
             self.impl_method_owner_stack
                 .push(token_key(node.self_ty.as_ref()));
+            let inventory_params = node
+                .generics
+                .where_clause
+                .iter()
+                .flat_map(|clause| &clause.predicates)
+                .filter_map(|predicate| {
+                    let syn::WherePredicate::Type(predicate) = predicate else {
+                        return None;
+                    };
+                    let syn::Type::Path(ty) = &predicate.bounded_ty else {
+                        return None;
+                    };
+                    let has_inventory_bound = predicate.bounds.iter().any(|bound| {
+                        matches!(bound, syn::TypeParamBound::Trait(bound)
+                            if bound.path.segments.last().is_some_and(|segment| segment.ident == "InventoryPublication"))
+                    });
+                    has_inventory_bound
+                        .then(|| ty.path.segments.last().map(|segment| segment.ident.to_string()))
+                        .flatten()
+                })
+                .collect();
+            self.inventory_publication_type_params
+                .push(inventory_params);
             syn::visit::visit_item_impl(self, node);
+            self.inventory_publication_type_params.pop();
             self.impl_method_owner_stack.pop();
             self.impl_identity_stack.pop();
             self.impl_stack.pop();
@@ -9993,6 +4317,11 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             identity.clone(),
             [symbol, Self::short_method_symbol(&owner, &method)],
         );
+        if signature_returns_listener_observations(&node.sig) {
+            self.program
+                .listener_observation_producers
+                .insert(identity.clone());
+        }
         self.function_stack.push(identity);
         let mut method_owners = signature_method_owners(
             &node.sig,
@@ -10015,132 +4344,12 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         self.typed_listener_spec_bindings
             .push(listener_execution_spec_parameters(&node.sig));
         self.plan_auth_scheme_locals.push(BTreeSet::new());
-        let exact_listener_pdp_constructor =
-            owner == "ListenerPdpJwksLifecycle" && exact_runtime_listener_pdp_new(node);
-        if owner == "ListenerPdpJwksLifecycle"
-            && node.sig.ident == "new"
-            && !exact_listener_pdp_constructor
-        {
-            self.program.invalid_listener_pdp_receipt_construction = true;
-        }
-        if owner == "ListenerPdpJwksLifecycle" && node.sig.ident == "merge" {
-            self.program.listener_pdp_aggregate_definitions = self
-                .program
-                .listener_pdp_aggregate_definitions
-                .saturating_add(1);
-            if exact_runtime_listener_pdp_merge(node) {
-                self.program.exact_listener_pdp_aggregate_definitions = self
-                    .program
-                    .exact_listener_pdp_aggregate_definitions
-                    .saturating_add(1);
-            }
-        }
-        if owner == "ListenerPdpJwksLifecycle"
-            && matches!(
-                node.sig.ident.to_string().as_str(),
-                "into_module" | "into_output"
-            )
-        {
-            self.program.listener_pdp_materializer_definitions = self
-                .program
-                .listener_pdp_materializer_definitions
-                .saturating_add(1);
-            if exact_listener_pdp_materializer(node) {
-                self.program.exact_listener_pdp_materializer_definitions = self
-                    .program
-                    .exact_listener_pdp_materializer_definitions
-                    .saturating_add(1);
-            }
-        }
-        if owner == "ProviderOutput" && node.sig.ident == "listener_pdp" {
-            self.program.listener_pdp_output_sink_definitions = self
-                .program
-                .listener_pdp_output_sink_definitions
-                .saturating_add(1);
-            if exact_listener_pdp_output_sink(node) {
-                self.program.exact_listener_pdp_output_sink_definitions = self
-                    .program
-                    .exact_listener_pdp_output_sink_definitions
-                    .saturating_add(1);
-            }
-        }
-        if owner == "ProviderOutput" && node.sig.ident == "new" {
-            self.program.provider_output_new_definitions = self
-                .program
-                .provider_output_new_definitions
-                .saturating_add(1);
-            if exact_provider_output_new(node) {
-                self.program.exact_provider_output_new_definitions = self
-                    .program
-                    .exact_provider_output_new_definitions
-                    .saturating_add(1);
-            }
-        }
-        if owner == "ListenerPdpConstructor" && node.sig.ident == "finish" {
-            self.program.listener_pdp_generated_finish_definitions = self
-                .program
-                .listener_pdp_generated_finish_definitions
-                .saturating_add(1);
-            if exact_listener_pdp_generated_finish(node) {
-                self.program.exact_listener_pdp_generated_finish_definitions = self
-                    .program
-                    .exact_listener_pdp_generated_finish_definitions
-                    .saturating_add(1);
-            }
-        }
-        if owner == "ListenerPdpBatch" && node.sig.ident == "transfer" {
-            self.program.listener_pdp_generated_transfer_definitions = self
-                .program
-                .listener_pdp_generated_transfer_definitions
-                .saturating_add(1);
-            if exact_listener_pdp_generated_transfer(node) {
-                self.program
-                    .exact_listener_pdp_generated_transfer_definitions = self
-                    .program
-                    .exact_listener_pdp_generated_transfer_definitions
-                    .saturating_add(1);
-            }
-        }
-        if owner == "UncommittedListenerPdpLifecycle" && node.sig.ident == "add" {
-            self.program.listener_pdp_funnel_add_definitions = self
-                .program
-                .listener_pdp_funnel_add_definitions
-                .saturating_add(1);
-            if exact_listener_pdp_funnel_add(node) {
-                self.program.exact_listener_pdp_funnel_add_definitions = self
-                    .program
-                    .exact_listener_pdp_funnel_add_definitions
-                    .saturating_add(1);
-            }
-        }
-        if owner == "UncommittedListenerPdpLifecycle" && node.sig.ident == "take" {
-            self.program.listener_pdp_funnel_take_definitions = self
-                .program
-                .listener_pdp_funnel_take_definitions
-                .saturating_add(1);
-            if exact_listener_pdp_funnel_take(node) {
-                self.program.exact_listener_pdp_funnel_take_definitions = self
-                    .program
-                    .exact_listener_pdp_funnel_take_definitions
-                    .saturating_add(1);
-            }
-        }
-        self.exact_listener_pdp_constructor_stack
-            .push(exact_listener_pdp_constructor);
-        let commit_dataflow = listener_pdp_receipt_commit_dataflow(
-            &node.block,
-            &node.sig,
-            &self.diverging_function_names,
-            &self.path_aliases,
-        );
-        self.record_evidence(|e| {
-            e.runtime_direct_listener_pdp_receipt_commit |= commit_dataflow.runtime_direct;
-            e.runtime_funnel_listener_pdp_receipt_commit |= commit_dataflow.runtime_funnel;
-            e.settings_federated_listener_pdp_receipt_commit |= commit_dataflow.generated_federated;
-            e.identity_rss_listener_pdp_receipt_commit |= commit_dataflow.generated_rss;
-        });
+        self.listener_observation_locals.push(BTreeSet::new());
+        self.provider_transferred_receipt_locals
+            .push(BTreeSet::new());
         syn::visit::visit_impl_item_fn(self, node);
-        self.exact_listener_pdp_constructor_stack.pop();
+        self.provider_transferred_receipt_locals.pop();
+        self.listener_observation_locals.pop();
         self.plan_auth_scheme_locals.pop();
         self.typed_listener_spec_bindings.pop();
         self.typed_token_provider_bindings.pop();
@@ -10200,24 +4409,6 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             || StandardPathAliases::is_explicit_process_terminator(node.func.as_ref())
         {
             self.invalidate_current_function();
-        }
-        if let syn::Expr::Path(path) = node.func.as_ref() {
-            let segments = path.path.segments.iter().collect::<Vec<_>>();
-            if segments.len() >= 2
-                && segments[segments.len() - 2].ident == "ListenerPdpJwksLifecycle"
-            {
-                let allowed_exact_new = segments.last().is_some_and(|segment| {
-                    segment.ident == "new"
-                        && self
-                            .exact_listener_pdp_builder_stack
-                            .last()
-                            .copied()
-                            .unwrap_or(false)
-                });
-                if !allowed_exact_new {
-                    self.program.invalid_listener_pdp_receipt_construction = true;
-                }
-            }
         }
         if let Some(call) = call_path_last_segment(node.func.as_ref()) {
             if let Some(identity) = self.path_call_identity(node.func.as_ref()) {
@@ -10306,10 +4497,22 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         {
             self.record_evidence(|e| e.domain_transport_from_spire = true);
         }
+        if (call_path_ends_with(node.func.as_ref(), "exact_join")
+            && call_path_contains_segment(node.func.as_ref(), "ProviderRoleBatches"))
+            || (call_path_ends_with(node.func.as_ref(), "from_plan")
+                && call_path_contains_segment(node.func.as_ref(), "ProviderBuild"))
+        {
+            self.record_evidence(|e| e.provider_selection = true);
+        }
+        if let Some(observation) = listener_observation_call(node) {
+            self.record_evidence(|e| e.listener_observations.push(observation));
+        }
         syn::visit::visit_expr_call(self, node);
     }
 
     fn visit_local(&mut self, node: &'ast syn::Local) {
+        let destructured_method_owners =
+            struct_pattern_method_owners(&node.pat, &self.diverging_function_names);
         let method_owner = node.init.as_ref().and_then(|init| {
             local_method_owner(
                 &node.pat,
@@ -10319,6 +4522,31 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                 &self.value_binding_type_map(),
             )
         });
+        if let (Some(binding), Some(init), Some(locals)) = (
+            local_binding_ident(&node.pat),
+            node.init.as_ref(),
+            self.listener_observation_locals.last_mut(),
+        ) && expression_contains_listener_observation(init.expr.as_ref())
+        {
+            locals.insert(binding.to_string());
+        }
+        if in_provider_role_closer_finish(self)
+            && let (Some(binding), Some(init)) =
+                (local_binding_ident(&node.pat), node.init.as_ref())
+        {
+            let value_types = self.value_binding_type_map();
+            let is_transferred = provider_transfer_expression(
+                init.expr.as_ref(),
+                &self.path_aliases,
+                &self.diverging_function_names,
+                &value_types,
+            );
+            if is_transferred
+                && let Some(locals) = self.provider_transferred_receipt_locals.last_mut()
+            {
+                locals.insert(binding.to_string());
+            }
+        }
         let local_binding = match (&node.pat, &node.init) {
             (syn::Pat::Ident(pattern), Some(init)) => self
                 .profile_binding_kind(init.expr.as_ref())
@@ -10348,6 +4576,9 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         if let Some(scope) = self.value_binding_scopes.last_mut() {
             scope.extend(pattern_binding_names(&node.pat));
         }
+        if let Some(scope) = self.value_binding_method_owners.last_mut() {
+            scope.extend(destructured_method_owners);
+        }
         if let (Some(owner), Some(binding), Some(scope)) = (
             method_owner,
             local_binding_ident(&node.pat),
@@ -10359,7 +4590,10 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
 
     fn visit_arm(&mut self, node: &'ast syn::Arm) {
         let carrier = profile_carrier_binding(&node.pat);
-        self.push_value_binding_scope(pattern_binding_names(&node.pat), BTreeMap::new());
+        self.push_value_binding_scope(
+            pattern_binding_names(&node.pat),
+            struct_pattern_method_owners(&node.pat, &self.diverging_function_names),
+        );
         if let Some(binding) = carrier.as_ref() {
             self.profile_carrier_bindings
                 .push(BTreeSet::from([binding.clone()]));
@@ -10408,6 +4642,10 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         self.pop_value_binding_scope();
     }
 
+    #[allow(
+        clippy::cognitive_complexity,
+        reason = "one typed call visitor records the closed security and lifecycle evidence vocabulary"
+    )]
     fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
         let receiver_name = simple_path_ident(ungroup_profile_expression(node.receiver.as_ref()));
         let bound_owner = receiver_name
@@ -10418,6 +4656,27 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             .as_deref()
             .is_some_and(|name| self.value_binding_is_shadowed(name));
         let value_types = self.value_binding_type_map();
+        let receiver_owner = bound_owner
+            .clone()
+            .or_else(|| {
+                expression_method_owner(
+                    ungroup_profile_expression(node.receiver.as_ref()),
+                    &self.path_aliases,
+                    &self.diverging_function_names,
+                    &value_types,
+                )
+            })
+            .or_else(|| {
+                field_receiver_owner(node.receiver.as_ref(), &self.diverging_function_names)
+            })
+            .or_else(|| direct_type_receiver_name(node.receiver.as_ref()));
+        if method_is_provider_build(node)
+            && receiver_owner
+                .as_deref()
+                .is_some_and(|owner| owner.ends_with("Plan"))
+        {
+            self.record_evidence(|e| e.provider_selection = true);
+        }
         let diverges = bound_owner.as_deref().is_some_and(|owner| {
             self.diverging_function_names
                 .owner_method_is_diverging(owner, &node.method)
@@ -10441,6 +4700,9 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
             _ => None,
         };
         if let Some(owner) = phase_owner {
+            self.record_call(&Self::short_method_symbol(owner, &method));
+        } else if let Some(owner) = bound_owner.as_deref() {
+            let owner = owner.rsplit("::").next().unwrap_or(owner);
             self.record_call(&Self::short_method_symbol(owner, &method));
         } else if let Some(identity) = self.method_receiver_identity(&node.receiver, &method) {
             self.record_call(&identity);
@@ -10468,6 +4730,129 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
                     e.profile_managed_resource_calls.saturating_add(1);
             });
         }
+        match node.method.to_string().as_str() {
+            "finish"
+                if receiver_owner
+                    .as_deref()
+                    .is_some_and(is_provider_finish_owner)
+                    || (in_provider_role_closer_finish(self)
+                        && provider_role_closer_field_has_type(
+                            node.receiver.as_ref(),
+                            &self.diverging_function_names,
+                            "ProviderRoleBatches",
+                        )) =>
+            {
+                let runtime = receiver_owner
+                    .as_deref()
+                    .is_some_and(|owner| owner.ends_with("ProviderBuild"));
+                let transferred_receipt_flow = !runtime
+                    && node.args.iter().any(|argument| {
+                        provider_transfer_expression(
+                            argument,
+                            &self.path_aliases,
+                            &self.diverging_function_names,
+                            &value_types,
+                        ) || simple_path_ident(ungroup_profile_expression(argument)).is_some_and(
+                            |binding| {
+                                self.provider_transferred_receipt_locals
+                                    .last()
+                                    .is_some_and(|locals| locals.contains(&binding))
+                            },
+                        )
+                    });
+                self.record_evidence(|e| {
+                    e.provider_typed_finish = true;
+                    e.provider_finish_transfer |= transferred_receipt_flow;
+                    e.runtime_provider_finish |= runtime;
+                });
+            }
+            "publish" => {
+                let inventory_params = self
+                    .inventory_publication_type_params
+                    .iter()
+                    .flatten()
+                    .collect::<BTreeSet<_>>();
+                let receiver_field = receiver_name.clone().or_else(|| {
+                    let syn::Expr::Field(field) =
+                        ungroup_profile_expression(node.receiver.as_ref())
+                    else {
+                        return None;
+                    };
+                    let syn::Member::Named(name) = &field.member else {
+                        return None;
+                    };
+                    Some(name.to_string())
+                });
+                let typed_inventory_sink = receiver_owner.as_deref().is_some_and(|owner| {
+                    owner == "runtimeexec::inventory::InventoryPublisher"
+                        || inventory_params
+                            .contains(&owner.rsplit("::").next().unwrap_or(owner).to_string())
+                }) || receiver_field.as_deref().is_some_and(|field| {
+                    self.diverging_function_names
+                        .struct_fields
+                        .iter()
+                        .any(|((_, name), ty)| name == field && inventory_params.contains(ty))
+                });
+                self.record_evidence(|e| {
+                    e.listener_publish_sink_seen |= typed_inventory_sink;
+                    e.inventory_publish |= typed_inventory_sink;
+                });
+                let direct_or_bound = node.args.iter().any(|argument| {
+                    expression_contains_listener_observation(argument)
+                        || simple_path_ident(ungroup_profile_expression(argument)).is_some_and(
+                            |binding| {
+                                self.listener_observation_locals
+                                    .last()
+                                    .is_some_and(|locals| locals.contains(&binding))
+                            },
+                        )
+                });
+                if typed_inventory_sink && direct_or_bound {
+                    self.record_evidence(|e| e.listener_publish_flow = true);
+                }
+                if typed_inventory_sink {
+                    for argument in &node.args {
+                        let source = match ungroup_profile_expression(argument) {
+                            syn::Expr::MethodCall(call) => {
+                                let name = simple_path_ident(ungroup_profile_expression(
+                                    call.receiver.as_ref(),
+                                ));
+                                name.as_deref()
+                                    .and_then(|name| self.value_binding_method_owner(name))
+                                    .map(|owner| {
+                                        let owner = owner.rsplit("::").next().unwrap_or(owner);
+                                        Self::short_method_symbol(owner, &call.method.to_string())
+                                    })
+                                    .or_else(|| {
+                                        self.method_receiver_identity(
+                                            call.receiver.as_ref(),
+                                            &call.method.to_string(),
+                                        )
+                                    })
+                                    .or_else(|| {
+                                        Some(format!("listener-producer-name::{}", call.method))
+                                    })
+                            }
+                            syn::Expr::Call(call) => self.path_call_identity(call.func.as_ref()),
+                            _ => None,
+                        };
+                        if let (Some(function), Some(source)) =
+                            (self.current_function().map(str::to_owned), source)
+                            && let Some(info) = self.program.functions.get_mut(&function)
+                        {
+                            info.listener_publish_sources.insert(source);
+                            if let syn::Expr::MethodCall(call) =
+                                ungroup_profile_expression(argument)
+                            {
+                                info.listener_publish_sources
+                                    .insert(format!("listener-producer-name::{}", call.method));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
         if node.method == "profile_binding"
             && self.receiver_is_typed_token_provider(node.receiver.as_ref())
         {
@@ -10480,6 +4865,12 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
     }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if node.path.segments.len() >= 2 {
+            let expression = syn::Expr::Path(node.clone());
+            if let Some(identity) = self.path_call_identity(&expression) {
+                self.record_call(&identity);
+            }
+        }
         if path_contains_segment(&node.path, "DOMAIN_TRANSPORT_READY_PROBE_NAME") {
             self.record_evidence(|e| e.domain_transport_ready_probe = true);
         }
@@ -10519,30 +4910,6 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
     }
 
     fn visit_expr_struct(&mut self, node: &'ast syn::ExprStruct) {
-        let explicit_lifecycle = node
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "ListenerPdpJwksLifecycle");
-        let lifecycle_self = node.path.is_ident("Self")
-            && self
-                .impl_stack
-                .last()
-                .is_some_and(|owner| owner == "ListenerPdpJwksLifecycle");
-        if (explicit_lifecycle || lifecycle_self)
-            && !self
-                .exact_listener_pdp_builder_stack
-                .last()
-                .copied()
-                .unwrap_or(false)
-            && !self
-                .exact_listener_pdp_constructor_stack
-                .last()
-                .copied()
-                .unwrap_or(false)
-        {
-            self.program.invalid_listener_pdp_receipt_construction = true;
-        }
         if path_ends_with(&node.path, "RssAccess")
             && path_contains_segment(&node.path, "ProfileBinding")
         {
@@ -10959,6 +5326,10 @@ fn listener_execution_spec_parameters(signature: &syn::Signature) -> BTreeSet<St
         .collect()
 }
 
+fn signature_returns_listener_observations(signature: &syn::Signature) -> bool {
+    matches!(&signature.output, syn::ReturnType::Type(_, ty) if type_contains_ident(ty, "BoundListenerObservation"))
+}
+
 fn exact_profile_binding_definition(function: &syn::ImplItemFn) -> bool {
     if function.sig.receiver().is_none()
         || !return_type_contains_ident(&function.sig.output, "ProfileBinding")
@@ -11319,24 +5690,183 @@ fn required_features(provider: &DiportProvider) -> &'static [&'static str] {
     provider.provider.required_features()
 }
 
-fn dependency_features(cargo_toml: &toml::Value, dependency: &str) -> Option<BTreeSet<String>> {
-    let dep = cargo_toml
-        .get("dependencies")
-        .and_then(toml::Value::as_table)
-        .and_then(|deps| deps.get(dependency))?;
-    let features = dep
-        .as_table()
-        .and_then(|table| table.get("features"))
-        .and_then(toml::Value::as_array)
-        .map(|items| {
-            items
+fn selected_direct_normal_dependency_features(
+    facts: &WorkspaceFacts,
+    build: &BuildFacts,
+    package: &PackageKey,
+    assembly: &GovernedAssembly,
+    dependency_name: &str,
+) -> Result<Option<BTreeSet<String>>> {
+    for dependency in facts.direct_dependencies_for(package)? {
+        if dependency.name() != dependency_name || dependency.kind() != DependencyKind::Normal {
+            continue;
+        }
+        let Some(resolved) = dependency.resolved() else {
+            return Err(AssemblyCargoFactsError::UnresolvedDependency {
+                assembly: assembly.manifest().name().to_owned(),
+                dependency: dependency_name.to_owned(),
+            }
+            .into());
+        };
+        if build.is_dependency_selected(BuildSide::Target, package, dependency.name(), resolved) {
+            return Ok(Some(dependency.requested_features().clone()));
+        }
+    }
+    Ok(None)
+}
+
+fn validate_cargo_capability_specs(
+    facts: &WorkspaceFacts,
+    build: &BuildFacts,
+    package: &PackageKey,
+    assembly: &GovernedAssembly,
+    domain: &str,
+    specs: &[RequiredCapabilitySpec],
+    findings: &mut Vec<Finding>,
+) -> Result<()> {
+    for spec in specs {
+        let RequiredCapabilityExpectation::CargoDependency {
+            dependency,
+            required_features,
+        } = spec.expectation
+        else {
+            continue;
+        };
+        match selected_direct_normal_dependency_features(
+            facts,
+            build,
+            package,
+            assembly,
+            dependency,
+        )? {
+            None => findings.push(finding(
+                Rule::RequiredCapability,
+                assembly.cargo_label(),
+                format!(
+                    "field=dependencies domain={domain} capability={} expected selected direct normal [dependencies].{dependency} resolving to package `{dependency}` in {}; actual=missing-or-inactive-dependency",
+                    spec.capability,
+                    assembly.cargo_label()
+                ),
+            )),
+            Some(features)
+                if required_features
+                    .iter()
+                    .any(|required| !features.contains(*required)) =>
+            {
+                findings.push(finding(
+                    Rule::RequiredCapability,
+                    assembly.cargo_label(),
+                    format!(
+                        "field=dependencies domain={domain} capability={} expected [dependencies].{dependency} features {:?}; actual={features:?}",
+                        spec.capability, required_features
+                    ),
+                ));
+            }
+            Some(_) => {}
+        }
+    }
+    Ok(())
+}
+
+fn validate_assembly_cargo_facts(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    assembly: &GovernedAssembly,
+) -> Result<Vec<Finding>> {
+    let package = assembly_package_key(root, facts, assembly)?;
+    let build = resolve_assembly_build(facts, &package, FeatureSelection::All)?;
+    let mut findings = Vec::new();
+
+    for (index, provider) in assembly.manifest().diport_providers().iter().enumerate() {
+        if provider.lifecycle != ProviderLifecycle::Active {
+            continue;
+        }
+        let source = format!(
+            "{}:{}",
+            assembly.manifest_label(),
+            provider_table_line(assembly.source_text(), index)
+        );
+        let subject = format!("{source} {}", provider.provider);
+        match selected_direct_normal_dependency_features(
+            facts,
+            &build,
+            &package,
+            assembly,
+            &provider.provider_crate,
+        )? {
+            None => findings.push(finding(
+                Rule::ActiveProviderDependency,
+                &subject,
+                format!(
+                    "field=providerCrate active providerCrate `{}` must be a selected direct normal dependency with the same resolved package identity in {}",
+                    provider.provider_crate,
+                    assembly.cargo_label()
+                ),
+            )),
+            Some(actual_features) => {
+                let missing = required_features(provider)
+                    .iter()
+                    .filter(|feature| !actual_features.contains(**feature))
+                    .copied()
+                    .collect::<Vec<_>>();
+                if !missing.is_empty() {
+                    findings.push(finding(
+                        Rule::ActiveProviderFeature,
+                        &subject,
+                        format!(
+                            "field=requiredFeatures active provider `{}` for port `{}` requires Cargo feature {:?}; check {} [dependencies].{}",
+                            provider.provider,
+                            provider.port,
+                            missing,
+                            assembly.cargo_label(),
+                            provider.provider_crate
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    if is_deviceidentity_pilot_shape(assembly) {
+        validate_cargo_capability_specs(
+            facts,
+            &build,
+            &package,
+            assembly,
+            "deviceidentity",
+            DEVICEIDENTITY_PILOT_REQUIRED_CAPABILITIES,
+            &mut findings,
+        )?;
+    } else {
+        for domain in assembly.manifest().domains() {
+            if let Some(spec) = REQUIRED_CAPABILITY_DOMAINS
                 .iter()
-                .filter_map(toml::Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect()
-        })
-        .unwrap_or_default();
-    Some(features)
+                .find(|spec| spec.domain == domain.as_str())
+            {
+                validate_cargo_capability_specs(
+                    facts,
+                    &build,
+                    &package,
+                    assembly,
+                    spec.domain,
+                    spec.capabilities,
+                    &mut findings,
+                )?;
+            }
+        }
+        if requires_distributed_capabilities(assembly) {
+            validate_cargo_capability_specs(
+                facts,
+                &build,
+                &package,
+                assembly,
+                "distributed",
+                DURABLE_TOPOLOGY_REQUIRED_CAPABILITIES,
+                &mut findings,
+            )?;
+        }
+    }
+    Ok(findings)
 }
 
 fn provider_table_line(src: &str, provider_index: usize) -> usize {
@@ -11380,8 +5910,26 @@ mod tests {
             !root.join("contracts").exists(),
             "contract-bearing fixtures must use the governed contract fixture loader"
         );
-        let (assemblies, findings) = discover_test_targets(root)?;
-        validate_discovered_root(root, assemblies, findings)
+        let (assemblies, mut findings) = discover_test_targets(root)?;
+        findings.extend(validate_runtime_inventory_listener_provenance(
+            root,
+            &assemblies,
+        )?);
+        if root.join("Cargo.toml").is_file() {
+            let command_facts =
+                crate::workspace_facts::CommandWorkspaceFacts::for_test_fixture(root);
+            let facts = command_facts.get()?;
+            for assembly in &assemblies {
+                findings.extend(validate_assembly(assembly));
+                findings.extend(validate_assembly_cargo_facts(root, facts, assembly)?);
+                findings.extend(validate_target_domain_closure(root, facts, assembly)?);
+            }
+        } else {
+            for assembly in &assemblies {
+                findings.extend(validate_assembly(assembly));
+            }
+        }
+        Ok((assemblies.len(), findings))
     }
 
     /// Partial fixture roots intentionally opt into target-scoped governance loading.
@@ -11427,7 +5975,9 @@ mod tests {
                 write(&root.join("contracts"), "not a directory")?;
             }
 
-            let error = super::validate_root(&root)
+            let workspace_root = crate::workspace_root()?;
+            let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&workspace_root);
+            let error = super::validate_root(&root, command_facts.get()?)
                 .expect_err("production assembly validation must require a contracts directory");
             let message = format!("{error:#}");
             assert!(
@@ -11496,6 +6046,176 @@ mod tests {
         fs::create_dir_all(&dir)?;
         write(&dir.join("assembly.toml"), &manifest)?;
         write(&dir.join("Cargo.toml"), cargo)?;
+        Ok(())
+    }
+
+    fn enable_fixture_cargo_workspace(root: &Path) -> anyhow::Result<()> {
+        let assemblies_root = root.join("assemblies");
+        let mut members = Vec::new();
+        let mut dependency_packages = BTreeMap::<PathBuf, (String, BTreeSet<String>)>::new();
+        for entry in fs::read_dir(&assemblies_root)? {
+            let assembly_dir = entry?.path();
+            if !assembly_dir.is_dir() || !assembly_dir.join("Cargo.toml").is_file() {
+                continue;
+            }
+            let cargo_path = assembly_dir.join("Cargo.toml");
+            let mut cargo: toml::Value = toml::from_str(&fs::read_to_string(&cargo_path)?)?;
+            if let Some(table) = cargo.as_table_mut() {
+                table.remove("lints");
+                table.remove("bin");
+                table.insert(
+                    "features".to_owned(),
+                    toml::Value::Table(toml::Table::from_iter([(
+                        "default".to_owned(),
+                        toml::Value::Array(Vec::new()),
+                    )])),
+                );
+            }
+            let package = cargo
+                .get_mut("package")
+                .and_then(toml::Value::as_table_mut)
+                .context("fixture Cargo.toml [package]")?;
+            package.insert(
+                "version".to_owned(),
+                toml::Value::String("0.0.0".to_owned()),
+            );
+            package.insert("edition".to_owned(), toml::Value::String("2024".to_owned()));
+            package.insert(
+                "rust-version".to_owned(),
+                toml::Value::String("1.86".to_owned()),
+            );
+            package.remove("build");
+
+            fn retain_path_dependencies(value: &mut toml::Value) {
+                let Some(table) = value.as_table_mut() else {
+                    return;
+                };
+                for (key, value) in table.iter_mut() {
+                    if matches!(
+                        key.as_str(),
+                        "dependencies" | "dev-dependencies" | "build-dependencies"
+                    ) {
+                        if let Some(dependencies) = value.as_table_mut() {
+                            dependencies.retain(|_, declaration| {
+                                declaration
+                                    .as_table()
+                                    .is_some_and(|table| table.contains_key("path"))
+                            });
+                        }
+                    } else {
+                        retain_path_dependencies(value);
+                    }
+                }
+            }
+            retain_path_dependencies(&mut cargo);
+
+            fn collect_dependency_tables<'a>(
+                value: &'a toml::Value,
+                output: &mut Vec<(&'a str, &'a toml::Value)>,
+            ) {
+                let Some(table) = value.as_table() else {
+                    return;
+                };
+                for (key, value) in table {
+                    if matches!(
+                        key.as_str(),
+                        "dependencies" | "dev-dependencies" | "build-dependencies"
+                    ) {
+                        if let Some(dependencies) = value.as_table() {
+                            output.extend(
+                                dependencies
+                                    .iter()
+                                    .map(|(name, declaration)| (name.as_str(), declaration)),
+                            );
+                        }
+                    } else {
+                        collect_dependency_tables(value, output);
+                    }
+                }
+            }
+
+            let mut declarations = Vec::new();
+            collect_dependency_tables(&cargo, &mut declarations);
+            for (name, declaration) in declarations {
+                let Some(table) = declaration.as_table() else {
+                    continue;
+                };
+                let Some(path) = table.get("path").and_then(toml::Value::as_str) else {
+                    continue;
+                };
+                let absolute = assembly_dir.join(path);
+                let package = table
+                    .get("package")
+                    .and_then(toml::Value::as_str)
+                    .unwrap_or(name)
+                    .to_owned();
+                let features = table
+                    .get("features")
+                    .and_then(toml::Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(toml::Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<BTreeSet<_>>();
+                dependency_packages
+                    .entry(absolute)
+                    .and_modify(|(_, known)| known.extend(features.clone()))
+                    .or_insert((package, features));
+            }
+            write(&cargo_path, &toml::to_string(&cargo)?)?;
+            fs::create_dir_all(assembly_dir.join("src"))?;
+            if !assembly_dir.join("src/lib.rs").exists() {
+                write(&assembly_dir.join("src/lib.rs"), "pub fn fixture() {}")?;
+            }
+            members.push(
+                assembly_dir
+                    .strip_prefix(root)?
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+
+        for (path, (package, requested_features)) in dependency_packages {
+            fs::create_dir_all(path.join("src"))?;
+            let mut features = requested_features;
+            features.extend(
+                [
+                    "auth-audit-sink",
+                    "backend",
+                    "domain-settings",
+                    "sign",
+                    "verify",
+                ]
+                .into_iter()
+                .map(ToOwned::to_owned),
+            );
+            let feature_table = features
+                .into_iter()
+                .map(|feature| format!("{feature} = []"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            write(
+                &path.join("Cargo.toml"),
+                &format!(
+                    "[package]\nname = {package:?}\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[features]\n{feature_table}\n"
+                ),
+            )?;
+            write(&path.join("src/lib.rs"), "pub fn fixture() {}")?;
+            members.push(path.strip_prefix(root)?.to_string_lossy().into_owned());
+        }
+        members.sort();
+        members.dedup();
+        let member_lines = members
+            .iter()
+            .map(|member| format!("  {member:?},"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        write(
+            &root.join("Cargo.toml"),
+            &format!(
+                "[workspace]\nresolver = \"2\"\nmembers = [\n{member_lines}\n]\n\n[workspace.package]\nversion = \"0.0.0\"\nedition = \"2024\"\n"
+            ),
+        )?;
         Ok(())
     }
 
@@ -11765,6 +6485,9 @@ edition = "2024"
 name = "{domain}"
 version = "0.0.0"
 edition = "2024"
+
+[features]
+test-support = []
 "#
                 ),
             )?;
@@ -11810,19 +6533,12 @@ edition = "2024"
             .filter(|finding| {
                 matches!(
                     finding.rule,
-                    Rule::ActiveDomainDependency | Rule::InactiveDomainDependencyClosure
+                    Rule::ActiveDomainDependency
+                        | Rule::InactiveDomainDependencyClosure
+                        | Rule::ProductionTestSupport
                 )
             })
             .collect())
-    }
-
-    #[test]
-    fn assembly_domain_metadata_indexes_all_workspace_features() {
-        let args = cargo_metadata_args("/tmp/rss/Cargo.toml");
-        assert!(
-            args.contains(&"--all-features"),
-            "workspace package classification must see the full compile surface: {args:?}"
-        );
     }
 
     fn production_security_manifest(
@@ -12328,6 +7044,7 @@ outputs = ["probes", "resources", "workers"]
     fn required_capability_findings(manifest: &str, cargo: &str) -> anyhow::Result<Vec<Finding>> {
         let root = unique_tmp("assembly-capabilities");
         write_assembly(&root, manifest, cargo)?;
+        enable_fixture_cargo_workspace(&root)?;
         match validate_test_fixture_root_without_contracts(&root) {
             Ok((_count, findings)) => Ok(findings
                 .into_iter()
@@ -12474,6 +7191,7 @@ domains = ["identity"]
                 .any(|finding| finding.rule == Rule::PdpReplayStoreCapability),
             "runtime Pdp without durable replay provider must fail: {findings:?}"
         );
+
         Ok(())
     }
 
@@ -13473,239 +8191,69 @@ fn mtls_config_from_env() {
     }
 
     #[test]
-    fn runtime_inventory_provider_binding_rejects_handwritten_production_callsite()
-    -> anyhow::Result<()> {
-        let handwritten = syn::parse_file(
-            r#"
-fn build() {
-    let _ = runtimeexec::inventory::ProviderProbeBinding::new("provider", Vec::new());
-}
-"#,
-        )
-        .expect("synthetic production source");
-        assert_eq!(production_provider_binding_evidence(&handwritten).calls, 1);
-
-        let aliased = syn::parse_file(
-            r#"
-use runtimeexec::inventory::ProviderProbeBinding as Binding;
-fn build() { let _ = Binding::new("provider", Vec::new()); }
-"#,
-        )
-        .expect("synthetic alias source");
-        assert_eq!(production_provider_binding_evidence(&aliased).imports, 1);
-
-        let module_aliased_impl = syn::parse_file(
-            r#"
-use runtimeexec::inventory as model;
-struct Receipt;
-impl Receipt {
-    fn consume(self) {
-        let _ = model::ProviderProbeBinding::new("provider", Vec::new());
-    }
-}
-"#,
-        )
-        .expect("synthetic module alias source");
-        let evidence = production_provider_binding_evidence(&module_aliased_impl);
-        assert_eq!(evidence.calls, 1);
-        assert_eq!(evidence.constructor_references, 1);
-
-        let type_aliased = syn::parse_file(
-            r#"
-type Binding = runtimeexec::inventory::ProviderProbeBinding;
-fn build() { let _ = Binding::new("provider", Vec::new()); }
-"#,
-        )
-        .expect("synthetic type alias source");
-        assert_eq!(
-            production_provider_binding_evidence(&type_aliased).type_aliases,
-            1
-        );
-
-        let macro_wrapped = syn::parse_file(
-            r#"
-macro_rules! mint {
-    () => { runtimeexec::inventory::ProviderProbeBinding::new("provider", Vec::new()) };
-}
-fn build() { let _ = mint!(); }
-"#,
-        )
-        .expect("synthetic macro source");
-        assert!(production_provider_binding_evidence(&macro_wrapped).macros > 0);
-
-        let test_only = syn::parse_file(
-            r#"
-#[cfg(test)]
-mod tests {
-    use runtimeexec::inventory::ProviderProbeBinding;
-    fn fixture() { let _ = ProviderProbeBinding::new("provider", Vec::new()); }
-}
-"#,
-        )
-        .expect("synthetic test source");
-        assert_eq!(
-            production_provider_binding_evidence(&test_only).calls
-                + production_provider_binding_evidence(&test_only).imports,
-            0
-        );
-
-        let root = unique_tmp("inventory-provider-production-validator");
-        write_assembly(
-            &root,
-            &manifest_with_intent(),
-            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
-        )?;
-        let source_dir = root.join("assemblies/runtime/src");
-        fs::create_dir_all(&source_dir)?;
-        write(
-            &source_dir.join("provider_output.rs"),
-            "fn consume() { let _ = runtimeexec::inventory::ProviderProbeBinding::new(\"provider\", Vec::new()); }",
-        )?;
-        // A production file/module named `test_support` is not a test boundary.
-        write(
-            &source_dir.join("test_support.rs"),
-            "mod test_support { fn mint() { let _ = runtimeexec::inventory::ProviderProbeBinding::new(\"forged\", Vec::new()); } }",
-        )?;
-        let (assemblies, _) = discover_test_targets(&root)?;
-        let findings = validate_runtime_inventory_provider_provenance(&root, &assemblies)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::RuntimeInventoryProviderProvenance),
-            "production validator accepted an unguarded test_support callsite: {findings:#?}"
-        );
-
-        write(
-            &source_dir.join("test_support.rs"),
-            "#[cfg(feature = \"test-support\")] mod test_support { fn mint() { let _ = runtimeexec::inventory::ProviderProbeBinding::new(\"fixture\", Vec::new()); } }",
-        )?;
-        let (assemblies, _) = discover_test_targets(&root)?;
-        assert!(
-            validate_runtime_inventory_provider_provenance(&root, &assemblies)?.is_empty(),
-            "an explicit test-only cfg must remain outside production evidence"
-        );
-        fs::remove_dir_all(root)?;
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_inventory_provider_binding_real_completion_funnels_are_exact() -> anyhow::Result<()>
-    {
-        let root = crate::workspace_root()?;
-        let (assemblies, _) = discover(&root)?;
-        let findings = validate_runtime_inventory_provider_provenance(&root, &assemblies)?;
-        assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
-        Ok(())
-    }
-
-    #[test]
-    fn runtime_inventory_listener_provenance_rejects_detached_or_aliased_construction()
-    -> anyhow::Result<()> {
-        let direct = syn::parse_file(
-            r#"
-fn publish(bound: Server) {
-    let _ = runtimeexec::inventory::BoundListenerObservation::from_bound(
-        "admin", kind(), auth(), scheme(), bound.local_addr(),
-    );
-}
-"#,
-        )
-        .expect("direct bound construction");
-        let evidence = production_listener_observation_evidence(&direct);
-        assert_eq!(evidence.calls, 1);
-        assert_eq!(evidence.direct_local_addr_calls, 1);
-        assert_eq!(evidence.constructor_references, 1);
-        assert_eq!(evidence.direct_observations[0].receiver, "bound");
-
-        let detached = syn::parse_file(
-            r#"
-fn publish(bound: Server) {
-    let address = bound.local_addr();
-    let _ = runtimeexec::inventory::BoundListenerObservation::from_bound(
-        "admin", kind(), auth(), scheme(), address,
-    );
-}
-"#,
-        )
-        .expect("detached address construction");
-        let evidence = production_listener_observation_evidence(&detached);
-        assert_eq!(evidence.calls, 1);
-        assert_eq!(evidence.direct_local_addr_calls, 0);
-
-        let aliased = syn::parse_file(
-            r#"
+    fn runtime_inventory_listener_provenance_rejects_detached_dead_or_swapped_flow() {
+        const PREFIX: &str = r#"
+struct Server;
+struct UnrelatedPublisher;
+struct FakeInventoryPublisher;
+use runtimeexec::inventory::InventoryPublisher;
+impl InventoryPublisher { fn publish(&self, _observations: Vec<Observation>) {} }
+impl UnrelatedPublisher { fn publish(&self, _observations: Vec<Observation>) {} }
+impl FakeInventoryPublisher { fn publish(&self, _observations: Vec<Observation>) {} }
 use runtimeexec::inventory::BoundListenerObservation as Observation;
-type CopyableObservation = runtimeexec::inventory::BoundListenerObservation;
-macro_rules! mint {
-    ($bound:expr) => { runtimeexec::inventory::BoundListenerObservation::from_bound(
-        "admin", kind(), auth(), scheme(), $bound.local_addr(),
-    ) };
-}
-"#,
-        )
-        .expect("listener escape source");
-        let evidence = production_listener_observation_evidence(&aliased);
-        assert_eq!(evidence.imports, 1);
-        assert_eq!(evidence.type_aliases, 1);
-        assert!(evidence.macros > 0);
+struct Adapter { publisher: InventoryPublisher, primary: Server, admin: Server }
+"#;
+        let expected = [ExpectedListenerObservation {
+            id: "\"admin-main\"",
+            kind: "Kind::Admin",
+            auth: "Auth::Token",
+        }];
+        let accepts = |body: &str| {
+            let file = syn::parse_file(&format!(
+                "{PREFIX} impl LaunchAdapter for Adapter {{ fn activate(self) {{ {body} }} }}"
+            ))
+            .expect("listener flow fixture parses");
+            let evidence = file_security_closeout_program(&file).reachable_evidence_from_run();
+            evidence.listener_publish_flow
+                && listener_observations_match(&evidence.listener_observations, &expected)
+        };
 
-        let test_only = syn::parse_file(
-            r#"
-#[cfg(test)]
-mod tests {
-    fn fixture(bound: Server) {
-        let address = bound.local_addr();
-        let _ = runtimeexec::inventory::BoundListenerObservation::from_bound(
-            "admin", kind(), auth(), scheme(), address,
-        );
-    }
-}
-"#,
-        )
-        .expect("test-only listener source");
-        assert!(production_listener_observation_evidence(&test_only).is_empty());
+        assert!(accepts(
+            "self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.admin.local_addr())]));"
+        ));
+        assert!(!accepts(
+            "let address = self.admin.local_addr(); self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), address)]));"
+        ));
+        assert!(!accepts(
+            "let _ = Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.admin.local_addr()); self.publisher.publish(Vec::new());"
+        ));
+        assert!(!accepts(
+            "self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.primary.local_addr())]));"
+        ));
 
-        let root = unique_tmp("inventory-listener-production-validator");
-        write_assembly(
-            &root,
-            &manifest_with_intent(),
-            "[package]\nname = \"runtime\"\nversion = \"0.0.0\"\n",
-        )?;
-        let source_dir = root.join("assemblies/runtime/src");
-        fs::create_dir_all(&source_dir)?;
-        write(
-            &source_dir.join("listeners.rs"),
-            r#"
-fn observations(prepared: Prepared) {
-    runtimeexec::inventory::BoundListenerObservation::from_bound("primary-main", assembly_schema::AssemblyListenerKind::Primary, assembly_schema::ListenerAuth::FederatedAccessToken, scheme(), prepared.admin.bound.local_addr());
-    runtimeexec::inventory::BoundListenerObservation::from_bound("admin-main", assembly_schema::AssemblyListenerKind::Admin, assembly_schema::ListenerAuth::FederatedAccessToken, scheme(), prepared.primary.bound.local_addr());
-    runtimeexec::inventory::BoundListenerObservation::from_bound("health-main", assembly_schema::AssemblyListenerKind::Health, assembly_schema::ListenerAuth::NoAuth, scheme(), prepared.health.bound.local_addr());
-}
-"#,
-        )?;
-        let (assemblies, _) = discover_test_targets(&root)?;
-        let findings = validate_runtime_inventory_listener_provenance(&root, &assemblies)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::RuntimeInventoryListenerProvenance),
-            "production validator accepted swapped primary/admin bound receivers: {findings:#?}"
-        );
+        let unrelated = syn::parse_file(&format!(
+            "{PREFIX} struct WrongAdapter {{ publisher: UnrelatedPublisher, admin: Server }} impl LaunchAdapter for WrongAdapter {{ fn activate(self) {{ self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.admin.local_addr())])); }} }}"
+        ))
+        .expect("unrelated publish fixture parses");
+        let evidence = file_security_closeout_program(&unrelated).reachable_evidence_from_run();
+        assert!(!evidence.listener_publish_sink_seen);
+        assert!(!evidence.listener_publish_flow);
 
-        write(
-            &source_dir.join("test_support.rs"),
-            "mod test_support { fn forge(bound: Server) { runtimeexec::inventory::BoundListenerObservation::from_bound(\"x\", kind(), auth(), scheme(), bound.local_addr()); } }",
-        )?;
-        let findings = validate_runtime_inventory_listener_provenance(&root, &assemblies)?;
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::RuntimeInventoryListenerProvenance
-                    && finding.subject.ends_with("test_support.rs")
-            }),
-            "unguarded test_support source must be production evidence: {findings:#?}"
-        );
-        fs::remove_dir_all(root)?;
-        Ok(())
+        let suffix_bait = syn::parse_file(&format!(
+            "{PREFIX} struct SuffixBaitAdapter {{ publisher: FakeInventoryPublisher, admin: Server }} impl LaunchAdapter for SuffixBaitAdapter {{ fn activate(self) {{ self.publisher.publish(Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), self.admin.local_addr())])); }} }}"
+        ))
+        .expect("inventory publisher suffix bait parses");
+        let evidence = file_security_closeout_program(&suffix_bait).reachable_evidence_from_run();
+        assert!(!evidence.listener_publish_sink_seen);
+        assert!(!evidence.listener_publish_flow);
+
+        let dead = syn::parse_file(&format!(
+            "{PREFIX} fn dead(server: Server) -> Vec<Observation> {{ Vec::from([Observation::from_bound(\"admin-main\", Kind::Admin, Auth::Token, scheme(), server.local_addr())]) }} impl LaunchAdapter for Adapter {{ fn activate(self) {{ self.publisher.publish(Vec::new()); }} }}"
+        ))
+        .expect("dead listener fixture parses");
+        let evidence = file_security_closeout_program(&dead).reachable_evidence_from_run();
+        assert!(!evidence.listener_publish_flow);
+        assert!(evidence.listener_observations.is_empty());
     }
 
     #[test]
@@ -13714,6 +8262,61 @@ fn observations(prepared: Prepared) {
         let (assemblies, _) = discover(&root)?;
         let findings = validate_runtime_inventory_listener_provenance(&root, &assemblies)?;
         assert!(findings.is_empty(), "unexpected findings: {findings:#?}");
+        Ok(())
+    }
+
+    #[test]
+    fn settingsonly_raw_jwt_reparse_rejects_cfg_test_alias_and_pointer_bait() {
+        for source in [
+            "#[cfg(test)] mod bait { fn raw(raw: &str) { let _ = authn::Jwt::parse(raw); } }",
+            "fn raw(raw: &str) { let parse = authn::Jwt::parse; let _ = parse(raw); }",
+            "fn raw(raw: &str) { let parse: fn(&str) -> _ = authn::Jwt::parse; let _ = parse(raw); }",
+            "#[cfg(test)] mod bait { use authn::Jwt as J; fn raw(raw: &str) { let _ = J::parse(raw); } }",
+            "use authn::{Jwt as J, VerifiedJwt as V}; fn raw(raw: &str) { let _ = J::parse(raw); let _ = V::raw; }",
+            "type J = authn::Jwt; fn raw(raw: &str) { let _ = J::parse(raw); }",
+            "fn raw(jwt: authn::VerifiedJwt) { let _ = jwt.raw(); }",
+        ] {
+            let syntax = syn::parse_file(source).expect("raw JWT mutation fixture parses");
+            assert_ne!(
+                file_raw_jwt_reparse_count(&syntax),
+                0,
+                "raw JWT mutation must fail closed: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn settingsonly_raw_jwt_aliases_are_lexically_scoped() {
+        for (source, expected) in [
+            (
+                "mod jwt { use authn::Jwt as J; fn no_call() {} } mod other { use other::Parser as J; fn parse(raw: &str) { let _ = J::parse(raw); } }",
+                0,
+            ),
+            (
+                "mod jwt { use authn::Jwt as J; fn raw(raw: &str) { let _ = J::parse(raw); } } mod other { use other::Parser as J; fn parse(raw: &str) { let _ = J::parse(raw); } }",
+                1,
+            ),
+            (
+                "fn outer() { { use authn::Jwt as J; let _ = J::parse(\"raw\"); } { use other::Parser as J; let _ = J::parse(\"value\"); } }",
+                1,
+            ),
+        ] {
+            let syntax = syn::parse_file(source).expect("scoped JWT alias fixture parses");
+            assert_eq!(
+                file_raw_jwt_reparse_count(&syntax),
+                expected,
+                "JWT alias evidence must not leak into a sibling lexical scope: {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn settingsonly_raw_jwt_reparse_real_workspace_is_clean() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let ir = AssemblyGovernanceIr::<Core>::load_target(&root, "settingsonly")?
+            .context("load real settingsonly target")?;
+        let assembly = ir.assembly("settingsonly").context("settingsonly target")?;
+        assert!(settingsonly_raw_jwt_reparse_findings(assembly)?.is_empty());
         Ok(())
     }
 
@@ -13901,6 +8504,26 @@ audit = { path = "../../crates/audit" }
     }
 
     #[test]
+    fn assembly_default_test_support_is_rejected() -> anyhow::Result<()> {
+        let root = unique_tmp("assembly-domain-default-test-support");
+        let manifest = manifest_with_domains(&[AssemblyDomain::Identity])?
+            .replace("profile = \"demo\"", "profile = \"production\"")
+            .replace("topology = \"demo\"", "topology = \"durable-shared\"");
+        let findings = domain_findings(
+            &root,
+            &manifest,
+            r#"[dependencies]
+identity = { path = "../../crates/identity", features = ["test-support"] }
+"#,
+            "",
+        )?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::ProductionTestSupport && finding.detail.contains("identity")
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn assembly_domain_real_workspace_closures_match_manifests() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
         let (assemblies, discovery_findings) = discover(&root)?;
@@ -13908,13 +8531,14 @@ audit = { path = "../../crates/audit" }
             discovery_findings.is_empty(),
             "real workspace discovery should be clean: {discovery_findings:?}"
         );
-        let metadata = load_workspace_metadata(&root)?.context("real workspace has Cargo.toml")?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
         assert!(
             !assemblies.is_empty(),
             "real workspace must govern assemblies"
         );
         for assembly in &assemblies {
-            let findings = validate_target_domain_closure(&root, assembly, &metadata)?;
+            let findings = validate_target_domain_closure(&root, facts, assembly)?;
             assert!(
                 findings.is_empty(),
                 "{} target closure findings: {findings:?}",
@@ -13924,88 +8548,9 @@ audit = { path = "../../crates/audit" }
         Ok(())
     }
 
-    fn identityaudit_executable_targets() -> [MetadataTarget; 5] {
-        [
-            MetadataTarget {
-                name: "build-script-build".to_owned(),
-                kind: vec!["custom-build".to_owned()],
-                src_path: PathBuf::new(),
-                required_features: Vec::new(),
-            },
-            MetadataTarget {
-                name: "identityaudit".to_owned(),
-                kind: vec!["lib".to_owned()],
-                src_path: PathBuf::new(),
-                required_features: Vec::new(),
-            },
-            MetadataTarget {
-                name: "identityaudit-server".to_owned(),
-                kind: vec!["bin".to_owned()],
-                src_path: PathBuf::new(),
-                required_features: Vec::new(),
-            },
-            MetadataTarget {
-                name: IDENTITYAUDIT_ARTIFACT_BINARY_TEST.to_owned(),
-                kind: vec!["test".to_owned()],
-                src_path: PathBuf::new(),
-                required_features: Vec::new(),
-            },
-            MetadataTarget {
-                name: IDENTITYAUDIT_ARTIFACT_IMAGE_TEST.to_owned(),
-                kind: vec!["test".to_owned()],
-                src_path: PathBuf::new(),
-                required_features: vec![IDENTITYAUDIT_ARTIFACT_FEATURE.to_owned()],
-            },
-        ]
-    }
-
-    fn identityaudit_production_closure() -> BTreeSet<String> {
-        IDENTITYAUDIT_ALLOWED_NORMAL_WORKSPACE_PACKAGES
-            .iter()
-            .map(|package| (*package).to_owned())
-            .collect()
-    }
-
-    /// INVARIANT: IDENTITYAUDIT-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::identityaudit_executable_boundary_rejects_lib_only_shape", anti_vacuity = "tests::identityaudit_real_executable_artifact_closure_is_complete" } -- #1797 replaces the demo composition proof with one exact executable package and its closed production transport/artifact closure.
     #[test]
-    fn identityaudit_executable_boundary_accepts_exact_targets_and_production_closure() {
-        let findings = validate_identityaudit_boundary(
-            "assemblies/identityaudit/assembly.toml",
-            "assemblies/identityaudit/Cargo.toml",
-            &identityaudit_executable_targets(),
-            &identityaudit_production_closure(),
-        );
-        assert!(
-            findings.is_empty(),
-            "identityaudit executable + production transport closure must pass: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn identityaudit_executable_boundary_rejects_lib_only_shape() {
-        let lib_only = [MetadataTarget {
-            name: "identityaudit".to_owned(),
-            kind: vec!["lib".to_owned()],
-            src_path: PathBuf::new(),
-            required_features: Vec::new(),
-        }];
-        let findings = validate_identityaudit_boundary(
-            "assemblies/identityaudit/assembly.toml",
-            "assemblies/identityaudit/Cargo.toml",
-            &lib_only,
-            &identityaudit_production_closure(),
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::IdentityAuditBoundary
-                    && finding.detail.contains("package.targets")
-            }),
-            "lib-only identityaudit must fail the executable boundary: {findings:?}"
-        );
-    }
-
-    #[test]
-    fn identityaudit_manifest_boundary_rejects_demo_profile_and_topology() -> anyhow::Result<()> {
+    fn identityaudit_manifest_boundary_rejects_profile_topology_and_listener_drift()
+    -> anyhow::Result<()> {
         let repository = AssemblyFixtureBuilder::production_universe()?
             .profile("identityaudit", AssemblyProfile::Demo)?
             .topology("identityaudit", AssemblyTopology::Demo)?
@@ -14018,11 +8563,29 @@ audit = { path = "../../crates/audit" }
         let findings = validate_assembly(assembly);
         assert!(
             findings.iter().any(|finding| {
-                finding.rule == Rule::IdentityAuditBoundary
+                finding.rule == Rule::IdentityAuditManifestBoundary
                     && finding.detail.contains("profile")
                     && finding.detail.contains("topology")
             }),
             "demo identityaudit must fail the production executable boundary: {findings:?}"
+        );
+        let repository = AssemblyFixtureBuilder::production_universe()?
+            .listener_domains(
+                "identityaudit",
+                assembly_schema::AssemblyListenerKind::Admin,
+                vec![AssemblyDomain::Audit, AssemblyDomain::Identity],
+            )?
+            .build()?;
+        let ir = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "identityaudit")?
+            .context("identityaudit listener fixture target")?;
+        let findings = validate_assembly(
+            ir.assembly("identityaudit")
+                .context("identityaudit listener fixture")?,
+        );
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::IdentityAuditManifestBoundary)
         );
         Ok(())
     }
@@ -14030,8 +8593,7 @@ audit = { path = "../../crates/audit" }
     /// identityaudit participates in production provider/JWKS closeout, but has no Internal mTLS
     /// listener or federated/service token profiles and therefore must not inherit those gates.
     #[test]
-    fn identityaudit_production_boundary_does_not_inherit_full_runtime_only_gates()
-    -> anyhow::Result<()> {
+    fn identityaudit_real_manifest_boundary_is_exact() -> anyhow::Result<()> {
         let repository = AssemblyFixtureBuilder::production_universe()?.build()?;
         let ir = AssemblyGovernanceIr::<Core>::load_target(repository.path(), "identityaudit")?
             .context("identityaudit fixture target")?;
@@ -14039,6 +8601,11 @@ audit = { path = "../../crates/audit" }
             .assembly("identityaudit")
             .context("identityaudit fixture")?;
         let findings = validate_assembly(assembly);
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule != Rule::IdentityAuditManifestBoundary)
+        );
         assert!(
             findings.iter().all(|finding| !matches!(
                 finding.rule,
@@ -14052,1355 +8619,85 @@ audit = { path = "../../crates/audit" }
     }
 
     #[test]
-    fn identityaudit_real_executable_artifact_closure_is_complete() -> anyhow::Result<()> {
-        let root = crate::workspace_root()?;
-        let manifest = AssemblyManifest::from_toml_str(IDENTITYAUDIT_MANIFEST)?;
-        assert_eq!(manifest.profile, AssemblyProfile::Production);
-        assert_eq!(manifest.topology, AssemblyTopology::DurableIsolated);
-
-        let metadata = load_workspace_metadata(&root)?.context("real workspace has Cargo.toml")?;
-        let package = metadata
-            .packages
-            .iter()
-            .find(|package| package.name == "identityaudit")
-            .context("identityaudit package missing from cargo metadata")?;
-        assert_eq!(
-            package
-                .targets
-                .iter()
-                .map(|target| {
-                    (
-                        target.name.as_str(),
-                        target.kind.as_slice(),
-                        target.required_features.as_slice(),
-                    )
-                })
-                .collect::<BTreeSet<_>>(),
-            identityaudit_executable_targets()
-                .iter()
-                .map(|target| {
-                    (
-                        target.name.as_str(),
-                        target.kind.as_slice(),
-                        target.required_features.as_slice(),
-                    )
-                })
-                .collect::<BTreeSet<_>>()
-        );
-
-        let schema_path = root.join("assemblies/identityaudit/config.schema.json");
-        let schema: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&schema_path)?)?;
-        assert_eq!(
-            schema.get("additionalProperties"),
-            Some(&serde_json::json!(false))
-        );
-        for path in [
-            schema_path,
-            root.join("assemblies/identityaudit/identityaudit.example.toml"),
-        ] {
-            assert!(
-                is_regular_file_without_symlink(&path)?,
-                "required identityaudit artifact is missing or symlinked: {}",
-                path.display()
-            );
-        }
-
-        let journeys_manifest: toml::Value =
-            std::fs::read_to_string(root.join("journeys/Cargo.toml"))?.parse()?;
-        assert!(
-            journeys_manifest
-                .get("test")
-                .and_then(toml::Value::as_array)
-                .is_some_and(|tests| tests.iter().any(|test| {
-                    test.get("name").and_then(toml::Value::as_str) == Some("identityaudit_runtime")
-                        && test.get("path").and_then(toml::Value::as_str)
-                            == Some("tests/identityaudit_runtime.rs")
-                }))
-        );
-        let journey =
-            std::fs::read_to_string(root.join("journeys/tests/identityaudit_runtime.rs"))?;
-        assert!(identityaudit_journey_has_required_test(&journey)?);
-
-        let dockerfile = std::fs::read_to_string(root.join("Dockerfile"))?;
-        assert!(
-            identityaudit_docker_target_is_closed(&dockerfile),
-            "identityaudit-runtime must be one closed distroless target while runtime remains default"
-        );
-
-        let findings = validate_target(&root, "identityaudit")?;
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.rule != Rule::IdentityAuditBoundary),
-            "real identityaudit executable closure must be complete: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn identityaudit_artifact_gate_rejects_noop_contracts() -> anyhow::Result<()> {
-        let binary = include_str!("../../assemblies/identityaudit/tests/artifact_acceptance.rs");
-        let image =
-            include_str!("../../assemblies/identityaudit/tests/runtime_image_acceptance.rs");
-        let support = include_str!("../../assemblies/identityaudit/tests/support/mod.rs");
-        assert!(identityaudit_binary_artifact_source_is_closed(binary)?);
-        assert!(identityaudit_image_artifact_source_is_closed(image)?);
-        assert!(identityaudit_artifact_support_is_closed(support)?);
-
-        assert!(
-            !identityaudit_binary_artifact_source_is_closed(
-                &binary.replace(
-                    "assert_executable_contract(Artifact::Binary(env!(\"CARGO_BIN_EXE_identityaudit-server\")))",
-                    "Ok(())",
-                )
-            )?,
-            "identityaudit binary artifact gate accepted a no-op contract"
-        );
-        assert!(
-            !identityaudit_image_artifact_source_is_closed(&image.replace(
-                "assert_executable_contract(Artifact::Image(&image))",
-                "Ok(())",
-            ))?,
-            "identityaudit image artifact gate accepted a no-op contract"
-        );
-        assert!(
-            !identityaudit_artifact_support_is_closed(
-                r#"
-                pub(crate) enum Artifact<'a> { Binary(&'a str), Image(&'a str) }
-                impl Artifact<'_> {
-                    pub(crate) fn execute(self, _arguments: &[&str]) -> std::io::Result<std::process::Output> {
-                        unreachable!()
-                    }
-                }
-                pub(crate) fn assert_executable_contract(_artifact: Artifact<'_>) -> anyhow::Result<()> { Ok(()) }
-                "#
-            )?,
-            "identityaudit support gate accepted a no-op executable contract"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn identityaudit_artifact_gate_rejects_docker_without_end_of_options() -> anyhow::Result<()> {
-        let support = include_str!("../../assemblies/identityaudit/tests/support/mod.rs");
-        assert!(identityaudit_artifact_support_is_closed(support)?);
-        let without_separator = support.replace(
-            r#".args(["run", "--rm", "--", image])"#,
-            r#".args(["run", "--rm", image])"#,
-        );
-        assert_ne!(without_separator, support, "docker -- mutation was vacuous");
-        assert!(
-            !identityaudit_artifact_support_is_closed(&without_separator)?,
-            "support gate must require docker run --rm -- <image>"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn identityaudit_artifact_gate_rejects_image_ignore_regression() -> anyhow::Result<()> {
-        let image =
-            include_str!("../../assemblies/identityaudit/tests/runtime_image_acceptance.rs");
-        let ignored = image.replacen(
-            &format!("#[test]\nfn {IDENTITYAUDIT_ARTIFACT_IMAGE_FN}"),
-            &format!("#[test]\n#[ignore]\nfn {IDENTITYAUDIT_ARTIFACT_IMAGE_FN}"),
-            1,
-        );
-        assert_ne!(ignored, image, "ignore mutation was vacuous");
-        assert!(
-            !identityaudit_image_artifact_source_is_closed(&ignored)?,
-            "identityaudit image artifact gate must reject #[ignore] regression"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn identityaudit_artifact_evidence_diagnostics_distinguish_layers() -> anyhow::Result<()> {
-        let closed_manifest =
-            identityaudit_artifact_manifest_fixture(IDENTITYAUDIT_ARTIFACT_FEATURE);
-        let binary = include_str!("../../assemblies/identityaudit/tests/artifact_acceptance.rs");
-        let image =
-            include_str!("../../assemblies/identityaudit/tests/runtime_image_acceptance.rs");
-        let support = include_str!("../../assemblies/identityaudit/tests/support/mod.rs");
-
-        let broken_binary = identityaudit_artifact_acceptance_from_sources(
-            Some(&closed_manifest),
-            Some(
-                r#"
-                mod support;
-                use support::{assert_executable_contract, Artifact};
-                #[test]
-                fn identityaudit_server_binary_is_an_executable_artifact() -> anyhow::Result<()> {
-                    Ok(())
-                }
-                "#,
-            ),
-            Some(image),
-            Some(support),
-        )?;
-        assert_eq!(
-            broken_binary.failures,
-            vec![IDENTITYAUDIT_ARTIFACT_LAYER_BINARY],
-            "binary-only breakage must diagnose only binary source: {broken_binary:?}"
-        );
-        let findings =
-            validate_identityaudit_executable_evidence(IdentityAuditExecutableEvidence {
-                test_support_enabled: false,
-                schema_is_closed: true,
-                sample_is_regular_file: true,
-                artifact_acceptance: broken_binary.clone(),
-                journey_target_declared: true,
-                required_journey_test_declared: true,
-                runtimeexec_launch_is_live: true,
-                dockerfile: "FROM scratch AS identityaudit-runtime\n",
-            });
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::IdentityAuditBoundary
-                    && finding.detail.contains(IDENTITYAUDIT_ARTIFACT_LAYER_BINARY)
-                    && !finding
-                        .detail
-                        .contains(IDENTITYAUDIT_ARTIFACT_LAYER_SUPPORT)
-            }),
-            "finding must name binary source layer: {findings:?}"
-        );
-
-        let broken_support = identityaudit_artifact_acceptance_from_sources(
-            Some(&closed_manifest),
-            Some(binary),
-            Some(image),
-            Some("pub(crate) fn assert_executable_contract(_: ()) {}"),
-        )?;
-        assert!(
-            broken_support
-                .failures
-                .contains(&IDENTITYAUDIT_ARTIFACT_LAYER_SUPPORT)
-                && !broken_support
-                    .failures
-                    .contains(&IDENTITYAUDIT_ARTIFACT_LAYER_BINARY),
-            "support-only breakage must diagnose support source distinctly: {broken_support:?}"
-        );
-        assert_ne!(
-            broken_binary.detail(),
-            broken_support.detail(),
-            "independent failure layers must produce distinguishable diagnostics"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn identityaudit_executable_boundary_rejects_missing_or_misgated_image_target() {
-        let mut missing_image = identityaudit_executable_targets().to_vec();
-        missing_image.retain(|target| target.name != IDENTITYAUDIT_ARTIFACT_IMAGE_TEST);
-        let findings = validate_identityaudit_boundary(
-            "assemblies/identityaudit/assembly.toml",
-            "assemblies/identityaudit/Cargo.toml",
-            &missing_image,
-            &identityaudit_production_closure(),
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::IdentityAuditBoundary
-                    && finding.detail.contains("package.targets")
-            }),
-            "missing image target must fail the executable boundary: {findings:?}"
-        );
-
-        let mut wrong_feature = identityaudit_executable_targets();
-        wrong_feature[4].required_features = vec!["integration".to_owned()];
-        let findings = validate_identityaudit_boundary(
-            "assemblies/identityaudit/assembly.toml",
-            "assemblies/identityaudit/Cargo.toml",
-            &wrong_feature,
-            &identityaudit_production_closure(),
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::IdentityAuditBoundary
-                    && finding.detail.contains("package.targets")
-            }),
-            "wrong image required-features must fail the executable boundary: {findings:?}"
-        );
-
-        let mut ungated_image = identityaudit_executable_targets();
-        ungated_image[4].required_features.clear();
-        let findings = validate_identityaudit_boundary(
-            "assemblies/identityaudit/assembly.toml",
-            "assemblies/identityaudit/Cargo.toml",
-            &ungated_image,
-            &identityaudit_production_closure(),
-        );
-        assert!(
-            findings.iter().any(|finding| {
-                finding.rule == Rule::IdentityAuditBoundary
-                    && finding.detail.contains("package.targets")
-            }),
-            "ungated image target must fail the executable boundary: {findings:?}"
-        );
-    }
-
-    fn identityaudit_artifact_manifest_fixture(image_feature: &str) -> toml::Value {
-        format!(
+    fn provider_construction_live_join_rejects_bypassed_or_dead_stages() {
+        for source in [
             r#"
-            [features]
-            {IDENTITYAUDIT_ARTIFACT_FEATURE} = []
-            [[test]]
-            name = "{IDENTITYAUDIT_ARTIFACT_BINARY_TEST}"
-            path = "{IDENTITYAUDIT_ARTIFACT_BINARY_PATH}"
-            [[test]]
-            name = "{IDENTITYAUDIT_ARTIFACT_IMAGE_TEST}"
-            path = "{IDENTITYAUDIT_ARTIFACT_IMAGE_PATH}"
-            required-features = ["{image_feature}"]
-            "#
-        )
-        .parse()
-        .expect("artifact manifest fixture")
-    }
-
-    #[test]
-    fn identityaudit_artifact_manifest_gate_rejects_wrong_feature_contract() {
-        let manifest = identityaudit_artifact_manifest_fixture("integration");
-        assert!(
-            !identityaudit_artifact_manifest_is_closed(&manifest),
-            "wrong image required-features must fail manifest gate"
-        );
-
-        let missing_feature = format!(
+struct ProviderRoleBatches; struct RoleConstructor; struct RoleReceipt;
+impl ProviderRoleBatches { fn exact_join() -> Self { Self } }
+impl RoleConstructor { fn finish(self) -> RoleReceipt { RoleReceipt } }
+impl RoleReceipt { fn transfer(self) {} }
+fn run() { let _roles = ProviderRoleBatches::exact_join(); RoleConstructor.finish(); }
+"#,
             r#"
-            [features]
-            default = []
-            [[test]]
-            name = "{IDENTITYAUDIT_ARTIFACT_BINARY_TEST}"
-            path = "{IDENTITYAUDIT_ARTIFACT_BINARY_PATH}"
-            [[test]]
-            name = "{IDENTITYAUDIT_ARTIFACT_IMAGE_TEST}"
-            path = "{IDENTITYAUDIT_ARTIFACT_IMAGE_PATH}"
-            required-features = ["{IDENTITYAUDIT_ARTIFACT_FEATURE}"]
-            "#
+struct ProviderRoleBatches; struct RoleConstructor; struct RoleReceipt;
+impl ProviderRoleBatches { fn exact_join() -> Self { Self } }
+impl RoleConstructor { fn finish(self) -> RoleReceipt { RoleReceipt } }
+impl RoleReceipt { fn transfer(self) {} }
+fn run() { let _roles = ProviderRoleBatches::exact_join(); }
+fn dead() { RoleConstructor.finish().transfer(); }
+"#,
+            r#"
+struct ProviderRoleBatches; struct Unrelated; struct UnrelatedReceipt;
+impl ProviderRoleBatches { fn exact_join() -> Self { Self } }
+impl Unrelated { fn finish(self) -> UnrelatedReceipt { UnrelatedReceipt } }
+impl UnrelatedReceipt { fn transfer(self) {} }
+fn run() { let _roles = ProviderRoleBatches::exact_join(); Unrelated.finish().transfer(); }
+"#,
+            r#"
+struct ProviderRoleBatches; struct DummyConstructor; struct DummyReceipt;
+impl ProviderRoleBatches { fn exact_join() -> Self { Self } }
+impl DummyConstructor { fn finish(self) -> DummyReceipt { DummyReceipt } }
+impl DummyReceipt { fn transfer(self) {} }
+fn run() { let _roles = ProviderRoleBatches::exact_join(); DummyConstructor.finish().transfer(); }
+"#,
+            r#"
+struct ProviderRoleBatches;
+impl ProviderRoleBatches { fn exact_join() -> Self { Self } fn finish(self) {} }
+fn run() { ProviderRoleBatches::exact_join().finish(); }
+"#,
+        ] {
+            let file = syn::parse_file(source).expect("provider live-join fixture parses");
+            let evidence = file_security_closeout_program(&file).reachable_evidence_from_run();
+            assert!(!evidence.has_provider_construction_live_join());
+        }
+        let file = syn::parse_file(
+            r#"
+struct ProviderRoleBatches; struct ProviderRoleCloser { roles: ProviderRoleBatches, constructor: EventConstructor }
+struct EventConstructor; struct EventReceipt;
+impl ProviderRoleBatches { fn exact_join() -> Self { Self } }
+impl ProviderRoleBatches { fn finish(self, _receipt: EventReceipt) {} }
+impl EventConstructor { fn finish(self) -> EventReceipt { EventReceipt } }
+impl EventReceipt { fn transfer(self) -> EventReceipt { self } }
+impl ProviderRoleCloser {
+    fn finish(self) {
+        let receipt = self.constructor.finish().transfer();
+        self.roles.finish(receipt);
+    }
+}
+fn run() {
+    let roles = ProviderRoleBatches::exact_join();
+    let closer: ProviderRoleCloser = ProviderRoleCloser { roles, constructor: EventConstructor };
+    closer.finish();
+}
+"#,
         )
-        .parse::<toml::Value>()
-        .expect("fixture manifest");
+        .expect("provider live-join green fixture parses");
+        let evidence = file_security_closeout_program(&file).reachable_evidence_from_run();
         assert!(
-            !identityaudit_artifact_manifest_is_closed(&missing_feature),
-            "missing {IDENTITYAUDIT_ARTIFACT_FEATURE} feature marker must fail manifest gate"
-        );
-
-        let closed = identityaudit_artifact_manifest_fixture(IDENTITYAUDIT_ARTIFACT_FEATURE);
-        assert!(identityaudit_artifact_manifest_is_closed(&closed));
-    }
-
-    #[test]
-    fn identityaudit_docker_boundary_rejects_third_binary_and_arbitrary_copy() -> anyhow::Result<()>
-    {
-        let source = std::fs::read_to_string(crate::workspace_root()?.join("Dockerfile"))?;
-        for (label, mutated) in [
-            (
-                "identityaudit third binary",
-                source.replace(
-                    "--package identityaudit --bin identityaudit-server",
-                    "--package identityaudit --bin identityaudit-server --package third --bin third",
-                ),
-            ),
-            (
-                "identityaudit arbitrary copy",
-                source.replace(
-                    "ENTRYPOINT [\"/usr/local/bin/identityaudit-server\"]",
-                    "COPY --from=identityaudit-builder /app/target/release/third /usr/local/bin/third\nENTRYPOINT [\"/usr/local/bin/identityaudit-server\"]",
-                ),
-            ),
-        ] {
-            assert_ne!(mutated, source, "{label} mutation was vacuous");
-            assert!(
-                !identityaudit_docker_target_is_closed(&mutated),
-                "identityaudit Docker boundary accepted {label}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn identityaudit_journey_gate_requires_runtime_witness_chain() -> anyhow::Result<()> {
-        let source = include_str!("../../journeys/tests/identityaudit_runtime.rs");
-        assert!(identityaudit_journey_has_required_test(source)?);
-        for required_call in [
-            "RuntimeFixture::start",
-            "wait_until_ready",
-            "login",
-            "wait_for_auth_audit",
-            "wait_for_session_created_hash_chain",
-            "send_sigterm",
-            "wait_for_drain",
-        ] {
-            let broken = source.replace(required_call, "noop_witness");
-            assert!(
-                !identityaudit_journey_has_required_test(&broken)?,
-                "identityaudit journey gate accepted missing witness {required_call}"
-            );
-        }
-        assert!(!identityaudit_journey_has_required_test(
-            "#[tokio::test]\nasync fn identityaudit_login_audit_ready_sigterm_drain() -> anyhow::Result<()> { Ok(()) }"
-        )?);
-        assert!(!identityaudit_journey_has_required_test(
-            "#[tokio::test]\nasync fn identityaudit_login_audit_ready_sigterm_drain() -> anyhow::Result<()> { if false { let mut runtime = RuntimeFixture::start(providers).await?; runtime.wait_until_ready().await?; let login = runtime.login().await?; wait_for_auth_audit(&pool).await?; wait_for_session_created_hash_chain(&pool, &login).await?; runtime.send_sigterm()?; runtime.wait_for_drain().await?; } Ok(()) }"
-        )?);
-        assert!(!identityaudit_journey_has_required_test(
-            "#[tokio::test]\nasync fn identityaudit_login_audit_ready_sigterm_drain() -> anyhow::Result<()> { let dead = || { let mut runtime = RuntimeFixture::start(providers); runtime.wait_until_ready(); let login = runtime.login(); wait_for_auth_audit(&pool); wait_for_session_created_hash_chain(&pool, &login); runtime.send_sigterm(); runtime.wait_for_drain(); }; Ok(()) }"
-        )?);
-        Ok(())
-    }
-
-    fn settingsonly_boundary_evidence<'a>(
-        targets: &'a [MetadataTarget],
-        closure_packages: &'a BTreeSet<String>,
-    ) -> SettingsOnlyExecutableEvidence<'a> {
-        SettingsOnlyExecutableEvidence {
-            targets,
-            closure_packages,
-            test_support_enabled: false,
-            schema_is_regular_file: true,
-            sample_is_regular_file: true,
-            production_artifact_target_declared: true,
-            production_artifact: ArtifactClosureEvidence::certificate([
-                "InputReady",
-                "L2Join",
-                "Sigkill",
-                "Sigterm",
-                "ProjectionShadowStartRestartDrain",
-                "ProjectionFatalExitReadiness",
-            ]),
-            journey_target_declared: true,
-            required_journey_test_declared: true,
-            runtimeexec_launch_is_live: true,
-            dockerignore_contracts_included: true,
-        }
-    }
-
-    /// INVARIANT: SETTINGSONLY-EXECUTABLE-BOUNDARY-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::settingsonly_production_artifact_gate_rejects_incomplete_case_closure", anti_vacuity = "tests::settingsonly_real_executable_boundary_is_complete" } -- settingsonly remains one build-script+lib+bin package; its integration-only production artifact target is a closed six-case AST bijection, contracts remain in the image build context, and artifact identity/ENTRYPOINT stay owned by ASSEMBLY-ARTIFACT-MATRIX-01.
-    #[test]
-    fn settingsonly_executable_boundary_rejects_each_incomplete_artifact_fact() {
-        let targets = [
-            MetadataTarget {
-                name: "build-script-build".to_owned(),
-                kind: vec!["custom-build".to_owned()],
-                src_path: PathBuf::new(),
-                required_features: Vec::new(),
-            },
-            MetadataTarget {
-                name: "settingsonly".to_owned(),
-                kind: vec!["lib".to_owned()],
-                src_path: PathBuf::new(),
-                required_features: Vec::new(),
-            },
-            MetadataTarget {
-                name: "settingsonly-server".to_owned(),
-                kind: vec!["bin".to_owned()],
-                src_path: PathBuf::new(),
-                required_features: Vec::new(),
-            },
-        ];
-        let required = SETTINGSONLY_ALLOWED_NORMAL_WORKSPACE_PACKAGES
-            .iter()
-            .map(|package| (*package).to_owned())
-            .collect::<BTreeSet<_>>();
-        assert!(
-            validate_settingsonly_executable_evidence(settingsonly_boundary_evidence(
-                &targets, &required,
-            ))
-            .is_empty()
-        );
-
-        let mut unexpected_closure = required.clone();
-        unexpected_closure.insert("mqtt".to_owned());
-        assert!(
-            validate_settingsonly_executable_evidence(settingsonly_boundary_evidence(
-                &targets,
-                &unexpected_closure,
-            ))
-            .iter()
-            .any(|finding| finding.detail.contains("unexpected packages")),
-            "positive dependency closure accepted an unlisted package"
-        );
-
-        let mut incomplete_closure = required
-            .iter()
-            .filter(|package| package.as_str() != "runtimeexec")
-            .cloned()
-            .collect::<BTreeSet<_>>();
-        incomplete_closure.insert("identity".to_owned());
-        let mut incomplete = settingsonly_boundary_evidence(&targets[..1], &incomplete_closure);
-        incomplete.test_support_enabled = true;
-        incomplete.schema_is_regular_file = false;
-        incomplete.sample_is_regular_file = false;
-        incomplete.production_artifact_target_declared = false;
-        incomplete.production_artifact =
-            ArtifactClosureEvidence::Violations(vec![ArtifactClosureViolation::new(
-                ArtifactClosureStage::CaseInventory,
-                Some("InputReady"),
-                ArtifactClosurePath::Support,
-                None,
-                "closed case inventory",
-                "missing",
-            )]);
-        incomplete.journey_target_declared = false;
-        incomplete.required_journey_test_declared = false;
-        incomplete.dockerignore_contracts_included = false;
-        let details = validate_settingsonly_executable_evidence(incomplete)
-            .into_iter()
-            .map(|finding| finding.detail)
-            .collect::<Vec<_>>()
-            .join("\n");
-        for field in [
-            "package.targets",
-            "missing allowed",
-            "unexpected packages",
-            "default-normal-features",
-            "config-schema",
-            "config-sample",
-            "production-artifact",
-            "journey",
-            ".dockerignore",
-        ] {
-            assert!(details.contains(field), "missing red evidence for {field}");
-        }
-    }
-
-    #[test]
-    fn settingsonly_journey_gate_requires_exact_non_ignored_parent() -> anyhow::Result<()> {
-        let cases = [
-            ("missing parent", "#[test]\nfn unrelated_journey() {}"),
-            (
-                "only ignored child",
-                "#[tokio::test]\n#[ignore]\nasync fn settingsonly_lifecycle_fixture_child() {}",
-            ),
-            (
-                "name bait",
-                "#[test]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain_decoy() {}",
-            ),
-            (
-                "ignored parent",
-                "#[tokio::test]\n#[ignore]\nasync fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {}",
-            ),
-            (
-                "conditionally compiled parent",
-                "#[test]\n#[cfg(any())]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() { run(); }",
-            ),
-            (
-                "conditionally ignored parent",
-                "#[test]\n#[cfg_attr(all(), ignore)]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() { run(); }",
-            ),
-            (
-                "empty parent",
-                "#[test]\nfn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {}",
-            ),
-            (
-                "handwritten ignore child without macro closure",
-                r#"
-                fn spawn_child() {
-                    let _ = Command::new("x").args(["--ignored", "--exact", "settingsonly_lifecycle_fixture_child"]);
-                }
-                async fn exercise_child() {
-                    activation_gate.accept().await;
-                    assert_health_contract();
-                    assert_primary_fails_closed();
-                    send_sigterm();
-                    wait_for_child().await;
-                    assert_port_released();
-                    assert_port_released();
-                }
-                #[tokio::test]
-                async fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {
-                    reserve_listener_addresses().await;
-                    let logs = ChildLogs::create(1);
-                    spawn_child();
-                    exercise_child().await;
-                    logs.remove();
-                }
-                #[tokio::test]
-                #[ignore]
-                async fn settingsonly_lifecycle_fixture_child() {}
-                "#,
-            ),
-            (
-                "macro without stringify selector binding",
-                r#"
-                macro_rules! settingsonly_lifecycle_subprocess {
-                    ($name:ident) => {
-                        #[tokio::test]
-                        #[ignore]
-                        async fn $name() {}
-                    };
-                }
-                settingsonly_lifecycle_subprocess!(settingsonly_lifecycle_fixture_child);
-                fn spawn_child() {
-                    let _ = Command::new("x").args(["--ignored", "--exact", "settingsonly_lifecycle_fixture_child"]);
-                }
-                async fn exercise_child() {
-                    activation_gate.accept().await;
-                    assert_health_contract();
-                    assert_primary_fails_closed();
-                    send_sigterm();
-                    wait_for_child().await;
-                    assert_port_released();
-                    assert_port_released();
-                }
-                #[tokio::test]
-                async fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() {
-                    reserve_listener_addresses().await;
-                    let logs = ChildLogs::create(1);
-                    spawn_child();
-                    exercise_child().await;
-                    logs.remove();
-                }
-                "#,
-            ),
-        ];
-        for (case, source) in cases {
-            assert!(
-                !settingsonly_journey_has_required_test(source)?,
-                "settingsonly journey gate accepted {case}"
-            );
-        }
-
-        assert!(!settingsonly_journey_has_required_test(
-            "#[tokio::test]\nasync fn settingsonly_lifecycle_fixture_ready_request_sigterm_drain() { return; }"
-        )?);
-        assert!(settingsonly_journey_has_required_test(include_str!(
-            "../../journeys/tests/settingsonly_runtime.rs"
-        ))?);
-        Ok(())
-    }
-
-    #[test]
-    fn subset_health_inventory_requires_live_runtimeexec_launch_chain() -> anyhow::Result<()> {
-        let lib = "fn run() { runtime.block_on(runtime::launch_captured(captured)); }";
-        let direct = "async fn launch_captured() { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan).await; }";
-        assert!(subset_runtimeexec_launch_sources_are_live(lib, direct)?);
-
-        let delegated = "async fn launch(startup: S) { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan).await; } async fn launch_captured() { launch(startup).await; }";
-        assert!(subset_runtimeexec_launch_sources_are_live(lib, delegated)?);
-
-        let dead = "async fn launch_captured() { if false { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan).await; } }";
-        assert!(!subset_runtimeexec_launch_sources_are_live(lib, dead)?);
-        assert!(!subset_runtimeexec_launch_sources_are_live(
-            "fn run() {}",
-            direct
-        )?);
-        for opaque in [
-            "async fn launch_captured() { let dead = || { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan); }; }",
-            "async fn launch_captured() { let dead = async { let plan = runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan).await; }; }",
-            "async fn launch_captured() { const _: () = { runtimeexec::StartupPlan::new(startup, budget); runtimeexec::launch_startup(plan); }; }",
-        ] {
-            assert!(
-                !subset_runtimeexec_launch_sources_are_live(lib, opaque)?,
-                "opaque scope satisfied live launch chain: {opaque}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::panic)] // reason: test fixture asserts ArtifactClosureEvidence::Certified via explicit panic path.
-    fn settingsonly_production_artifact_gate_rejects_incomplete_case_closure() -> anyhow::Result<()>
-    {
-        let entry = include_str!("../../journeys/tests/settingsonly_production_artifact.rs");
-        let support =
-            include_str!("../../journeys/tests/support/settingsonly_production_artifact.rs");
-        let manifest: toml::Value = include_str!("../../journeys/Cargo.toml").parse()?;
-        assert!(settingsonly_production_artifact_target_is_exact(&manifest));
-        let evidence = settingsonly_production_artifact_sources_are_closed(entry, support);
-        let ArtifactClosureEvidence::Certified(certificate) = evidence else {
-            panic!("real source did not produce a closure certificate: {evidence:?}");
-        };
-        assert_eq!(certificate.case_count(), 6);
-
-        for (case, broken) in [
-            (
-                "wrong Cargo target path",
-                include_str!("../../journeys/Cargo.toml").replace(
-                    "path = \"tests/settingsonly_production_artifact.rs\"",
-                    "path = \"tests/decoy.rs\"",
-                ),
-            ),
-            (
-                "duplicate Cargo target",
-                format!(
-                    "{}\n[[test]]\nname = \"settingsonly_production_artifact\"\npath = \"tests/settingsonly_production_artifact.rs\"\nrequired-features = [\"integration\"]\n",
-                    include_str!("../../journeys/Cargo.toml")
-                ),
-            ),
-        ] {
-            let broken: toml::Value = broken.parse()?;
-            assert!(
-                !settingsonly_production_artifact_target_is_exact(&broken),
-                "production artifact target gate accepted {case}"
-            );
-        }
-
-        for (case, broken) in [
-            (
-                "support path replacement",
-                entry.replacen(
-                    "support/settingsonly_production_artifact.rs",
-                    "support/decoy.rs",
-                    1,
-                ),
-            ),
-            (
-                "support path decoy",
-                entry.replacen(
-                    "#[path = \"support/settingsonly_production_artifact.rs\"]",
-                    "#[path = \"support/decoy.rs\"]\n#[doc = \"support/settingsonly_production_artifact.rs\"]",
-                    1,
-                ),
-            ),
-            (
-                "aliased support import",
-                entry.replacen(
-                    "use settingsonly_production_artifact::{EvidenceCase, run_case};",
-                    "use settingsonly_production_artifact::{EvidenceCase, run_case as execute};",
-                    1,
-                ),
-            ),
-            (
-                "missing test",
-                entry.replacen(
-                    "async fn settingsonly_image_mount_spiffe_readiness_join",
-                    "async fn unrelated_test",
-                    1,
-                ),
-            ),
-            (
-                "extra test",
-                format!("{entry}\n#[test]\nfn extra_test() {{}}\n"),
-            ),
-            (
-                "ignored test",
-                entry.replacen("#[tokio::test", "#[ignore]\n#[tokio::test", 1),
-            ),
-            (
-                "cfg test",
-                entry.replacen("#[tokio::test", "#[cfg(any())]\n#[tokio::test", 1),
-            ),
-            (
-                "should panic test",
-                entry.replacen("#[tokio::test", "#[should_panic]\n#[tokio::test", 1),
-            ),
-            (
-                "empty test",
-                entry.replacen("run_case(EvidenceCase::InputReady).await", "Ok(())", 1),
-            ),
-            (
-                "wrong case",
-                entry.replacen("EvidenceCase::InputReady", "EvidenceCase::Unknown", 1),
-            ),
-            (
-                "duplicate case",
-                entry.replacen("EvidenceCase::Sigterm", "EvidenceCase::Sigkill", 1),
-            ),
-        ] {
-            assert_ne!(broken, entry, "{case} mutation was vacuous");
-            assert!(
-                matches!(
-                    settingsonly_production_artifact_sources_are_closed(&broken, support),
-                    ArtifactClosureEvidence::Violations(_)
-                ),
-                "production artifact gate accepted {case}"
-            );
-        }
-
-        for (case, broken) in [
-            (
-                "missing EvidenceCase",
-                support.replacen("    InputReady,\n", "", 1),
-            ),
-            (
-                "equal-count EvidenceCase substitution",
-                support.replacen("    InputReady,", "    Unknown,", 1),
-            ),
-            (
-                "extra EvidenceCase",
-                support.replacen("    InputReady,", "    InputReady,\n    Extra,", 1),
-            ),
-            (
-                "default match arm",
-                support.replacen(
-                    "            Self::Sigterm => fixture.sigterm().await,",
-                    "            Self::Sigterm => fixture.sigterm().await,\n            _ => fixture.sigterm().await,",
-                    1,
-                ),
-            ),
-            (
-                "string selector",
-                support.replacen(
-                    "    async fn dispatch(self, fixture: &mut Fixture) -> anyhow::Result<CaseCompletion> {\n        match self {",
-                    "    async fn dispatch(self, fixture: &mut Fixture) -> anyhow::Result<CaseCompletion> {\n        match self.id() {",
-                    1,
-                ),
-            ),
-            (
-                "wrong match case",
-                support.replacen(
-                    "Self::InputReady => fixture.input_ready().await",
-                    "Self::InputReady => fixture.sigterm().await",
-                    1,
-                ),
-            ),
-            (
-                "swallowed result",
-                support.replacen("fixture.finish(result).await", "result", 1),
-            ),
-            (
-                "replaced finish result",
-                support.replacen("fixture.finish(result).await", "fixture.finish(Ok(())).await", 1),
-            ),
-            (
-                "early return",
-                support.replacen(
-                    "    let mut fixture = Fixture::start(repository, case.id()).await?;",
-                    "    return Ok(());\n    let mut fixture = Fixture::start(repository, case.id()).await?;",
-                    1,
-                ),
-            ),
-            (
-                "extra runner branch",
-                support.replacen(
-                    "    let mut fixture = Fixture::start(repository, case.id()).await?;",
-                    "    if false { return Ok(()); }\n    let mut fixture = Fixture::start(repository, case.id()).await?;",
-                    1,
-                ),
-            ),
-            (
-                "empty scenario",
-                support.replacen(
-                    "    async fn input_ready(&mut self) -> anyhow::Result<CaseCompletion> {",
-                    "    async fn input_ready(&mut self) -> anyhow::Result<CaseCompletion> { return Err(anyhow::anyhow!(\"empty\"));",
-                    1,
-                ),
-            ),
-            (
-                "opaque-only scenario",
-                support.replacen(
-                    "        self.workload.wait_request().await?;",
-                    "        let _dead = || self.workload.wait_request();",
-                    1,
-                ),
-            ),
-            (
-                "cfg-elided local witness",
-                support.replacen(
-                    "        let _ready = self.wait_ready().await?;",
-                    "        #[cfg(any())]\n        let _ready = self.wait_ready().await?;",
-                    1,
-                ),
-            ),
-            (
-                "cfg_attr-elided expression witness",
-                support.replacen(
-                    "        self.workload.wait_request().await?;",
-                    "        #[cfg_attr(all(), cfg(any()))]\n        self.workload.wait_request().await?;",
-                    1,
-                ),
-            ),
-            (
-                "missing SIGTERM waiter",
-                support.replacen(
-                    "        self.wait_claimed(&event_id).await?;\n        barrier.wait_for_waiter(&self.pool).await?;",
-                    "        self.wait_claimed(&event_id).await?;\n",
-                    1,
-                ),
-            ),
-            (
-                "non-awaited witness future",
-                support.replacen(
-                    "        self.wait_claimed(&event_id).await?;",
-                    "        self.wait_claimed(&event_id);",
-                    1,
-                ),
-            ),
-            (
-                "dropped awaited witness result",
-                support.replacen(
-                    "        self.wait_claimed(&event_id).await?;",
-                    "        self.wait_claimed(&event_id).await;",
-                    1,
-                ),
-            ),
-            (
-                "duplicate witness",
-                support.replacen(
-                    "        self.wait_claimed(&event_id).await?;",
-                    "        self.wait_claimed(&event_id).await?;\n        self.wait_claimed(&event_id).await?;",
-                    1,
-                ),
-            ),
-            (
-                "out-of-order SIGTERM waiter",
-                support.replacen(
-                    "        self.wait_claimed(&event_id).await?;\n        barrier.wait_for_waiter(&self.pool).await?;",
-                    "        barrier.wait_for_waiter(&self.pool).await?;\n        self.wait_claimed(&event_id).await?;",
-                    1,
-                ),
-            ),
-            (
-                "wrong Evidence ID",
-                support.replacen(
-                    "SETTINGSONLY-T3-INPUT-READY-01",
-                    "SETTINGSONLY-T3-INPUT-READY-XX",
-                    1,
-                ),
-            ),
-            (
-                "duplicate Evidence ID",
-                support.replacen(
-                    "SETTINGSONLY-T3-SIGTERM-01",
-                    "SETTINGSONLY-T3-SIGKILL-01",
-                    1,
-                ),
-            ),
-        ] {
-            assert_ne!(broken, support, "{case} mutation was vacuous");
-            assert!(
-                matches!(
-                    settingsonly_production_artifact_sources_are_closed(entry, &broken),
-                    ArtifactClosureEvidence::Violations(_)
-                ),
-                "production artifact gate accepted {case}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn settingsonly_production_artifact_gate_emits_precise_typed_diagnostics() {
-        let entry = include_str!("../../journeys/tests/settingsonly_production_artifact.rs");
-        let support =
-            include_str!("../../journeys/tests/support/settingsonly_production_artifact.rs");
-
-        let ignored = entry.replacen("#[tokio::test", "#[ignore]\n#[tokio::test", 1);
-        assert_artifact_violation(
-            settingsonly_production_artifact_sources_are_closed(&ignored, support),
-            ArtifactClosureStage::TestInventory,
-            None,
-            ArtifactClosurePath::Entry,
-            "one live unconditional non-empty run_case carrier",
-            "settingsonly_image_mount_spiffe_readiness_join",
-        );
-
-        let wrong_dispatch = support.replacen(
-            "Self::InputReady => fixture.input_ready().await",
-            "Self::InputReady => fixture.sigterm().await",
-            1,
-        );
-        assert_artifact_violation(
-            settingsonly_production_artifact_sources_are_closed(entry, &wrong_dispatch),
-            ArtifactClosureStage::Dispatch,
-            Some("InputReady"),
-            ArtifactClosurePath::Support,
-            "input_ready",
-            "sigterm",
-        );
-
-        let direct_receipt = support.replacen(
-            "let receipt = self.observe_unacked(event_id, barrier).await?;",
-            "let receipt = UnackedReceipt { event_id, barrier };",
-            1,
-        );
-        assert_artifact_violation(
-            settingsonly_production_artifact_sources_are_closed(entry, &direct_receipt),
-            ArtifactClosureStage::ReceiptProvenance,
-            Some("Sigkill"),
-            ArtifactClosurePath::Support,
-            "receipt minted by a typed Fixture method",
-            "direct UnackedReceipt construction",
-        );
-
-        let cloneable_receipt = support.replacen(
-            "struct UnackedReceipt {",
-            "#[derive(Clone)]\nstruct UnackedReceipt {",
-            1,
-        );
-        assert_artifact_violation(
-            settingsonly_production_artifact_sources_are_closed(entry, &cloneable_receipt),
-            ArtifactClosureStage::ReceiptProvenance,
-            None,
-            ArtifactClosurePath::Support,
-            "private non-Clone non-Copy receipt with private fields",
-            "# [derive (Clone)] struct UnackedReceipt { event_id : String , barrier : InboxBarrier , }",
-        );
-
-        let alpha_renamed = support
-            .replacen(
-                "run_case(case: EvidenceCase)",
-                "run_case(selected: EvidenceCase)",
-                1,
-            )
-            .replacen("case.id()", "selected.id()", 1)
-            .replacen("let mut fixture =", "let mut runtime_fixture =", 1)
-            .replacen(
-                "case.dispatch(&mut fixture)",
-                "selected.dispatch(&mut runtime_fixture)",
-                1,
-            )
-            .replacen("completion.case == case", "completion.case == selected", 1)
-            .replacen("let result =", "let outcome =", 1)
-            .replacen(
-                "fixture.finish(result)",
-                "runtime_fixture.finish(outcome)",
-                1,
-            );
-        assert!(matches!(
-            settingsonly_production_artifact_sources_are_closed(entry, &alpha_renamed),
-            ArtifactClosureEvidence::Certified(_)
-        ));
-
-        let unrelated = support.replacen(
-            "    async fn l2_join(&mut self) -> anyhow::Result<CaseCompletion> {",
-            "    async fn l2_join(&mut self) -> anyhow::Result<CaseCompletion> {\n        let _diagnostic = self.evidence_id;",
-            1,
-        );
-        assert!(matches!(
-            settingsonly_production_artifact_sources_are_closed(entry, &unrelated),
-            ArtifactClosureEvidence::Certified(_)
-        ));
-    }
-
-    #[allow(clippy::panic)] // reason: test helper panics with exact violation diagnostics on mismatch.
-    fn assert_artifact_violation(
-        evidence: ArtifactClosureEvidence,
-        stage: ArtifactClosureStage,
-        case: Option<&str>,
-        path: ArtifactClosurePath,
-        expected: &str,
-        actual: &str,
-    ) {
-        let ArtifactClosureEvidence::Violations(violations) = evidence else {
-            panic!("mutation unexpectedly produced a certificate");
-        };
-        let violation = violations
-            .iter()
-            .find(|violation| {
-                violation.stage == stage
-                    && violation.case.as_deref() == case
-                    && violation.path == path
-                    && violation.expected == expected
-                    && violation.actual == actual
-            })
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing exact violation stage={stage:?} case={case:?} path={path:?} expected={expected:?} actual={actual:?}; actual violations={violations:?}"
-                )
-            });
-        assert!(
-            violation.span.is_some(),
-            "exact diagnostic omitted its source span: {violation:?}"
+            evidence.has_provider_construction_live_join(),
+            "typed generated carrier fixture must close the selected batch: {evidence:?}"
         );
     }
 
     #[test]
-    fn settingsonly_real_executable_boundary_is_complete() -> anyhow::Result<()> {
+    fn provider_construction_live_join_real_assemblies_are_exact() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let findings = validate_target(&root, "settingsonly")?;
-        assert!(
-            findings
-                .iter()
-                .all(|finding| finding.rule != Rule::SettingsOnlyExecutableBoundary),
-            "real settingsonly artifact closure must be complete: {findings:?}"
-        );
-        Ok(())
-    }
-
-    fn real_settingsonly_l2_evidence() -> anyhow::Result<SettingsOnlyL2Evidence> {
-        let root = crate::workspace_root()?;
-        let ir = AssemblyGovernanceIr::<Core>::load(&root)?;
-        let assembly = ir
-            .assembly("settingsonly")
-            .context("settingsonly governance projection")?;
-        let metadata = load_workspace_metadata(&root)?.context("workspace cargo metadata")?;
-        let (closure_packages, _) = cargo_tree_default_normal_evidence(&root, assembly, &metadata)?;
-        load_settingsonly_l2_evidence(&root, assembly, &closure_packages)
-    }
-
-    #[test]
-    fn settingsonly_l2_production_closure_accepts_real_workspace() -> anyhow::Result<()> {
-        let evidence = real_settingsonly_l2_evidence()?;
-        let findings = validate_settingsonly_l2_evidence(&evidence);
-        assert!(
-            findings.is_empty(),
-            "real L2 production closure must be green: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn settingsonly_l2_production_closure_rejects_synthetic_mutations() -> anyhow::Result<()> {
-        let baseline = real_settingsonly_l2_evidence()?;
-        assert!(validate_settingsonly_l2_evidence(&baseline).is_empty());
-
-        let mut cases: Vec<(&str, SettingsOnlyL2Evidence)> = Vec::new();
-
-        let mut missing = baseline.clone();
-        missing
-            .runtime_plan
-            .get_mut("providerPlans")
-            .and_then(serde_json::Value::as_array_mut)
-            .context("providerPlans fixture")?
-            .pop();
-        cases.push(("missing provider", missing));
-
-        let mut extra = baseline.clone();
-        let plans = extra
-            .runtime_plan
-            .get_mut("providerPlans")
-            .and_then(serde_json::Value::as_array_mut)
-            .context("providerPlans fixture")?;
-        plans.push(plans[0].clone());
-        cases.push(("extra provider", extra));
-
-        let mut equal_count_substitution = baseline.clone();
-        let substituted = equal_count_substitution
-            .runtime_plan
-            .get_mut("providerPlans")
-            .and_then(serde_json::Value::as_array_mut)
-            .context("providerPlans fixture")?
-            .iter_mut()
-            .find(|provider| {
-                provider.get("id").and_then(serde_json::Value::as_str)
-                    == Some("distributed-cas-store")
-            })
-            .context("distributed CAS fixture")?;
-        substituted["id"] = serde_json::json!("distributed-cas-store-alternative");
-        cases.push((
-            "equal-count provider substitution",
-            equal_count_substitution,
-        ));
-
-        let mut ephemeral = baseline.clone();
-        ephemeral.providers_gen = ephemeral.providers_gen.replacen(
-            "ProviderDurability::Persistent",
-            "ProviderDurability::EphemeralMemory",
-            1,
-        );
-        cases.push(("ephemeral durable provider", ephemeral));
-
-        let mut cargo_fallback = baseline.clone();
-        cargo_fallback
-            .closure_packages
-            .insert("demo-fallback".to_owned());
-        cases.push(("fallback Cargo closure", cargo_fallback));
-
-        let mut generated_comment = baseline.clone();
-        generated_comment.providers_gen = generated_comment.providers_gen.replace(
-            "ProviderCatalogEntry::checked(",
-            "/* ProviderCatalogEntry::checked( */ ProviderCatalogEntry::unchecked(",
-        );
-        cases.push(("generated comment bait", generated_comment));
-
-        let mut generated_test = baseline.clone();
-        generated_test.modules_gen = generated_test.modules_gen.replace(
-            "pub async fn wire_domains",
-            "#[cfg(test)] pub async fn wire_domains",
-        );
-        cases.push(("generated cfg(test) bait", generated_test));
-
-        let mut lock_drift = baseline.clone();
-        lock_drift.runtime_plan["assemblyFingerprint"] = serde_json::json!("sha256:synthetic-red");
-        cases.push(("runtime plan drift", lock_drift));
-
-        let mut lock_digest = baseline.clone();
-        lock_digest.lock["digests"]["manifest"] = serde_json::json!("sha256:synthetic-red");
-        cases.push(("assembly lock drift", lock_digest));
-
-        let mut v1 = baseline.clone();
-        v1.config_schema["properties"]["schemaVersion"]["const"] = serde_json::json!(1);
-        cases.push(("config v1", v1));
-
-        let mut missing_projection_generation = baseline.clone();
-        missing_projection_generation.runtime_plan["workflowPlans"]
-            .as_array_mut()
-            .context("settingsonly workflow plan fixture")?[0]
-            .as_object_mut()
-            .context("settingsonly projection workflow fixture")?
-            .remove("targetGeneration");
-        cases.push((
-            "missing projection target generation",
-            missing_projection_generation,
-        ));
-
-        let mut wrong_projection_generation = baseline.clone();
-        wrong_projection_generation.runtime_plan["workflowPlans"][0]["targetGeneration"] =
-            serde_json::json!("v2");
-        cases.push((
-            "wrong projection target generation",
-            wrong_projection_generation,
-        ));
-
-        let mut default_projection_generation = baseline.clone();
-        default_projection_generation
-            .config_sample
-            .as_table_mut()
-            .context("settingsonly config sample fixture")?
-            .insert(
-                "projection".to_owned(),
-                toml::Value::Table(toml::map::Map::from_iter([(
-                    "targetGeneration".to_owned(),
-                    toml::Value::String("v3".to_owned()),
-                )])),
-            );
-        cases.push((
-            "operator config target generation",
-            default_projection_generation,
-        ));
-
-        let mut fallback_projection_generation = baseline.clone();
-        fallback_projection_generation.config_schema["required"]
-            .as_array_mut()
-            .context("settingsonly config required fixture")?
-            .push(serde_json::json!("projection"));
-        fallback_projection_generation.config_schema["properties"]["projection"] =
-            serde_json::json!({ "$ref": "#/definitions/ProjectionConfig" });
-        fallback_projection_generation.config_schema["definitions"]["ProjectionConfig"] = serde_json::json!({
-            "type": "object",
-            "required": ["targetGeneration"],
-            "properties": { "targetGeneration": { "type": "string" } },
-            "additionalProperties": false
-        });
-        cases.push((
-            "operator config schema target generation",
-            fallback_projection_generation,
-        ));
-
-        let mut dead_helper = baseline.clone();
-        dead_helper.runtime_rs = dead_helper.runtime_rs.replace(
-            "let completed = crate::providers::build(",
-            "if false { let _ = crate::providers::build; } let completed = fallback::build(",
-        );
-        cases.push(("dead helper and fallback", dead_helper));
-
-        let mut nonactivated = baseline.clone();
-        nonactivated.eventing_rs = nonactivated.eventing_rs.replace(
-            "eventing_composition::bridge_generated_settings_subscriptions(bindings)",
-            "eventing_composition::validate_nonactivated_settings_subscriber(bindings)",
-        );
-        cases.push(("nonactivated subscriber", nonactivated));
-
-        let mut unready_amqp = baseline.clone();
-        unready_amqp.eventing_rs = unready_amqp
-            .eventing_rs
-            .replace("wire_amqp_readiness(", "dead_amqp_readiness(");
-        cases.push(("unready AMQP provider roles", unready_amqp));
-
-        let mut degraded_required_probe = baseline.clone();
-        degraded_required_probe.eventing_rs = degraded_required_probe.eventing_rs.replace(
-            "required_health_status(self.health.status())",
-            "self.health.status()",
-        );
-        cases.push((
-            "degraded required probe remains ready",
-            degraded_required_probe,
-        ));
-
-        let mut generic_bridge = baseline.clone();
-        generic_bridge.bridge_rs = generic_bridge
-            .bridge_rs
-            .replace("admitted_settings_dispatch,", "admitted_dispatch,");
-        cases.push(("generic subscription fallback", generic_bridge));
-
-        let mut raw_jwt_parse = baseline.clone();
-        raw_jwt_parse
-            .auth_bridge_rs
-            .push_str("\nfn raw_parse(raw: &str) { let _ = authn::Jwt::parse(raw); }\n");
-        cases.push(("raw JWT parse", raw_jwt_parse));
-
-        let mut raw_jwt_alias = baseline.clone();
-        raw_jwt_alias.auth_bridge_rs.push_str(
-            "\nfn raw_alias(raw: &str) { let parse = authn::Jwt::parse; let _ = parse(raw); }\n",
-        );
-        cases.push(("raw JWT parse alias", raw_jwt_alias));
-
-        let mut raw_jwt_function_pointer = baseline.clone();
-        raw_jwt_function_pointer.auth_bridge_rs.push_str(
-            "\nfn raw_pointer(raw: &str) { let parse: fn(&str) -> Result<authn::Jwt, authn::AuthnError> = authn::Jwt::parse; let _ = parse(raw); }\n",
-        );
-        cases.push(("raw JWT parse function pointer", raw_jwt_function_pointer));
-
-        let mut raw_jwt_test_bait = baseline.clone();
-        raw_jwt_test_bait.auth_bridge_rs.push_str(
-            "\n#[cfg(test)] mod bait { fn raw_parse(raw: &str) { let _ = authn::Jwt::parse(raw); } }\n",
-        );
-        cases.push(("cfg(test) raw JWT parse bait", raw_jwt_test_bait));
-
-        let mut full_access_extension = baseline.clone();
-        full_access_extension.auth_bridge_rs = full_access_extension.auth_bridge_rs.replace(
-            "request.extensions_mut().insert(principal);",
-            "request.extensions_mut().insert(principal); request.extensions_mut().insert(access);",
-        );
-        cases.push(("full verified access extension", full_access_extension));
-
-        let mut provider_fallback = baseline.clone();
-        provider_fallback.providers_rs = provider_fallback.providers_rs.replace(
-            "build_s3_archive_store(s3, &secrets)",
-            "fallback_archive_store(s3, &secrets)",
-        );
-        cases.push(("production provider fallback", provider_fallback));
-
-        let mut provider_string_bait = baseline.clone();
-        provider_string_bait.providers_rs = provider_string_bait.providers_rs.replace(
-            "build_s3_archive_store(s3, &secrets)",
-            "{ let _bait = \"build_s3_archive_store(s3, &secrets)\"; fallback_archive_store(s3, &secrets) }",
-        );
-        cases.push(("production provider string bait", provider_string_bait));
-
-        let mut optional_receipt = baseline.clone();
-        optional_receipt.providers_rs = optional_receipt.providers_rs.replace(
-            "distributed_lock_store: crate::providers_gen::DistributedLockStoreReceipt",
-            "distributed_lock_store: Option<crate::providers_gen::DistributedLockStoreReceipt>",
-        );
-        cases.push(("optional production receipt", optional_receipt));
-
-        let mut unready_redis = baseline.clone();
-        unready_redis.providers_rs = unready_redis
-            .providers_rs
-            .replace("RedisReadinessWorker::spawn(", "dead_redis_sampler(");
-        cases.push(("unready Redis provider", unready_redis));
-
-        let mut open_nested_config = baseline.clone();
-        open_nested_config.config_schema["definitions"]["ListenersConfig"]["additionalProperties"] =
-            serde_json::json!(true);
-        cases.push(("open nested config", open_nested_config));
-
-        let mut incomplete_secret_bundle = baseline.clone();
-        incomplete_secret_bundle.config_rs = incomplete_secret_bundle
-            .config_rs
-            .replace("    pg_projection_worker_password: SecretValue,\n", "");
-        cases.push(("incomplete secret bundle", incomplete_secret_bundle));
-
-        let mut unready_dlx_key = baseline.clone();
-        unready_dlx_key.dlx_rs = unready_dlx_key
-            .dlx_rs
-            .replace("DLX_HOT_KEY_READINESS_PROBE", "DLX_HOT_KEY_UNOBSERVED");
-        cases.push(("unready DLX key provider", unready_dlx_key));
-
-        let mut misattributed_dlx_key = baseline.clone();
-        misattributed_dlx_key.dlx_rs = misattributed_dlx_key.dlx_rs.replace(
-            "let dlx_hot_key_provider = DomainModuleResult {",
-            "let lifecycle_hot_key_bait = DomainModuleResult {",
-        );
-        cases.push(("misattributed DLX key probe", misattributed_dlx_key));
-
-        let mut detached_dlx_receipt = baseline.clone();
-        detached_dlx_receipt.providers_rs = detached_dlx_receipt.providers_rs.replace(
-            "hot_output.merge(dlx_outputs.dlx_hot_key_provider);",
-            "hot_output.merge(dlx_outputs.dlx_lifecycle_repository);",
-        );
-        cases.push(("detached DLX key receipt", detached_dlx_receipt));
-
-        for (name, evidence) in cases {
-            let findings = validate_settingsonly_l2_evidence(&evidence);
+        for name in ["runtime", "settingsonly", "identityaudit"] {
+            let evidence =
+                security_closeout_evidence_from_sources(&root.join("assemblies").join(name))?;
             assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::SettingsOnlyL2ProductionClosure),
-                "synthetic mutation `{name}` escaped the L2 closure gate: {findings:?}"
+                evidence.has_provider_construction_live_join(),
+                "{name} must retain a production-reachable provider construction handoff: {evidence:?}"
             );
         }
         Ok(())
@@ -15580,250 +8877,6 @@ ratelimit = { path = "../../adapters/ratelimit" }
     }
 
     #[test]
-    fn exact_listener_pdp_shapes_lock_canonical_bodies_per_kind() {
-        let builders = [
-            (
-                ListenerPdpReceiptBuilderKind::RuntimeRss,
-                r#"fn build_rss_listener_pdp_jwks_lifecycle(
-    provider: &RuntimeAccessProvider<RssAccessProfile>,
-) -> ListenerPdpJwksLifecycle {
-    ListenerPdpJwksLifecycle::new(
-        provider.managed_resource(),
-        AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),
-    )
-}"#,
-            ),
-            (
-                ListenerPdpReceiptBuilderKind::RuntimeFederated,
-                r#"fn build_federated_listener_pdp_jwks_lifecycle(
-    provider: &RuntimeAccessProvider<FederatedAccessProfile>,
-) -> ListenerPdpJwksLifecycle {
-    ListenerPdpJwksLifecycle::new(
-        provider.managed_resource(),
-        AccessTokenJwksReadyProbe::federated_access(provider.jwks_readiness()).into_registration(),
-    )
-}"#,
-            ),
-            (
-                ListenerPdpReceiptBuilderKind::SettingsFederated,
-                r#"fn build_federated_listener_pdp_jwks_lifecycle(
-    federated: FederatedProvider,
-) -> (
-    crate::providers_gen::ListenerPdpConstructor,
-    ListenerPdpJwksLifecycle,
-) {
-    let managed_resource = federated.managed_resource();
-    let ready_probe = AccessTokenJwksReadyProbe::federated_access(
-        federated.probe_name.clone(),
-        federated.readiness.clone(),
-    );
-    let FederatedProvider {
-        provider: _,
-        provider_constructor,
-        probe_name,
-        readiness: _,
-    } = federated;
-    (
-        provider_constructor,
-        ListenerPdpJwksLifecycle {
-            probe_name,
-            probe: Box::new(ready_probe),
-            managed_resource,
-        },
-    )
-}"#,
-            ),
-            (
-                ListenerPdpReceiptBuilderKind::IdentityRss,
-                r#"fn build_rss_listener_pdp_jwks_lifecycle(
-    products: OidcProducts,
-) -> (
-    Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
-    Arc<identity::AuthGrantValidationService>,
-    ListenerPdpJwksLifecycle,
-) {
-    let provider = products.provider();
-    let OidcProducts {
-        provider: _,
-        grants,
-        probe_name,
-        probe,
-    } = products;
-    let managed_resource =
-        SharedManagedResource::boxed(Arc::clone(&provider), "identityaudit-rss-access-verifier");
-    (
-        provider,
-        grants,
-        ListenerPdpJwksLifecycle {
-            jwks_probe: (probe_name, Box::new(probe)),
-            managed_resource,
-        },
-    )
-}"#,
-            ),
-        ];
-        assert_eq!(builders.len(), LISTENER_PDP_RECEIPT_BUILDER_SHAPES.len());
-        for (kind, source) in builders {
-            let shape = LISTENER_PDP_RECEIPT_BUILDER_SHAPES
-                .iter()
-                .find(|shape| shape.kind == kind)
-                .unwrap_or_else(|| panic!("missing shape for {kind:?}"));
-            let function = syn::parse_str::<syn::ItemFn>(source)
-                .unwrap_or_else(|error| panic!("parse {} ({kind:?}): {error}", shape.source));
-            assert_eq!(
-                exact_listener_pdp_receipt_builder(&function),
-                Some(kind),
-                "canonical body must match {}",
-                shape.source
-            );
-
-            let mut old_shape = function.clone();
-            old_shape.block = syn::parse_quote!({ unreachable!("old-shape") });
-            assert!(
-                exact_listener_pdp_receipt_builder(&old_shape).is_none(),
-                "old-shape body must fail {}",
-                shape.source
-            );
-        }
-
-        let commits = [
-            (
-                ListenerPdpCommitKind::Runtime,
-                r#"fn commit_listener_pdp_jwks_lifecycle(
-    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
-    permit: ListenerPdpPermit,
-) -> ProviderOutput {
-    ProviderOutput::listener_pdp(lifecycle, permit)
-}"#,
-            ),
-            (
-                ListenerPdpCommitKind::Generated,
-                r#"fn commit_listener_pdp_jwks_lifecycle(
-    constructor: crate::providers_gen::ListenerPdpConstructor,
-    lifecycle: ListenerPdpJwksLifecycle,
-) -> anyhow::Result<crate::providers_gen::ListenerPdpBatch> {
-    constructor.finish(lifecycle)
-}"#,
-            ),
-        ];
-        assert_eq!(commits.len(), LISTENER_PDP_COMMIT_SHAPES.len());
-        for (kind, source) in commits {
-            let shape = LISTENER_PDP_COMMIT_SHAPES
-                .iter()
-                .find(|shape| shape.kind == kind)
-                .unwrap_or_else(|| panic!("missing commit shape for {kind:?}"));
-            let function = syn::parse_str::<syn::ItemFn>(source)
-                .unwrap_or_else(|error| panic!("parse {} ({kind:?}): {error}", shape.source));
-            assert!(
-                exact_listener_pdp_commit_function(&function),
-                "canonical commit must match {}",
-                shape.source
-            );
-
-            let mut old_shape = function.clone();
-            old_shape.block = syn::parse_quote!({ unreachable!("old-shape") });
-            assert!(
-                !exact_listener_pdp_commit_function(&old_shape),
-                "old-shape commit body must fail {}",
-                shape.source
-            );
-        }
-    }
-
-    #[test]
-    fn production_security_closeout_accepts_identity_consuming_probe_builder() {
-        let consuming = syn::parse_str::<syn::ItemFn>(
-            r#"fn build_rss_listener_pdp_jwks_lifecycle(
-    products: OidcProducts,
-) -> (
-    Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
-    Arc<identity::AuthGrantValidationService>,
-    ListenerPdpJwksLifecycle,
-) {
-    let provider = products.provider();
-    let OidcProducts {
-        provider: _,
-        grants,
-        probe_name,
-        probe,
-    } = products;
-    let managed_resource =
-        SharedManagedResource::boxed(Arc::clone(&provider), "identityaudit-rss-access-verifier");
-    (
-        provider,
-        grants,
-        ListenerPdpJwksLifecycle {
-            jwks_probe: (probe_name, Box::new(probe)),
-            managed_resource,
-        },
-    )
-}"#,
-        )
-        .expect("parse consuming identity builder");
-        assert_eq!(
-            exact_listener_pdp_receipt_builder(&consuming),
-            Some(ListenerPdpReceiptBuilderKind::IdentityRss),
-            "move-only identity JWKS builder must match the Hard receipt fingerprint"
-        );
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_identity_cloned_probe_builder() {
-        let cloned = syn::parse_str::<syn::ItemFn>(
-            r#"fn build_rss_listener_pdp_jwks_lifecycle(
-    products: &OidcProducts,
-) -> ListenerPdpJwksLifecycle {
-    ListenerPdpJwksLifecycle {
-        jwks_probe: (
-            products.probe_name.clone(),
-            Box::new(products.probe.clone()),
-        ),
-        managed_resource: SharedManagedResource::boxed(
-            Arc::clone(&products.provider),
-            "identityaudit-rss-access-verifier",
-        ),
-    }
-}"#,
-        )
-        .expect("parse cloned identity builder");
-        assert!(
-            exact_listener_pdp_receipt_builder(&cloned).is_none(),
-            "borrow+clone identity JWKS builder must no longer satisfy Hard receipt provenance"
-        );
-
-        let by_value_but_clone = syn::parse_str::<syn::ItemFn>(
-            r#"fn build_rss_listener_pdp_jwks_lifecycle(
-    products: OidcProducts,
-) -> (
-    Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
-    Arc<identity::AuthGrantValidationService>,
-    ListenerPdpJwksLifecycle,
-) {
-    let provider = products.provider();
-    (
-        provider,
-        products.grants.clone(),
-        ListenerPdpJwksLifecycle {
-            jwks_probe: (
-                products.probe_name.clone(),
-                Box::new(products.probe.clone()),
-            ),
-            managed_resource: SharedManagedResource::boxed(
-                Arc::clone(&provider),
-                "identityaudit-rss-access-verifier",
-            ),
-        },
-    )
-}"#,
-        )
-        .expect("parse by-value clone identity builder");
-        assert!(
-            exact_listener_pdp_receipt_builder(&by_value_but_clone).is_none(),
-            "by-value builder that still clones the probe must fail Hard receipt provenance"
-        );
-    }
-
-    #[test]
     fn production_security_closeout_requires_critical_providers() -> anyhow::Result<()> {
         for (name, constructor, gate) in [
             (
@@ -15929,1764 +8982,6 @@ ratelimit = { path = "../../adapters/ratelimit" }
             "JWKS closeout diagnosis must not dump cross-assembly boolean matrix: {}",
             jwks.detail
         );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_separately_staged_jwks_lifecycle() -> anyhow::Result<()>
-    {
-        let root = unique_tmp("assembly-production-security-staged-jwks");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let staged = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
-            "    provider_build.record(\n        crate::provider_output::commit_listener_pdp_jwks_lifecycle(\n            listener_pdp_lifecycle,\n            listener_pdp_permit,\n        ),\n    );",
-            "    stage_domain_output(listener_pdp_lifecycle);\n    UnrelatedLifecycle.listener_pdp_lifecycle();",
-        );
-        let staged = format!(
-            "{staged}\nstruct UnrelatedLifecycle;\nimpl UnrelatedLifecycle {{ fn listener_pdp_lifecycle(&self) {{}} }}\n"
-        );
-        write_runtime_src(&root, "lib.rs", &staged)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "separately staged JWKS probe/resource must not satisfy listener-pdp receipt ownership: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_bait_receipt_provenance() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-bait-receipt");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let exact = r#"fn build_rss_listener_pdp_jwks_lifecycle(
-    provider: &RuntimeAccessProvider<RssAccessProfile>,
-) -> ListenerPdpJwksLifecycle {
-    ListenerPdpJwksLifecycle::new(
-        provider.managed_resource(),
-        AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),
-    )
-}"#;
-        let bait = r#"fn build_rss_listener_pdp_jwks_lifecycle(
-    provider: &RuntimeAccessProvider<RssAccessProfile>,
-) -> ListenerPdpJwksLifecycle {
-    let _real_resource = provider.managed_resource();
-    let _real_probe =
-        AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration();
-    ListenerPdpJwksLifecycle::new(unrelated_resource(), unrelated_probe())
-}"#;
-        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, bait);
-        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "real JWKS facts discarded before a forged receipt must fail closed: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_lossy_receipt_aggregate() -> anyhow::Result<()> {
-        let exact = r#"    pub(crate) fn merge(mut self, other: Self) -> Self {
-        self.module.merge(other.module);
-        self
-    }"#;
-        for (case, lossy) in [
-            (
-                "discard-left",
-                r#"    pub(crate) fn merge(self, other: Self) -> Self {
-        other
-    }"#,
-            ),
-            (
-                "discard-right",
-                r#"    pub(crate) fn merge(self, _other: Self) -> Self {
-        self
-    }"#,
-            ),
-        ] {
-            let root = unique_tmp(&format!(
-                "assembly-production-security-lossy-receipt-aggregate-{case}"
-            ));
-            write_assembly(
-                &root,
-                &production_security_manifest("production", true, true, true),
-                CARGO_SECURITY_BACKEND,
-            )?;
-            let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, lossy);
-            assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-            write_runtime_src(&root, "lib.rs", &mutated)?;
-
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-                "{case} lifecycle aggregate must fail closed: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_lossy_receipt_sink() -> anyhow::Result<()> {
-        let exact_materializer = r#"    pub(crate) fn into_module(self) -> bootstrap::DomainModuleResult {
-        self.module
-    }"#;
-        let exact_sink = r#"    fn listener_pdp(lifecycle: ListenerPdpJwksLifecycle, permit: ListenerPdpPermit) -> Self {
-        Self::new(
-            lifecycle.into_module(),
-            vec![ProviderReceipt::ListenerPdp(permit.0)],
-            "listener-pdp",
-            CHANNELS_PROBES_RESOURCES,
-        )
-    }"#;
-        let exact_new = r#"    fn new(
-        module: DomainModuleResult,
-        receipts: Vec<ProviderReceipt>,
-        batch: &'static str,
-        expected_channels: &'static [LifecycleChannel],
-    ) -> Self {
-        Self {
-            batches: vec![ProviderBatch {
-                module,
-                receipts,
-                batch,
-                expected_channels,
-            }],
-        }
-    }"#;
-        for (case, exact, lossy) in [
-            (
-                "materializer",
-                exact_materializer,
-                r#"    pub(crate) fn into_module(self) -> bootstrap::DomainModuleResult {
-        bootstrap::DomainModuleResult::default()
-    }"#,
-            ),
-            (
-                "listener-pdp-sink",
-                exact_sink,
-                r#"    fn listener_pdp(_lifecycle: ListenerPdpJwksLifecycle, permit: ListenerPdpPermit) -> Self {
-        Self::new(
-            DomainModuleResult::default(),
-            vec![ProviderReceipt::ListenerPdp(permit.0)],
-            "listener-pdp",
-            CHANNELS_PROBES_RESOURCES,
-        )
-    }"#,
-            ),
-            (
-                "provider-output-new",
-                exact_new,
-                r#"    fn new(
-        _module: DomainModuleResult,
-        receipts: Vec<ProviderReceipt>,
-        batch: &'static str,
-        expected_channels: &'static [LifecycleChannel],
-    ) -> Self {
-        Self {
-            batches: vec![ProviderBatch {
-                module: DomainModuleResult::default(),
-                receipts,
-                batch,
-                expected_channels,
-            }],
-        }
-    }"#,
-            ),
-        ] {
-            let root = unique_tmp(&format!(
-                "assembly-production-security-lossy-receipt-sink-{case}"
-            ));
-            write_assembly(
-                &root,
-                &production_security_manifest("production", true, true, true),
-                CARGO_SECURITY_BACKEND,
-            )?;
-            let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, lossy);
-            assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-            write_runtime_src(&root, "lib.rs", &mutated)?;
-
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-                "lossy {case} must fail closed: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_lossy_generated_listener_pdp_sink() -> anyhow::Result<()>
-    {
-        let exact = r#"
-impl ListenerPdpConstructor {
-    pub(crate) fn finish(
-        self,
-        output: crate::providers::ListenerPdpJwksLifecycle,
-    ) -> anyhow::Result<ListenerPdpBatch> {
-        let output = output.into_output();
-        validate_lifecycle_output(self.entry, &output)?;
-        Ok(ListenerPdpBatch(output))
-    }
-}
-impl ListenerPdpBatch {
-    pub(crate) fn transfer(
-        self,
-        inventory: &mut bootstrap::DomainModuleResult,
-    ) -> ListenerPdpReceipt {
-        let probe_names = self.0.probes.iter().map(|(name, _)| name.clone()).collect();
-        let receipt = ListenerPdpReceipt {
-            probes: self.0.probes.len(),
-            resources: self.0.resources.len(),
-            workers: self.0.workers.len(),
-            probe_names,
-        };
-        inventory.merge(self.0);
-        receipt
-    }
-}
-"#;
-        let exact_program = file_security_closeout_program(&syn::parse_file(exact)?);
-        assert_eq!(exact_program.listener_pdp_generated_finish_definitions, 1);
-        assert_eq!(
-            exact_program.exact_listener_pdp_generated_finish_definitions,
-            1
-        );
-        assert_eq!(exact_program.listener_pdp_generated_transfer_definitions, 1);
-        assert_eq!(
-            exact_program.exact_listener_pdp_generated_transfer_definitions,
-            1
-        );
-
-        let lossy_finish = exact.replace(
-            "        let output = output.into_output();\n        validate_lifecycle_output(self.entry, &output)?;\n        Ok(ListenerPdpBatch(output))",
-            "        drop(self);\n        drop(output);\n        Ok(ListenerPdpBatch(bootstrap::DomainModuleResult::default()))",
-        );
-        let lossy_transfer = exact.replace(
-            "        inventory.merge(self.0);\n        receipt",
-            "        drop(inventory);\n        drop(self.0);\n        receipt",
-        );
-        for (case, source) in [("finish", lossy_finish), ("transfer", lossy_transfer)] {
-            let program = file_security_closeout_program(&syn::parse_file(&source)?);
-            assert_eq!(program.listener_pdp_generated_finish_definitions, 1);
-            assert_eq!(program.listener_pdp_generated_transfer_definitions, 1);
-            assert!(
-                program.exact_listener_pdp_generated_finish_definitions == 0
-                    || program.exact_listener_pdp_generated_transfer_definitions == 0,
-                "lossy generated {case} sink must not be exact"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_requires_generated_batch_transfer() -> anyhow::Result<()> {
-        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
-            let file = syn::parse_file(&format!(
-                "use std::{{iter::repeat as top_repeat, process::exit}}; fn stop() -> ! {{ loop {{}} }} fn coerced_stop() {{ loop {{ std::hint::spin_loop(); }} }} fn imported_exit_stop() {{ exit(1); }} fn repeat_stop() {{ for _ in top_repeat(()) {{ std::hint::spin_loop(); }} }} fn nested_repeat_stop() {{ {{ use std::iter::repeat; for _ in repeat(()) {{ std::hint::spin_loop(); }} }} }} fn absolute_repeat_stop() {{ for _ in ::std::iter::repeat(()) {{ ::std::hint::spin_loop(); }} }} fn adapted_repeat_stop() {{ for _ in std::iter::repeat(()).map(|_| ()).filter(|_| true).enumerate() {{ std::hint::spin_loop(); }} }} fn finite_repeat() {{ for _ in std::iter::repeat(()).take(1) {{ std::hint::spin_loop(); }} }} fn constant_branch_stop() {{ if false {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn integer_constant_branch_stop() {{ if 1 == 2 {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn integer_relation_branch_stop() {{ if 2 < 1 {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn constant_match_stop() {{ match true {{ false => return, true => {{}} }} loop {{ std::hint::spin_loop(); }} }} fn constant_while_stop() {{ while false {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn labeled_inner_stop() {{ loop {{ 'inner: {{ break 'inner; }} std::hint::spin_loop(); }} }} fn nested_break_stop() {{ loop {{ loop {{ break; }} std::hint::spin_loop(); }} }} fn returning_loop() {{ loop {{ break; }} }} fn conditionally_returning(flag: bool) {{ if flag {{ return; }} loop {{ std::hint::spin_loop(); }} }} struct Guard; impl Guard {{ fn new() -> Self {{ Guard }} fn stop(&self) -> ! {{ loop {{}} }} fn halt(&self) {{ self.stop(); }} }} fn make_guard() -> Guard {{ Guard }} struct Wrap {{ guard: Guard }} struct Worker; impl Worker {{ fn new() -> Self {{ Worker }} fn stop(&self) {{}} }} fn make_worker() -> Worker {{ Worker }} struct WrapWorker {{ guard: Worker }} fn run() {{ {body} }}"
-            ))?;
-            let Some(syn::Item::Fn(function)) = file.items.last() else {
-                anyhow::bail!("expected function fixture");
-            };
-            Ok(listener_pdp_receipt_commit_dataflow(
-                &function.block,
-                &function.sig,
-                &collect_diverging_function_names(std::iter::once(&file)),
-                &StandardPathAliases::from_items(&file.items),
-            ))
-        }
-
-        let lifecycle =
-            "let lifecycle = self::build_federated_listener_pdp_jwks_lifecycle(&federated);";
-        let green = commit_flow(&format!(
-            "{lifecycle} self::commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)?.transfer(transaction.provider_output_mut());"
-        ))?;
-        assert!(green.generated_federated);
-
-        for (case, body) in [
-            (
-                "detached",
-                format!(
-                    "{lifecycle} let _batch = self::commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)?;"
-                ),
-            ),
-            (
-                "wrong-inventory",
-                format!(
-                    "{lifecycle} self::commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)?.transfer(decoy.provider_output_mut());"
-                ),
-            ),
-            (
-                "post-commit-merge",
-                format!(
-                    "{lifecycle} self::commit_listener_pdp_jwks_lifecycle(constructor, lifecycle)?.merge(decoy).transfer(transaction.provider_output_mut());"
-                ),
-            ),
-        ] {
-            let flow = commit_flow(&body)?;
-            assert!(
-                !flow.generated_federated,
-                "generated listener-PDP {case} batch must not count as transferred"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_requires_runtime_output_record() -> anyhow::Result<()> {
-        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
-            let file = syn::parse_file(&format!(
-                "use std::{{iter::repeat as top_repeat, process::exit}}; fn stop() -> ! {{ loop {{}} }} fn coerced_stop() {{ loop {{ std::hint::spin_loop(); }} }} fn imported_exit_stop() {{ exit(1); }} fn repeat_stop() {{ for _ in top_repeat(()) {{ std::hint::spin_loop(); }} }} fn nested_repeat_stop() {{ {{ use std::iter::repeat; for _ in repeat(()) {{ std::hint::spin_loop(); }} }} }} fn absolute_repeat_stop() {{ for _ in ::std::iter::repeat(()) {{ ::std::hint::spin_loop(); }} }} fn adapted_repeat_stop() {{ for _ in std::iter::repeat(()).map(|_| ()).filter(|_| true).enumerate() {{ std::hint::spin_loop(); }} }} fn finite_repeat() {{ for _ in std::iter::repeat(()).take(1) {{ std::hint::spin_loop(); }} }} fn constant_branch_stop() {{ if false {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn integer_constant_branch_stop() {{ if 1 == 2 {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn integer_relation_branch_stop() {{ if 2 < 1 {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn constant_match_stop() {{ match true {{ false => return, true => {{}} }} loop {{ std::hint::spin_loop(); }} }} fn constant_while_stop() {{ while false {{ return; }} loop {{ std::hint::spin_loop(); }} }} fn labeled_inner_stop() {{ loop {{ 'inner: {{ break 'inner; }} std::hint::spin_loop(); }} }} fn nested_break_stop() {{ loop {{ loop {{ break; }} std::hint::spin_loop(); }} }} fn returning_loop() {{ loop {{ break; }} }} fn conditionally_returning(flag: bool) {{ if flag {{ return; }} loop {{ std::hint::spin_loop(); }} }} struct Guard; impl Guard {{ fn new() -> Self {{ Guard }} fn stop(&self) -> ! {{ loop {{}} }} fn halt(&self) {{ self.stop(); }} }} fn make_guard() -> Guard {{ Guard }} struct Wrap {{ guard: Guard }} struct Worker; impl Worker {{ fn new() -> Self {{ Worker }} fn stop(&self) {{}} }} fn make_worker() -> Worker {{ Worker }} struct WrapWorker {{ guard: Worker }} fn run() {{ {body} }}"
-            ))?;
-            let Some(syn::Item::Fn(function)) = file.items.last() else {
-                anyhow::bail!("expected function fixture");
-            };
-            Ok(listener_pdp_receipt_commit_dataflow(
-                &function.block,
-                &function.sig,
-                &collect_diverging_function_names(std::iter::once(&file)),
-                &StandardPathAliases::from_items(&file.items),
-            ))
-        }
-
-        let setup = r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
-let rss = crate::infra::oidc::build_rss_listener_pdp_jwks_lifecycle(&rss_provider);
-let federated = crate::infra::oidc::build_federated_listener_pdp_jwks_lifecycle(&federated_provider);
-let lifecycle = rss.merge(federated);"#;
-        let commit =
-            "crate::provider_output::commit_listener_pdp_jwks_lifecycle(lifecycle, permit)";
-        let green = commit_flow(&format!("{setup} provider_build.record({commit});"))?;
-        assert!(green.runtime_direct);
-        let returning_loop_green = commit_flow(&format!(
-            "returning_loop(); {setup} provider_build.record({commit});"
-        ))?;
-        assert!(
-            returning_loop_green.runtime_direct,
-            "a break targeting the outer loop must preserve later evidence"
-        );
-        let conditional_return_green = commit_flow(&format!(
-            "conditionally_returning(true); {setup} provider_build.record({commit});"
-        ))?;
-        assert!(
-            conditional_return_green.runtime_direct,
-            "a helper with a normal return path must not be inferred as never-returning"
-        );
-        let finite_repeat_green = commit_flow(&format!(
-            "finite_repeat(); {setup} provider_build.record({commit});"
-        ))?;
-        assert!(
-            finite_repeat_green.runtime_direct,
-            "a terminating iterator adapter must preserve later evidence"
-        );
-        let local_worker_method_green = commit_flow(&format!(
-            "let worker = Worker; worker.stop(); {setup} provider_build.record({commit});"
-        ))?;
-        assert!(
-            local_worker_method_green.runtime_direct,
-            "a non-diverging same-name method on a local binding must preserve later evidence"
-        );
-        let scoped_imports = syn::parse_file(
-            "fn repeat(value: ()) -> std::iter::Once<()> { std::iter::once(value) } \
-             fn nested_repeat_stop() { { use std::iter::repeat; for _ in repeat(()) {} } } \
-             fn finite_local_repeat() { for _ in repeat(()) {} }",
-        )?;
-        let scoped_diverging = collect_diverging_function_names(std::iter::once(&scoped_imports));
-        assert!(scoped_diverging.contains("nested_repeat_stop"));
-        assert!(
-            !scoped_diverging.contains("finite_local_repeat"),
-            "a nested standard import must not leak onto a sibling local function"
-        );
-        let shadowed_source = format!(
-            "use std::{{iter::repeat, process::exit}}; \
-             fn stop() -> ! {{ loop {{}} }} fn normal() {{}} \
-             struct Worker; impl Worker {{ fn stop(&self) {{}} }} \
-             fn standard_repeat_forever() {{ for _ in repeat(()) {{}} }} \
-             fn finite_helper() {{ let repeat = |value| std::iter::once(value); for _ in repeat(()) {{}} }} \
-             fn finite_destructured() {{ let (repeat,) = (|value| std::iter::once(value),); for _ in repeat(()) {{}} }} \
-             fn finite_parameter(repeat: impl Fn(()) -> std::iter::Once<()>) {{ for _ in repeat(()) {{}} }} \
-             fn finite_stop_parameter(stop: impl FnOnce()) {{ stop(); }} \
-             fn finite_stop_local() {{ let stop = || (); stop(); }} \
-             fn closure_parameter_scope() {{ let invoke = |stop: fn()| stop(); invoke(normal); }} \
-             fn immediate_closure_scope() {{ (|stop: fn()| stop())(normal); }} \
-             fn scope_shadows() {{ if let Some(exit) = Some(|| ()) {{ exit(); }} match Some(|| ()) {{ Some(exit) => exit(), None => {{}} }} }} \
-             fn run(exit: impl FnOnce()) {{ Worker.stop(); exit(); {setup} provider_build.record({commit}); }}"
-        );
-        let shadowed_file = syn::parse_file(&shadowed_source)?;
-        let shadowed_diverging = collect_diverging_function_names(std::iter::once(&shadowed_file));
-        assert!(shadowed_diverging.contains("standard_repeat_forever"));
-        assert!(shadowed_diverging.contains("stop"));
-        assert!(
-            !shadowed_diverging.contains("finite_helper"),
-            "a local closure must shadow a same-name standard import"
-        );
-        assert!(!shadowed_diverging.contains("finite_destructured"));
-        assert!(!shadowed_diverging.contains("finite_parameter"));
-        assert!(!shadowed_diverging.contains("finite_stop_parameter"));
-        assert!(!shadowed_diverging.contains("finite_stop_local"));
-        let Some(syn::Item::Fn(shadowed_run)) = shadowed_file.items.last() else {
-            anyhow::bail!("expected shadowed run fixture");
-        };
-        let shadowed_flow = listener_pdp_receipt_commit_dataflow(
-            &shadowed_run.block,
-            &shadowed_run.sig,
-            &shadowed_diverging,
-            &StandardPathAliases::from_items(&shadowed_file.items),
-        );
-        assert!(
-            shadowed_flow.runtime_direct,
-            "a function parameter must shadow a same-name process terminator import"
-        );
-        assert!(
-            file_security_closeout_program(&shadowed_file)
-                .invalid_functions
-                .is_empty(),
-            "outer callgraph invalidation must respect value-namespace shadowing"
-        );
-
-        for (case, body) in [
-            ("detached", format!("{setup} let _detached = {commit};")),
-            ("wrong-recorder", format!("{setup} decoy.record({commit});")),
-            (
-                "shadowed-recorder",
-                format!("{setup} let mut provider_build = Decoy; provider_build.record({commit});"),
-            ),
-            (
-                "post-commit-merge",
-                format!("{setup} provider_build.record({commit}.merge(decoy));"),
-            ),
-            (
-                "cfg-disabled-block",
-                format!("#[cfg(any())] {{ {setup} provider_build.record({commit}); }}"),
-            ),
-            (
-                "cfg-attr-disabled-block",
-                format!(
-                    "#[cfg_attr(all(), cfg(any()))] {{ {setup} provider_build.record({commit}); }}"
-                ),
-            ),
-            (
-                "panic-before-record",
-                format!("panic!(\"stop\"); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "bail-before-record",
-                format!("anyhow::bail!(\"stop\"); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "opaque-macro-before-record",
-                format!("opaque!(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "tracing-argument-mutation",
-                format!(
-                    "{setup} ::tracing::info!(changed = {{ lifecycle = rss; true }}); provider_build.record({commit});"
-                ),
-            ),
-            (
-                "ensure-divergence-before-record",
-                format!(
-                    "::anyhow::ensure!(false, \"stop\"); {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "vec-argument-divergence-before-record",
-                format!(
-                    "::std::vec![{{ std::process::exit(1); 0 }}]; {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "loop-before-record",
-                format!("loop {{}} {setup} provider_build.record({commit});"),
-            ),
-            (
-                "loop-dead-conditional-break",
-                format!(
-                    "loop {{ if false {{ break; }} }} {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "loop-dead-break-after-continue",
-                format!("loop {{ continue; break; }} {setup} provider_build.record({commit});"),
-            ),
-            (
-                "while-true-before-record",
-                format!("while true {{}} {setup} provider_build.record({commit});"),
-            ),
-            (
-                "while-true-dead-break",
-                format!(
-                    "while true {{ if false {{ break; }} }} {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "infinite-repeat-for",
-                format!(
-                    "for _ in std::iter::repeat(()) {{}} {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "opaque-true-while",
-                format!(
-                    "while std::hint::black_box(true) {{}} {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "block-true-while",
-                format!("while {{ true }} {{}} {setup} provider_build.record({commit});"),
-            ),
-            (
-                "process-exit-before-record",
-                format!("std::process::exit(1); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "never-return-helper-before-record",
-                format!("stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "coerced-never-helper-before-record",
-                format!("coerced_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "imported-exit-helper-before-record",
-                format!("imported_exit_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "repeat-never-helper-before-record",
-                format!("repeat_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "nested-import-repeat-never-helper-before-record",
-                format!("nested_repeat_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "absolute-repeat-never-helper-before-record",
-                format!("absolute_repeat_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "adapted-repeat-never-helper-before-record",
-                format!("adapted_repeat_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "constant-dead-return-helper-before-record",
-                format!("constant_branch_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "integer-constant-dead-return-helper-before-record",
-                format!("integer_constant_branch_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "integer-relation-dead-return-helper-before-record",
-                format!("integer_relation_branch_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "constant-match-dead-return-helper-before-record",
-                format!("constant_match_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "constant-while-dead-return-helper-before-record",
-                format!("constant_while_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "inner-labeled-break-helper-before-record",
-                format!("labeled_inner_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "nested-loop-break-helper-before-record",
-                format!("nested_break_stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "never-return-method-before-record",
-                format!("Guard.stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "local-never-return-method-before-record",
-                format!(
-                    "let guard = Guard; guard.stop(); {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "typed-local-never-return-method-before-record",
-                format!(
-                    "let guard: Guard = Guard; guard.stop(); {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "inferred-self-never-return-method-before-record",
-                format!("Guard.halt(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "local-inferred-self-never-return-method-before-record",
-                format!(
-                    "let guard = Guard; guard.halt(); {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "constant-false-if",
-                format!(
-                    "if false {{ {setup} provider_build.record({commit}); }} else {{ return; }}"
-                ),
-            ),
-            (
-                "constant-true-if",
-                format!(
-                    "if true {{ return; }} else {{ {setup} provider_build.record({commit}); }}"
-                ),
-            ),
-            (
-                "block-constant-false-if",
-                format!(
-                    "if {{ false }} {{ {setup} provider_build.record({commit}); }} else {{ return; }}"
-                ),
-            ),
-            (
-                "short-circuit-constant-false-if",
-                format!(
-                    "if false && unknown() {{ {setup} provider_build.record({commit}); }} else {{ return; }}"
-                ),
-            ),
-            (
-                "short-circuit-constant-true-if",
-                format!(
-                    "if true || unknown() {{ return; }} else {{ {setup} provider_build.record({commit}); }}"
-                ),
-            ),
-            (
-                "closed-integer-comparison-if",
-                format!(
-                    "if 1 == 1 {{ return; }} else {{ {setup} provider_build.record({commit}); }}"
-                ),
-            ),
-            (
-                "opaque-const-path-if",
-                format!(
-                    "if ALWAYS_TRUE {{ return; }} else {{ {setup} provider_build.record({commit}); }}"
-                ),
-            ),
-            (
-                "opaque-const-path-if-before-record",
-                format!(
-                    "if ALWAYS_TRUE {{ return; }} else {{ {setup} }} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "literal-bool-match",
-                format!(
-                    "match true {{ true => return, false => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "literal-integer-match",
-                format!(
-                    "match 1 {{ 1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "suffixed-literal-integer-match",
-                format!(
-                    "match 1u8 {{ 1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "radix-literal-integer-match",
-                format!(
-                    "match 0x1 {{ 1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "underscored-literal-integer-match",
-                format!(
-                    "match 1_0 {{ 10 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "negative-literal-integer-match",
-                format!(
-                    "match -1 {{ -1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "raw-string-literal-match",
-                format!(
-                    "match r#\"rss\"# {{ \"rss\" => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "byte-scrutinee-integer-pattern-match",
-                format!(
-                    "match b'a' {{ 97 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "integer-scrutinee-byte-pattern-match",
-                format!(
-                    "match 97u8 {{ b'a' => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "cast-byte-scrutinee-integer-pattern-match",
-                format!(
-                    "match b'a' as u8 {{ 97 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "const-path-match",
-                format!(
-                    "match ALWAYS_ONE {{ 1 => return, _ => {{ {setup} provider_build.record({commit}); }} }}"
-                ),
-            ),
-            (
-                "closed-constant-match-guard",
-                format!(
-                    "match 1 {{ 1 if 1 == 2 => {{ {setup} provider_build.record({commit}); }}, _ => return }}"
-                ),
-            ),
-            (
-                "opaque-const-path-match-guard",
-                format!(
-                    "match 1 {{ 1 if ALWAYS_FALSE => {{ {setup} provider_build.record({commit}); }}, _ => return }}"
-                ),
-            ),
-            (
-                "literal-match-ambiguous-identifier",
-                format!(
-                    "match 1 {{ MAYBE_ONE => {{ {setup} provider_build.record({commit}); }}, 1 => return, _ => return }}"
-                ),
-            ),
-        ] {
-            let flow = commit_flow(&body)?;
-            assert!(
-                !flow.runtime_direct && !flow.runtime_funnel,
-                "runtime listener-PDP {case} output must not count as recorded"
-            );
-        }
-
-        let dead_callgraph = syn::parse_file(
-            "fn spin() { loop { std::hint::spin_loop(); } } fn stop() { spin(); } fn evidence() {} fn run() { stop(); evidence(); }",
-        )?;
-        let program = file_security_closeout_program(&dead_callgraph);
-        let run = program
-            .resolve_function("free::crate::run")
-            .context("resolve never-return callgraph root")?;
-        assert!(
-            program.invalid_functions.contains(&run),
-            "a never-return helper must invalidate callgraph edges after it"
-        );
-        let local_method_callgraph = syn::parse_file(
-            "struct Guard; impl Guard { fn stop(&self) -> ! { loop {} } fn halt(&self) { self.stop(); } } \
-             struct Worker; impl Worker { fn stop(&self) {} } \
-             fn evidence() {} \
-             fn dead_local() { let guard = Guard; guard.stop(); evidence(); } \
-             fn dead_inferred() { let guard = Guard; guard.halt(); evidence(); } \
-             fn live_local() { let worker = Worker; worker.stop(); evidence(); }",
-        )?;
-        let local_program = file_security_closeout_program(&local_method_callgraph);
-        for (case, symbol) in [
-            ("local-stop", "free::crate::dead_local"),
-            ("local-inferred-halt", "free::crate::dead_inferred"),
-        ] {
-            let function = local_program
-                .resolve_function(symbol)
-                .with_context(|| format!("resolve {case} callgraph root"))?;
-            assert!(
-                local_program.invalid_functions.contains(&function),
-                "{case} owner-qualified local diverging method must invalidate later evidence"
-            );
-        }
-        let live = local_program
-            .resolve_function("free::crate::live_local")
-            .context("resolve non-diverging local method callgraph root")?;
-        assert!(
-            !local_program.invalid_functions.contains(&live),
-            "a non-diverging same-name local method must not invalidate later evidence"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_temporary_receiver_divergence() -> anyhow::Result<()> {
-        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
-            let file = syn::parse_file(&format!(
-                "struct Guard; impl Guard {{ fn new() -> Self {{ Guard }} fn stop(&self) -> ! {{ loop {{}} }} }} \
-                 fn make_guard() -> Guard {{ Guard }} \
-                 struct Wrap {{ guard: Guard }} \
-                 struct Worker; impl Worker {{ fn new() -> Self {{ Worker }} fn stop(&self) {{}} }} \
-                 fn make_worker() -> Worker {{ Worker }} \
-                 struct WrapWorker {{ guard: Worker }} \
-                 struct Factory; impl Factory {{ fn guard(&self) -> Guard {{ Guard }} fn worker(&self) -> Worker {{ Worker }} }} \
-                 fn run() {{ {body} }}"
-            ))?;
-            let Some(syn::Item::Fn(function)) = file.items.last() else {
-                anyhow::bail!("expected function fixture");
-            };
-            Ok(listener_pdp_receipt_commit_dataflow(
-                &function.block,
-                &function.sig,
-                &collect_diverging_function_names(std::iter::once(&file)),
-                &StandardPathAliases::from_items(&file.items),
-            ))
-        }
-
-        let setup = r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
-let rss = crate::infra::oidc::build_rss_listener_pdp_jwks_lifecycle(&rss_provider);
-let federated = crate::infra::oidc::build_federated_listener_pdp_jwks_lifecycle(&federated_provider);
-let lifecycle = rss.merge(federated);"#;
-        let commit =
-            "crate::provider_output::commit_listener_pdp_jwks_lifecycle(lifecycle, permit)";
-
-        for (case, body) in [
-            (
-                "associated-ctor-temp",
-                format!("Guard::new().stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "free-ctor-temp",
-                format!("make_guard().stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "field-receiver",
-                format!(
-                    "let wrapper = Wrap {{ guard: Guard }}; wrapper.guard.stop(); {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "unit-factory-method-temp",
-                format!("Factory.guard().stop(); {setup} provider_build.record({commit});"),
-            ),
-        ] {
-            let flow = commit_flow(&body)?;
-            assert!(
-                !flow.runtime_direct && !flow.runtime_funnel,
-                "temporary/field receiver {case} must make later exact listener-pdp commit unreachable"
-            );
-        }
-
-        for (case, body) in [
-            (
-                "associated-ctor-temp",
-                format!("Worker::new().stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "free-ctor-temp",
-                format!("make_worker().stop(); {setup} provider_build.record({commit});"),
-            ),
-            (
-                "field-receiver",
-                format!(
-                    "let wrapper = WrapWorker {{ guard: Worker }}; wrapper.guard.stop(); {setup} provider_build.record({commit});"
-                ),
-            ),
-            (
-                "unit-factory-method-temp",
-                format!("Factory.worker().stop(); {setup} provider_build.record({commit});"),
-            ),
-        ] {
-            let flow = commit_flow(&body)?;
-            assert!(
-                flow.runtime_direct,
-                "non-diverging same-name {case} must preserve later exact listener-pdp commit"
-            );
-        }
-
-        let callgraph = syn::parse_file(
-            "struct Guard; impl Guard { fn new() -> Self { Guard } fn stop(&self) -> ! { loop {} } } \
-             fn make_guard() -> Guard { Guard } \
-             struct Wrap { guard: Guard } \
-             struct Worker; impl Worker { fn new() -> Self { Worker } fn stop(&self) {} } \
-             fn make_worker() -> Worker { Worker } \
-             struct WrapWorker { guard: Worker } \
-             struct Factory; impl Factory { fn guard(&self) -> Guard { Guard } fn worker(&self) -> Worker { Worker } } \
-             fn evidence() {} \
-             fn dead_associated_ctor() { Guard::new().stop(); evidence(); } \
-             fn dead_free_ctor() { make_guard().stop(); evidence(); } \
-             fn dead_field() { let wrapper = Wrap { guard: Guard }; wrapper.guard.stop(); evidence(); } \
-             fn dead_unit_factory() { Factory.guard().stop(); evidence(); } \
-             fn live_associated_ctor() { Worker::new().stop(); evidence(); } \
-             fn live_free_ctor() { make_worker().stop(); evidence(); } \
-             fn live_field() { let wrapper = WrapWorker { guard: Worker }; wrapper.guard.stop(); evidence(); } \
-             fn live_unit_factory() { Factory.worker().stop(); evidence(); }",
-        )?;
-        let program = file_security_closeout_program(&callgraph);
-        for (case, symbol) in [
-            ("associated-ctor-temp", "free::crate::dead_associated_ctor"),
-            ("free-ctor-temp", "free::crate::dead_free_ctor"),
-            ("field-receiver", "free::crate::dead_field"),
-            ("unit-factory-method-temp", "free::crate::dead_unit_factory"),
-        ] {
-            let function = program
-                .resolve_function(symbol)
-                .with_context(|| format!("resolve {case} callgraph root"))?;
-            assert!(
-                program.invalid_functions.contains(&function),
-                "{case} owner-qualified temporary/field diverging method must invalidate later evidence"
-            );
-        }
-        for (case, symbol) in [
-            ("associated-ctor-temp", "free::crate::live_associated_ctor"),
-            ("free-ctor-temp", "free::crate::live_free_ctor"),
-            ("field-receiver", "free::crate::live_field"),
-            ("unit-factory-method-temp", "free::crate::live_unit_factory"),
-        ] {
-            let live = program
-                .resolve_function(symbol)
-                .with_context(|| format!("resolve non-diverging {case} callgraph root"))?;
-            assert!(
-                !program.invalid_functions.contains(&live),
-                "a non-diverging same-name {case} method must not invalidate later evidence"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_discarded_exact_receipt() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-discarded-exact-receipt");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
-            "    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);",
-            "    let _discarded_federated = federated_lifecycle;\n    let listener_pdp_lifecycle = rss_lifecycle;",
-        );
-        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "discarding one exact profile receipt before commit must fail closed: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_mutated_direct_receipt() -> anyhow::Result<()> {
-        let canonical = "    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);\n    let federated_lifecycle =\n        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);\n    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);";
-        for (case, mutation) in [
-            (
-                "replace",
-                "    let _discarded = std::mem::replace(\n        &mut rss_lifecycle,\n        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),\n    );",
-            ),
-            (
-                "mutable-alias",
-                "    let alias = &mut rss_lifecycle;\n    *alias = self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);",
-            ),
-            (
-                "loop",
-                "    for _ in 0..1 {\n        rss_lifecycle = self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);\n    }",
-            ),
-            (
-                "add-assign",
-                "    rss_lifecycle += self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);",
-            ),
-            (
-                "match-mutable-alias",
-                "    match &mut rss_lifecycle {\n        alias => *alias = self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),\n    }",
-            ),
-            (
-                "raw-mutable-alias",
-                "    let alias = &raw mut rss_lifecycle;\n    unsafe { *alias = self::build_federated_listener_pdp_jwks_lifecycle(&federated_access); }",
-            ),
-        ] {
-            let root = unique_tmp(&format!(
-                "assembly-production-security-mutated-direct-receipt-{case}"
-            ));
-            write_assembly(
-                &root,
-                &production_security_manifest("production", true, true, true),
-                CARGO_SECURITY_BACKEND,
-            )?;
-            let replacement = format!(
-                "    let mut rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);\n    let federated_lifecycle =\n        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);\n{mutation}\n    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);"
-            );
-            let mutated = format!(
-                "{}\nimpl std::ops::AddAssign for ListenerPdpJwksLifecycle {{\n    fn add_assign(&mut self, replacement: Self) {{ *self = replacement; }}\n}}",
-                SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(canonical, &replacement)
-            );
-            assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-            write_runtime_src(&root, "lib.rs", &mutated)?;
-
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-                "{case} mutation of a direct profile receipt must invalidate its flow: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_same_name_flow_wrapper() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-same-name-flow-wrapper");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
-            "    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);",
-            "    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access)\n        .context(self::build_federated_listener_pdp_jwks_lifecycle(&federated_access));",
-        );
-        let mutated = format!(
-            "{mutated}\ntrait ReplaceContext {{ fn context(self, replacement: Self) -> Self; }}\nimpl ReplaceContext for ListenerPdpJwksLifecycle {{\n    fn context(self, replacement: Self) -> Self {{ replacement }}\n}}"
-        );
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "same-name trait methods must not inherit lifecycle flow: {findings:?}"
-        );
-        Ok(())
-    }
-
-    fn security_closeout_with_receipt_flow(receipt_flow: &str) -> String {
-        let canonical_direct = r#"    let rss_lifecycle = self::build_rss_listener_pdp_jwks_lifecycle(&rss_access);
-    let federated_lifecycle =
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access);
-    let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);"#;
-        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(canonical_direct, receipt_flow);
-        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-        format!("{mutated}\n{RECEIPT_FUNNEL_TYPES}")
-    }
-
-    const RECEIPT_FUNNEL_TYPES: &str = r#"
-struct UncommittedListenerPdpLifecycle {
-    lifecycle: Option<ListenerPdpJwksLifecycle>,
-    committed: bool,
-}
-
-impl UncommittedListenerPdpLifecycle {
-    fn add(&mut self, lifecycle: ListenerPdpJwksLifecycle) {
-        if self.committed {
-            unreachable!("{}", TOKEN_MODULE_COMMITTED_ONCE);
-        }
-        self.lifecycle = Some(match self.lifecycle.take() {
-            Some(current) => current.merge(lifecycle),
-            None => lifecycle,
-        });
-    }
-
-    fn take(&mut self) -> Option<ListenerPdpJwksLifecycle> {
-        if std::mem::replace(&mut self.committed, true) {
-            unreachable!("{}", TOKEN_MODULE_COMMITTED_ONCE);
-        }
-        self.lifecycle.take()
-    }
-}
-
-struct DecoyFunnel { lifecycle: Option<ListenerPdpJwksLifecycle> }
-impl DecoyFunnel {
-    fn new() -> Self { Self { lifecycle: None } }
-    fn add(&mut self, lifecycle: ListenerPdpJwksLifecycle) {
-        if self.lifecycle.is_none() { self.lifecycle = Some(lifecycle); }
-    }
-    fn take(&mut self) -> Option<ListenerPdpJwksLifecycle> { self.lifecycle.take() }
-}
-"#;
-
-    #[test]
-    fn production_security_closeout_rejects_decoy_receipt_funnel() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-decoy-receipt-funnel");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let decoy_flow = r#"    let mut listener_pdp_receipts = DecoyFunnel::new();
-    listener_pdp_receipts.add(
-        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-    );
-    listener_pdp_receipts.add(
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-    );
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
-        let mutated = security_closeout_with_receipt_flow(decoy_flow);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "same-name add/take on a decoy funnel must fail closed: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_funnel_type_alias() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-funnel-type-alias");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let alias_flow = r#"    type UncommittedListenerPdpLifecycle = DecoyFunnel;
-    let mut listener_pdp_receipts = UncommittedListenerPdpLifecycle::new();
-    listener_pdp_receipts.add(
-        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-    );
-    listener_pdp_receipts.add(
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-    );
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
-        let mutated = security_closeout_with_receipt_flow(alias_flow);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "a local type alias must not impersonate the canonical receipt funnel: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_restores_outer_binding_after_shadow() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-funnel-shadow");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let shadow_flow = r#"    let mut listener_pdp_receipts = DecoyFunnel::new();
-    {
-        let listener_pdp_receipts =
-            self::UncommittedListenerPdpLifecycle::new();
-        drop(listener_pdp_receipts);
-    }
-    listener_pdp_receipts.add(
-        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-    );
-    listener_pdp_receipts.add(
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-    );
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
-        let mutated = security_closeout_with_receipt_flow(shadow_flow);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "an inner canonical shadow must not bless the outer decoy binding: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_destructuring_shadow() -> anyhow::Result<()> {
-        for (case, pattern, declaration) in [
-            (
-                "struct",
-                "let FunnelWrapper { listener_pdp_receipts } = wrapper();",
-                "struct FunnelWrapper { listener_pdp_receipts: DecoyFunnel }",
-            ),
-            (
-                "tuple-struct",
-                "let FunnelTuple(listener_pdp_receipts) = wrapper();",
-                "struct FunnelTuple(DecoyFunnel);",
-            ),
-        ] {
-            let root = unique_tmp(&format!(
-                "assembly-production-security-{case}-funnel-shadow"
-            ));
-            write_assembly(
-                &root,
-                &production_security_manifest("production", true, true, true),
-                CARGO_SECURITY_BACKEND,
-            )?;
-            let receipt_flow = format!(
-                r#"    let mut listener_pdp_receipts =
-        self::UncommittedListenerPdpLifecycle::new();
-    {pattern}
-    listener_pdp_receipts.add(
-        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-    );
-    listener_pdp_receipts.add(
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-    );
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#
-            );
-            let mutated = format!(
-                "{}\n{declaration}",
-                security_closeout_with_receipt_flow(&receipt_flow)
-            );
-            write_runtime_src(&root, "lib.rs", &mutated)?;
-
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-                "{case} shadow must not retain the outer canonical binding: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_mutually_exclusive_receipts() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-exclusive-receipts");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let receipt_flow = r#"    let mut listener_pdp_receipts =
-        self::UncommittedListenerPdpLifecycle::new();
-    if condition {
-        listener_pdp_receipts.add(
-            self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-        );
-    } else {
-        listener_pdp_receipts.add(
-            self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-        );
-    }
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
-        let mutated = security_closeout_with_receipt_flow(receipt_flow);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "mutually exclusive profile receipts must not be ORed across paths: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_conditional_commit() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-conditional-commit");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let exact = r#"    provider_build.record(
-        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
-            listener_pdp_lifecycle,
-            listener_pdp_permit,
-        ),
-    );"#;
-        let conditional = r#"    if condition {
-        provider_build.record(
-            crate::provider_output::commit_listener_pdp_jwks_lifecycle(
-                listener_pdp_lifecycle,
-                listener_pdp_permit,
-            ),
-        );
-    }"#;
-        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, conditional);
-        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "listener-PDP lifecycle commit must cover every continuing path: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_cfg_disabled_commit() -> anyhow::Result<()> {
-        let exact = r#"    provider_build.record(
-        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
-            listener_pdp_lifecycle,
-            listener_pdp_permit,
-        ),
-    );"#;
-        for (case, attribute) in [
-            ("cfg", "#[cfg(any())]"),
-            ("cfg-attr", "#[cfg_attr(all(), cfg(any()))]"),
-        ] {
-            let root = unique_tmp(&format!(
-                "assembly-production-security-{case}-disabled-commit"
-            ));
-            write_assembly(
-                &root,
-                &production_security_manifest("production", true, true, true),
-                CARGO_SECURITY_BACKEND,
-            )?;
-            let disabled = format!("    {attribute}\n    {{\n{exact}\n    }}");
-            let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, &disabled);
-            assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-            write_runtime_src(&root, "lib.rs", &mutated)?;
-
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-                "{case}-disabled listener-PDP commit must not count as production evidence: {findings:?}"
-            );
-        }
-
-        let root = unique_tmp("assembly-production-security-cfg-disabled-owner");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE
-            .replace("fn run_startup() {", "#[cfg(any())]\nfn run_startup() {");
-        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "cfg-disabled listener-PDP owner must not count as production evidence: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_funnel_replacement() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-replaced-funnel");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let receipt_flow = r#"    let mut listener_pdp_receipts =
-        self::UncommittedListenerPdpLifecycle::new();
-    listener_pdp_receipts.add(
-        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-    );
-    std::mem::replace(
-        &mut listener_pdp_receipts,
-        self::UncommittedListenerPdpLifecycle::new(),
-    );
-    listener_pdp_receipts.add(
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-    );
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#;
-        let mutated = security_closeout_with_receipt_flow(receipt_flow);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "unknown mutable replacement must invalidate accumulated receipts: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_keeps_funnel_on_zero_profile_add() -> anyhow::Result<()> {
-        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
-            let file = syn::parse_file(&format!("fn run() {{ {body} }}"))?;
-            let Some(syn::Item::Fn(function)) = file.items.last() else {
-                anyhow::bail!("expected function fixture");
-            };
-            Ok(listener_pdp_receipt_commit_dataflow(
-                &function.block,
-                &function.sig,
-                &collect_diverging_function_names(std::iter::once(&file)),
-                &StandardPathAliases::from_items(&file.items),
-            ))
-        }
-
-        let record = r#"provider_build.record(
-        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
-            listener_pdp_lifecycle,
-            permit,
-        ),
-    );"#;
-        let green = commit_flow(&format!(
-            r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
-let mut listener_pdp_receipts = self::UncommittedListenerPdpLifecycle::new();
-listener_pdp_receipts.add(self::build_rss_listener_pdp_jwks_lifecycle(&rss_provider));
-listener_pdp_receipts.add(self::build_federated_listener_pdp_jwks_lifecycle(&federated_provider));
-let Some(listener_pdp_lifecycle) = listener_pdp_receipts.take() else {{ return; }};
-{record}"#
-        ))?;
-        assert!(
-            green.runtime_funnel,
-            "exact funnel add/take must record runtime_funnel commit evidence"
-        );
-
-        // known_add with profiles==0 must no-op and retain prior funnel bits.
-        let kept = commit_flow(&format!(
-            r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
-let mut listener_pdp_receipts = self::UncommittedListenerPdpLifecycle::new();
-listener_pdp_receipts.add(self::build_rss_listener_pdp_jwks_lifecycle(&rss_provider));
-listener_pdp_receipts.add(non_receipt_lifecycle());
-listener_pdp_receipts.add(self::build_federated_listener_pdp_jwks_lifecycle(&federated_provider));
-let Some(listener_pdp_lifecycle) = listener_pdp_receipts.take() else {{ return; }};
-{record}"#
-        ))?;
-        assert!(
-            kept.runtime_funnel,
-            "zero-profile known_add must keep funnel so later exact receipts still commit"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_non_receipt_funnel_adds() -> anyhow::Result<()> {
-        fn commit_flow(body: &str) -> anyhow::Result<ListenerPdpCommitDataflow> {
-            let file = syn::parse_file(&format!("fn run() {{ {body} }}"))?;
-            let Some(syn::Item::Fn(function)) = file.items.last() else {
-                anyhow::bail!("expected function fixture");
-            };
-            Ok(listener_pdp_receipt_commit_dataflow(
-                &function.block,
-                &function.sig,
-                &collect_diverging_function_names(std::iter::once(&file)),
-                &StandardPathAliases::from_items(&file.items),
-            ))
-        }
-
-        let record = r#"provider_build.record(
-        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
-            listener_pdp_lifecycle,
-            permit,
-        ),
-    );"#;
-        let flow = commit_flow(&format!(
-            r#"let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plan, catalog).context("join")?;
-let mut listener_pdp_receipts = self::UncommittedListenerPdpLifecycle::new();
-listener_pdp_receipts.add(non_receipt_lifecycle());
-listener_pdp_receipts.add(non_receipt_lifecycle());
-let Some(listener_pdp_lifecycle) = listener_pdp_receipts.take() else {{ return; }};
-{record}"#
-        ))?;
-        assert!(
-            !flow.runtime_funnel && !flow.runtime_direct,
-            "non-receipt funnel adds must not mint runtime listener-PDP commit evidence"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_opaque_funnel_mutation() -> anyhow::Result<()> {
-        for (case, mutation) in [
-            (
-                "method-argument",
-                "Reset.reset(&mut listener_pdp_receipts);",
-            ),
-            (
-                "mutable-alias",
-                "let alias = &mut listener_pdp_receipts; Reset.reset(alias);",
-            ),
-            (
-                "loop",
-                "for _ in 0..1 { Reset.reset(&mut listener_pdp_receipts); }",
-            ),
-            (
-                "invoked-closure",
-                "(|| Reset.reset(&mut listener_pdp_receipts))();",
-            ),
-        ] {
-            let root = unique_tmp(&format!(
-                "assembly-production-security-opaque-funnel-{case}"
-            ));
-            write_assembly(
-                &root,
-                &production_security_manifest("production", true, true, true),
-                CARGO_SECURITY_BACKEND,
-            )?;
-            let receipt_flow = format!(
-                r#"    let mut listener_pdp_receipts =
-        self::UncommittedListenerPdpLifecycle::new();
-    listener_pdp_receipts.add(
-        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-    );
-    {mutation}
-    listener_pdp_receipts.add(
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-    );
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#
-            );
-            let reset = r#"
-struct Reset;
-impl Reset {
-    fn reset(&self, target: &mut UncommittedListenerPdpLifecycle) {
-        target.lifecycle = None;
-        target.committed = false;
-    }
-}
-"#;
-            let mutated = format!(
-                "{}\n{reset}",
-                security_closeout_with_receipt_flow(&receipt_flow)
-            );
-            write_runtime_src(&root, "lib.rs", &mutated)?;
-
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-                "opaque {case} mutation must invalidate accumulated receipts: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_unexecuted_receipt_flow() -> anyhow::Result<()> {
-        for (case, receipt_flow) in [
-            (
-                "closure",
-                r#"    let mut listener_pdp_receipts =
-        self::UncommittedListenerPdpLifecycle::new();
-    let _never_called = || {
-        listener_pdp_receipts.add(
-            self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-        );
-        listener_pdp_receipts.add(
-            self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-        );
-    };
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#,
-            ),
-            (
-                "async",
-                r#"    let mut listener_pdp_receipts =
-        self::UncommittedListenerPdpLifecycle::new();
-    let _never_awaited = async {
-        listener_pdp_receipts.add(
-            self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-        );
-        listener_pdp_receipts.add(
-            self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-        );
-    };
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#,
-            ),
-            (
-                "dead-after-return",
-                r#"    let mut listener_pdp_receipts =
-        self::UncommittedListenerPdpLifecycle::new();
-    return;
-    listener_pdp_receipts.add(
-        self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-    );
-    listener_pdp_receipts.add(
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-    );
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#,
-            ),
-            (
-                "let-else-diverge",
-                r#"    let mut listener_pdp_receipts =
-        self::UncommittedListenerPdpLifecycle::new();
-    let Some(()) = optional else {
-        listener_pdp_receipts.add(
-            self::build_rss_listener_pdp_jwks_lifecycle(&rss_access),
-        );
-        return;
-    };
-    listener_pdp_receipts.add(
-        self::build_federated_listener_pdp_jwks_lifecycle(&federated_access),
-    );
-    let listener_pdp_lifecycle = listener_pdp_receipts.take().unwrap();"#,
-            ),
-        ] {
-            let root = unique_tmp(&format!(
-                "assembly-production-security-unexecuted-receipt-{case}"
-            ));
-            write_assembly(
-                &root,
-                &production_security_manifest("production", true, true, true),
-                CARGO_SECURITY_BACKEND,
-            )?;
-            let mutated = security_closeout_with_receipt_flow(receipt_flow);
-            write_runtime_src(&root, "lib.rs", &mutated)?;
-
-            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-            assert!(
-                findings
-                    .iter()
-                    .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-                "unexecuted {case} receipt flow must fail closed: {findings:?}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_cross_module_commit_collision() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-commit-collision");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let exact = r#"fn commit_listener_pdp_jwks_lifecycle(
-    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
-    permit: ListenerPdpPermit,
-) -> ProviderOutput {
-    ProviderOutput::listener_pdp(lifecycle, permit)
-}"#;
-        let live_decoy = r#"fn commit_listener_pdp_jwks_lifecycle(
-    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
-    permit: ListenerPdpPermit,
-) -> ProviderOutput {
-    stage_domain_output(lifecycle);
-    unrelated_provider_output(permit)
-}"#;
-        let mutated = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(exact, live_decoy);
-        assert_ne!(mutated, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-        write_runtime_src(&root, "lib.rs", &mutated)?;
-        write_runtime_src(&root, "dead_exact.rs", exact)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "dead exact helper plus live same-name decoy must fail closed: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_uncalled_same_name_run() -> anyhow::Result<()> {
-        let root = unique_tmp("assembly-production-security-same-name-run");
-        write_assembly(
-            &root,
-            &production_security_manifest("production", true, true, true),
-            CARGO_SECURITY_BACKEND,
-        )?;
-        let exact = r#"    provider_build.record(
-        crate::provider_output::commit_listener_pdp_jwks_lifecycle(
-            listener_pdp_lifecycle,
-            listener_pdp_permit,
-        ),
-    );"#;
-        let without_commit = SECURITY_CLOSEOUT_RUN_PATH_SOURCE.replace(
-            exact,
-            "    drop(listener_pdp_lifecycle);\n    drop(listener_pdp_permit);",
-        );
-        assert_ne!(without_commit, SECURITY_CLOSEOUT_RUN_PATH_SOURCE);
-        let decoy = r#"
-fn run(
-    plans: &[assembly_schema::ProviderPlan],
-    rss_provider: &crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>,
-    federated_provider: &crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>,
-    permit: crate::provider_output::ListenerPdpPermit,
-) -> anyhow::Result<()> {
-    let mut provider_build = crate::provider_output::ProviderBuild::from_plan(
-        plans,
-        crate::providers_gen::PROVIDER_CATALOG,
-    )?;
-    let rss = crate::infra::oidc::build_rss_listener_pdp_jwks_lifecycle(rss_provider);
-    let federated =
-        crate::infra::oidc::build_federated_listener_pdp_jwks_lifecycle(federated_provider);
-    provider_build.record(crate::provider_output::commit_listener_pdp_jwks_lifecycle(
-        rss.merge(federated),
-        permit,
-    ))?;
-    Ok(())
-}
-"#;
-        write_runtime_src(
-            &root,
-            "lib.rs",
-            &format!("{without_commit}\nmod decoy {{ {decoy} }}\nmod decoy_file;"),
-        )?;
-        write_runtime_src(&root, "decoy_file.rs", decoy)?;
-
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
-        assert!(
-            findings
-                .iter()
-                .any(|finding| finding.rule == Rule::ProductionSecurityJwksCloseout),
-            "uncalled inline/file modules with same-name run must not merge into the crate root: {findings:?}"
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn production_security_closeout_rejects_qualified_method_owner_collision() -> anyhow::Result<()>
-    {
-        let decoy_body = r#"
-    let mut provider_build = crate::provider_output::ProviderBuild::from_plan(plans, catalog)?;
-    let rss = crate::infra::oidc::build_rss_listener_pdp_jwks_lifecycle(rss_provider);
-    let federated =
-        crate::infra::oidc::build_federated_listener_pdp_jwks_lifecycle(federated_provider);
-    provider_build.record(crate::provider_output::commit_listener_pdp_jwks_lifecycle(
-        rss.merge(federated),
-        permit,
-    ))?;
-    Ok(())
-"#;
-        let qualified = format!(
-            r#"
-struct Planned;
-impl Planned {{ fn build_providers(self) {{}} }}
-mod decoy {{ pub(super) struct Planned; }}
-impl decoy::Planned {{
-    fn build_providers(self, plans: Plans, catalog: Catalog, rss_provider: Rss, federated_provider: Federated, permit: Permit) -> anyhow::Result<()> {{
-        {decoy_body}
-    }}
-}}
-fn run() {{ Planned.build_providers(); }}
-"#
-        );
-        let trait_owner = format!(
-            r#"
-struct Planned;
-impl Planned {{ fn build_providers(self) {{}} }}
-trait DecoyBuild {{ fn build_providers(self, plans: Plans, catalog: Catalog, rss_provider: Rss, federated_provider: Federated, permit: Permit) -> anyhow::Result<()>; }}
-impl DecoyBuild for Planned {{
-    fn build_providers(self, plans: Plans, catalog: Catalog, rss_provider: Rss, federated_provider: Federated, permit: Permit) -> anyhow::Result<()> {{
-        {decoy_body}
-    }}
-}}
-fn run() {{ Planned.build_providers(); }}
-"#
-        );
-        for (case, source) in [("qualified-owner", qualified), ("trait-owner", trait_owner)] {
-            let program = file_security_closeout_program(&syn::parse_file(&source)?);
-            let evidence = program.reachable_evidence_from_run();
-            assert!(
-                !evidence.runtime_direct_listener_pdp_receipt_commit
-                    && !evidence.runtime_funnel_listener_pdp_receipt_commit,
-                "{case} same-name method must be ambiguous instead of merging decoy evidence"
-            );
-        }
         Ok(())
     }
 
@@ -18293,7 +9588,7 @@ fn run() {{
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
-                Rule::RuntimeInventoryProviderProvenance | Rule::RuntimeInventoryListenerProvenance
+                Rule::RuntimeInventoryListenerProvenance | Rule::ProviderConstructionLiveJoin
             )),
             "security closeout fixture emitted unrelated findings: {findings:?}"
         );
@@ -18317,7 +9612,7 @@ fn run() {{
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
-                Rule::RuntimeInventoryProviderProvenance | Rule::RuntimeInventoryListenerProvenance
+                Rule::RuntimeInventoryListenerProvenance | Rule::ProviderConstructionLiveJoin
             )),
             "security closeout fixture emitted unrelated findings: {findings:?}"
         );
@@ -18340,7 +9635,7 @@ fn run() {{
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
-                Rule::RuntimeInventoryProviderProvenance | Rule::RuntimeInventoryListenerProvenance
+                Rule::RuntimeInventoryListenerProvenance | Rule::ProviderConstructionLiveJoin
             )),
             "security closeout fixture emitted unrelated findings: {findings:?}"
         );
@@ -18708,6 +10003,8 @@ deviceloop = { path = "../../crates/deviceloop" }
 "#,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
+
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
@@ -18749,6 +10046,8 @@ amqp = { path = "../../adapters/amqp" }
 "#,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
+
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
@@ -18756,6 +10055,69 @@ amqp = { path = "../../adapters/amqp" }
                 .any(|f| f.rule == Rule::ActiveProviderFeature),
             "active AMQP provider without backend feature must be rejected: {findings:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn active_provider_dependency_requires_exact_selected_normal_identity() -> anyhow::Result<()> {
+        let manifest = format!(
+            "{}\n{}",
+            manifest_with_intent(),
+            r#"[[diportProviders]]
+id = "event-publisher"
+port = "diport::Publisher"
+provider = "amqp::AmqpPublisher"
+providerCrate = "amqp"
+requiredFeatures = ["backend"]
+consumer = "eventexec"
+lifecycle = "active"
+durability = "persistent"
+purpose = "outbox-relay-amqp-publish"
+outputs = ["probes", "resources", "workers"]
+"#,
+        );
+        for (case, dependencies) in [
+            (
+                "renamed-key",
+                r#"[dependencies]
+postgres = { path = "../../adapters/postgres" }
+amqp_alias = { package = "amqp", path = "../../adapters/amqp", features = ["backend"] }
+"#,
+            ),
+            (
+                "inactive-target",
+                r#"[dependencies]
+postgres = { path = "../../adapters/postgres" }
+
+[target.'cfg(any())'.dependencies]
+amqp = { path = "../../adapters/amqp", features = ["backend"] }
+"#,
+            ),
+            (
+                "dev-kind",
+                r#"[dependencies]
+postgres = { path = "../../adapters/postgres" }
+
+[dev-dependencies]
+amqp = { path = "../../adapters/amqp", features = ["backend"] }
+"#,
+            ),
+        ] {
+            let root = unique_tmp(&format!("assembly-provider-selected-{case}"));
+            write_assembly(
+                &root,
+                &manifest,
+                &format!("[package]\nname = \"runtime\"\n\n{dependencies}"),
+            )?;
+            enable_fixture_cargo_workspace(&root)?;
+            let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+            assert!(
+                findings
+                    .iter()
+                    .any(|finding| finding.rule == Rule::ActiveProviderDependency),
+                "{case} must not satisfy selected direct normal provider identity: {findings:?}"
+            );
+        }
         Ok(())
     }
 
@@ -18847,6 +10209,7 @@ ratelimit = { path = "../../adapters/ratelimit" }
 "#,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
@@ -18947,6 +10310,7 @@ impl InfraBuilt {
 "#,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
@@ -19404,6 +10768,7 @@ amqp = { path = "../../adapters/amqp" }
             CARGO_AMQP_BACKEND,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
@@ -19423,6 +10788,7 @@ amqp = { path = "../../adapters/amqp" }
             CARGO_AMQP_BACKEND,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
@@ -19478,6 +10844,7 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
 "#,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
@@ -19534,6 +10901,7 @@ vault = { path = "../../adapters/vault", features = ["backend"] }
 "#,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
@@ -19603,6 +10971,7 @@ postgres = { path = "../../adapters/postgres" }
 "#,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
@@ -19659,6 +11028,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
 "#,
         )?;
 
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert_no_provider_validation_findings(&findings);
         Ok(())
@@ -19677,6 +11047,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
             ),
             CARGO_AMQP_NO_BACKEND,
         )?;
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings
@@ -19700,6 +11071,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
             ),
             CARGO_AMQP_NO_BACKEND,
         )?;
+        enable_fixture_cargo_workspace(&root)?;
         let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
         assert!(
             findings

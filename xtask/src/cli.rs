@@ -173,7 +173,7 @@ pub(crate) enum ContractCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub(crate) enum AssemblyCommand {
-    /// assembly-level DI provider 声明校验。
+    /// 校验 assembly manifest、Cargo closure 与 production governance residual。
     Validate,
     /// assembly lifecycle 与应用 artifact exact closure。
     #[command(subcommand)]

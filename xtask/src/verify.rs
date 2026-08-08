@@ -1308,17 +1308,34 @@ fn run_internal(
 ) -> Result<()> {
     match check {
         InternalCheck::ContractValidate => run_check(&contract::validate::ContractValidate),
-        InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate),
-        InternalCheck::AssemblyArtifactsCheck => crate::assembly_artifacts::run(),
+        InternalCheck::AssemblyValidate => run_check(&assembly::AssemblyValidate::new(
+            root,
+            command_facts
+                .get()
+                .context(command_scope_facts_context("assembly-validate"))?,
+        )),
+        InternalCheck::AssemblyArtifactsCheck => run_assembly_artifacts_check(
+            root,
+            command_facts,
+            crate::assembly_artifacts::report_workspace_facts_failure,
+        ),
         InternalCheck::AssemblyModulesCheck => crate::assembly_codegen::run(true),
         InternalCheck::AssemblyProvidersCheck => crate::assembly_codegen::run_providers(true),
-        InternalCheck::AssemblyLockCheck => {
-            assembly_lock::run(assembly_lock::AssemblyLockAction::Check)
-        }
+        InternalCheck::AssemblyLockCheck => assembly_lock::run(
+            root,
+            assembly_lock::AssemblyLockAction::Check,
+            command_facts
+                .get()
+                .context(command_scope_facts_context("assembly-lock-check"))?,
+        ),
         InternalCheck::AssemblyRuntimePlanCheck => crate::assembly_runtime_plan::run(true),
-        InternalCheck::AssemblyGraphCheck => {
-            crate::graph::run(&crate::graph::Options::check_runtime())
-        }
+        InternalCheck::AssemblyGraphCheck => crate::graph::run(
+            root,
+            &crate::graph::Options::check_runtime(),
+            command_facts
+                .get()
+                .context(command_scope_facts_context("assembly-graph-check"))?,
+        ),
         // active 默认 deny；固定 review rules 为 warn，但未确认 fail-closed。
         InternalCheck::ContractBreaking => contract::breaking::run(&opts.contract_against),
         InternalCheck::LayerDeps => run_check(&layerdeps::LayerDeps),
@@ -1406,6 +1423,22 @@ fn run_internal(
         }
         // 轴 A 封装面：basis+engine+curated extras 全集（layer=None）；check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
         InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
+    }
+}
+
+fn run_assembly_artifacts_check(
+    root: &Path,
+    command_facts: &crate::workspace_facts::CommandWorkspaceFacts,
+    report_facts_failure: impl FnOnce(),
+) -> Result<()> {
+    let prepared = crate::assembly_artifacts::prepare(root)?;
+    match command_facts.get() {
+        Ok(facts) => crate::assembly_artifacts::run_prepared(root, facts, prepared),
+        Err(error) => {
+            report_facts_failure();
+            Err(anyhow::Error::msg(error.to_string()))
+                .context(command_scope_facts_context("assembly-artifacts-check"))
+        }
     }
 }
 
@@ -4242,6 +4275,65 @@ mod tests {
             calls.get(),
             0,
             "non-facts labeled plan must keep CommandWorkspaceFacts zero-load"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn command_scope_one_load_across_assembly_consumers() -> anyhow::Result<()> {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let root = workspace_root()?;
+        let output = crate::cmd::cargo_cmd(
+            crate::cmd::CargoSubcommand::Metadata,
+            &["--locked", "--all-features", "--format-version", "1"],
+            &[],
+            Some(&root),
+        )
+        .output()?;
+        anyhow::ensure!(output.status.success(), "prepare metadata fixture");
+        let metadata = output.stdout;
+        let calls = Rc::new(Cell::new(0));
+        let counter = Rc::clone(&calls);
+        let command_facts =
+            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, move |_| {
+                counter.set(counter.get() + 1);
+                Ok(metadata.clone())
+            });
+
+        for check in [
+            InternalCheck::AssemblyValidate,
+            InternalCheck::AssemblyArtifactsCheck,
+            InternalCheck::AssemblyLockCheck,
+            InternalCheck::AssemblyGraphCheck,
+        ] {
+            run_internal(check, &opts(false, false), &root, &command_facts)?;
+        }
+        assert_eq!(calls.get(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn assembly_artifacts_metadata_failure_runs_stable_failure_reporter() -> anyhow::Result<()> {
+        use std::cell::Cell;
+
+        let root = workspace_root()?;
+        let command_facts =
+            crate::workspace_facts::CommandWorkspaceFacts::with_metadata_loader(&root, |_| {
+                Err("synthetic metadata failure".to_owned())
+            });
+        let reported = Cell::new(false);
+        let error = run_assembly_artifacts_check(&root, &command_facts, || reported.set(true))
+            .expect_err("metadata failure must fail the aggregate artifact check");
+        assert!(
+            reported.get(),
+            "metadata failure must emit the stable FAILED view"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("assembly-artifacts-check: load command-scoped workspace facts")
         );
         Ok(())
     }

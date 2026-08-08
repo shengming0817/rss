@@ -1,4 +1,4 @@
-use crate::{PackageKey, WorkspaceFacts, WorkspaceFactsError};
+use crate::{DependencyKind, PackageKey, WorkspaceFacts, WorkspaceFactsError};
 use guppy::PackageId;
 use guppy::errors::{FeatureBuildStage, FeatureGraphWarning};
 use guppy::graph::cargo::{
@@ -207,6 +207,14 @@ struct SideFacts {
     /// Selected package names including registry/crates.io deps (for serving clap absence etc.).
     selected_package_names: BTreeSet<String>,
     features: BTreeSet<FeatureKey>,
+    selected_dependencies: BTreeSet<SelectedDependency>,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SelectedDependency {
+    dependent: PackageKey,
+    dependency: PackageKey,
+    name: String,
 }
 
 impl BuildFacts {
@@ -229,6 +237,29 @@ impl BuildFacts {
     #[must_use]
     pub fn is_feature_enabled(&self, side: BuildSide, feature: &FeatureKey) -> bool {
         self.enabled_features(side).contains(feature)
+    }
+
+    /// Whether one dependency edge from a workspace package is selected for this root-specific
+    /// Cargo build. The dependency identity may be another workspace package or an external crate.
+    ///
+    /// `dependency_name` is the manifest dependency key after rename. The query is edge-specific:
+    /// selecting `dependency` through another direct or transitive path does not make this edge
+    /// selected.
+    #[must_use]
+    pub fn is_dependency_selected(
+        &self,
+        side: BuildSide,
+        dependent: &PackageKey,
+        dependency_name: &str,
+        dependency: &PackageKey,
+    ) -> bool {
+        self.side_facts(side)
+            .selected_dependencies
+            .contains(&SelectedDependency {
+                dependent: dependent.clone(),
+                dependency: dependency.clone(),
+                name: dependency_name.to_owned(),
+            })
     }
 
     /// 返回 `feature` 在 `side` 上的 activation path（若有）。
@@ -350,8 +381,18 @@ impl WorkspaceFacts {
             ));
         }
 
-        let target = collect_side_facts(&cargo_set, BuildSide::Target);
-        let host = collect_side_facts(&cargo_set, BuildSide::Host);
+        let target_dependencies =
+            self.collect_selected_dependencies(cargo_set.target_links(), DependencyKind::Normal);
+        let host_dependencies = self
+            .collect_selected_dependencies(cargo_set.build_dep_links(), DependencyKind::Build)
+            .into_iter()
+            .chain(self.collect_selected_dependencies(
+                cargo_set.proc_macro_links().chain(cargo_set.host_links()),
+                DependencyKind::Normal,
+            ))
+            .collect();
+        let target = collect_side_facts(&cargo_set, BuildSide::Target, target_dependencies);
+        let host = collect_side_facts(&cargo_set, BuildSide::Host, host_dependencies);
 
         let (starts, adjacency) = selected_feature_graph(&cargo_set)?;
         let mut activation_paths = BTreeMap::new();
@@ -381,9 +422,52 @@ impl WorkspaceFacts {
             activation_paths,
         })
     }
+
+    fn collect_selected_dependencies<'g>(
+        &self,
+        links: impl Iterator<Item = PackageLink<'g>>,
+        kind: DependencyKind,
+    ) -> BTreeSet<SelectedDependency> {
+        links
+            .filter_map(|link| {
+                let (from, to) = link.endpoints();
+                if !from.in_workspace() {
+                    return None;
+                }
+                let dependent = PackageKey(from.name().to_owned());
+                let dependency = PackageKey(to.name().to_owned());
+                let candidate_names = self
+                    .packages
+                    .get(&dependent)?
+                    .direct_dependencies
+                    .iter()
+                    .filter(|declaration| {
+                        declaration.kind() == kind && declaration.resolved() == Some(&dependency)
+                    })
+                    .map(|declaration| declaration.name())
+                    .collect::<BTreeSet<_>>();
+                let name = if candidate_names.contains(link.dep_name()) {
+                    link.dep_name()
+                } else if candidate_names.len() == 1 {
+                    candidate_names.first().copied()?
+                } else {
+                    return None;
+                };
+                Some(SelectedDependency {
+                    dependent,
+                    dependency,
+                    name: name.to_owned(),
+                })
+            })
+            .collect()
+    }
 }
 
-fn collect_side_facts(cargo_set: &CargoSet<'_>, side: BuildSide) -> SideFacts {
+fn collect_side_facts(
+    cargo_set: &CargoSet<'_>,
+    side: BuildSide,
+    selected_dependencies: BTreeSet<SelectedDependency>,
+) -> SideFacts {
     let selected = selected_features(cargo_set, side);
     let mut packages = BTreeSet::new();
     let mut selected_package_names = BTreeSet::new();
@@ -405,6 +489,7 @@ fn collect_side_facts(cargo_set: &CargoSet<'_>, side: BuildSide) -> SideFacts {
         packages,
         selected_package_names,
         features,
+        selected_dependencies,
     }
 }
 

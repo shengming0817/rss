@@ -152,6 +152,7 @@ pub struct DirectDependencyFacts {
     kind: DependencyKind,
     source: DependencySource,
     unconditional: bool,
+    requested_features: BTreeSet<String>,
 }
 
 impl DirectDependencyFacts {
@@ -194,6 +195,12 @@ impl DirectDependencyFacts {
     #[must_use]
     pub const fn unconditional(&self) -> bool {
         self.unconditional
+    }
+
+    /// Features requested by this exact Cargo dependency declaration.
+    #[must_use]
+    pub fn requested_features(&self) -> &BTreeSet<String> {
+        &self.requested_features
     }
 }
 
