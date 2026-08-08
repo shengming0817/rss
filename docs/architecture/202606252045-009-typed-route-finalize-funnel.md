@@ -79,9 +79,9 @@
   门控——**生产构建（无 `test-util` feature）里编译期不存在**，故生产代码无法取裸 Router 绕过 funnel（内置 review #7
   采纳：由 doc-hidden+命名的 Soft 升为 cfg 门控的 Medium）。跨 crate 测试消费方（bootstrap/audit/bins，及 httpserve
   自身集成测试经 self dev-dep）经 dev-dependency 显式启用该 feature；workspace 测试构建经 dev-dep 启用，生产/`cargo build` 不启用。
-- **#1017 是下游（downstream）非前置（blocked-by）**：本 PR 交出 per-listener `AuthenticatedRoutes`，#1017（socket
-  bind + serve）只需 `into_make_service` + `axum::serve` 消费，无需协调接口变更——funnel 的安全收益「未认证不可 bind」
-  在 #1017 写 bind 点时由类型系统天生兑现（`run()` 现持 `_authed` 待 #1017 接线）。
+- **assemblies/runtime launch 是下游（downstream）非前置（blocked-by）**：本 PR 交出 per-listener `AuthenticatedRoutes`；assemblies/runtime launch 已消费
+  `into_make_service` + `axum::serve` 完成 socket bind/serve，无需再协调接口变更——funnel 的安全收益「未认证不可 bind」
+  已由类型系统兑现。
 - **旧 `RouteGroup` struct 退役**：接受裸 `axum::Router` 的旧 `httpserve::RouteGroup`（pre-funnel 公开面）已删除——
   与 §2.1「无 public API 交出裸 `axum::Router`」一致；其错误通道 `RouteGroupError` 保留（`finalize_auth` 返回型）。
 

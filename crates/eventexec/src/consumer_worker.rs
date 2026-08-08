@@ -59,10 +59,10 @@
 //! task-local——**不跨线程传播**。Handler 实现**禁止**读 `runctx::try_current()`（会返回 `None`）；
 //! 租户上下文须从 message payload 解析（本 PR 各 handler 即如此）。
 //!
-//! # NOTE：AMQP-pending-#1017（专用线程驱动的真 broker 验证）
+//! # NOTE：AMQP ManagedBlockingWorker（专用线程驱动的真 broker 验证）
 //!
 //! 专用线程驱动在 demo（MemBus）+ eventexec 单测验证；真 AMQP broker 下经
-//! managed worker 化（lapin cross-runtime）留 #1017。§6 集成 journey
+//! ManagedBlockingWorker（lapin cross-runtime）覆盖。§6 集成 journey
 //! （`amqp_consumer_at_least_once_journey.rs`）用 inline `tokio::join!` 同 runtime 驱动
 //! `run_consumer_ackable` 证 broker settlement，覆盖接缝的 at-least-once 终态兑现。
 
@@ -87,7 +87,7 @@ use crate::relay::WorkerHealth;
 
 /// readyz probe 名基（event consumer worker；无 `_ready` 后缀——运行时操作 probe，对齐
 /// [`crate::OUTBOX_RELAY_PROBE`]）。组合根据此 + domain/topic 组装 per-worker `primitives::ProbeName`
-/// （如 `event_consumer:audit:identity.session-created`）接 readyz 聚合（HTTP endpoint mount 归 #1017）。
+/// （如 `event_consumer:audit:identity.session-created`）接 readyz 聚合（HTTP endpoint mount 归 #1320 / assemblies/runtime）。
 pub const EVENT_CONSUMER_PROBE: &str = "event_consumer";
 
 /// consumer worker 关闭超时：每条在途消息 handle + commit + settle 有界 drain，对齐 relay 的 45s 预算。

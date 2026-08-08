@@ -110,11 +110,11 @@
 | Topic | 一致性级 | payload | 当前 |
 |-------|---------|---------|------|
 | `identity.session-created` | L2 OutboxFact | `{session_id, subject: uuid (canonical UserId), tenant_id, occurred_at}` | ✓ active；schema `format:uuid` |
-| `identity.role-assigned` | L2 OutboxFact | `{subject, role_id, tenant_id, assigned_by, occurred_at}`；此处 `subject` = RBAC 绑定目标（非 login） | 新增（PR5，lifecycle draft） |
-| `identity.role-revoked` | L2 OutboxFact | `{subject, role_id, tenant_id, revoked_by, occurred_at}`；同上 RBAC 绑定目标 | 新增（PR5，lifecycle draft） |
+| `identity.role-assigned` | L2 OutboxFact | `{subject, role_id, tenant_id, assigned_by, occurred_at}`；此处 `subject` = RBAC 绑定目标（非 login） | 新增（PR5，lifecycle active） |
+| `identity.role-revoked` | L2 OutboxFact | `{subject, role_id, tenant_id, revoked_by, occurred_at}`；同上 RBAC 绑定目标 | 新增（PR5，lifecycle active） |
 | `identity.security-event` | L2 OutboxFact | `{kind,actor:{kind,keyId,ref},target:{kind,keyId,ref},tenantId,occurredAt}`；actor/target ref 均为版本化 tenant/domain-separated HMAC pseudonym | active；audit 消费十组合法映射（含 AccountReactivated）；epoch 前或 int64 溢出时间 fail-closed |
 
-> 字段 camelCase（serde rename）；payload 类型经 `generated`，非手写共享 crate。`role-*` 事件订阅方 = audit（角色变更审计），但**运行时订阅消费延 #1017 Join**——本 feature 内 `role-*` lifecycle 暂为 **draft**（active 事件才要求至少一个 subscriber，§active event subscriber；draft 契约设计 + 发布侧不触发该守卫，避免无 subscriber 时 validate 红）。PR5b 补齐最小生产 `role_bindings` 表与 `PgRoleBindingLifecycle`，确保 assign/revoke HTTP 端点不是测试专用接线；`session-created` 仍 active（G1 已有 audit subscriber）。
+> 字段 camelCase（serde rename）；payload 类型经 `generated`，非手写共享 crate。`role-*` 事件订阅方 = audit（角色变更审计），**运行时订阅消费已接线（composition eventing）**——`role-*` lifecycle 已 **active**。PR5b 补齐最小生产 `role_bindings` 表与 `PgRoleBindingLifecycle`，确保 assign/revoke HTTP 端点不是测试专用接线；`session-created` 仍 active（G1 已有 audit subscriber）。
 
 ## HTTP 契约（`contracts/http/identity/v1/`）
 

@@ -11,7 +11,7 @@
 //!   收集器 + 域装配单元。`compose` 聚合各域 [`Domain::init`] 声明到单一 [`Registry`]；W 阶段
 //!   finalize driver 已落地——[`Registry::readyz_report`] 驱动探针 worst-of 聚合，
 //!   [`Registry::finalize_routes`] 按 listener 分组折叠路由组 register 闭包。HTTP mount + auth
-//!   finalize（httpserve）、subscriber dispatch（eventexec）、socket bind / 信号 / config 归组合根（Join #1017）。
+//!   finalize（httpserve）、subscriber dispatch（eventexec）、socket bind / 信号 / config 归组合根（assemblies/runtime launch）。
 //!   对标：kube-rs controller lifecycle、uber-go/fx Lifecycle.Append、omicron nexus 分 listener 隔离。
 //!
 //! - [`eventtransport`]：topology-gated 事件传输选型（单源策略）——[`resolve`] 按 [`Topology`]
@@ -27,7 +27,7 @@
 //!
 //! - [`refreshstoredeps`]：topology-gated refresh token store 选型——demo 拓扑用 in-mem 替身，
 //!   durable 拓扑用 postgres；[`refreshstoredeps::resolve`] 是纯策略函数，不构造 adapter。
-//!   本轮无 bin 消费方（live consumer = #1017 login 接线）。
+//!   resolver 仍无组合根消费方；login/refresh 现经 AuthGrant 路径，不经本 resolver。
 //!
 //! - [`topology`]：部署拓扑词汇单源（[`Topology`] 枚举），被 replaydeps / eventtransport /
 //!   sagaprojectiondeps / refreshstoredeps 等 resolver 共用。

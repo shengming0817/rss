@@ -35,7 +35,7 @@ eventexec/Join 为 New。
 状态分布：Done ≈ 38、New ≈ 23、Approved ≈ 18、Removed ≈ 4。结构性观察：
 
 1. 瓶颈从「签名冻结」转移到「W body 并行铺开」。剩余 New 主体 = eventexec(#1114–1124)、域(#1012–1016)、
-   adapter(#1009–1011)、distributed(#1007)、deviceloop(#1008)、Join(#1017)。
+   adapter(#1009–1011)、distributed(#1007)、deviceloop(#1008)、Join（已由 #1249–#1257、#1320 等分解闭合；runtime 聚合子项 #1431）。
 2. eventexec(#1005) 已 speckit-002 拆成 11 PBI(#1114–1124，Hierarchy 子项 + 4 wave)，但 epic wave 快照仍以
    #1005 粗粒度记账——本轮排期已下钻纳入。
 3. 大量 Approved/New 治理硬化 follow-up（#1034/1036/1039/1054/1055/1057/1077/1087/1090/1092/1095/1097/1101/
@@ -81,7 +81,7 @@ device/rest adapter(#1010/#1011 除 oidc/vault)、wire-gate #1140、按 ADR 落�
   脊柱 `#1117(outbox+relay+sweeper)` ∥ `#1118(idempotency)` ∥ `#1119(amqp transport)` → `#1120(ConsumerBase+DLX)`
   → `#1100(durable 闭环)`；域并行 `#1012 identity(+#1109/#1110)` ∥ `#1014 audit` ∥ `#1013 settings` ∥
   `#1016 syshealth`；`#1136(testkit)` 随域并行。
-- **Phase 3 · Join 收敛 → 🏁 MVP** — 并行 4：`#1017(Join)` ∥ `#1133(供应链门)` ∥ `#1137(testcontainers)` ∥
+- **Phase 3 · Join 收敛 → 🏁 MVP** — 并行 4：`Join（已由 #1249–#1257、#1320 等分解闭合；runtime 聚合子项 #1431）` ∥ `#1133(供应链门)` ∥ `#1137(testcontainers)` ∥
   `#1134→#1135(Dockerfile→K8s/Helm)`；`#1015 contractreg`（无功能 blocked-by、优先级最低域 crate，容量有余追加）搭车。
   **MVP = 可部署·durable·治理绿单进程平台**。
 - **Phase 4 · Post-MVP（L3–L4 + 设备 + 分布式 + 零信任落地）**：`#1121 saga` ∥ `#1122 projection(需 #1121)` ∥
@@ -91,7 +91,7 @@ device/rest adapter(#1010/#1011 除 oidc/vault)、wire-gate #1140、按 ADR 落�
 ### 最大并行结论
 
 - **单一最大并行点 = Phase 1–2（W 宽扇出）**：迁移模型称 ~25 单元扇出。硬约束脊柱 =
-  `postgres 基座(#1116) → outbox/idempotency → consumer → durable 闭环(#1100) → Join(#1017)`，其余全挂脊柱旁并行。
+  `postgres 基座(#1116) → outbox/idempotency → consumer → durable 闭环(#1100) → Join（已由 #1249–#1257、#1320 等分解闭合；runtime 聚合子项 #1431）`，其余全挂脊柱旁并行。
 - **实际同时活跃 = 4**（≤4/wave 容量装箱，pri 优先）；真并行独立组示例 = Phase 1 的
   `{consistency-L0L2(#1114), postgres(#1116), redis/amqp(#1009 umbrella)}`。
 

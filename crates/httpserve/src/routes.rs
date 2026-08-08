@@ -2995,7 +2995,7 @@ mod tests {
         }
     }
 
-    /// `into_make_service` 是 bindable 出口（仅 `AuthenticatedRoutes` 有，#1017 bind 点消费）——可构造即证存在。
+    /// `into_make_service` 是 bindable 出口（仅 `AuthenticatedRoutes` 有，assemblies/runtime launch bind 点消费）——可构造即证存在。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn authenticated_routes_into_make_service_available() {

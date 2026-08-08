@@ -36,7 +36,7 @@
 //! `DurableIsolated` 两个 durable 变体都收敛为「需 postgres url」——隔离语义留给 schema / row scope，
 //! 不在本选型层分叉（同 [`crate::sagaprojectiondeps`] 处理方式）。
 //!
-//! 本轮无 bin 消费方（live consumer = login 接线 = #1017）；resolver 先行交付，组合根接线后续。
+//! resolver 仍无组合根消费方；login/refresh 现经 AuthGrant 路径，不经本 resolver。
 //!
 //! ref: docs/rules/eventbus.md §复用层选型（topology-gated）
 //! ref: crate::replaydeps（同范式 topology-gated resolver）

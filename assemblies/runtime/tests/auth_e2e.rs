@@ -1,5 +1,5 @@
 //! 验签桥 e2e（ADR-006 §8 ③）：真 `OidcProvider`（静态 key）+ 组合根 `apply_verify_bridge` +
-//! `httpserve::finalize_auth` + enforce，经 `tower::oneshot` 驱动已组装 router（不真实绑端口；serve = #1017）。
+//! `httpserve::finalize_auth` + enforce，经 `tower::oneshot` 驱动已组装 router（不真实绑端口；serve = assemblies/runtime launch）。
 //!
 //! 覆盖：有效 JWT→200+证据放行；无 token/坏签名/过期/错 aud/错 iss/alg:none/跨 scheme→401（拒绝路径全覆盖）；
 //! **无 bridge 回归**（T001/T002 单独 merge 态：即便有效 JWT，Require 仍 401）；mTLS 只接受 transport peer evidence；

@@ -15,7 +15,7 @@
 
 | 契约 | kind | 一致性 | owner | 触发 / 订阅 | permission / auth |
 |------|------|--------|-------|------------|-------------------|
-| `identity.role-assigned` | event | L2 OutboxFact | identity | 触发：角色分配；订阅：audit（延 #1017，contract lifecycle 暂留 draft 以免触发 active-subscriber 校验） | — |
+| `identity.role-assigned` | event | L2 OutboxFact | identity | 触发：角色分配；订阅：audit（已接线，contract lifecycle active） | — |
 | `identity.role-revoked` | event | L2 OutboxFact | identity | 触发：角色撤销；订阅：audit（同上） | — |
 | `identity.password-change` | http | L2 OutboxFact | identity | `POST /api/v1/identity/password/change`；credential/account/grant/family/outbox 同事务 | `identity:profile:write` |
 | `identity.account-status-get` | http | L0 LocalOnly | identity | `GET /api/v1/identity/accounts/{userId}/status` | `identity:account-security:read` |
@@ -27,7 +27,7 @@
 | `identity.roles-list` | http | L0 | identity | `GET /api/v1/identity/roles`，鉴权 + 分页(limit≤500)，响应 `{data,nextCursor,hasMore}` | `identity:role:read` |
 | `identity.profile` | http | L0 | identity | `GET /api/v1/identity/profile`，鉴权（selfScoped） | `identity:profile:read` |
 
-PR5b 同步补齐最小生产 `role_bindings` 表与 `PgRoleBindingLifecycle`：assign/revoke 的 binding 行和 role event outbox 行同事务落库；role event audit consumer / session invalidation 仍延后 #1017。
+PR5b 同步补齐最小生产 `role_bindings` 表与 `PgRoleBindingLifecycle`：assign/revoke 的 binding 行和 role event outbox 行同事务落库；role event audit consumer 已接线；session invalidation 为未交付业务缺口。
 
 ## 扇出闭环（每个新契约，contract-fanout.md）
 
@@ -37,7 +37,7 @@ schema（`*.schema.json`）→ contract.toml（id/kind/consistencyLevel/owner/en
 
 | 契约 | contract schema | generated | 域 crate metadata | tests | docs |
 |------|----------------|-----------|-------------------|-------|------|
-| `identity.role-assigned` | 新增 schema.json + contract.toml（lifecycle draft） | 新增 identity_v1.rs event type | 新增 Cargo.toml dep + contract.toml contractUsages | 发布侧 producer 测试（audit consumer 幂等测试延 #1017） | contracts.md 更新 |
+| `identity.role-assigned` | 新增 schema.json + contract.toml（lifecycle active） | 新增 identity_v1.rs event type | 新增 Cargo.toml dep + contract.toml contractUsages | 发布侧 producer 测试（audit consumer 已接线） | contracts.md 更新 |
 | `identity.role-revoked` | 新增 | 新增 | 新增 | 新增 | 更新 |
 | `identity.roles-assign` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 | `identity.roles-revoke` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |

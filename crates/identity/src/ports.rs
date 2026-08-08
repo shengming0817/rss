@@ -1185,7 +1185,7 @@ pub trait RoleBindingReadRepoLocal: Send + Sync {
 /// PII-redacted）冒泡。
 ///
 /// **PR5b 状态**：port + `#[cfg(test)]` in-mem 替身 + 生产 `PgRoleBindingLifecycle` 已闭合 assign/revoke
-/// 发布侧；role assigned/revoked event contract 仍为 draft，生产 audit consumer 延后（#1017）。
+/// 发布侧；role assigned/revoked event contract 已 active，生产 audit consumer 已接线。
 ///
 /// ref: debezium outbox SMT（业务写 + outbox 行同一本地事务，producer 侧 durable）
 /// ref: Cockburn Hexagonal Ports&Adapters（repo 归域核心，adapter DIP 实现）

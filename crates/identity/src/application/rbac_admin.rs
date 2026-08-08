@@ -2,7 +2,7 @@
 //!
 //! [`RbacAdminService`] 经注入的 [`RoleReadRepo`](crate::ports::RoleReadRepo)（校验角色存在）+
 //! [`RoleBindingLifecycle`](crate::ports::RoleBindingLifecycle)（binding co-tx 写 + 角色事件 outbox 同事务）
-//! 落角色绑定，并在同一本地事务发布 `identity.role-{assigned,revoked}`（L2，事件 draft——audit 消费延 #1017）。
+//! 落角色绑定，并在同一本地事务发布 `identity.role-{assigned,revoked}`（L2，事件已 active，audit consumer 已接线）。
 //!
 //! 必填依赖走构造器位置参（缺失即编译错误，rust-standards §工程护栏）；`Clock` 位置参注入（禁系统时钟）。
 //! 错误为库错误枚举（const-literal message，不返回 HTTP 状态码——handler 层映射，error-handling.md）。

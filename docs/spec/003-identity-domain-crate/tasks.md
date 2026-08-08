@@ -100,7 +100,7 @@ description: "Task list — identity 域 crate body 兑现"
 
 ### PR5a：角色事件契约 + RbacAdminService
 
-- [ ] T021 [PR5a][US5] 新事件契约 `identity.role-assigned`/`identity.role-revoked`：`contracts/event/identity/v1/` schema + contract.toml（L2 OutboxFact，`lifecycle: draft` 以免触发 active-subscriber 校验——audit 订阅延 #1017 Join）→ `generated/src/event/identity_v1.rs`（codegen）→ 域 crate metadata。
+- [x] T021 [PR5a][US5] 新事件契约 `identity.role-assigned`/`identity.role-revoked`：`contracts/event/identity/v1/` schema + contract.toml（L2 OutboxFact，`lifecycle: active`——audit consumer 已接线）→ `generated/src/event/identity_v1.rs`（codegen）→ 域 crate metadata。
 - [ ] T023 [PR5a][US5] `RbacAdminService`（`application/rbac_admin.rs`）：`RoleRepo` CRUD + assign/revoke 发 role-* 事件（L2）。clippy/dylint/fmt/`cargo llvm-cov --lib -p identity`。
 
 ### PR5b：HTTP 端点契约 + handler + contract test + 生命周期升级
@@ -114,8 +114,8 @@ description: "Task list — identity 域 crate body 兑现"
 
 | 契约 | contract schema | generated | 域 crate metadata | tests | docs |
 |------|----------------|-----------|-------------------|-------|------|
-| `identity.role-assigned` | 新增（lifecycle draft） | 新增 | 新增 Cargo.toml dep + contract.toml | 发布侧 producer 测试（audit consumer 幂等测试延 #1017） | contracts.md 更新 |
-| `identity.role-revoked` | 新增（lifecycle draft） | 新增 | 新增 | 发布侧 producer 测试（audit consumer 测试延 #1017） | 更新 |
+| `identity.role-assigned` | 新增（lifecycle active） | 新增 | 新增 Cargo.toml dep + contract.toml | 发布侧 producer 测试（audit consumer 已接线） | contracts.md 更新 |
+| `identity.role-revoked` | 新增（lifecycle active） | 新增 | 新增 | 发布侧 producer 测试（audit consumer 已接线） | 更新 |
 | `identity.roles-assign` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 | `identity.roles-revoke` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 | `identity.roles-list` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
@@ -149,4 +149,4 @@ Wave 4: PR5(US5)                 ← blocked-by PR1, PR2(ABAC handler), PR4(登�
 
 - 每个 PR = 一个子 PBI 工作项（area-auth/type-enhancement/pri/cx，见 plan.md PR 表）。
 - AI-HARD 验收项（每 PR review 硬核查）见 plan.md §AI-HARD 约束。
-- 真依赖接线 + journey 全量 + bins/examples 在 Join 阶段 #1017，非本 feature。
+- 真依赖接线 + journey 全量 + bins/examples 在 assemblies/runtime launch，非本 feature。

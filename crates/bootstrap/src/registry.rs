@@ -465,7 +465,7 @@ impl Registry {
     /// 空探针 → `Unhealthy`（[`primitives::HealthReport::aggregate`] fail-closed，readyz 不因「没探针」误放行）。
     ///
     /// 借 `&self`、可重复调用：组合根的 readyz handler 每请求调一次（handler 如何长期持有 Registry /
-    /// 探针子集属组合根生命周期，归 Join #1017，不在本 crate）。HTTP 端点 mount 由 httpserve 驱动。
+    /// 探针子集属组合根生命周期，归 #1320 / assemblies/runtime，不在本 crate）。HTTP 端点 mount 由 httpserve 驱动。
     /// ref: uber-go/fx lifecycle.go（Hook 求值=DI port、纯聚合归 primitives，见 `primitives::healthz`）。
     ///
     /// detail 的 PII 安全由 `primitives::HealthCheck::detail() -> &'static str` 编译期类型约束守
@@ -513,7 +513,7 @@ impl Registry {
     /// 累加器）；组合根可安全对结果逐项 `into_iter` 按 listener bind，无需去重。
     ///
     /// 产出的 per-listener [`UnfinalizedRoutes`] 交组合根：再跑 `httpserve::finalize_auth` 换
-    /// `AuthenticatedRoutes` + 绑各自 socket（Join #1017）。`UnfinalizedRoutes` **无 public bindable 出口**，
+    /// `AuthenticatedRoutes` + 绑各自 socket（assemblies/runtime launch）。`UnfinalizedRoutes` **无 public bindable 出口**，
     /// 故组合根**不可能**跳过 `finalize_auth` 直接 bind 未认证 router（#1113 funnel Hard）。
     /// 经受控 `bootstrap → httpserve` 编译期路由类型边（ADR-009）：bootstrap 只碰 sealed `UnfinalizedRoutes`，
     /// 裸 `axum::Router` 全程不出 httpserve。

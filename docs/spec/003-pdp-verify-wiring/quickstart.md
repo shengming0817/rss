@@ -30,7 +30,7 @@ cargo nextest run --manifest-path crates/httpserve/Cargo.toml -p httpserve
 
 ```bash
 # 起 router + 真 OidcProvider（静态 key）+ verify-bridge
-cargo nextest run -p server -p rss   # in-process oneshot e2e（无需 feature gate；socket bind/serve = #1017）
+cargo nextest run -p server -p rss   # in-process oneshot e2e（无需 feature gate；socket bind/serve = assemblies/runtime launch）
 ```
 
 预期（ADR-006 §8 ③）：

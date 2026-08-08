@@ -9,7 +9,7 @@
 //!
 //! 并发形态：`run_consumer_ackable` future 持 `&DynAcker`/`&DynDeadLetterStore`（Send-非-Sync）跨 await ⇒
 //! `!Send`，**与 AMQP 连接同 runtime** 经 `tokio::join!` 同任务驱动（不跨线程；`ConsumerWorker` 的专用线程
-//! 驱动 + 两阶段关闭由 demo journey + eventexec 单测覆盖，真 broker 下的 worker 化随 bins 落地 #1017）。
+//! 驱动 + 两阶段关闭由 demo journey + eventexec 单测覆盖，真 broker 下的 worker 化由 ManagedBlockingWorker 覆盖）。
 //!
 //! Cargo `[[test]] required-features = ["integration"]`：broker 经 `testkit::env_or_rabbitmq()` self-provision（testcontainers，
 //! #1137；设 `RSS_AMQP_TEST_URL` 则对接长存外部 broker，其 vhost 由 testkit 预建）。需 docker（容器路径）。

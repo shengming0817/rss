@@ -70,7 +70,7 @@
 - ports：`RoleRepo`（已存）+ 新增 `CredentialRepo` / `SessionRepo`（ADR-005 Option 2 域形 port）。
 - internal/mem：测试 / `seed-login` 用 in-mem 替身。
 - 新契约：`identity.role-assigned` / `identity.role-revoked`（event L2）+ 新 HTTP 端点契约；`identity.login` / `identity.session-created` draft→active（pre-GA 窗口原地改）。
-- handler + contract test + bootstrap 路由组接线 + audit 订阅声明对齐（`session-created` 已有；`role-*` 事件本 feature 仅出 draft 契约设计 + 发布侧，audit 订阅消费延 #1017）。
+- handler + contract test + bootstrap 路由组接线 + audit 订阅声明对齐（`session-created` 已有；`role-*` 事件已 active，audit consumer 已接线）。
 
 **Out（属其它 W 单元，作为依赖 / 前置，不在本 feature 实现）**：
 
@@ -78,7 +78,7 @@
 - 真实持久化（postgres `RoleRepo` / `CredentialRepo` / `SessionRepo` impl）→ **adapter 单元（#1009–1011 / #1083 / #1116）**；本 feature 只定义 port + in-mem 替身。
 - EST 设备注册 / 证书签发 / CredentialFence sealed 令牌 → 独立 `deviceidentity` crate + authn（后期，非 #1012）。
 - `vocab::Decision` 增 Obligations/FieldMask 通道（P0-6 完整态）→ 若 ABAC deny-overrides 最小可用不需要，则不在本 feature 引入；需要则 PR2 内最小改动并在 PR body 标注（base crate 改动）。
-- role event audit consumer / session invalidation + journey 全量 + bins/examples 集成 → Join 阶段 **#1017**；PR5b 已补最小 `role_bindings` + `PgRoleBindingLifecycle` 生产闭环。
+- role event audit consumer 已接线（composition eventing）；session invalidation 为未交付业务缺口；journey 全量 + bins/examples 集成 → assemblies/runtime launch；PR5b 已补最小 `role_bindings` + `PgRoleBindingLifecycle` 生产闭环。
 
 > **blocked-by 精度**：identity 各子 PR 消费 authn 的是**已冻结签名**，故编译不被 #1003 实现硬阻塞——子 PR 用 in-mem 替身即可独立完成 + 测。5 个子 PBI 的 `Blocked-by` 只声明**彼此之间**与 #999，不错挂 #1003 / adapter（避免假依赖拖慢 wave）。
 
@@ -181,11 +181,11 @@ Suspended/Locked 恢复 Active 只做状态 CAS：保留 epoch、不发事件、
 
 ### User Story 5 - RBAC 角色管理 + 角色事件 + HTTP handler + contract 接线（L2 + wire）(Priority: P2)
 
-`RoleRepo`（已存 port）兑现角色 CRUD；角色分配 / 撤销定义新事件契约 `identity.role-assigned` / `identity.role-revoked`（event L2 OutboxFact，扇出闭环 schema→generated→metadata→test→docs）+ 发布侧实现——但**本 feature 内 `role-*` 事件 lifecycle 暂为 draft**（audit 订阅消费 + active 升级延 #1017 Join，避免在无 subscriber 时触发 active-subscriber 守卫）。新增 HTTP 端点（roles / profile / password-change / account-status-get/set / logout）的契约 + 真实 axum handler + contract-level 测试；`identity.login` / `identity.session-created` 生命周期 draft→active。
+`RoleRepo`（已存 port）兑现角色 CRUD；角色分配 / 撤销定义新事件契约 `identity.role-assigned` / `identity.role-revoked`（event L2 OutboxFact，扇出闭环 schema→generated→metadata→test→docs）+ 发布侧实现——`role-*` 事件 lifecycle 已 **active**，audit consumer 已接线。新增 HTTP 端点（roles / profile / password-change / account-status-get/set / logout）的契约 + 真实 axum handler + contract-level 测试；`identity.login` / `identity.session-created` 生命周期 draft→active。
 
 **Why this priority**: 把 identity 能力暴露为 wire 契约 + handler，是域 crate 对外可服务的收口。依赖 US4（登录 handler）、US2（authz handler 用 ABAC）、US1（类型）。最重（含契约 codegen + handler + contract test），估行接近上限。
 
-**Independent Test**: contract-level 测试（`axum::http` + `tower::ServiceExt::oneshot`）覆盖每个端点的正常响应 schema / 参数错误码 / 鉴权边界 / path 参数校验；`role-*` 事件契约 schema 校验 + 发布侧 producer 测试（draft；audit 可消费验证延 #1017）；roles-revoke 只撤目标 binding + 跨租隐藏存在性 contract test；generated diff 作一等审查材料；契约 `cargo xtask contract validate` 绿。
+**Independent Test**: contract-level 测试（`axum::http` + `tower::ServiceExt::oneshot`）覆盖每个端点的正常响应 schema / 参数错误码 / 鉴权边界 / path 参数校验；`role-*` 事件契约 schema 校验 + 发布侧 producer 测试（active；audit consumer 已接线）；roles-revoke 只撤目标 binding + 跨租隐藏存在性 contract test；generated diff 作一等审查材料；契约 `cargo xtask contract validate` 绿。
 
 **HTTP 端点清单（US5）**：
 
@@ -205,8 +205,8 @@ Suspended/Locked 恢复 Active 只做状态 CAS：保留 epoch、不发事件、
 
 **Acceptance Scenarios**:
 
-1. **Given** 角色分配请求，**When** handler 处理，**Then** 经 `RoleRepo` 落角色绑定 + 发布一条 `identity.role-assigned`（L2，contract draft；audit 订阅消费延 #1017）。
-2. **Given** 角色撤销请求（`{roleId}/bindings/{subject}`），**When** handler 处理，**Then** 仅撤销目标 binding（跨租输入隐藏存在性）+ 发布 `identity.role-revoked`（含 subject，draft），并触发域侧会话失效编排意图（运行期吊销由 authn 提供）。
+1. **Given** 角色分配请求，**When** handler 处理，**Then** 经 `RoleRepo` 落角色绑定 + 发布一条 `identity.role-assigned`（L2，contract active；audit consumer 已接线）。
+2. **Given** 角色撤销请求（`{roleId}/bindings/{subject}`），**When** handler 处理，**Then** 仅撤销目标 binding（跨租输入隐藏存在性）+ 发布 `identity.role-revoked`（含 subject，active）；session invalidation 为未交付业务缺口（运行期吊销由 authn 提供）。
 3. **Given** 缺参 / 非法 path 参数 / 越权调用，**When** 命中各端点，**Then** 返回 contract 声明的错误码（typed response envelope），非裸 5xx。
 4. **Given** 全部端点 handler 落地，**When** 跑 `cargo xtask contract validate`，**Then** `identity.login` / `identity.session-created` 可升 active、扇出闭环完整、generated 与 schema 一致。
 
@@ -275,7 +275,7 @@ Suspended/Locked 恢复 Active 只做状态 CAS：保留 epoch、不发事件、
 ## Assumptions
 
 - authn（#1003）的 `Principal` / `PrincipalKind` / `diport::{Pdp,Publisher,Clock}` 等冻结签名已可消费（#997 已冻结），identity 编译不被 authn body 阻塞。
-- role assign/revoke 的最小生产持久化由 PR5b 的 `role_bindings` + `PgRoleBindingLifecycle` 提供；role event audit consumer、session invalidation 和全量 journey 仍在 Join（#1017）。
+- role assign/revoke 的最小生产持久化由 PR5b 的 `role_bindings` + `PgRoleBindingLifecycle` 提供；role event audit consumer 已接线；session invalidation 为未交付业务缺口；全量 journey 归 assemblies/runtime launch。
 - pre-GA wire 破坏窗口（至 2026-12-31）内允许原地改 active 契约版本（api-versioning.md §兼容窗口），仍走扇出闭环。
 - `vocab::Decision` 现形态足以表达 Allow/Deny；若 ABAC 需 Obligations/FieldMask，则 PR2 内最小扩展（base crate 改动，PR body 标注），否则不引入。
 - argon2/bcrypt 哈希算法选型沿用 `secure` crate 既有能力（若已提供）；否则在 identity 内最小封装并在 research.md 记对标。

@@ -180,7 +180,7 @@ Open-source benchmark retained for the governance-gate implementation:
 | schedule-607 | #1014 | audit domain | out-of-scope | - | no | - | - | - | - | Complete business-domain functionality is outside scope |
 | schedule-607 | #1015 | contract registry domain | out-of-scope | - | no | - | - | - | - | Registry business functionality is outside scope |
 | schedule-607 | #1016 | system health domain | out-of-scope | - | no | - | - | - | - | Complete health control plane is outside scope |
-| schedule-607 | #1017 | join integration umbrella | absorbed-by | #1431 | yes | - | - | - | - | Persistence module aggregation is owned by the existing leaf |
+| schedule-607 | Join | join integration umbrella | decomposed | #1249–#1257,#1320 | yes | - | - | - | - | Join umbrella closed via wiring/收口/入口 leaves; #1431 owns only the persistence/runtime DomainModuleResult aggregation slice |
 | schedule-607 | #1034 | approved hardening follow-up | out-of-scope | - | no | - | - | - | - | Historical generic follow-up lacks a persistence carry-over atom |
 | schedule-607 | #1036 | approved hardening follow-up | out-of-scope | - | no | - | - | - | - | Historical generic follow-up lacks a persistence carry-over atom |
 | schedule-607 | #1039 | approved hardening follow-up | out-of-scope | - | no | - | - | - | - | Historical generic follow-up lacks a persistence carry-over atom |
