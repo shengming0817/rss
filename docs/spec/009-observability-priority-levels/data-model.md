@@ -11,14 +11,21 @@ or oversized state is discarded without discarding a valid parent.
 
 The observation boundary contains only:
 
-- closed HTTP method (`_OTHER` for an extension method);
+- closed HTTP method (`QUERY` is well-known; `_OTHER` for an extension method);
 - optional axum matched route template;
 - closed protocol version;
-- request and correlation identifiers;
+- trusted transport scheme minted only by the actual adapter-private plaintext/mTLS observation owner;
+- closed listener, terminal outcome, status class, and error type;
 - response status code.
 
 It cannot contain the request, URI, header map, body, authority, authentication evidence, tenant,
 principal, or arbitrary error text.
+
+`RequestObservation -> ResponseObservation -> ObservedBody` lives only in private `httpd` code and
+is a non-cloneable ownership chain. `httpserve` returns only opaque matched-route and response-cause
+metadata with crate-private constructors. Single settlement consumes the monotonic timer and active
+handle, so EOS, error, timeout, panic, and Drop cannot double-record; the handle's method, scheme,
+and listener labels are reused unchanged for decrement.
 
 ## HTTP client observation
 

@@ -466,7 +466,7 @@ mod tests {
         let empty = Arc::new(empty_reg.take_health_reporter());
         let authed = health_routes(empty);
         let resp = authed
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .oneshot(
                 Request::builder()
                     .uri("/health/v1/readyz")
@@ -500,7 +500,7 @@ mod tests {
         let reporter = Arc::new(reg.take_health_reporter());
         let authed = health_routes(reporter);
         let resp = authed
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .oneshot(
                 Request::builder()
                     .uri("/health/v1/readyz")
@@ -527,7 +527,7 @@ mod tests {
 
         let authed = health_routes(reporter);
         let resp = authed
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .oneshot(
                 Request::builder()
                     .uri("/health/v1/readyz")
@@ -549,7 +549,7 @@ mod tests {
     async fn health_listener_healthz_is_200() {
         let authed = health_routes(test_reporter());
         let resp = authed
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .oneshot(
                 Request::builder()
                     .uri("/health/v1/healthz")

@@ -1007,9 +1007,9 @@ async fn status_with_tenant_values_and_request_id<'a>(
     for value in tenants {
         builder = builder.header(diport::SERVICE_TOKEN_TENANT_HEADER, value);
     }
-    // 取回裸 Router 做 oneshot（`#[doc(hidden)]` 测试入口；生产经 into_make_service bind，无此出口）。
+    // 取回裸 Router 做 oneshot（`#[doc(hidden)]` 测试入口；生产经 into_server_service bind，无此出口）。
     let resp = app
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -1043,7 +1043,7 @@ async fn status_with_authorization_values<'a>(
         builder = builder.header(header::AUTHORIZATION, value);
     }
     let response = app
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -1070,7 +1070,11 @@ async fn body_limit_blocks_before_jwt_auth_tripwire() {
         .body(Body::empty())
         .unwrap();
 
-    let resp = authed.into_router_for_test().oneshot(req).await.unwrap();
+    let resp = authed
+        .into_plaintext_router_for_test()
+        .oneshot(req)
+        .await
+        .unwrap();
     // BODYLIMIT-BEFORE-AUTH-01：body-limit outer → 先拦截，响应 413 而非 401。
     assert_ne!(
         resp.status(),
@@ -1123,7 +1127,11 @@ async fn rate_limit_blocks_before_jwt_auth_tripwire() {
         .body(Body::empty())
         .unwrap();
 
-    let resp = authed.into_router_for_test().oneshot(req).await.unwrap();
+    let resp = authed
+        .into_plaintext_router_for_test()
+        .oneshot(req)
+        .await
+        .unwrap();
     // RATELIMIT-BEFORE-AUTH-01：rate-limit outer 于验签桥 → 先拦截，429 而非 401。
     assert_ne!(
         resp.status(),
@@ -1206,7 +1214,7 @@ async fn grant_store_outage_is_503_without_jwt_only_fallback() {
     );
     let token = production_user_jwt();
     let response = jwt_router_with_grants(true, grants)
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(
             axum::http::Request::builder()
                 .method(Method::GET)
@@ -1443,7 +1451,7 @@ async fn body_of_with_tenant(
         builder = builder.header(diport::SERVICE_TOKEN_TENANT_HEADER, value);
     }
     let resp = app
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(builder.body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -1648,7 +1656,7 @@ async fn server_budget_times_out_pending_pdp_as_503_and_drops_verifier() {
     let budget = httpserve::ServerRequestBudget::from_millis(
         NonZeroU64::new(50).expect("non-zero test budget"),
     );
-    let router = app.into_router_for_test_with_budget(budget);
+    let router = app.into_plaintext_router_for_test_with_budget(budget);
     let request = router.oneshot(
         axum::http::Request::builder()
             .method(Method::GET)
@@ -1899,7 +1907,7 @@ async fn verified_mtls_peer_satisfies_require_mtls() {
     req.extensions_mut().insert(verified_mtls_peer());
 
     let resp = mtls_router()
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(req)
         .await
         .unwrap();
@@ -1921,7 +1929,7 @@ async fn internal_mtls_requires_route_authorizer() {
     req.extensions_mut().insert(verified_mtls_peer());
 
     let resp = internal_mtls_router_without_authorizer()
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(req)
         .await
         .unwrap();
@@ -1943,7 +1951,7 @@ async fn internal_mtls_route_authorizer_allows_verified_peer() {
     req.extensions_mut().insert(verified_mtls_peer());
 
     let resp = internal_mtls_router_with_authorizer(allow_authorizer())
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(req)
         .await
         .unwrap();
@@ -1965,7 +1973,7 @@ async fn internal_mtls_verified_peer_remains_tenantless_scope() {
     req.extensions_mut().insert(verified_mtls_peer());
 
     let resp = internal_mtls_scope_router_with_authorizer(allow_authorizer())
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(req)
         .await
         .unwrap();
@@ -2506,7 +2514,7 @@ fn provider_outage_returns_retryable_503_envelope_and_redacts_pii() {
     let start = trace_len();
     let response = block_on_current_thread(async {
         jwt_router_with_pdp(ProviderUnavailablePdp)
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::GET)
@@ -2571,7 +2579,7 @@ fn tracing_server_budget_timeout_uses_closed_reason_and_redacts_pii() {
     );
     let start = trace_len();
     let status = block_on_current_thread(async move {
-        app.into_router_for_test_with_budget(budget)
+        app.into_plaintext_router_for_test_with_budget(budget)
             .oneshot(
                 axum::http::Request::builder()
                     .method(Method::GET)

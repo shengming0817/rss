@@ -9,8 +9,9 @@
 //!   [`GeneratedEndpoint`] 或 [`GeneratedPrimaryEndpoint`]，Health 只走固定 builder ⇒ 跨 listener 泄漏
 //!   不可表达（typed function choice，Hard）。
 //! - **#1113 auth-finalize-before-bind funnel（Hard）**：finalizer 函数是 [`AuthenticatedRoutes`] 的
-//!   **唯一**生产者（构造 `pub(crate)`），[`AuthenticatedRoutes::into_make_service`] 是**唯一** bindable
-//!   出口；[`UnfinalizedRoutes`] 无 public bindable 出口 ⇒ 未跑 auth 装配的 router 无法 bind。
+//!   **唯一**生产者（构造 `pub(crate)`），[`AuthenticatedRoutes::into_server_service`] 是**唯一**
+//!   transport core 出口；[`UnfinalizedRoutes`] 无 public service 出口 ⇒ 未跑 auth 装配的 router 无法进入
+//!   transport adapter。
 //!
 //! 与兄弟 crate `bootstrap` 的协同：`bootstrap::Registry::finalize_routes` 经受控 `bootstrap → httpserve`
 //! 编译期路由类型边（ADR-009）构造 [`UnfinalizedRoutes`]，再由组合根按 listener 选择
@@ -1197,7 +1198,7 @@ fn permission_authz(
 /// 单 listener 的 per-listener Router，**未** auth-finalize（#1113 funnel 入态），兼作 finalize 折叠的
 /// per-listener **累加器**。
 ///
-/// INVARIANT: ROUTE-AUTH-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 无 public bindable 出口（无 `into_make_service`）；唯一前进路径是
+/// INVARIANT: ROUTE-AUTH-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 无 public bindable 出口（无 `into_server_service`）；唯一前进路径是
 /// [`finalize_auth`]（同 crate 读私有字段）换 [`AuthenticatedRoutes`] ⇒ 未跑 auth 装配的 router 无法 bind。
 /// 经 [`empty`](Self::empty) + [`nest_group`](Self::nest_group) 累加（裸 `axum::Router` 不出 httpserve），
 /// 并原子保留 generated route marker 与 stateless/stateful identity；raw test mount 不具 generated identity。
@@ -1269,71 +1270,127 @@ impl UnfinalizedRoutes {
     }
 }
 
-/// Opaque make-service accepted by the HTTP transport adapter.
+/// Opaque, budget-sealed per-request HTTP transport core.
 ///
-/// Only [`AuthenticatedRoutes::into_make_service`] can construct this type in production. Its
-/// private field makes an unbudgeted raw axum router impossible to pass to `httpd`, while both the
-/// plaintext and mTLS serve paths consume the same sealed service capability.
+/// Only [`AuthenticatedRoutes::into_server_service`] constructs this production capability. It
+/// implements only the per-request core. It emits no transport evidence: the `httpd` adapter owns
+/// the sole official SERVER span/RED seam and selects scheme inside the actual bind branch.
 #[derive(Clone)]
-#[must_use = "ServerMakeService must be consumed by the HTTP transport adapter"]
-pub struct ServerMakeService {
-    inner: axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
-        axum::Router,
-        std::net::SocketAddr,
-    >,
+#[must_use = "ServerService must be consumed by the HTTP transport adapter"]
+pub struct ServerService {
+    router: axum::Router,
+    observation_policy: crate::ServerObservationPolicy,
 }
 
-impl ServerMakeService {
-    /// Consume the sealed capability at the transport adapter boundary.
-    #[doc(hidden)]
-    pub fn into_axum(
-        self,
-    ) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<
-        axum::Router,
-        std::net::SocketAddr,
-    > {
-        self.inner
-    }
-
+impl ServerService {
     /// Build a sealed service around a raw test router. Not present in production feature graphs.
     #[cfg(any(test, feature = "test-util"))]
     pub fn from_router_for_test(router: axum::Router, budget: crate::ServerRequestBudget) -> Self {
+        let router = router.layer(axum::middleware::from_fn(crate::middleware::panic_recovery));
         Self {
-            inner: seal_server_router(
+            router: seal_server_router(
                 router,
                 crate::protect::EdgeHardening::default(),
                 budget,
-                TracePolicy::Enabled,
-            )
-            .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                crate::ServerObservationPolicy::Enabled(crate::ServerObservationListener::Other),
+            ),
+            observation_policy: crate::ServerObservationPolicy::Enabled(
+                crate::ServerObservationListener::Other,
+            ),
+        }
+    }
+
+    /// Build a Health-listener core for transport policy tests.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn from_health_router_for_test(router: axum::Router) -> Self {
+        Self {
+            router: seal_server_router(
+                router,
+                crate::protect::EdgeHardening::default(),
+                crate::ServerRequestBudget::for_test(),
+                crate::ServerObservationPolicy::Disabled,
+            ),
+            observation_policy: crate::ServerObservationPolicy::Disabled,
+        }
+    }
+
+    /// Closed listener policy consumed by the transport-owned observation seam.
+    #[must_use]
+    pub const fn observation_policy(&self) -> crate::ServerObservationPolicy {
+        self.observation_policy
+    }
+}
+
+impl tower::Service<axum::extract::Request> for ServerService {
+    type Response = crate::ServerResponse;
+    type Error = core::convert::Infallible;
+    type Future =
+        ServerResponseFuture<<axum::Router as tower::Service<axum::extract::Request>>::Future>;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Result<(), Self::Error>> {
+        <axum::Router as tower::Service<axum::extract::Request>>::poll_ready(&mut self.router, cx)
+    }
+
+    fn call(&mut self, request: axum::extract::Request) -> Self::Future {
+        ServerResponseFuture {
+            inner: self.router.call(request),
         }
     }
 }
 
-/// auth-finalize 后的 per-listener Router（#1113 funnel 出态，可 bind）。
+/// Future returned by the sealed per-request core.
+pub struct ServerResponseFuture<F> {
+    inner: F,
+}
+
+impl<F> core::future::Future for ServerResponseFuture<F>
+where
+    F: core::future::Future<Output = Result<axum::response::Response, core::convert::Infallible>>
+        + Unpin,
+{
+    type Output = Result<crate::ServerResponse, core::convert::Infallible>;
+
+    fn poll(
+        mut self: core::pin::Pin<&mut Self>,
+        cx: &mut core::task::Context<'_>,
+    ) -> core::task::Poll<Self::Output> {
+        match core::pin::Pin::new(&mut self.inner).poll(cx) {
+            core::task::Poll::Ready(Ok(response)) => {
+                core::task::Poll::Ready(Ok(crate::ServerResponse::from_response(response)))
+            }
+            core::task::Poll::Ready(Err(error)) => core::task::Poll::Ready(Err(error)),
+            core::task::Poll::Pending => core::task::Poll::Pending,
+        }
+    }
+}
+
+/// auth-finalize 后的 per-listener Router（#1113 funnel 出态，可进入 transport adapter）。
 ///
 /// INVARIANT: ROUTE-AUTH-FUNNEL-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 唯一生产者 = finalizer 函数（构造 `pub(crate)`，外部 crate 无法
-/// mint）；[`into_make_service`](Self::into_make_service) 是唯一 bindable 出口。验签桥（#1109）经
+/// mint）；[`into_server_service`](Self::into_server_service) 是唯一 transport core 出口。验签桥（#1109）经
 /// [`layer`](Self::layer) 叠在外层、保持封印（产物仍是 `AuthenticatedRoutes`，只能加层不能替换）。
 ///
 /// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— body-limit **层**（CL 闸 + Limited wrap）叠在
 /// [`sealed_router`](Self::sealed_router) 唯一 funnel ⇒ 每个 bindable router 必带且必 outer 于 auth：
 /// CL-declared 超限 → before-auth clean 413；无声明/chunked → Limited read-time 字节硬顶（内存有界，
 /// 未认证请求经 enforce 401 时 body 从不被读，无 pre-auth buffer）。详见 middleware.rs body_limit 注释。
-#[must_use = "AuthenticatedRoutes 须经 into_make_service bind（否则 router 未 serve）"]
+#[must_use = "AuthenticatedRoutes 须经 into_server_service 交给 transport adapter"]
 pub struct AuthenticatedRoutes {
     router: axum::Router,
     hardening: crate::protect::EdgeHardening,
-    trace_policy: TracePolicy,
+    observation_policy: crate::ServerObservationPolicy,
 }
 
 impl AuthenticatedRoutes {
     /// 唯一生产入口（`pub(crate)`）——仅本模块 finalizer 可构造，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
-    fn new(router: axum::Router, trace_policy: TracePolicy) -> Self {
+    fn new(router: axum::Router, observation_policy: crate::ServerObservationPolicy) -> Self {
         Self {
             router,
             hardening: crate::protect::EdgeHardening::default(),
-            trace_policy,
+            observation_policy,
         }
     }
 
@@ -1362,11 +1419,11 @@ impl AuthenticatedRoutes {
         Self {
             router: self.router.layer(layer),
             hardening: self.hardening,
-            trace_policy: self.trace_policy,
+            observation_policy: self.observation_policy,
         }
     }
 
-    /// 在唯一 bindable 出口封全局防护中间件链（请求预算 + 请求 ID + correlation + security-headers + body-limit）。
+    /// 在唯一 transport core 出口封全局防护中间件链（请求预算 + 请求 ID + correlation + security-headers + body-limit）。
     ///
     /// INVARIANT: ROUTE-REQUESTID-OUTERMOST-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— `request_id` **不**在 [`finalize_auth`] 内挂（那会被组合根
     /// 后叠的验签桥包到内层 ⇒ 桥运行时读不到 `RequestId`，#1109 NOTE / #1320）；改由本出口统一注入 ⇒ 每个被
@@ -1383,46 +1440,47 @@ impl AuthenticatedRoutes {
     ///   · **无声明/chunked → `http_body_util::Limited` 字节硬顶（read-time，内存有界）**：未认证请求经
     ///     enforce 401 时 body 从不被读 ⇒ 无 pre-auth buffer（DoS 优姿态；见 middleware.rs body_limit reason）。
     ///   CL 路径的**拒绝决策** before-auth；无 CL 路径的 cap 由 Limited read-time 实施，非 before-auth 413。
-    /// 结构性 Hard：唯一 bindable 出口经本 funnel 封层，不可遗漏。security-headers outer 于 body-limit（所有响应
+    /// 结构性 Hard：唯一 transport core 出口经本 funnel 封层，不可遗漏。security-headers outer 于 body-limit（所有响应
     /// 含 413 均追加安全头）。
     ///
-    /// INVARIANT: SERVER-REQUEST-BUDGET-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability type + required argument" }——唯一 bindable 出口必须消费非零 [`crate::ServerRequestBudget`]，且 `httpd` plaintext/mTLS 只接受 [`ServerMakeService`]；不存在无预算 bind 路径。
+    /// INVARIANT: SERVER-REQUEST-BUDGET-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability field + required argument" }——唯一 transport core 出口必须消费非零 [`crate::ServerRequestBudget`]，且 `httpd` plaintext/mTLS 只接受 [`ServerService`]；不存在无预算 transport core。
     ///
-    /// INVARIANT: HTTP-SERVER-TRACE-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability field + unique bind funnel" }——finalizer 构造的非可选私有 [`TracePolicy`] 随封印类型传播，并且只能在唯一 bindable funnel 消费；Health Disabled，其余 listener Enabled。
+    /// INVARIANT: HTTP-SERVER-OBSERVATION-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability field + unique transport-core funnel" }——finalizer 构造的非可选 observation policy 随封印类型传播，并且只能由 transport owner 消费；Health Disabled，其余 listener Enabled。
     ///
-    /// INVARIANT: HTTP-SERVER-TRACE-ORDER-01 { level = "Medium", exec = "test", source = "code" }——T2 finalized-router 测试锁住 SERVER span 包含 budget/body-limit/验签桥/panic/handler 的真实请求顺序。
+    /// INVARIANT: HTTP-SERVER-OBSERVATION-ORDER-01 { level = "Medium", exec = "test", source = "code" }——T2 finalized-router 测试锁住 SERVER span 与 RED owner 包含 budget/body-limit/验签桥/panic/handler/body poll 的真实请求顺序。
     ///
-    /// 层序（外→内）：security-headers → `request_id` → `correlation` → SERVER trace
-    /// → server-request-budget → body-limit → 验签桥 → `panic_recovery` → `Extension(plan)` → enforce → handler。
+    /// 层序（外→内）：`httpd` SERVER observation → security-headers → `request_id` → `correlation`
+    /// → observation metadata → server-request-budget → body-limit → 验签桥 → `panic_recovery`
+    /// → `Extension(plan)` → enforce → handler。
     ///
-    /// 生产出口 [`into_make_service`](Self::into_make_service) 与 test 出口
-    /// [`into_router_for_test`](Self::into_router_for_test) 共用本 fn ⇒ 层序一致（test 不漂移）。
+    /// 生产出口 [`into_server_service`](Self::into_server_service) 与 typed test 出口共用本 fn ⇒ 层序一致
+    /// （test 不漂移）。
     fn sealed_router(self, budget: crate::ServerRequestBudget) -> axum::Router {
-        seal_server_router(self.router, self.hardening, budget, self.trace_policy)
+        seal_server_router(self.router, self.hardening, budget, self.observation_policy)
     }
 
-    /// **唯一** bindable 出口：封防护层（[`sealed_router`](Self::sealed_router)）后转 axum
-    /// `IntoMakeServiceWithConnectInfo`（bind 时注入 `ConnectInfo<SocketAddr>`，供 rate_limit
-    /// 中间件读 peer IP；天生只能消费已认证 router，ROUTE-AUTH-FUNNEL-02）。
-    pub fn into_make_service(self, budget: crate::ServerRequestBudget) -> ServerMakeService {
-        ServerMakeService {
-            inner: self
-                .sealed_router(budget)
-                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    /// **唯一** transport core 出口：封防护层后产出不可独立 bind 的 per-request service。
+    /// `httpd` 在真实 plaintext/mTLS serve 分支中构造私有 make-service，并同时持有可信 scheme 与
+    /// `ConnectInfo<SocketAddr>`；本 crate 不发射 transport evidence。
+    pub fn into_server_service(self, budget: crate::ServerRequestBudget) -> ServerService {
+        let observation_policy = self.observation_policy;
+        ServerService {
+            router: self.sealed_router(budget),
+            observation_policy,
         }
     }
 
     /// 测试专用：取回裸 Router 做 `oneshot` e2e 断言（经 [`sealed_router`](Self::sealed_router) ⇒ 与生产
-    /// `into_make_service` 同层序，含 request_id 最外层）。**`cfg(any(test, feature = "test-util"))` 门控（Medium）**——
-    /// 生产构建里编译期不存在，不削弱 ROUTE-AUTH-FUNNEL-02（生产唯一 bindable 出口仍是 `into_make_service`）。
+    /// `into_server_service` 同层序，含 request_id 最外层）。**`cfg(any(test, feature = "test-util"))` 门控（Medium）**——
+    /// 生产构建里编译期不存在，不削弱 ROUTE-AUTH-FUNNEL-02（生产唯一 transport core 出口仍是 `into_server_service`）。
     #[cfg(any(test, feature = "test-util"))]
-    pub fn into_router_for_test(self) -> axum::Router {
+    pub fn into_plaintext_router_for_test(self) -> axum::Router {
         self.sealed_router(crate::ServerRequestBudget::for_test())
     }
 
     /// Test-only exit with an explicit short budget for deterministic timeout/cancellation tests.
     #[cfg(any(test, feature = "test-util"))]
-    pub fn into_router_for_test_with_budget(
+    pub fn into_plaintext_router_for_test_with_budget(
         self,
         budget: crate::ServerRequestBudget,
     ) -> axum::Router {
@@ -1434,7 +1492,7 @@ fn seal_server_router(
     router: axum::Router,
     hardening: crate::protect::EdgeHardening,
     budget: crate::ServerRequestBudget,
-    trace_policy: TracePolicy,
+    observation_policy: crate::ServerObservationPolicy,
 ) -> axum::Router {
     // `.layer` calls are inner→outer. The timeout covers every fallible/async request component;
     // request/correlation context wraps it so a timeout response remains correlated. Mechanical
@@ -1448,11 +1506,11 @@ fn seal_server_router(
             budget,
             crate::middleware::server_request_budget,
         ));
-    let router = match trace_policy {
-        TracePolicy::Enabled => router.layer(axum::middleware::from_fn(
-            crate::middleware::http_server_trace,
+    let router = match observation_policy {
+        crate::ServerObservationPolicy::Enabled(_) => router.layer(axum::middleware::from_fn(
+            crate::middleware::http_server_observation_metadata,
         )),
-        TracePolicy::Disabled => router,
+        crate::ServerObservationPolicy::Disabled => router,
     };
     let mut router = router
         .layer(axum::middleware::from_fn(crate::middleware::correlation))
@@ -1464,39 +1522,39 @@ fn seal_server_router(
     router
 }
 
-/// 所有非 Primary route 注册完成后装配 auth enforcement（plan 由组合根注入，本函数不构造 `AuthPlan`）。
-/// Primary listener 必须使用 [`finalize_primary_auth`] / [`finalize_primary_auth_with_audit`] 注入
-/// [`RouteAuthorizer`]，避免 permission route 误装配成缺 authorizer 的请求期 403。
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum TracePolicy {
-    Enabled,
-    Disabled,
-}
-
-impl TracePolicy {
-    /// 从 listener auth plan 派生 trace 策略。Health listener 是高频 probe/scrape 面，禁用
-    /// `http.server.request` span；未知未来 listener fail-closed 为 Enabled，避免静默丢可观测性。
-    fn from_plan(plan: AuthPlan) -> Self {
-        match plan.listener() {
-            ListenerKind::Health => Self::Disabled,
-            ListenerKind::Primary | ListenerKind::Internal | ListenerKind::Admin => Self::Enabled,
-            _ => Self::Enabled,
+/// 从 listener auth plan 派生统一 observation 策略。Health listener 是高频 probe/scrape 面，
+/// 同时禁用 SERVER span 与 HTTP RED；未知未来 listener fail-closed 为 Enabled。
+fn observation_policy_from_plan(plan: AuthPlan) -> crate::ServerObservationPolicy {
+    match plan.listener() {
+        ListenerKind::Health => crate::ServerObservationPolicy::Disabled,
+        ListenerKind::Primary => {
+            crate::ServerObservationPolicy::Enabled(crate::ServerObservationListener::Primary)
         }
+        ListenerKind::Internal => {
+            crate::ServerObservationPolicy::Enabled(crate::ServerObservationListener::Internal)
+        }
+        ListenerKind::Admin => {
+            crate::ServerObservationPolicy::Enabled(crate::ServerObservationListener::Admin)
+        }
+        _ => crate::ServerObservationPolicy::Enabled(crate::ServerObservationListener::Other),
     }
 }
 
+/// 所有非 Primary route 注册完成后装配 auth enforcement（plan 由组合根注入，本函数不构造 `AuthPlan`）。
+/// Primary listener 必须使用 [`finalize_primary_auth`] / [`finalize_primary_auth_with_audit`] 注入
+/// [`RouteAuthorizer`]，避免 permission route 误装配成缺 authorizer 的请求期 403。
 ///
 /// #1113 funnel transform：消费 [`UnfinalizedRoutes`] 产 [`AuthenticatedRoutes`]——本 fn 是后者**唯一**
 /// 生产者（ROUTE-AUTH-FUNNEL-02）。业务不得绕过最终 matcher（runtime-api.md）。
 ///
 /// 层序（`.layer` 调用顺序 = 内→外）：`Extension(plan)`（最内，EnforceService 读 plan）→ `panic_recovery`
-/// （request-aware panic → 500 envelope）。listener 派生 trace policy 作为非可选 capability 随封印类型传递，
-/// 到唯一 bindable 出口才消费。`request_id` / `correlation` / SERVER trace / server budget **不**在此挂——均由唯一 bindable 出口
+/// （request-aware panic → 500 envelope）。listener 派生 observation policy 作为非可选 capability 随封印类型传递，
+/// 到 transport owner 才消费。`request_id` / `correlation` / observation metadata / server budget **不**在此挂——均由唯一 bindable 出口
 /// [`AuthenticatedRoutes::sealed_router`] 封装（ROUTE-REQUESTID-OUTERMOST-01 /
 /// ROUTE-CORRELATION-INNER-REQUESTID-01 / SERVER-REQUEST-BUDGET-01 / #1320）。完整请求流（外→内）：
-/// security headers → `request_id` → `correlation` → SERVER trace（Health 无）→ server budget → 验签桥
-/// → `panic_recovery` → `Extension(plan)` → 路由匹配 → `EnforceService` → handler。
+/// `httpd` SERVER observation（Health 无）→ security headers → `request_id` → `correlation`
+/// → observation metadata → server budget → 验签桥 → `panic_recovery` → `Extension(plan)`
+/// → 路由匹配 → `EnforceService` → handler。
 ///
 /// 验签桥（#1109）经 [`AuthenticatedRoutes::layer`] 叠在 `finalize_auth` 产物的**外层**（请求方向先于
 /// `EnforceService`），其注入的 [`Authenticated`](crate::Authenticated) 证据在 enforce 读取前就位；request_id
@@ -1594,7 +1652,7 @@ fn finalize_auth_inner(
     {
         return Err(listener_mismatch(&routes, plan.listener()));
     }
-    let trace_policy = TracePolicy::from_plan(plan);
+    let observation_policy = observation_policy_from_plan(plan);
     let mut router = routes.router.layer(axum::Extension(plan));
     if let Some(audit) = audit {
         router = router.layer(axum::Extension(audit));
@@ -1603,7 +1661,7 @@ fn finalize_auth_inner(
         router = router.layer(axum::Extension(authorizer));
     }
     let router = router.layer(axum::middleware::from_fn(crate::middleware::panic_recovery));
-    Ok(AuthenticatedRoutes::new(router, trace_policy))
+    Ok(AuthenticatedRoutes::new(router, observation_policy))
 }
 
 fn listener_mismatch(routes: &UnfinalizedRoutes, finalized: ListenerKind) -> RouteGroupError {
@@ -1639,15 +1697,11 @@ pub fn unfinalized_for_test<L: Listener>(
 mod tests {
     //! routes funnel 行为单测：typed listener marker（KIND 落值）+ funnel 三态（empty/nest_group →
     //! UnfinalizedRoutes → finalize_auth → AuthenticatedRoutes）round-trip serve + `layer` 保封印 +
-    //! `into_make_service` bindable 出口存在。compile-fail 负向证据（不可绕过）见 `tests/ui/`。
+    //! `into_server_service` transport core 出口存在。compile-fail 负向证据（不可绕过）见 `tests/ui/`。
     use super::*;
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;
-    use std::collections::HashMap;
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
     use tower::ServiceExt as _;
 
     // 测试断言用 expect/unwrap：item-level carve-out（error-handling.md §Carve-out）。
@@ -2027,132 +2081,42 @@ mod tests {
         Ok(())
     }
 
-    #[derive(Clone)]
-    struct AllowAuthorizer;
-
-    impl RouteAuthorizer for AllowAuthorizer {
-        fn authorize<'a>(
-            &'a self,
-            _request: crate::RouteAuthorizationRequest,
-        ) -> Pin<Box<dyn Future<Output = crate::RouteAuthorizationDecision> + Send + 'a>> {
-            Box::pin(async { crate::RouteAuthorizationDecision::Allow })
-        }
-    }
-
-    fn allow_authorizer() -> Arc<dyn RouteAuthorizer> {
-        Arc::new(AllowAuthorizer)
-    }
-
-    #[derive(Clone, Debug)]
-    struct CapturedSpan {
-        name: &'static str,
-        fields: HashMap<String, String>,
-    }
-
-    #[derive(Default)]
-    struct CapturedSpans {
-        spans: Mutex<Vec<CapturedSpan>>,
-    }
-
-    impl CapturedSpans {
-        fn new() -> Arc<Self> {
-            Arc::new(Self::default())
-        }
-
-        #[allow(clippy::expect_used)]
-        fn snapshot(&self) -> Vec<CapturedSpan> {
-            self.spans.lock().expect("capture lock").clone()
-        }
-    }
-
-    struct SpanVisit {
-        fields: HashMap<String, String>,
-    }
-
-    impl tracing::field::Visit for SpanVisit {
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            self.fields
-                .insert(field.name().to_string(), format!("{value:?}"));
-        }
-
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            self.fields
-                .insert(field.name().to_string(), value.to_string());
-        }
-
-        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
-            self.fields
-                .insert(field.name().to_string(), value.to_string());
-        }
-
-        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
-            self.fields
-                .insert(field.name().to_string(), value.to_string());
-        }
-    }
-
-    struct SpanCapture {
-        captured: Arc<CapturedSpans>,
-    }
-
-    impl tracing::Subscriber for SpanCapture {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        #[allow(clippy::expect_used)]
-        fn new_span(&self, attrs: &tracing::span::Attributes<'_>) -> tracing::Id {
-            let mut visitor = SpanVisit {
-                fields: HashMap::new(),
-            };
-            attrs.record(&mut visitor);
-            let mut spans = self.captured.spans.lock().expect("capture lock");
-            let id = u64::try_from(spans.len() + 1).unwrap_or(u64::MAX);
-            spans.push(CapturedSpan {
-                name: attrs.metadata().name(),
-                fields: visitor.fields,
-            });
-            tracing::Id::from_u64(id)
-        }
-
-        #[allow(clippy::expect_used)]
-        fn record(&self, span: &tracing::Id, values: &tracing::span::Record<'_>) {
-            let mut visitor = SpanVisit {
-                fields: HashMap::new(),
-            };
-            values.record(&mut visitor);
-            let idx = usize::try_from(span.into_u64())
-                .expect("span id fits usize")
-                .saturating_sub(1);
-            let mut spans = self.captured.spans.lock().expect("capture lock");
-            if let Some(existing) = spans.get_mut(idx) {
-                existing.fields.extend(visitor.fields);
-            }
-        }
-
-        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
-        fn enter(&self, _span: &tracing::Id) {}
-        fn exit(&self, _span: &tracing::Id) {}
-        fn event(&self, _event: &tracing::Event<'_>) {}
-    }
-
-    #[allow(clippy::expect_used)]
-    fn run_with_span_capture<R>(f: impl FnOnce() -> R) -> (R, Vec<CapturedSpan>) {
-        let captured = CapturedSpans::new();
-        let subscriber = SpanCapture {
-            captured: Arc::clone(&captured),
-        };
-        let dispatch = tracing::Dispatch::new(subscriber);
-        let result = tracing::dispatcher::with_default(&dispatch, f);
-        (result, captured.snapshot())
-    }
-
     #[test]
     fn listener_kind_maps_marker_to_value() {
         assert_eq!(Primary::KIND, ListenerKind::Primary);
         assert_eq!(Internal::KIND, ListenerKind::Internal);
         assert_eq!(Admin::KIND, ListenerKind::Admin);
         assert_eq!(Health::KIND, ListenerKind::Health);
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn listener_finalization_selects_closed_server_observation_policy() {
+        for (listener, scheme, expected) in [
+            (
+                ListenerKind::Health,
+                primitives::AuthScheme::NoAuth,
+                crate::ServerObservationPolicy::Disabled,
+            ),
+            (
+                ListenerKind::Primary,
+                primitives::AuthScheme::RssAccessToken,
+                crate::ServerObservationPolicy::Enabled(crate::ServerObservationListener::Primary),
+            ),
+            (
+                ListenerKind::Internal,
+                primitives::AuthScheme::ServiceToken,
+                crate::ServerObservationPolicy::Enabled(crate::ServerObservationListener::Internal),
+            ),
+            (
+                ListenerKind::Admin,
+                primitives::AuthScheme::RssAccessToken,
+                crate::ServerObservationPolicy::Enabled(crate::ServerObservationListener::Admin),
+            ),
+        ] {
+            let plan = AuthPlan::new(listener, scheme).expect("test observation plan");
+            assert_eq!(observation_policy_from_plan(plan), expected);
+        }
     }
 
     #[test]
@@ -2427,456 +2391,8 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    fn primary_listener_emits_http_server_span_fields() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let (_, spans) = run_with_span_capture(|| {
-            rt.block_on(async {
-                let routes = UnfinalizedRoutes::empty()
-                    .nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
-                        let endpoint = GeneratedPrimaryEndpoint::new(
-                            test_binding(
-                                "/api/v1/x",
-                                "test.primary.x",
-                                vocab::HttpRouteAuth::Public,
-                            ),
-                            |_: ContractMarker<TestRouteMarker>| async { "ok" },
-                        )
-                        .expect("endpoint");
-                        rb.mount(endpoint)
-                    })
-                    .expect("nest ok");
-                let plan = primitives::AuthPlan::new(
-                    ListenerKind::Primary,
-                    primitives::AuthScheme::RssAccessToken,
-                )
-                .expect("plan");
-                let router = finalize_primary_auth(routes, plan, allow_authorizer())
-                    .expect("finalize_auth")
-                    .into_router_for_test();
-                let req = Request::builder()
-                    .method(Method::GET)
-                    .uri("/api/v1/x")
-                    .header("x-request-id", "rid-span-1")
-                    .header("x-correlation-id", "corr-span-1")
-                    .body(Body::empty())
-                    .expect("request");
-                let resp = router.oneshot(req).await.expect("oneshot");
-                assert_eq!(resp.status(), StatusCode::OK);
-            });
-        });
-        let http_spans: Vec<_> = spans
-            .iter()
-            .filter(|span| span.name == "http.server.request")
-            .collect();
-        assert_eq!(http_spans.len(), 1, "Primary request emits one span");
-        let fields = &http_spans[0].fields;
-        assert_eq!(fields.get("otel.kind").map(String::as_str), Some("server"));
-        assert_eq!(
-            fields.get("otel.name").map(String::as_str),
-            Some("GET /api/v1/x")
-        );
-        assert_eq!(
-            fields.get("http.request.method").map(String::as_str),
-            Some("GET")
-        );
-        assert_eq!(
-            fields.get("http.route").map(String::as_str),
-            Some("/api/v1/x")
-        );
-        assert_eq!(
-            fields.get("network.protocol.version").map(String::as_str),
-            Some("1.1")
-        );
-        assert_eq!(
-            fields.get("request_id").map(String::as_str),
-            Some("rid-span-1")
-        );
-        assert_eq!(
-            fields.get("correlation").map(String::as_str),
-            Some("corr-span-1")
-        );
-        assert_eq!(
-            fields.get("http.response.status_code").map(String::as_str),
-            Some("200")
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    fn health_listener_serves_probe_routes_without_http_request_spans() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let (_, spans) = run_with_span_capture(|| {
-            rt.block_on(async {
-                let routes = crate::health::routes(
-                    || {
-                        primitives::HealthReport::aggregate(vec![primitives::HealthCheck::new(
-                            primitives::ProbeName::parse("db").expect("probe"),
-                            primitives::HealthStatus::Healthy,
-                            "ok",
-                        )])
-                    },
-                    || String::from("# HELP test_metric\n"),
-                );
-                let plan =
-                    primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
-                        .expect("plan");
-                let router = finalize_auth(routes, plan)
-                    .expect("finalize_auth")
-                    .into_router_for_test();
-                for path in [
-                    "/health/v1/healthz",
-                    "/health/v1/readyz",
-                    "/health/v1/metrics",
-                ] {
-                    let resp = router
-                        .clone()
-                        .oneshot(
-                            Request::builder()
-                                .method(Method::GET)
-                                .uri(path)
-                                .header("x-request-id", "rid-health")
-                                .body(Body::empty())
-                                .expect("request"),
-                        )
-                        .await
-                        .expect("oneshot");
-                    assert_eq!(resp.status(), StatusCode::OK, "{path}");
-                }
-            });
-        });
-        assert!(
-            spans.iter().all(|span| span.name != "http.server.request"),
-            "Health listener should not emit http.server.request spans: {spans:?}"
-        );
-    }
-
-    fn captured_http_spans(spans: &[CapturedSpan]) -> Vec<&CapturedSpan> {
-        spans
-            .iter()
-            .filter(|span| span.name == "http.server.request")
-            .collect()
-    }
-
-    fn trace_id_of(traceparent: &str) -> &str {
-        traceparent.split('-').nth(1).unwrap_or("")
-    }
-
-    #[test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    fn http_server_remote_parent_wraps_bridge_and_handler() {
-        let seen = Arc::new(Mutex::new(Vec::<String>::new()));
-        let handler_seen = Arc::clone(&seen);
-        let bridge_seen = Arc::clone(&seen);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let incoming = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-
-        tracewire::with_test_subscriber(|| {
-            rt.block_on(async {
-                let routes = UnfinalizedRoutes::empty()
-                    .nest_group::<Primary, RouteGroupError>("/api/v1", |rb| {
-                        let endpoint = GeneratedPrimaryEndpoint::new(
-                            test_binding(
-                                "/api/v1/trace",
-                                "test.primary.trace",
-                                vocab::HttpRouteAuth::Public,
-                            ),
-                            move |_: ContractMarker<TestRouteMarker>| {
-                                let seen = Arc::clone(&handler_seen);
-                                async move {
-                                    seen.lock().unwrap().push(
-                                        tracewire::capture_current()
-                                            .expect("handler has OTel context")
-                                            .into_traceparent(),
-                                    );
-                                    "ok"
-                                }
-                            },
-                        )?;
-                        rb.mount(endpoint)
-                    })
-                    .expect("routes");
-                let plan = AuthPlan::new(
-                    ListenerKind::Primary,
-                    primitives::AuthScheme::RssAccessToken,
-                )
-                .expect("plan");
-                let router = finalize_primary_auth(routes, plan, allow_authorizer())
-                    .expect("finalize")
-                    .layer(axum::middleware::from_fn(
-                        move |req: axum::extract::Request, next: axum::middleware::Next| {
-                            let seen = Arc::clone(&bridge_seen);
-                            async move {
-                                seen.lock().unwrap().push(
-                                    tracewire::capture_current()
-                                        .expect("bridge has OTel context")
-                                        .into_traceparent(),
-                                );
-                                next.run(req).await
-                            }
-                        },
-                    ))
-                    .into_router_for_test();
-                let response = router
-                    .oneshot(
-                        Request::builder()
-                            .uri("/api/v1/trace")
-                            .header("traceparent", incoming)
-                            .header("tracestate", "vendor=value")
-                            .body(Body::empty())
-                            .expect("request"),
-                    )
-                    .await
-                    .expect("oneshot");
-                assert_eq!(response.status(), StatusCode::OK);
-            });
-        });
-
-        let seen = seen.lock().unwrap();
-        assert_eq!(
-            seen.len(),
-            2,
-            "bridge and handler both observed tracing context"
-        );
-        assert!(
-            seen.iter()
-                .all(|traceparent| trace_id_of(traceparent) == trace_id_of(incoming)),
-            "both inner components inherit the inbound trace: {seen:?}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used, clippy::unwrap_used)]
-    fn http_server_span_uses_closed_names_status_and_privacy_fields() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let (_, spans) = run_with_span_capture(|| {
-            rt.block_on(async {
-                let router = seal_server_router(
-                    axum::Router::new()
-                        .route(
-                            "/items/{id}",
-                            axum::routing::get(|| async { StatusCode::BAD_REQUEST }),
-                        )
-                        .route(
-                            "/failure",
-                            axum::routing::get(|| async { StatusCode::INTERNAL_SERVER_ERROR }),
-                        )
-                        .route("/custom", axum::routing::any(|| async { StatusCode::OK })),
-                    crate::protect::EdgeHardening::default(),
-                    crate::ServerRequestBudget::for_test(),
-                    TracePolicy::Enabled,
-                );
-                let secret = "secret-marker-2035";
-                let request = Request::builder()
-                    .uri(format!("/items/{secret}?token={secret}"))
-                    .header("authorization", format!("Bearer {secret}"))
-                    .header("cookie", format!("session={secret}"))
-                    .header("x-tenant-id", secret)
-                    .body(Body::from(secret))
-                    .expect("request");
-                assert_eq!(
-                    router
-                        .clone()
-                        .oneshot(request)
-                        .await
-                        .expect("oneshot")
-                        .status(),
-                    StatusCode::BAD_REQUEST
-                );
-                assert_eq!(
-                    router
-                        .clone()
-                        .oneshot(
-                            Request::builder()
-                                .uri("/failure")
-                                .body(Body::empty())
-                                .expect("request"),
-                        )
-                        .await
-                        .expect("oneshot")
-                        .status(),
-                    StatusCode::INTERNAL_SERVER_ERROR
-                );
-                assert_eq!(
-                    router
-                        .clone()
-                        .oneshot(
-                            Request::builder()
-                                .method(Method::from_bytes(b"BREW").expect("custom method"))
-                                .uri("/custom")
-                                .body(Body::empty())
-                                .expect("request"),
-                        )
-                        .await
-                        .expect("oneshot")
-                        .status(),
-                    StatusCode::OK
-                );
-                assert_eq!(
-                    router
-                        .oneshot(
-                            Request::builder()
-                                .uri(format!("/missing/{secret}?q={secret}"))
-                                .body(Body::empty())
-                                .expect("request"),
-                        )
-                        .await
-                        .expect("oneshot")
-                        .status(),
-                    StatusCode::NOT_FOUND
-                );
-            });
-        });
-        let http = captured_http_spans(&spans);
-        assert_eq!(http.len(), 4);
-        assert_eq!(
-            http[0].fields.get("otel.name").map(String::as_str),
-            Some("GET /items/{id}")
-        );
-        assert_eq!(
-            http[0].fields.get("http.route").map(String::as_str),
-            Some("/items/{id}")
-        );
-        assert_eq!(
-            http[0].fields.get("otel.status_code"),
-            None,
-            "4xx remains unset"
-        );
-        assert_eq!(
-            http[1].fields.get("otel.status_code").map(String::as_str),
-            Some("error")
-        );
-        assert_eq!(
-            http[1].fields.get("error.type").map(String::as_str),
-            Some("500")
-        );
-        assert_eq!(
-            http[2].fields.get("otel.name").map(String::as_str),
-            Some("HTTP")
-        );
-        assert_eq!(
-            http[2]
-                .fields
-                .get("http.request.method")
-                .map(String::as_str),
-            Some("_OTHER")
-        );
-        assert_eq!(
-            http[2].fields.get("http.route").map(String::as_str),
-            Some("/custom")
-        );
-        assert_eq!(
-            http[3].fields.get("otel.name").map(String::as_str),
-            Some("GET")
-        );
-        assert_eq!(http[3].fields.get("http.route"), None);
-        let observed = format!("{http:?}");
-        assert!(
-            !observed.contains("secret-marker-2035"),
-            "sensitive request data leaked: {observed}"
-        );
-    }
-
-    #[test]
-    #[allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
-    fn http_server_span_settles_synthetic_413_503_and_panic_500() {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        let (_, spans) = run_with_span_capture(|| {
-            rt.block_on(async {
-                let inner = axum::Router::new()
-                    .route("/ok", axum::routing::post(|| async { StatusCode::OK }))
-                    .route(
-                        "/slow",
-                        axum::routing::get(|| async {
-                            tokio::time::sleep(core::time::Duration::from_millis(20)).await;
-                            StatusCode::OK
-                        }),
-                    )
-                    .route(
-                        "/panic",
-                        axum::routing::get(|| async {
-                            panic!("closed panic marker");
-                            #[allow(unreachable_code)]
-                            StatusCode::OK
-                        }),
-                    )
-                    .layer(axum::middleware::from_fn(crate::middleware::panic_recovery));
-                let router = seal_server_router(
-                    inner,
-                    crate::protect::EdgeHardening::default(),
-                    crate::ServerRequestBudget::from_millis(
-                        std::num::NonZeroU64::new(1).expect("nonzero"),
-                    ),
-                    TracePolicy::Enabled,
-                );
-                let cases = [
-                    (
-                        Request::builder()
-                            .method(Method::POST)
-                            .uri("/ok")
-                            .header("content-length", "1048577")
-                            .body(Body::empty())
-                            .expect("413 request"),
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                    ),
-                    (
-                        Request::builder()
-                            .uri("/slow")
-                            .body(Body::empty())
-                            .expect("503 request"),
-                        StatusCode::SERVICE_UNAVAILABLE,
-                    ),
-                    (
-                        Request::builder()
-                            .uri("/panic")
-                            .body(Body::empty())
-                            .expect("panic request"),
-                        StatusCode::INTERNAL_SERVER_ERROR,
-                    ),
-                ];
-                for (request, expected) in cases {
-                    let status = router
-                        .clone()
-                        .oneshot(request)
-                        .await
-                        .expect("oneshot")
-                        .status();
-                    assert_eq!(status, expected);
-                }
-            });
-        });
-        let statuses: Vec<_> = captured_http_spans(&spans)
-            .iter()
-            .map(|span| span.fields.get("http.response.status_code").cloned())
-            .collect();
-        assert_eq!(
-            statuses,
-            [
-                Some("413".to_owned()),
-                Some("503".to_owned()),
-                Some("500".to_owned())
-            ]
-        );
-    }
-
-    #[test]
     #[allow(clippy::expect_used)]
-    fn http_server_trace_headers_never_grant_protected_route_authority() {
+    fn http_server_observation_headers_never_grant_protected_route_authority() {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2889,7 +2405,7 @@ mod tests {
                 .expect("plan");
             let router = finalize_auth(routes, plan)
                 .expect("finalize")
-                .into_router_for_test();
+                .into_plaintext_router_for_test();
             for traceparent in [
                 None,
                 Some("not-w3c"),
@@ -2926,7 +2442,7 @@ mod tests {
             primitives::AuthPlan::new(ListenerKind::Admin, primitives::AuthScheme::RssAccessToken)
                 .expect("plan");
         let authed = finalize_auth(routes, plan).expect("finalize_auth");
-        let router = authed.into_router_for_test();
+        let router = authed.into_plaintext_router_for_test();
 
         // 强断言精确 fail-closed 码（非弱 `assert_ne!(404)`）：matched + finalize_auth 注入 Jwt plan →
         // Require(Jwt) + 无 Authenticated 证据 → 401（AUTH-EVIDENCE-REQUIRE-01）。若 enforce 失效（误放行 200）
@@ -2957,7 +2473,7 @@ mod tests {
                 .expect("plan");
         let router = finalize_auth(routes, plan)
             .expect("finalize_auth")
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
 
         assert_eq!(
             oneshot_status(router.clone(), "/api/v1/audit/list").await,
@@ -2988,9 +2504,9 @@ mod tests {
                     next.run(req).await
                 },
             ));
-        // 仍是 AuthenticatedRoutes（类型已断言），且 into_make_service bindable 出口可构造 + 仍 serve。
+        // 仍是 AuthenticatedRoutes（类型已断言），且 transport core 出口可构造。
         {
-            let r = authed.into_router_for_test();
+            let r = authed.into_plaintext_router_for_test();
             assert_eq!(
                 oneshot_status(r, "/list").await,
                 StatusCode::UNAUTHORIZED,
@@ -2999,17 +2515,18 @@ mod tests {
         }
     }
 
-    /// `into_make_service` 是 bindable 出口（仅 `AuthenticatedRoutes` 有，assemblies/runtime launch bind 点消费）——可构造即证存在。
+    /// `into_server_service` 是 transport core 出口（仅 `AuthenticatedRoutes` 有，assemblies/runtime
+    /// launch 交给 httpd bind 点消费）——可构造即证存在。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn authenticated_routes_into_make_service_available() {
+    async fn authenticated_routes_into_server_service_available() {
         let routes = test_routes::<Health>(|rb| {
             rb.mount_raw_for_test(admin_route("/list"), get(|| async {}))
         });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         let authed = finalize_auth(routes, plan).expect("finalize_auth");
-        let _make_service = authed.into_make_service(crate::ServerRequestBudget::for_test());
+        let _server_service = authed.into_server_service(crate::ServerRequestBudget::for_test());
     }
 
     /// 取回完整 Response（不仅 status）做 header 断言（request_id 封口验证）。
@@ -3023,7 +2540,7 @@ mod tests {
     }
 
     /// ROUTE-REQUESTID-OUTERMOST-01：`request_id` 不在 `finalize_auth` 内挂，但 bindable 出口
-    /// （`sealed_router`，test 经 `into_router_for_test` 同路径）仍封它 ⇒ 响应带 `x-request-id`。
+    /// （`sealed_router`，test 经 typed plaintext/TLS 出口同路径）仍封它 ⇒ 响应带 `x-request-id`。
     /// NoAuth listener 取 200 路径（避免 enforce 401 干扰，纯验出口封口）。
     #[tokio::test]
     #[allow(clippy::expect_used)]
@@ -3035,7 +2552,7 @@ mod tests {
             .expect("plan");
         let router = finalize_auth(routes, plan)
             .expect("finalize_auth")
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
         let resp = oneshot_response(router, "/list").await;
         assert_eq!(resp.status(), StatusCode::OK, "NoAuth matched → 200");
         let rid = resp
@@ -3075,7 +2592,7 @@ mod tests {
                         resp
                     },
                 ));
-        let resp = oneshot_response(probed.into_router_for_test(), "/list").await;
+        let resp = oneshot_response(probed.into_plaintext_router_for_test(), "/list").await;
         assert_eq!(
             resp.headers().get("x-saw-rid").map(|v| v.as_bytes()),
             Some(&b"1"[..]),
@@ -3097,7 +2614,7 @@ mod tests {
         );
     }
 
-    // ── edge hardening 集成测试（经 sealed_router / into_router_for_test funnel）─────────────────
+    // ── edge hardening 集成测试（经 sealed_router / typed test funnel）─────────────────
 
     /// security-headers 通过 sealed_router funnel 叠在所有响应上（200 路径）。
     /// 验证 `x-content-type-options: nosniff` 等默认安全头存在且值正确。
@@ -3111,7 +2628,7 @@ mod tests {
             .expect("plan");
         let router = finalize_auth(routes, plan)
             .expect("finalize_auth")
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
 
         let resp = oneshot_response(router, "/list").await;
         assert_eq!(resp.status(), StatusCode::OK, "NoAuth → 200");
@@ -3175,7 +2692,7 @@ mod tests {
                 ),
                 headers: crate::protect::SecurityHeaders::default(),
             })
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
 
         // Content-Length: 11 > 10 → 413
         let req = Request::builder()
@@ -3217,7 +2734,7 @@ mod tests {
                 ),
                 headers: crate::protect::SecurityHeaders::default(),
             })
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
 
         // Content-Length: 11 > 10 → 413（CL fast-reject）。
         let req = Request::builder()
@@ -3265,7 +2782,7 @@ mod tests {
             .expect("plan");
         let router = finalize_auth(routes, plan)
             .expect("finalize_auth")
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
 
         let resp = oneshot_response(router, "/list").await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -3289,7 +2806,7 @@ mod tests {
             .expect("plan");
         let router = finalize_auth(routes, plan)
             .expect("finalize_auth")
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
 
         let resp = oneshot_response(router, "/list").await;
         assert_eq!(resp.status(), StatusCode::OK, "NoAuth matched → 200");
@@ -3331,7 +2848,7 @@ mod tests {
                         resp
                     },
                 ));
-        let resp = oneshot_response(probed.into_router_for_test(), "/list").await;
+        let resp = oneshot_response(probed.into_plaintext_router_for_test(), "/list").await;
         assert_eq!(
             resp.headers()
                 .get("x-saw-correlation")

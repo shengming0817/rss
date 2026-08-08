@@ -1,4 +1,8 @@
 version: 2
+owner:
+  emitter: adapters/httpd
+  core_metadata: crates/httpserve
+  core_emits_transport_evidence: false
 server_span:
   tracing_name: http.server.request
   kind: server
@@ -9,17 +13,66 @@ attributes:
     - otel.kind
     - otel.name
     - http.request.method
+    - url.scheme
     - network.protocol.version
-    - http.response.status_code
+    - rss.http.listener
+    - rss.http.status_class
+    - rss.http.outcome
   matched_only:
     - http.route
-  diagnostic:
-    - request_id
-    - correlation
+  conditional:
+    http.response.status_code: response_headers_available
+    error.type: terminal_error
 status:
   client_error: unset
   server_error: error
-  error_type: decimal_status_code
+  no_response_status_class: none
+  error_types:
+    server_status: decimal_5xx_status_code
+    terminal:
+      - response_body_error
+      - cancelled
+      - timeout
+      - panic
+metrics:
+  request_duration:
+    name: http.server.request.duration
+    instrument: histogram
+    unit: seconds
+    required_attributes:
+      - http.request.method
+      - url.scheme
+      - rss.http.listener
+      - rss.http.status_class
+      - rss.http.outcome
+    optional_attributes:
+      - http.route
+      - http.response.status_code
+      - error.type
+  active_requests:
+    name: http.server.active_requests
+    instrument: gauge_projection_of_up_down_counter
+    unit: request
+    required_attributes:
+      - http.request.method
+      - url.scheme
+      - rss.http.listener
+lifecycle:
+  settle_at:
+    - body_eos
+    - final_frame_end_stream
+    - body_error
+    - cancellation
+    - timeout
+    - panic
+  outcomes:
+    - completed
+    - body_error
+    - cancelled
+    - timeout
+    - panic
+  exactly_once: true
+  headers_are_terminal_only_for_empty_body: true
 forbidden_sources:
   - raw_uri
   - query
@@ -30,6 +83,7 @@ forbidden_sources:
   - tenant
   - principal
   - free_form_error
+  - forwarded_scheme_header
 client_span:
   tracing_name: http.client.request
   kind: client

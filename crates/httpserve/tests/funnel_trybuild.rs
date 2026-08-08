@@ -1,7 +1,7 @@
 //! typed route funnel 编译期 Hard 不变式的 compile-fail 回归锁（#1113/#1103，ADR-009）。
 //!
 //! 负向证据（trybuild compile_fail）——锁住「错误不可表达」：
-//! - `cannot_bind_unfinalized`：`UnfinalizedRoutes` 无 `into_make_service`（无 public bindable 出口，ROUTE-AUTH-FUNNEL-01）。
+//! - `cannot_bind_unfinalized`：`UnfinalizedRoutes` 无 `into_server_service`（无 public bindable 出口，ROUTE-AUTH-FUNNEL-01）。
 //! - `cannot_mint_authenticated`：`AuthenticatedRoutes::new` 是 `pub(crate)`，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
 //! - `cannot_mint_authenticated_evidence`：production `Authenticated::new_*` 需要 `authmint::AuthenticatedMint`，
 //!   缺 mint 首参即 compile_fail（AUTH-EVIDENCE-MINT-01 Hard；本例锁 `new_mtls` arity）。

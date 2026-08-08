@@ -296,7 +296,7 @@ mod tests {
             httpserve::UnfinalizedRoutes::empty(),
             primitives::AuthPlan::none(primitives::ListenerKind::Health)?,
         )?;
-        let router = apply(routes, verifier).into_router_for_test();
+        let router = apply(routes, verifier).into_plaintext_router_for_test();
 
         let missing = router
             .clone()

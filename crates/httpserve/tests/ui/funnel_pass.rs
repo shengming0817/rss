@@ -68,5 +68,5 @@ fn main() {
     )
     .unwrap();
     let authed = httpserve::finalize_auth(routes, plan).unwrap();
-    let _make = authed.into_make_service(httpserve::ServerRequestBudget::for_test());
+    let _make = authed.into_server_service(httpserve::ServerRequestBudget::for_test());
 }

@@ -176,7 +176,7 @@ struct BoundListener {
     listener: ListenerKind,
     scheme: AuthScheme,
     bound: httpd::BoundHttpServer,
-    svc: httpserve::ServerMakeService,
+    svc: httpserve::ServerService,
     transport: PreparedListenerTransport,
 }
 
@@ -388,7 +388,7 @@ impl BoundListener {
             listener,
             scheme,
             bound,
-            svc: routes.into_make_service(budget),
+            svc: routes.into_server_service(budget),
             transport,
         })
     }
@@ -696,7 +696,7 @@ mod tests {
             listener,
             scheme: AuthScheme::NoAuth,
             bound,
-            svc: routes.into_make_service(test_budget()),
+            svc: routes.into_server_service(test_budget()),
             transport,
         }
     }
@@ -1329,7 +1329,7 @@ mod tests {
                 listener: ListenerKind::Internal,
                 scheme: AuthScheme::Mtls,
                 bound,
-                svc: routes.into_make_service(test_budget()),
+                svc: routes.into_server_service(test_budget()),
                 transport: PreparedListenerTransport::Mtls {
                     config: mtls,
                     health: Arc::clone(&health),

@@ -678,7 +678,7 @@ async fn identity_password_security_event_journey() -> TestResult {
         Arc::new(SystemClock),
         assembly_schema::AssemblyListenerKind::Primary,
     )?;
-    let app = routes.into_router_for_test();
+    let app = routes.into_plaintext_router_for_test();
 
     let first = login(&app, CURRENT_PASSWORD).await?;
     let second = login(&app, CURRENT_PASSWORD).await?;

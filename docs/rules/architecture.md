@@ -87,7 +87,7 @@ rss/
 │   └── syshealth/        # 域：健康聚合
 ├── adapters/             # 一 adapter 一 crate + feature 门控；裸后端名（adapters/ 路径消歧）
 │   ├── postgres/ redis/ amqp/ mqtt/ s3/
-│   ├── oidc/ grpc/ httpd/ otel/ prometheus/ vault/   # httpd = HTTP 传输（只消费 budget-sealed ServerMakeService；HttpServer bind+serve+ManagedResource）
+│   ├── oidc/ grpc/ httpd/ otel/ prometheus/ vault/   # httpd = HTTP 传输（只消费 budget-sealed ServerService；HttpServer bind+serve+ManagedResource）
 │   ├── softca/ ratelimit/
 │   └── memory/           # in-mem DI port provider（测试 / demo 注入；被 journeys 组合根消费）
 ├── bins/

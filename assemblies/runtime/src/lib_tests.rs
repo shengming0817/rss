@@ -1262,7 +1262,7 @@ fn extract_admin_router(assembled: routes::FinalizedListenerSet) -> anyhow::Resu
         .into_iter()
         .find_map(|assembled| {
             let (listener, routes) = assembled.into_parts();
-            (listener == ListenerKind::Admin).then(|| routes.into_router_for_test())
+            (listener == ListenerKind::Admin).then(|| routes.into_plaintext_router_for_test())
         })
         .context("admin router")
 }

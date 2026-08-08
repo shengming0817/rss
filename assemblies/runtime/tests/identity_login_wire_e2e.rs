@@ -735,7 +735,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
     // 4. wire_identity_with（复用 SharedRuntimeDeps 中的 mock-Vault signer，仅注入显式 JWT/AuthGrant 配置）。
     let identity_binding = wire_identity_with(&deps, identity_test_values())?;
 
-    // 5. 装配 Primary router（compose → assemble_authed_routers → into_router_for_test）。
+    // 5. 装配 Primary router（compose → assemble_authed_routers → typed plaintext test exit）。
     let mut bindings = vec![identity_binding];
     let (mut registry, _) = bootstrap::compose_bindings(&mut bindings)?;
     let primary = finalize_rss_listener(
@@ -748,7 +748,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
         Arc::new(SystemClock),
         assembly_schema::AssemblyListenerKind::Primary,
     )?;
-    let app = primary.into_router_for_test();
+    let app = primary.into_plaintext_router_for_test();
 
     // Login while both accounts are Active so each receives a durable refresh record, then move
     // the authoritative rows to non-Active states. A decoy/wrong production reader would return
@@ -1222,7 +1222,7 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
         Arc::new(SystemClock),
         assembly_schema::AssemblyListenerKind::Primary,
     )?
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
 
     let mut binding_b = vec![wire_identity_with(&deps, identity_test_values())?];
     let (mut registry_b, _) = bootstrap::compose_bindings(&mut binding_b)?;
@@ -1236,7 +1236,7 @@ async fn wire_identity_two_routers_concurrent_refresh_reuse_closes_security_loop
         Arc::new(SystemClock),
         assembly_schema::AssemblyListenerKind::Primary,
     )?
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
 
     let initial = login_bundle(&router_a, LOGIN_USERNAME).await?;
     let presented = initial["data"]["refreshToken"]
@@ -1453,7 +1453,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         Arc::new(SystemClock),
         assembly_schema::AssemblyListenerKind::Primary,
     )?;
-    let app = primary.into_router_for_test();
+    let app = primary.into_plaintext_router_for_test();
 
     // 4. POST /roles/{roleId}/bindings：operator JWT 无 role:assign 权限 → route gate 403，且 zero-write。
     let assign_path = ROLES_ASSIGN_SPEC

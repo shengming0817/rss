@@ -289,7 +289,11 @@ async fn verify_response(
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
-    let response = app.into_router_for_test().oneshot(req).await.unwrap();
+    let response = app
+        .into_plaintext_router_for_test()
+        .oneshot(req)
+        .await
+        .unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), 4096)
         .await

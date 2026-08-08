@@ -2571,7 +2571,7 @@ mod tests {
         .layer(::axum::Extension(scope))
         .layer(::axum::Extension(bridge_principal))
         .layer(::axum::Extension(authenticated))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
         (router, proof)
     }
 
@@ -3265,7 +3265,7 @@ mod tests {
                     }
                 },
             ))
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
             let request = axum::http::Request::builder()
                 .uri(AUDIT_TENANT_ENTRIES_PATH.replace("{tenantId}", CANON_TENANT))
                 .body(axum::body::Body::empty())

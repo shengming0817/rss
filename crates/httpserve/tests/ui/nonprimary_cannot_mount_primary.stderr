@@ -45,6 +45,6 @@ error[E0599]: no method named `mount` found for struct `ListenerRouter<Health>` 
    |                                                                     ^^^^^ method not found in `ListenerRouter<Health>`
    |
    = note: the method was found for
-           - `ListenerRouter<Primary>`
            - `ListenerRouter<httpserve::Admin>`
            - `ListenerRouter<httpserve::Internal>`
+           - `ListenerRouter<httpserve::Primary>`

@@ -224,7 +224,7 @@ trybuild = { workspace = true }
 # deny.toml memory wrapper 不含 runtime，故 MemSecretResolver 在 e2e 中用 inline 结构代替（无需 memory dep）。
 testkit = { path = "../../crates/testkit" }
 # auth_e2e 经 httpserve test-util 构造 funnel 输入（`routes::unfinalized_for_test`）+ 取回裸 Router
-# （`AuthenticatedRoutes::into_router_for_test`）做 oneshot；生产构建无此 feature ⇒ 这些入口编译期不存在（ADR-009 §6）。
+# （`AuthenticatedRoutes::into_plaintext_router_for_test`）做 oneshot；生产构建无此 feature ⇒ 这些入口编译期不存在（ADR-009 §6）。
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 sqlx = { workspace = true }
 # refresh/login mint→verify e2e（#1252）：wiremock 模拟 vault Transit `/sign`（动态 ES256 签）+ serde_json 编解

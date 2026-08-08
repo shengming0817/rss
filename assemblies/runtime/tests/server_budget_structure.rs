@@ -16,7 +16,7 @@ fn complete_budget_boundary(routes: &str, phase_launch: &str, launch: &str, http
     let httpd = compact(httpd);
 
     routes.contains(
-        "pubfninto_make_service(self,budget:crate::ServerRequestBudget)->ServerMakeService",
+        "pubfninto_server_service(self,budget:crate::ServerRequestBudget)->ServerService",
     ) && routes.contains(
         ".layer(axum::middleware::from_fn_with_state(budget,crate::middleware::server_request_budget,))",
     ) && phase_launch.contains(
@@ -38,21 +38,21 @@ fn complete_budget_boundary(routes: &str, phase_launch: &str, launch: &str, http
     )
         && launch.contains("budget:httpserve::ServerRequestBudget")
         && launch.contains("Self{listeners,budget,addr_resolver,inventory_publisher,}")
-        && launch.contains("routes.into_make_service(budget)")
-        && httpd.matches("svc:httpserve::ServerMakeService").count() >= 5
+        && launch.contains("routes.into_server_service(budget)")
+        && httpd.matches("svc:httpserve::ServerService").count() >= 5
         && !httpd.contains("svc:IntoMakeServiceWithConnectInfo")
 }
 
 #[test]
 fn guard_rejects_partial_or_transport_specific_budget() {
     let routes = r#"
-        pub fn into_make_service(self, budget: crate::ServerRequestBudget) -> ServerMakeService {
+        pub fn into_server_service(self, budget: crate::ServerRequestBudget) -> ServerService {
             let _ = budget;
-            ServerMakeService::new(self.router)
+            ServerService::new(self.router)
         }
     "#;
     let launch = r#"
-        let svc = routes.into_make_service(budget);
+        let svc = routes.into_server_service(budget);
     "#;
     let phase_launch = r#"
         let request_budget = crate::launch::server_request_budget(context.config())?;
@@ -62,7 +62,7 @@ fn guard_rejects_partial_or_transport_specific_budget() {
     "#;
     let httpd = r#"
         pub fn serve(self, svc: IntoMakeServiceWithConnectInfo<Router, SocketAddr>) {}
-        pub fn serve_mtls(self, svc: httpserve::ServerMakeService) {}
+        pub fn serve_mtls(self, svc: httpserve::ServerService) {}
     "#;
     assert!(!complete_budget_boundary(
         routes,
@@ -72,7 +72,7 @@ fn guard_rejects_partial_or_transport_specific_budget() {
     ));
 
     let routes = r#"
-        pub fn into_make_service(self, budget: crate::ServerRequestBudget) -> ServerMakeService {}
+        pub fn into_server_service(self, budget: crate::ServerRequestBudget) -> ServerService {}
         router.layer(axum::middleware::from_fn_with_state(
             budget,
             crate::middleware::server_request_budget,
@@ -81,7 +81,7 @@ fn guard_rejects_partial_or_transport_specific_budget() {
     assert!(!complete_budget_boundary(
         routes,
         phase_launch,
-        "let svc = routes.into_make_service(budget);",
+        "let svc = routes.into_server_service(budget);",
         httpd
     ));
 }

@@ -7,4 +7,7 @@
 - [x] Health policy remains disabled.
 - [x] Span naming is low-cardinality and route-template based.
 - [x] The observation type cannot retain sensitive request surfaces.
-- [x] Body lifecycle remains owned by #2037.
+- [x] #2037 settles span, duration, and active requests once at the real response-body terminal state.
+- [x] The adapter-private plaintext/mTLS observation owner mints trusted `http`/`https`; the request core emits none.
+- [x] Health emits neither request spans nor HTTP RED metrics.
+- [x] Active increment/decrement reuse an identical begin-time label set.

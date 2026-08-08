@@ -63,17 +63,32 @@ fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留�
 - observe 面的脱敏声明与 at-rest 的保护声明是两条正交声明面，不混用、不互相替代。
 - errcode 的 Message / Public Details / Internal Details 三层分工见 `docs/rules/error-handling.md`。
 
-## HTTP server trace
+## HTTP server observation
 
-- `tracewire` is the only W3C/OpenTelemetry context bridge. `httpserve` may restore an inbound
-  remote parent through it, but must not import OpenTelemetry directly.
-- INVARIANT: HTTP-SERVER-TRACE-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private capability field + unique bind funnel" }——every finalized router carries a private, non-optional listener trace policy to the unique bindable funnel. Health is disabled; all other and unknown listeners are enabled.
-- INVARIANT: HTTP-SERVER-TRACE-ORDER-01 { level = "Medium", exec = "test", source = "code" }——the SERVER span wraps request budget, body limit, authentication bridge, panic recovery, enforcement, and handler work. A finalized-router T2 test is the executable carrier because axum layer order is not encoded by Rust types.
+- `tracewire` is the only W3C/OpenTelemetry context bridge. The adapter-private `httpd` observation
+  seam restores the inbound remote parent through it; neither layer imports OpenTelemetry directly.
+- INVARIANT: HTTP-SERVER-OBSERVATION-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed non-optional metadata + adapter-private emitter" }——every finalized router carries a non-optional closed listener policy to `httpd`. Health disables both the SERVER span and HTTP RED metrics; all other and unknown listeners are enabled. `httpserve` can produce only closed route/cause metadata, never an emitter.
+- INVARIANT: HTTP-SERVER-OBSERVATION-ORDER-01 { level = "Medium", exec = "test", source = "code" }——the single adapter-owned observation seam wraps request budget, body limit, authentication bridge, panic recovery, enforcement, handler work, and response-body polling. A transport T2 test is the executable carrier because axum layer order is not encoded by Rust types.
+- INVARIANT: HTTP-SERVER-TRANSPORT-SCHEME-01 { level = "Hard", exec = "native-compile", source = "code", native = "adapter-private emitter created only by actual bind branches" }——the private observation emitter owned by `httpd`'s actual plaintext and mTLS bind branches mints `http` and `https` respectively. `httpserve::ServerService` emits no transport evidence, so wrapping its public request service and injecting URI/extensions cannot forge RSS's official scheme. Scheme is never selected by an assembly, URI, forwarding header, or public lowering API.
+- A private move-only lifecycle owner starts the SERVER span and increments active requests together,
+  then settles the span, duration, and active decrement exactly once at body EOS, final-frame
+  `is_end_stream`, body error, cancellation, timeout, or recovered panic. Headers alone do not settle
+  a non-empty response.
+- `http.server.request.duration` is a seconds histogram. It carries closed method, trusted scheme,
+  listener, status class and outcome; optional status and `error.type`; and only an optional
+  `MatchedPath` route template. `http.server.active_requests` is a `{request}` gauge projection of
+  the OpenTelemetry UpDownCounter and carries only the identical begin-time method, scheme, and
+  listener label set on increment and decrement. Histogram count is the request count; no duplicate
+  request counter is emitted.
+- HTTP outcomes are closed to `completed|body_error|cancelled|timeout|panic`; status class is closed
+  to `informational|success|redirection|client_error|server_error|other|none`; error type is a 5xx
+  decimal status or `response_body_error|cancelled|timeout|panic`. Body error and cancellation take
+  precedence over a response cause. Extension methods collapse to `_OTHER`; `QUERY` is well-known.
 - SERVER span names use only a closed method token and optional `MatchedPath` route template. Raw
   URI/path/query, authority, headers/cookies, body, credentials, tenant/principal, and free-form
   error text are forbidden span inputs.
 - Invalid or missing trace context is diagnostic-only and starts a new root; it never changes HTTP,
-  authentication, authorization, or tenant behavior. Response-body completion belongs to #2037.
+  authentication, authorization, or tenant behavior.
 
 ## Readyz Probe
 

@@ -162,7 +162,7 @@ fn publish_router(
         routes,
         crate::auth_bridge::FederatedVerifier::production(provider),
     )
-    .into_router_for_test())
+    .into_plaintext_router_for_test())
 }
 
 async fn call_publish(

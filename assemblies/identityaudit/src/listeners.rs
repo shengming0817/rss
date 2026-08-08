@@ -173,12 +173,12 @@ fn server_request_budget(
 
 struct PreparedListener {
     bound: httpd::BoundHttpServer,
-    service: httpserve::ServerMakeService,
+    service: httpserve::ServerService,
 }
 
 struct PreparedMtlsListener {
     bound: httpd::BoundHttpServer,
-    service: httpserve::ServerMakeService,
+    service: httpserve::ServerService,
     mtls: httpd::MtlsServerConfig,
 }
 
@@ -417,15 +417,15 @@ async fn prepare_listeners(
     Ok(PreparedListeners {
         primary: PreparedListener {
             bound: primary,
-            service: listeners.primary.into_make_service(budget),
+            service: listeners.primary.into_server_service(budget),
         },
         admin: PreparedListener {
             bound: admin,
-            service: listeners.admin.into_make_service(budget),
+            service: listeners.admin.into_server_service(budget),
         },
         health: PreparedListener {
             bound: health,
-            service: listeners.health.into_make_service(budget),
+            service: listeners.health.into_server_service(budget),
         },
         primary_front: None,
         admin_front: None,

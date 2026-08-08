@@ -638,7 +638,7 @@ mod tests {
             Arc::new(TestClock),
             Arc::new(crate::listeners::FederatedPermissionAuthorizer),
         )?
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .layer(axum::Extension(authenticated)))
     }
 
@@ -747,7 +747,7 @@ mod tests {
         .expect("Admin auth plan");
         let router = ::httpserve::finalize_auth(routes, plan)
             .expect("finalize inventory auth")
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .layer(::axum::Extension(httpserve::Authenticated::new(
                 httpserve::NonRssTestScheme::FederatedAccessToken,
                 vocab::PrincipalKind::Admin,

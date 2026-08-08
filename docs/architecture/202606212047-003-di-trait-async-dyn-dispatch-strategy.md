@@ -79,7 +79,7 @@ Medium 回归锁：`ui_assert_async_sync_arc_send_sync!` / `ui_assert_async_send
 trybuild + PDP non-Sync provider compile-fail（anti-vacuity，**不得**把 trybuild 标成 Hard）。旧同步轮询
 另由 Clippy `disallowed-methods` 和 runtime async bridge 结构守卫（Medium）禁止。终止预算不属于 PDP port
 或 bridge：runtime 从必填非零 snapshot 配置解析 `ServerRequestBudget`，httpserve 唯一 bindable funnel 用它
-包住完整 request future，httpd plaintext/mTLS 只接受 budget-sealed `ServerMakeService`。耗尽 drop 整条 future
+包住完整 request future，httpd plaintext/mTLS 只接受 budget-sealed `ServerService`。耗尽 drop 整条 future
 并返回统一 503（outcome 未知，`retryable=false`）；局部 verifier timeout 由结构门明确拒绝。
 
 四处同源（rustdoc「注入形态」+ trybuild UI + 本节 + xtask `collect_diport` Dyn* export exact-set）须同步：

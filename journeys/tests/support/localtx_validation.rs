@@ -798,8 +798,8 @@ fn finalized_router(
                 subject,
                 Some(tenant),
             )?))
-            .into_router_for_test(),
-        None => authenticated.into_router_for_test(),
+            .into_plaintext_router_for_test(),
+        None => authenticated.into_plaintext_router_for_test(),
     })
 }
 
@@ -1498,7 +1498,7 @@ fn finalized_audit_router(
         Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
         Arc::new(AuditReadAuthorizer),
     )?
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
     let Some(kind) = principal_kind else {
         return Ok(router);
     };

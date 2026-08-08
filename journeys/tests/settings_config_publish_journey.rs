@@ -165,7 +165,7 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
         "settings-route-journey",
         Some(tenant),
     )))
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
 
     let publish = route_request(
         &router,

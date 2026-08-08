@@ -42,12 +42,17 @@ spiffe-rustls = { workspace = true }
 spiffe-rustls-tokio = { workspace = true }
 tokio-rustls = { workspace = true }
 tower = { workspace = true }
+http-body = { workspace = true }
+metrics = { workspace = true }
 url = { workspace = true }
 rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]
 # bind 127.0.0.1:0 → 真 socket serve + raw TcpStream HTTP/1.1 GET 断言 200 + shutdown 收敛（hermetic，无外部 dep）。
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net", "test-util"] }
 rcgen = { workspace = true }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 tracewire = { path = "../../crates/tracewire", features = ["test-util"] }
+metrics-exporter-prometheus = { workspace = true }
+futures = { workspace = true }
+http-body-util = { workspace = true }

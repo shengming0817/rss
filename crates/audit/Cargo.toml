@@ -51,7 +51,7 @@ rstest = { workspace = true }
 tower = { workspace = true }
 # test-support：handler 单测经 runctx::test_support::app_ctx + scope 注入 AppCtx tenant（仅自测，不进生产构建）。
 runctx = { path = "../runctx", features = ["test-support"] }
-# admin 读路由 finalize 测试经 httpserve test-util 取回裸 Router（`UnfinalizedRoutes::into_router_for_test`）做 oneshot；
+# admin 读路由 finalize 测试经 httpserve test-util 的 typed plaintext exit 取回 Router 做 oneshot；
 # 生产构建无此 feature ⇒ 该入口编译期不存在（ADR-009 §6 Soft→Medium）。
 httpserve = { path = "../httpserve", features = ["test-util"] }
 authn = { path = "../authn", features = ["test-support"] }

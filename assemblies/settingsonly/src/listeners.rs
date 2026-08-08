@@ -244,12 +244,12 @@ pub(crate) struct PreparedListeners {
 
 struct PreparedListener {
     bound: httpd::BoundHttpServer,
-    service: httpserve::ServerMakeService,
+    service: httpserve::ServerService,
 }
 
 struct PreparedMtlsListener {
     bound: httpd::BoundHttpServer,
-    service: httpserve::ServerMakeService,
+    service: httpserve::ServerService,
     mtls: httpd::MtlsServerConfig,
 }
 
@@ -303,9 +303,9 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
                 .await
                 .context("wait for settingsonly activation release")?;
         }
-        let primary_service = listeners.primary.into_make_service(request_budget);
-        let admin_service = listeners.admin.into_make_service(request_budget);
-        let health_service = listeners.health.into_make_service(request_budget);
+        let primary_service = listeners.primary.into_server_service(request_budget);
+        let admin_service = listeners.admin.into_server_service(request_budget);
+        let health_service = listeners.health.into_server_service(request_budget);
         let (primary_front, admin_front, health_front) = if let Some(frontend) = frontend {
             let primary_address = SocketAddr::new(frontend.pod_ip, frontend.primary_port);
             let admin_address = SocketAddr::new(frontend.pod_ip, frontend.admin_port);

@@ -608,7 +608,7 @@ async fn identity_refresh_producer_transaction_journey() -> TestResult {
             Arc::new(SystemClock),
             assembly_schema::AssemblyListenerKind::Primary,
         )?
-        .into_router_for_test())
+        .into_plaintext_router_for_test())
     };
     let router_a = build_router()?;
     let router_b = build_router()?;

@@ -223,7 +223,7 @@ fn service_token(token_id: &str, now: i64) -> TestResult<String> {
 
 async fn submit(routes: httpserve::AuthenticatedRoutes, token: &str) -> TestResult<Response<Body>> {
     Ok(routes
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
         .oneshot(
             Request::builder()
                 .method(Method::GET)

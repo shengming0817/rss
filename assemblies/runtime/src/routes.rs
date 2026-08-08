@@ -421,7 +421,7 @@ pub(crate) fn build_runtime_rate_limiter() -> Arc<GovernorLimiter> {
 /// `UnfinalizedRoutes` 产 `AuthenticatedRoutes` 并注入 AuthPlan 与 framework 中间件。随后据
 /// `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）
 /// → 叠 rate-limit（[`httpserve::rate_limit`]，outer 于验签桥；peer-IP keyed per-request）。
-/// 产出 `AuthenticatedRoutes` 经 `into_make_service` 交给 launch phase 绑 socket + serve——bind 点
+/// 产出 `AuthenticatedRoutes` 经 `into_server_service` 交给 launch phase 绑 socket + serve——bind 点
 /// 天生只能消费已认证 router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
 ///
 /// 层序（外→内）：security headers → request-id → correlation → 全请求 server budget → body-limit
@@ -1424,7 +1424,7 @@ mod tests {
         .expect("Health listener");
         let (_, routes) = health.into_parts();
         let response = routes
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .oneshot(
                 Request::builder()
                     .uri("/health/v1/readyz")
@@ -1634,10 +1634,10 @@ mod tests {
             }
             let (listener, routes) = assembled.into_parts();
             match listener {
-                ListenerKind::Primary => primary = Some(routes.into_router_for_test()),
-                ListenerKind::Admin => admin = Some(routes.into_router_for_test()),
-                ListenerKind::Internal => internal = Some(routes.into_router_for_test()),
-                ListenerKind::Health => health = Some(routes.into_router_for_test()),
+                ListenerKind::Primary => primary = Some(routes.into_plaintext_router_for_test()),
+                ListenerKind::Admin => admin = Some(routes.into_plaintext_router_for_test()),
+                ListenerKind::Internal => internal = Some(routes.into_plaintext_router_for_test()),
+                ListenerKind::Health => health = Some(routes.into_plaintext_router_for_test()),
                 other => unexpected.push(other),
             }
         }
@@ -1721,7 +1721,7 @@ mod tests {
         )
         .expect("finalize runtime auth");
         let response = authed
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .oneshot(
                 Request::builder()
                     .method(Method::POST)
@@ -1826,7 +1826,7 @@ mod tests {
             ));
 
         let response = routes
-            .into_router_for_test()
+            .into_plaintext_router_for_test()
             .oneshot(request)
             .await
             .expect("admin probe");

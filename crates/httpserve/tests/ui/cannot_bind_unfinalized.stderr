@@ -1,5 +1,5 @@
-error[E0599]: no method named `into_make_service` found for struct `UnfinalizedRoutes` in the current scope
+error[E0599]: no method named `into_server_service` found for struct `UnfinalizedRoutes` in the current scope
  --> tests/ui/cannot_bind_unfinalized.rs:4:29
   |
-4 |     let _make = unfinalized.into_make_service();
-  |                             ^^^^^^^^^^^^^^^^^ method not found in `UnfinalizedRoutes`
+4 |     let _make = unfinalized.into_server_service();
+  |                             ^^^^^^^^^^^^^^^^^^^ method not found in `UnfinalizedRoutes`

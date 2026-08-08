@@ -2157,7 +2157,7 @@ mod tests {
             authorizer,
         )
         .expect("finalize Primary auth")
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
         (router, proof)
     }
 
@@ -2197,7 +2197,7 @@ mod tests {
             authorizer,
         )
         .expect("finalize Primary auth")
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
         (router, proof)
     }
 

@@ -3055,11 +3055,11 @@ fn finalized_router_routes(expression: &Expr) -> Option<String> {
             Expr::MethodCall(call)
                 if matches!(
                     call.method.to_string().as_str(),
-                    "into_router_for_test" | "layer"
+                    "into_plaintext_router_for_test" | "layer"
                 ) =>
             {
                 if call.turbofish.is_some()
-                    || (call.method == "into_router_for_test" && !call.args.is_empty())
+                    || (call.method == "into_plaintext_router_for_test" && !call.args.is_empty())
                     || (call.method == "layer" && !is_transparent_extension_layer(call))
                 {
                     return None;
@@ -6185,7 +6185,7 @@ fn {factory}(repo: TestRepo) -> (
     ).expect("mounted proof");
     let router = ::httpserve::finalize_auth(routes, plan)
         .expect("finalized")
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
     (router, proof)
 }}
 #[tokio::test]
@@ -6362,19 +6362,19 @@ fn conforms() {
         for (name, source) in [
             (
                 "short circuit",
-                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|_request, _next| async { axum::http::StatusCode::NO_CONTENT })).into_router_for_test()",
+                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|_request, _next| async { axum::http::StatusCode::NO_CONTENT })).into_plaintext_router_for_test()",
             ),
             (
                 "response replacement",
-                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|request, next| async move { let _response = next.run(request).await; axum::http::StatusCode::NO_CONTENT })).into_router_for_test()",
+                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|request, next| async move { let _response = next.run(request).await; axum::http::StatusCode::NO_CONTENT })).into_plaintext_router_for_test()",
             ),
             (
                 "unobserved side effect",
-                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|request, next| async move { SIDE_EFFECT.fetch_add(1, Ordering::SeqCst); next.run(request).await })).into_router_for_test()",
+                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::middleware::from_fn(|request, next| async move { SIDE_EFFECT.fetch_add(1, Ordering::SeqCst); next.run(request).await })).into_plaintext_router_for_test()",
             ),
             (
                 "relative Extension path is shadowable",
-                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::Extension(value)).into_router_for_test()",
+                "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(axum::Extension(value)).into_plaintext_router_for_test()",
             ),
         ] {
             let expression = syn::parse_str::<Expr>(source)?;
@@ -6389,7 +6389,7 @@ fn conforms() {
     #[test]
     fn router_factory_accepts_absolute_axum_extensions() -> Result<()> {
         let expression = syn::parse_str::<Expr>(
-            "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(::axum::Extension(first)).layer(::axum::Extension(second)).into_router_for_test()",
+            "::httpserve::finalize_auth(routes, plan).expect(\"finalized\").layer(::axum::Extension(first)).layer(::axum::Extension(second)).into_plaintext_router_for_test()",
         )?;
         assert_eq!(
             finalized_router_routes(&expression).as_deref(),
@@ -6470,8 +6470,8 @@ fn conforms() {
                 format!(
                     "use evil as axum;\n{}",
                     canonical.replace(
-                        ".expect(\"finalized\")\n        .into_router_for_test()",
-                        ".expect(\"finalized\")\n        .layer(axum::Extension(value))\n        .into_router_for_test()",
+                        ".expect(\"finalized\")\n        .into_plaintext_router_for_test()",
+                        ".expect(\"finalized\")\n        .layer(axum::Extension(value))\n        .into_plaintext_router_for_test()",
                     )
                 ),
             ),
@@ -6480,8 +6480,8 @@ fn conforms() {
                 format!(
                     "mod axum {{ fn Extension<T>(value: T) -> T {{ value }} }}\n{}",
                     canonical.replace(
-                        ".expect(\"finalized\")\n        .into_router_for_test()",
-                        ".expect(\"finalized\")\n        .layer(axum::Extension(value))\n        .into_router_for_test()",
+                        ".expect(\"finalized\")\n        .into_plaintext_router_for_test()",
+                        ".expect(\"finalized\")\n        .layer(axum::Extension(value))\n        .into_plaintext_router_for_test()",
                     )
                 ),
             ),
@@ -6831,7 +6831,7 @@ async fn outer() {
             (
                 "bait finalizer with fake tail",
                 canonical.replace(
-                    "::httpserve::finalize_auth(routes, plan)\n        .expect(\"finalized\")\n        .into_router_for_test()",
+                    "::httpserve::finalize_auth(routes, plan)\n        .expect(\"finalized\")\n        .into_plaintext_router_for_test()",
                     "{ let _bait = ::httpserve::finalize_auth(routes, plan); axum::Router::new() }",
                 ),
             ),

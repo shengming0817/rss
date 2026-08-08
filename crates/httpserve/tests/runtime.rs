@@ -194,7 +194,9 @@ async fn mount_non_primary_route_is_reachable_after_finalize() {
         )
     });
     let plan = AuthPlan::none(ListenerKind::Health).unwrap();
-    let router = finalize_auth(routes, plan).unwrap().into_router_for_test();
+    let router = finalize_auth(routes, plan)
+        .unwrap()
+        .into_plaintext_router_for_test();
 
     let resp = router
         .clone()
@@ -223,7 +225,7 @@ async fn primary_public_opt_out_allows() {
         )
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     // Public opt-out → Allow → 200，即便 plan 要求 Jwt 且无 Authorization。
     let resp = router
@@ -244,7 +246,7 @@ async fn primary_public_opt_out_with_evidence_is_200() {
         )
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -267,7 +269,7 @@ async fn primary_require_without_credential_is_401() {
         rb.mount(endpoint)
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     // Require(Jwt) + 无 Authorization → 401 + ERR_CORE_UNAUTHENTICATED。
     let resp = router
@@ -299,7 +301,7 @@ async fn primary_require_is_fail_closed_401() {
         )
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -324,7 +326,7 @@ async fn primary_require_with_authenticated_evidence_allows() {
         rb.mount(endpoint)
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -352,7 +354,7 @@ async fn primary_permission_authorizer_deny_is_403() {
         Arc::new(DenyAuthorizer),
     )
     .unwrap()
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/x");
     req.extensions_mut().insert(rss_user_authed());
     let resp = router.oneshot(req).await.unwrap();
@@ -380,7 +382,7 @@ async fn primary_self_scoped_permission_uses_principal_subject_resource() {
         Arc::new(recorder),
     )
     .unwrap()
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/me");
     req.extensions_mut()
         .insert(Authenticated::new_rss_user_for_test(PRINCIPAL, tenant()));
@@ -408,7 +410,7 @@ async fn primary_path_param_permission_uses_axum_decoded_resource() {
         Arc::new(recorder),
     )
     .unwrap()
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
     let resource = "22222222-3333-4444-8555-666666666666";
     let mut req = empty_req(Method::GET, &format!("/api/v1/roles/{resource}"));
     req.extensions_mut().insert(rss_user_authed());
@@ -436,7 +438,7 @@ async fn primary_path_param_noncanonical_resource_denies_before_authorizer() {
         Arc::new(recorder),
     )
     .unwrap()
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
     let mut req = empty_req(Method::GET, "/api/v1/roles/role-123");
     req.extensions_mut().insert(rss_user_authed());
     let resp = router.oneshot(req).await.unwrap();
@@ -467,7 +469,7 @@ async fn primary_require_with_mismatched_scheme_is_401() {
         )
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let mut req = Request::builder()
         .method(Method::GET)
@@ -539,7 +541,7 @@ async fn request_id_is_generated_on_response() {
         )
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -569,7 +571,7 @@ async fn incoming_request_id_is_echoed_and_in_envelope() {
         )
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -600,7 +602,7 @@ async fn handler_panic_becomes_500_envelope_without_leaking_payload() {
         )
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let req = Request::builder()
         .method(Method::GET)
@@ -662,7 +664,7 @@ async fn primary_password_reset_exempt_allows() {
         )
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -682,7 +684,7 @@ async fn primary_noauth_plan_allows() {
         )
     });
     let plan = AuthPlan::none(ListenerKind::Primary).unwrap();
-    let router = finalize_primary_test(routes, plan).into_router_for_test();
+    let router = finalize_primary_test(routes, plan).into_plaintext_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/x"))
@@ -736,7 +738,7 @@ async fn route_meta_in_request_extension() {
         rb.mount(endpoint)
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let resp = router
         .oneshot(empty_req(Method::GET, "/api/v1/meta"))
@@ -817,7 +819,7 @@ async fn route_meta_exposes_both_declared_idempotency_classes() {
         )?)
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let idempotent = router
         .clone()
@@ -863,7 +865,7 @@ async fn declared_success_status_drift_fails_closed() {
         )?)
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let response = router
         .oneshot(empty_req(Method::POST, "/api/v1/wire-status-drift"))
@@ -909,7 +911,7 @@ async fn undeclared_redirect_status_fails_closed() {
         )?)
     });
     let router = finalize_primary_test(routes, primary_plan(AuthScheme::RssAccessToken))
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
 
     let response = router
         .oneshot(empty_req(Method::POST, "/api/v1/wire-status-redirect"))
@@ -931,7 +933,7 @@ async fn healthz_is_200() {
         httpserve::health::routes(|| primitives::HealthReport::aggregate(vec![]), String::new);
     let router = finalize_auth(routes, AuthPlan::none(ListenerKind::Health).unwrap())
         .unwrap()
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
     let resp = router
         .oneshot(empty_req(Method::GET, "/health/v1/healthz"))
         .await
@@ -980,7 +982,7 @@ async fn readyz_reflects_aggregated_health() {
         AuthPlan::none(ListenerKind::Health).unwrap(),
     )
     .unwrap()
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
     let resp = router
         .oneshot(empty_req(Method::GET, "/health/v1/readyz"))
         .await
@@ -1000,7 +1002,7 @@ async fn readyz_reflects_aggregated_health() {
         AuthPlan::none(ListenerKind::Health).unwrap(),
     )
     .unwrap()
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
     let resp = router
         .oneshot(empty_req(Method::GET, "/health/v1/readyz"))
         .await
@@ -1014,7 +1016,7 @@ async fn readyz_reflects_aggregated_health() {
         AuthPlan::none(ListenerKind::Health).unwrap(),
     )
     .unwrap()
-    .into_router_for_test();
+    .into_plaintext_router_for_test();
     let resp = router
         .oneshot(empty_req(Method::GET, "/health/v1/readyz"))
         .await
@@ -1055,7 +1057,7 @@ async fn server_budget_times_out_whole_request_with_shared_envelope_and_drops_ha
     let budget = httpserve::ServerRequestBudget::from_millis(NonZeroU64::new(20).unwrap());
     let router = finalize_auth(routes, AuthPlan::none(ListenerKind::Health).unwrap())
         .unwrap()
-        .into_router_for_test_with_budget(budget);
+        .into_plaintext_router_for_test_with_budget(budget);
 
     let request = Request::builder()
         .method(Method::GET)

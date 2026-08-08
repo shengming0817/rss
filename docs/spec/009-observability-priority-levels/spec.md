@@ -27,7 +27,20 @@ Only these four PBIs belong to Epic #2034. The three child PBIs may proceed inde
 - Health listeners emit no request span.
 - Malformed diagnostic headers fail open and never affect authentication or tenancy.
 
-Response-body completion is intentionally owned by #2037.
+## #2037 acceptance
+
+- The adapter-private observation owner mints trusted `http`/`https` inside the actual plaintext/mTLS
+  bind branch. The exported per-request core emits no transport evidence, so an external wrapper
+  cannot forge RSS's official scheme; assembly, request URI, extensions, and forwarding headers
+  cannot select it.
+- One move-only owner holds the SERVER span, monotonic timer, and active-request handle until response
+  body EOS, final-frame end, body error, timeout, panic, or cancellation.
+- Each request records exactly one duration sample and one matching active decrement. Headers do not
+  settle a streaming body, and post-settlement Drop cannot emit twice.
+- Duration labels use only closed values and an optional `MatchedPath`; active labels reuse the exact
+  begin-time method, scheme, and listener set. Health emits neither span nor RED metrics.
+- Timeout and recovered panic are typed response causes; ordinary 5xx responses retain ordinary
+  status-derived error semantics. Raw request surfaces and free-form errors never enter attributes.
 
 ## #2036 acceptance
 

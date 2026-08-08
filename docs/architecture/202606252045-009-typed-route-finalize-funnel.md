@@ -33,7 +33,7 @@
   同时携擦除 marker 的 `HttpRouteEvidence` 与 handler。故不同契约的 evidence/handler 交换在类型层不可表达，
   path/method/auth/resource scope 不可分别传入。构造 `new` / 拆 `into_inner` 均 `pub(crate)`——域 crate
   只在 register 闭包里收到 builder、无 raw-bypass；Health 只能经 crate 内固定 builder 挂载。
-- **funnel 三态**：`UnfinalizedRoutes`（未认证态，兼 per-listener 累加器，`empty()` + `nest_group::<L>()`；**无 public bindable 出口**）→ `finalize_auth(UnfinalizedRoutes, AuthPlan) -> Result<AuthenticatedRoutes, _>`（**唯一**生产 `AuthenticatedRoutes`，构造 `pub(crate)`）→ `AuthenticatedRoutes::into_make_service()`（**唯一** bindable 出口；`layer()` 只能加层不能替换，保封印）。
+- **funnel 三态**：`UnfinalizedRoutes`（未认证态，兼 per-listener 累加器，`empty()` + `nest_group::<L>()`；**无 public service 出口**）→ `finalize_auth(UnfinalizedRoutes, AuthPlan) -> Result<AuthenticatedRoutes, _>`（**唯一**生产 `AuthenticatedRoutes`，构造 `pub(crate)`）→ `AuthenticatedRoutes::into_server_service()`（**唯一** transport core 出口；`layer()` 只能加层不能替换，保封印）。该 core 只实现 per-request `Service`、不能直接交给 `axum::serve`；`httpd` 的私有 make-service 才能在真实 bind 分支完成 lowering。
 - **不变量**：任何 public（非 `#[doc(hidden)]` test）API **都不**返回裸 `axum::Router`——裸 Router 全程不出 httpserve。
 
 ### 2.2 受控 `bootstrap → httpserve` 边
@@ -47,7 +47,7 @@
 - **ROUTE-ENDPOINT-ATOMIC-01 / ROUTE-MOUNT-NOBYPASS-01**（#1690 Hard）：production public API 不接受 raw
   `MethodRouter` 或 route 字段；endpoint 是 handler 与完整 evidence 的唯一注册单元。
 - **ROUTE-AUTH-FUNNEL-01**（#1113 Hard）：`UnfinalizedRoutes` 无 public bindable 出口。
-- **ROUTE-AUTH-FUNNEL-02**（#1113 Hard）：`finalize_auth` 是 `AuthenticatedRoutes` 唯一生产者，`into_make_service` 唯一 bindable 出口。
+- **ROUTE-AUTH-FUNNEL-02**（#1113 Hard）：`finalize_auth` 是 `AuthenticatedRoutes` 唯一生产者，`into_server_service` 是唯一 transport core 出口。
 
 ## 3. 修订既有决策（ai-robust §审查要求：ADR amendment 须同步重评威胁矩阵）
 
@@ -75,12 +75,13 @@
 - 一条新 sanctioned `Service → Service` 边（受 layers 白名单 + rstest 守）。
 - **无 public-api golden 漂移**：httpserve/bootstrap 属 Service 层、不在 `cargo public-api` baseline（仅 basis+engine）——P1 相对 P2 的额外收益。
 - **测试专用让步**（非生产，**feature-gated Medium**）：`UnfinalizedRoutes::into_router_for_test` /
-  `AuthenticatedRoutes::into_router_for_test` / `routes::unfinalized_for_test` 由 `#[cfg(any(test, feature = "test-util"))]`
+  `AuthenticatedRoutes::into_plaintext_router_for_test` /
+  `routes::unfinalized_for_test` 由 `#[cfg(any(test, feature = "test-util"))]`
   门控——**生产构建（无 `test-util` feature）里编译期不存在**，故生产代码无法取裸 Router 绕过 funnel（内置 review #7
   采纳：由 doc-hidden+命名的 Soft 升为 cfg 门控的 Medium）。跨 crate 测试消费方（bootstrap/audit/bins，及 httpserve
   自身集成测试经 self dev-dep）经 dev-dependency 显式启用该 feature；workspace 测试构建经 dev-dep 启用，生产/`cargo build` 不启用。
-- **assemblies/runtime launch 是下游（downstream）非前置（blocked-by）**：本 PR 交出 per-listener `AuthenticatedRoutes`；assemblies/runtime launch 已消费
-  `into_make_service` + `axum::serve` 完成 socket bind/serve，无需再协调接口变更——funnel 的安全收益「未认证不可 bind」
+- **assemblies/runtime launch 是下游（downstream）非前置（blocked-by）**：本 PR 交出 per-listener `AuthenticatedRoutes`；assemblies/runtime launch 将
+  `into_server_service` 产物交给 `httpd`，由 adapter-private make-service 完成 socket bind/serve——funnel 的安全收益「未认证不可 bind」
   已由类型系统兑现。
 - **旧 `RouteGroup` struct 退役**：接受裸 `axum::Router` 的旧 `httpserve::RouteGroup`（pre-funnel 公开面）已删除——
   与 §2.1「无 public API 交出裸 `axum::Router`」一致；其错误通道 `RouteGroupError` 保留（`finalize_auth` 返回型）。

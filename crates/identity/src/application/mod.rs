@@ -1350,7 +1350,7 @@ pub(crate) fn login_router_for_test<S: diport::Signer + Send + Sync + 'static>(
     .expect("valid Primary access-token plan");
     httpserve::finalize_primary_auth(routes, plan, Arc::new(PublicRouteTestAuthorizer))
         .expect("public login test route finalizes")
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
 }
 
 #[cfg(test)]
@@ -1373,7 +1373,7 @@ pub(crate) fn refresh_router_for_test<S: diport::Signer + Send + Sync + 'static>
     .expect("valid Primary access-token plan");
     httpserve::finalize_primary_auth(routes, plan, Arc::new(PublicRouteTestAuthorizer))
         .expect("public refresh route finalizes")
-        .into_router_for_test()
+        .into_plaintext_router_for_test()
 }
 
 async fn login_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
@@ -5253,7 +5253,7 @@ mod tests {
             authorizer,
         )
         .expect("finalize Primary auth")
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
         (router, proof)
     }
 
@@ -5723,7 +5723,7 @@ mod tests {
             authorizer,
         )
         .expect("finalize Primary auth")
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
         (router, proof)
     }
 
@@ -5799,7 +5799,7 @@ mod tests {
             authorizer,
         )
         .expect("finalize Primary auth")
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
         (router, proof)
     }
 
@@ -5858,7 +5858,7 @@ mod tests {
             authorizer,
         )
         .expect("finalize Primary auth")
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
         (router, proof)
     }
 
@@ -5917,7 +5917,7 @@ mod tests {
             authorizer,
         )
         .expect("finalize Primary auth")
-        .into_router_for_test();
+        .into_plaintext_router_for_test();
         (router, proof)
     }
 
@@ -7066,7 +7066,7 @@ mod tests {
         .expect("Primary JWT auth plan");
         let router = httpserve::finalize_primary_auth(routes, plan, authorizer)
             .expect("finalize Primary auth")
-            .into_router_for_test();
+            .into_plaintext_router_for_test();
         let cases = [
             (&LOGIN_HTTP_SPEC, "POST", "/login", None),
             (&REFRESH_HTTP_SPEC, "POST", "/refresh", None),

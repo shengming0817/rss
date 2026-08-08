@@ -1,14 +1,13 @@
 //! httpd adapter —— HTTP 传输 adapter（#1320 运行时入口 Join）。
 //!
 //! 单一 `HttpServer`：bind `TcpListener` → `axum::serve` 已认证 router 的
-//! `httpserve::ServerMakeService` →
+//! `httpserve::ServerService` →
 //! serve task 监听注入的 [`CancellationToken`] 优雅关停；`impl diport::ManagedResource` 经
 //! `cancel()` + await JoinHandle 收敛。**精确对标 `adapters/grpc` 的 `GrpcServer`**（transport=adapter）。
 //!
-//! ConnectInfo 贯通（#1106）：`into_make_service_with_connect_info::<SocketAddr>()` 在 bind 时注入
-//! `ConnectInfo<SocketAddr>` extension，供 `httpserve::rate_limit` 中间件读 peer IP 做 per-IP keyed 限流。
-//! `ServerMakeService` 同时证明 router 已在唯一 funnel 装入非零全请求预算；plaintext / mTLS 入口均只接受
-//! 该 capability，不存在 transport-specific 或无预算 serve 分支（SERVER-REQUEST-BUDGET-01）。
+//! 私有 make-service 在真实 bind 分支注入 `ConnectInfo<SocketAddr>`，并由同一 adapter-private seam
+//! 铸造可信 HTTP/HTTPS observation。`httpserve::ServerService` 不发射 transport evidence；即使外部
+//! wrapper 能调用 request core，也不能进入 RSS 的官方 SERVER span/RED owner。
 //!
 //! # 为何是 adapter（而非 httpserve 服务 crate）
 //!
@@ -57,6 +56,9 @@ use tokio_util::sync::CancellationToken;
 use tower::Service;
 
 mod domain_client;
+mod server_observation;
+#[cfg(test)]
+mod server_observation_tests;
 use domain_client::{DomainHttpTarget, ObservedHttpClient};
 
 /// HTTP 传输 adapter：持有 bind 成功的 listener 地址、graceful-shutdown 的 [`CancellationToken`]
@@ -806,6 +808,129 @@ where
     }
 }
 
+/// Adapter-private bridge from the budget/auth-sealed per-request core to axum's connection
+/// make-service contract. Construction is colocated with the actual plaintext/mTLS serve branch,
+/// so request headers and assembly callers cannot select the observed scheme.
+#[derive(Clone)]
+struct TransportMakeService {
+    inner: httpserve::ServerService,
+    scheme: server_observation::TransportScheme,
+}
+
+impl TransportMakeService {
+    fn plaintext(inner: httpserve::ServerService) -> Self {
+        Self {
+            inner,
+            scheme: server_observation::TransportScheme::Http,
+        }
+    }
+
+    fn tls(inner: httpserve::ServerService) -> Self {
+        Self {
+            inner,
+            scheme: server_observation::TransportScheme::Https,
+        }
+    }
+}
+
+impl<'a, L> Service<IncomingStream<'a, L>> for TransportMakeService
+where
+    L: Listener<Addr = SocketAddr>,
+{
+    type Response = TransportService;
+    type Error = Infallible;
+    type Future = std::future::Ready<Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, target: IncomingStream<'a, L>) -> Self::Future {
+        std::future::ready(Ok(TransportService {
+            inner: self.inner.clone(),
+            scheme: self.scheme,
+            remote_addr: *target.remote_addr(),
+        }))
+    }
+}
+
+#[derive(Clone)]
+struct TransportService {
+    inner: httpserve::ServerService,
+    scheme: server_observation::TransportScheme,
+    remote_addr: SocketAddr,
+}
+
+impl Service<axum::extract::Request> for TransportService {
+    type Response = axum::response::Response;
+    type Error = Infallible;
+    type Future = TransportResponseFuture<
+        <httpserve::ServerService as Service<axum::extract::Request>>::Future,
+    >;
+
+    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.inner.poll_ready(cx)
+    }
+
+    fn call(&mut self, mut request: axum::extract::Request) -> Self::Future {
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(self.remote_addr));
+        let observation = match self.inner.observation_policy() {
+            httpserve::ServerObservationPolicy::Enabled(listener) => {
+                let inbound =
+                    server_observation::InboundTraceContext::from_headers(request.headers());
+                let observation = server_observation::RequestObservation::new(
+                    request.method(),
+                    request.version(),
+                    self.scheme,
+                    listener,
+                );
+                if let Some(inbound) = inbound {
+                    inbound.apply_to(&observation.span());
+                }
+                Some(observation)
+            }
+            httpserve::ServerObservationPolicy::Disabled => None,
+        };
+        TransportResponseFuture {
+            inner: self.inner.call(request),
+            observation,
+        }
+    }
+}
+
+struct TransportResponseFuture<F> {
+    inner: F,
+    observation: Option<server_observation::RequestObservation>,
+}
+
+impl<F> Future for TransportResponseFuture<F>
+where
+    F: Future<Output = Result<httpserve::ServerResponse, Infallible>> + Unpin,
+{
+    type Output = Result<axum::response::Response, Infallible>;
+
+    fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let span = self.observation.as_ref().map_or_else(
+            tracing::Span::none,
+            server_observation::RequestObservation::span,
+        );
+        let poll = span.in_scope(|| Pin::new(&mut self.inner).poll(cx));
+        match poll {
+            Poll::Ready(Ok(response)) => {
+                let response = match self.observation.take() {
+                    Some(observation) => observation.observe_response(response),
+                    None => response.into_response(),
+                };
+                Poll::Ready(Ok(response))
+            }
+            Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
+            Poll::Pending => Poll::Pending,
+        }
+    }
+}
+
 /// 已 bind、未 serve 的 HTTP listener（`async bind` 与 `sync serve-spawn` 拆分的中间态）。
 ///
 /// 拆分动机：`bootstrap::ShutdownStack::register_with_token` 的 `make` 闭包是**同步**
@@ -837,11 +962,11 @@ impl BoundHttpServer {
     /// 须在 **tokio runtime 上下文**调用——内部 `tokio::spawn` 在无 runtime 时 panic。从 async fn
     /// （如 `serve_until_signal`）或 `ShutdownStack::register_with_token` 闭包内调用即满足（组合根均在
     /// `#[tokio::main]` 运行时内）。
-    pub fn serve(self, svc: httpserve::ServerMakeService, token: CancellationToken) -> HttpServer {
+    pub fn serve(self, svc: httpserve::ServerService, token: CancellationToken) -> HttpServer {
         let serve_token = token.clone();
         let listener = self.listener;
         let handle = tokio::spawn(async move {
-            let svc = svc.into_axum();
+            let svc = TransportMakeService::plaintext(svc);
             axum::serve(listener, svc)
                 .with_graceful_shutdown(async move {
                     // 关闭信号 = 注入 token 的 cancel（阶段 1 广播 / 内部 detached cancel）。
@@ -864,7 +989,7 @@ impl BoundHttpServer {
     /// `ConnectInfo<SocketAddr>` and `authn::VerifiedMtlsPeer` extensions.
     pub fn serve_mtls(
         self,
-        svc: httpserve::ServerMakeService,
+        svc: httpserve::ServerService,
         mtls: MtlsServerConfig,
         token: CancellationToken,
     ) -> HttpServer {
@@ -875,7 +1000,7 @@ impl BoundHttpServer {
             config: mtls,
         };
         let handle = tokio::spawn(async move {
-            let svc = svc.into_axum();
+            let svc = TransportMakeService::tls(svc);
             axum::serve(listener.tap_io(|_io| {}), MtlsMakeService::new(svc))
                 .with_graceful_shutdown(async move {
                     serve_token.cancelled().await;
@@ -920,7 +1045,7 @@ impl HttpServer {
     pub async fn serve_with_token(
         name: &'static str,
         addr: SocketAddr,
-        svc: httpserve::ServerMakeService,
+        svc: httpserve::ServerService,
         token: CancellationToken,
     ) -> Result<Self, HttpServeError> {
         Ok(Self::bind(name, addr).await?.serve(svc, token))
@@ -930,7 +1055,7 @@ impl HttpServer {
     pub async fn serve_mtls_with_token(
         name: &'static str,
         addr: SocketAddr,
-        svc: httpserve::ServerMakeService,
+        svc: httpserve::ServerService,
         mtls: MtlsServerConfig,
         token: CancellationToken,
     ) -> Result<Self, HttpServeError> {
@@ -942,7 +1067,7 @@ impl HttpServer {
     pub async fn serve(
         name: &'static str,
         addr: SocketAddr,
-        svc: httpserve::ServerMakeService,
+        svc: httpserve::ServerService,
     ) -> Result<Self, HttpServeError> {
         Self::serve_with_token(name, addr, svc, CancellationToken::new()).await
     }
@@ -1007,16 +1132,16 @@ mod tests {
     use tokio_rustls::TlsConnector;
     use tracing::Instrument as _;
 
-    /// 极简 router → budget-sealed make service，挂一个 GET /healthz 恒 200。
-    fn make_svc() -> httpserve::ServerMakeService {
-        httpserve::ServerMakeService::from_router_for_test(
+    /// 极简 router → budget-sealed server service，挂一个 GET /healthz 恒 200。
+    fn make_svc() -> httpserve::ServerService {
+        httpserve::ServerService::from_router_for_test(
             Router::new().route("/healthz", get(|| async { "ok" })),
             httpserve::ServerRequestBudget::for_test(),
         )
     }
 
-    fn make_mtls_svc() -> httpserve::ServerMakeService {
-        httpserve::ServerMakeService::from_router_for_test(
+    fn make_mtls_svc() -> httpserve::ServerService {
+        httpserve::ServerService::from_router_for_test(
             Router::new().route(
                 "/mtls-peer",
                 get(
@@ -1029,8 +1154,8 @@ mod tests {
         )
     }
 
-    fn make_domain_transport_svc() -> httpserve::ServerMakeService {
-        httpserve::ServerMakeService::from_router_for_test(
+    fn make_domain_transport_svc() -> httpserve::ServerService {
+        httpserve::ServerService::from_router_for_test(
             Router::new()
                 .route("/rpc/echo", axum::routing::post(domain_transport_echo))
                 .route(
@@ -1045,6 +1170,18 @@ mod tests {
         )
     }
 
+    #[test]
+    fn actual_transport_make_service_owns_closed_scheme_selection() {
+        assert_eq!(
+            TransportMakeService::plaintext(make_svc()).scheme,
+            server_observation::TransportScheme::Http
+        );
+        assert_eq!(
+            TransportMakeService::tls(make_mtls_svc()).scheme,
+            server_observation::TransportScheme::Https
+        );
+    }
+
     struct HandlerDropSignal(Arc<AtomicBool>);
 
     impl Drop for HandlerDropSignal {
@@ -1054,7 +1191,7 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn make_pending_svc(dropped: Arc<AtomicBool>) -> httpserve::ServerMakeService {
+    fn make_pending_svc(dropped: Arc<AtomicBool>) -> httpserve::ServerService {
         let router = Router::new().route(
             "/slow",
             get(move || {
@@ -1066,7 +1203,7 @@ mod tests {
                 }
             }),
         );
-        httpserve::ServerMakeService::from_router_for_test(
+        httpserve::ServerService::from_router_for_test(
             router,
             httpserve::ServerRequestBudget::from_millis(
                 NonZeroU64::new(20).expect("non-zero test budget"),

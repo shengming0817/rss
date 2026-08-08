@@ -20,8 +20,6 @@ test-util = []
 vocab = { path = "../vocab" }           # CoreError / CoreErrorKind / PublicDetail（wire error mapper 单源）
 primitives = { path = "../primitives" } # AuthPlan / resolve_requirement / HealthReport（健康聚合）
 diagctx = { path = "../diagctx" }       # correlation 诊断信道，service→base（ADR-002 §D1-bis）
-# W3C remote-parent restore 单源；httpserve 不直接 import OpenTelemetry。
-tracewire = { path = "../tracewire" }
 # enforce 在 Require-Allow 后建 runctx::scope（ambient tenant/principal 与 route auth 决策对齐，#1105 F2）；
 # AppCtx 由组合根验签桥经 PendingScopeCtx extension 传入（httpserve 不依赖 authn，只 scope 已构造的 AppCtx）。
 runctx = { path = "../runctx" }
@@ -46,7 +44,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["time"] } # 全请求 server budget；timeout 通过 drop 取消整条 request future
 
 [dev-dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] } # ServiceExt::oneshot 驱动 mock 请求
 # typed route funnel 负向证据（#1113/#1103，ADR-009）：编译期 Hard 不变式的 compile-fail 回归锁
 # （未认证 router 不可 bind、AuthenticatedRoutes 外部不可 mint、non-Primary 不可 mount Primary endpoint）。
@@ -54,5 +52,3 @@ trybuild = { workspace = true }
 # self dev-dep 启用 test-util：httpserve 的**集成测试**（tests/runtime.rs / funnel_trybuild.rs / ui）把 httpserve 当
 # 普通 dep 编译（非 lib `cfg(test)`），需此 feature 才见 `*_for_test`/`unfinalized_for_test`（标准 self dev-dep 模式）。
 httpserve = { path = ".", features = ["test-util"] }
-# HTTP ingress continuity tests reuse tracewire's subscriber; no direct OTel dependency here.
-tracewire = { path = "../tracewire", features = ["test-util"] }

@@ -1,11 +1,11 @@
-//! HTTP 中间件：全请求 server budget + requestId 注入 + correlation 诊断信道绑定 + tracing span + panic recovery。
+//! HTTP 中间件：全请求 server budget + requestId 注入 + correlation 诊断信道绑定 + panic recovery。
 //!
 //! `request_id`：接收或生成 `x-request-id`，写入 extensions，回填到响应 header。
 //! `correlation`：解析 `x-correlation-id`（回退链：入站 header → RequestId → UUID v4），
 //!   经 `diagctx::scope` 绑定 [`diagctx::DiagnosticCtx`]，回填响应 header（ADR-002 §D1-bis）。
 //! `server_request_budget`：drop 超时的完整 request future，返回统一 503 envelope（outcome 未知，
 //!   `retryable=false`）。
-//! `trace`：用 `tracing::Instrument` 包裹 `next.run`，不跨 await 持有 span guard。
+//! `observation metadata`：仅回传 MatchedPath/闭值 cause 给 transport-owned observation seam。
 //! `panic_recovery`：request-aware panic → 500 envelope（带 requestId，panic payload 不泄漏）。
 //!
 //! ref: tokio-rs/axum axum/src/middleware/from_fn.rs@main
@@ -116,7 +116,10 @@ pub(crate) async fn server_request_budget(
                 budget_ms = budget.millis().get(),
                 "http server request budget exhausted"
             );
-            crate::error::service_unavailable(&request_id)
+            mark_response_cause(
+                crate::error::service_unavailable(&request_id),
+                crate::server_observation::ServerResponseCause::timeout(),
+            )
         }
     }
 }
@@ -156,36 +159,25 @@ pub(crate) async fn request_id(mut req: Request, next: Next) -> Response {
     resp
 }
 
-/// W3C-parented HTTP SERVER span. The span ends when response headers are returned; response-body
-/// EOS/error/cancellation settlement belongs to #2037.
-pub(crate) async fn http_server_trace(req: Request, next: Next) -> Response {
-    let inbound = crate::trace_context::InboundTraceContext::from_headers(req.headers());
-    let rid = req
+/// Preserve only Axum's matched route template for the transport-owned observation seam.
+pub(crate) async fn http_server_observation_metadata(req: Request, next: Next) -> Response {
+    let route = req
         .extensions()
-        .get::<RequestId>()
-        .map(|r| r.0.clone())
-        .unwrap_or_default();
-    let correlation = diagctx::correlation();
-    let observation = crate::trace_context::HttpServerObservation::new(
-        req.method(),
-        req.extensions().get::<axum::extract::MatchedPath>(),
-        req.version(),
-        &rid,
-        correlation.as_ref().map_or("", |value| value.as_str()),
-    );
-    let span = observation.span();
-    if let Some(inbound) = inbound {
-        inbound.apply_to(&span);
+        .get::<axum::extract::MatchedPath>()
+        .map(crate::server_observation::ServerObservationRoute::from_matched_path);
+    let mut response = next.run(req).await;
+    if let Some(route) = route {
+        response.extensions_mut().insert(route);
     }
-    use tracing::Instrument;
-    let resp = next.run(req).instrument(span.clone()).await;
-    let status = resp.status().as_u16();
-    span.record("http.response.status_code", status);
-    if resp.status().is_server_error() {
-        span.record("otel.status_code", "error");
-        span.record("error.type", status.to_string());
-    }
-    resp
+    response
+}
+
+fn mark_response_cause(
+    mut response: Response,
+    cause: crate::server_observation::ServerResponseCause,
+) -> Response {
+    response.extensions_mut().insert(cause);
+    response
 }
 
 /// 中间件：Content-Length 检查 + stream-level 字节硬顶——超过 [`crate::protect::BodyLimit`] 上限则拦截。
@@ -269,12 +261,12 @@ fn log_rate_limited(rid: &str, retry_after: std::time::Duration) {
 /// 限流器是 best-effort 防护，provider 故障时服务可用性优先于限流保护；
 /// 极端 DDoS 场景下网络层（CDN/WAF）应作第一道防线。
 ///
-/// peer IP 来自 [`axum::extract::ConnectInfo<SocketAddr>`] extension（生产经
-/// `into_make_service_with_connect_info` 注入；缺失时 fallback "unknown"——仅限 oneshot 单测环境）。
+/// peer IP 来自 [`axum::extract::ConnectInfo<SocketAddr>`] extension（生产经 `httpd` 的私有 transport
+/// make-service 注入；缺失时 fallback "unknown"——仅限 oneshot 单测环境）。
 ///
 /// # INVARIANT: RATE-LIMIT-PEER-IP-01 { level = "Medium", exec = "manual/opt-in", source = "code" }
-/// 生产路径经 `into_make_service_with_connect_info::<SocketAddr>()` 绑定（`routes.rs`），
-/// `ConnectInfo<SocketAddr>` 天然在场；oneshot 测试环境手动插入或留 "unknown"（均合法）。
+/// 生产路径经 `httpd::TransportMakeService` 绑定，`ConnectInfo<SocketAddr>` 天然在场；oneshot 测试
+/// 环境手动插入或留 "unknown"（均合法）。
 pub async fn rate_limit<S>(State(limiter): State<Arc<S>>, req: Request, next: Next) -> Response
 where
     S: RateLimiter + Send + Sync + 'static,
@@ -287,7 +279,7 @@ where
         .to_owned();
 
     // 读 peer IP；缺 ConnectInfo → fallback "unknown"（oneshot 测试场景）。
-    // reason: 生产经 into_make_service_with_connect_info 必有 ConnectInfo，fallback 仅测试路径。
+    // reason: 生产经 httpd 私有 make-service 必有 ConnectInfo，fallback 仅测试路径。
     let ip = req
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
@@ -330,7 +322,10 @@ pub(crate) async fn panic_recovery(req: Request, next: Next) -> Response {
     {
         Ok(resp) => resp,
         // panic payload 不解析、不泄漏；统一 envelope，requestId 来自 request 上下文。
-        Err(_panic) => crate::error::internal_error(&rid),
+        Err(_panic) => mark_response_cause(
+            crate::error::internal_error(&rid),
+            crate::server_observation::ServerResponseCause::panic(),
+        ),
     }
 }
 

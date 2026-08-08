@@ -403,7 +403,7 @@ async fn verify_status(token: &str) -> StatusCode {
         .header(header::AUTHORIZATION, format!("Bearer {token}"))
         .body(Body::empty())
         .unwrap();
-    app.into_router_for_test()
+    app.into_plaintext_router_for_test()
         .oneshot(req)
         .await
         .unwrap()

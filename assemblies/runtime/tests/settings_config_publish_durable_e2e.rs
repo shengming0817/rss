@@ -610,7 +610,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     let reporter = Arc::new(reg.take_health_reporter());
     let metrics_exporter: Arc<dyn diport::MetricsExporter> = telemetry.clone();
     let authed = runtime::test_support::finalize_health_listener(reporter, metrics_exporter)?;
-    let router = authed.into_router_for_test();
+    let router = authed.into_plaintext_router_for_test();
     let readyz = router
         .clone()
         .oneshot(
