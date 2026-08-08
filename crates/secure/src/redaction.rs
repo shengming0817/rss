@@ -714,29 +714,59 @@ pub fn redact_field(key: &str, value: &str) -> Redacted {
     )
 }
 
+/// Observation sink funnel: apply the canonical sensitive-key policy, then scrub URL userinfo.
+///
+/// JSON logging and trace exporters consume this exact entrypoint so neither sink can accidentally
+/// omit one half of the observe-time defense. Declaration-driven PII must still be rendered through
+/// [`safe`] before it reaches a tracing field; this fallback intentionally does not guess arbitrary
+/// PII from benign field names.
+pub fn redact_observation_field(key: &str, value: &str) -> Redacted {
+    let keyed = redact_field(key, value);
+    redact_url_credentials(keyed.as_str())
+}
+
 /// 统一脱敏 funnel：剥离 URL 的 userinfo（`user:pass@`）凭据，保留 scheme/host/port/path 供诊断。
 ///
 /// 用于带内联凭据的连接串（AMQP `amqp://user:pass@host/vhost`、DB DSN 等）——authority 段的
-/// userinfo 整段替换为 `<redacted>`，其余原样。无 `://`、或 authority 内无 `@` 时原样返回（仍包成
+/// 每个 URL 的 userinfo 整段替换为 `<redacted>`，其余原样；自由文本内多个 URL 会全部扫描。无 `://`、
+/// 或所有 authority 内均无 `@` 时原样返回（仍包成
 /// [`Redacted`]，禁 crate 外把未脱敏 URL 当安全值打印绕过 funnel）。只清洗 authority 段的 `@`，
 /// path / query 里的 `@` 不动（[`redact_field`] 按 key 判定无法识别 URL 内联凭据，故需此姊妹 funnel）。
 pub fn redact_url_credentials(url: &str) -> Redacted {
-    let Some(scheme_end) = url.find("://") else {
-        return Redacted::new(url);
-    };
-    let authority_start = scheme_end + 3;
-    let rest = &url[authority_start..];
-    // authority 终止于 path / query / fragment 首字符（其后的 '@' 属 path，非凭据）。
-    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
-    let Some(at) = rest[..authority_end].rfind('@') else {
-        return Redacted::new(url);
-    };
-    // 重建 scheme://<redacted>@<host:port/path...>；userinfo（at 之前）整段抹去。
-    Redacted::new(format!(
-        "{}{REDACTED_PLACEHOLDER}@{}",
-        &url[..authority_start],
-        &rest[at + 1..],
-    ))
+    let mut search_start = 0;
+    let mut copied_through = 0;
+    let mut redacted = String::new();
+    let mut changed = false;
+
+    while let Some(relative_scheme_end) = url[search_start..].find("://") {
+        let authority_start = search_start + relative_scheme_end + 3;
+        let rest = &url[authority_start..];
+        let authority_len = rest
+            .find(|character: char| {
+                matches!(character, '/' | '?' | '#') || character.is_whitespace()
+            })
+            .unwrap_or(rest.len());
+        let authority_end = authority_start + authority_len;
+        if let Some(at) = rest[..authority_len].rfind('@') {
+            redacted.push_str(&url[copied_through..authority_start]);
+            redacted.push_str(REDACTED_PLACEHOLDER);
+            redacted.push('@');
+            redacted.push_str(&url[authority_start + at + 1..authority_end]);
+            copied_through = authority_end;
+            changed = true;
+        }
+        if authority_end >= url.len() {
+            break;
+        }
+        search_start = authority_end;
+    }
+
+    if changed {
+        redacted.push_str(&url[copied_through..]);
+        Redacted::new(redacted)
+    } else {
+        Redacted::new(url)
+    }
 }
 
 // ===== last_error 脱敏安全载体（#1361）=====
@@ -791,7 +821,8 @@ mod tests {
     use super::{
         FieldRedaction, LastError, PiiKind, RedactField, RedactScope, RedactValue, Redacted,
         RedactionCtx, RedactionHashError, RedactionHashKey, RedactionMode, Sensitivity,
-        redact_error, redact_field, redact_hash, redact_struct, redact_url_credentials, safe,
+        redact_error, redact_field, redact_hash, redact_observation_field, redact_struct,
+        redact_url_credentials, safe,
     };
     use rstest::rstest;
 
@@ -1040,6 +1071,27 @@ mod tests {
         assert!(matches!(some.as_redact_value(), RedactValue::Str("v")));
         let none: Option<String> = None;
         assert!(matches!(none.as_redact_value(), RedactValue::Absent));
+    }
+
+    #[rstest]
+    #[case("authorization", "Bearer SECRET_BAIT", "<redacted>")]
+    #[case(
+        "dsn",
+        "postgres://user:SECRET_BAIT@db.internal/rss",
+        "postgres://<redacted>@db.internal/rss"
+    )]
+    #[case("operation", "reconcile", "reconcile")]
+    #[case(
+        "message",
+        "probe http://safe/x then postgres://user:SECRET_BAIT@db/rss and amqp://u:p@mq/v",
+        "probe http://safe/x then postgres://<redacted>@db/rss and amqp://<redacted>@mq/v"
+    )]
+    fn observation_field_uses_the_single_key_and_url_funnel(
+        #[case] key: &str,
+        #[case] value: &str,
+        #[case] want: &str,
+    ) {
+        assert_eq!(redact_observation_field(key, value).as_str(), want);
     }
 
     #[test]

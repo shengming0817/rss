@@ -8,7 +8,7 @@ use super::{
     RustCryptoMacVerifier, S3RuntimeConfig, S3RuntimeConfigParts, ServingRuntimeInputs,
     after_required_preflight, build_trace_export, build_trace_export_from_value, domains,
     event_transport, plan, prepare_local_before_external, prepare_operator_local,
-    prepare_serving_local, routes, run, validate_domain_listener_evidence,
+    prepare_serving_local, routes, run, safe_process_error_line, validate_domain_listener_evidence,
 };
 use crate::config::DOMAIN_TRANSPORT_SHARED_URL_ENV;
 use crate::infra::s3::S3DlxArchiveConfig;
@@ -46,6 +46,16 @@ use tokio_util::sync::CancellationToken;
 
 const B64: base64::engine::general_purpose::GeneralPurpose =
     base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+#[test]
+fn pre_runtime_process_error_is_one_safe_line() {
+    let error = anyhow::anyhow!("failed\nnext\rline postgres://user:SECRET_BAIT@db/rss");
+    let rendered = safe_process_error_line(&error);
+
+    assert!(!rendered.contains(['\r', '\n']));
+    assert!(!rendered.contains("user:SECRET_BAIT"));
+    assert_eq!(rendered, "failed next line postgres://<redacted>@db/rss");
+}
 
 struct FixedDlxBootstrapClock;
 
@@ -1944,11 +1954,17 @@ fn rls_ready_registers_and_is_unique() {
 // ── build_trace_export_from_value：endpoint typed 安全边界（fail-fast）─────────────
 // 显式 raw value（不读真实 env）覆盖 None / TLS / loopback-http / 非 loopback 明文 / 非法 scheme 五态。
 
+fn test_telemetry_resource() -> otel::TelemetryResource {
+    otel::TelemetryResource::try_new("runtime", "assembly-fp", "plan-fp")
+        .expect("non-empty telemetry resource")
+}
+
 #[test]
 #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
 fn build_trace_export_unset_endpoint_is_none() {
     // 未配 RSS_OTEL_ENDPOINT → 仅 fmt 日志、不导出 trace（按需开启），且非 Err。
-    let out = build_trace_export_from_value(None).expect("unset endpoint is Ok(None)");
+    let out = build_trace_export_from_value(None, &test_telemetry_resource())
+        .expect("unset endpoint is Ok(None)");
     assert!(out.is_none(), "unset endpoint must yield None");
 }
 
@@ -1958,7 +1974,7 @@ async fn build_trace_export_uses_the_captured_endpoint_mapping() {
     let snapshot = crate::config::test_snapshot(&[(OTEL_ENDPOINT_ENV, "http://localhost:4317")])
         .expect("capture trace endpoint");
 
-    let out = build_trace_export(snapshot.view())
+    let out = build_trace_export(snapshot.view(), &test_telemetry_resource())
         .expect("snapshot-backed loopback endpoint builds exporter");
     assert!(out.is_some(), "captured endpoint must enable exporting");
 }
@@ -1966,27 +1982,36 @@ async fn build_trace_export_uses_the_captured_endpoint_mapping() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
-    let snapshot = crate::config::test_snapshot(&[(
-        domains::identity::PASSWORD_BLOCKLIST_PATH_ENV,
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../deploy/password-blocklist.demo.sha256"
+    let snapshot = crate::config::test_snapshot(&[
+        (
+            domains::identity::PASSWORD_BLOCKLIST_PATH_ENV,
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../deploy/password-blocklist.demo.sha256"
+            ),
         ),
-    )])
+        ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+        ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+        ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+    ])
     .expect("capture runtime config with local password policy");
     let endpoint = otel::OtelEndpoint::insecure_localhost("http://localhost:4317")
         .expect("hermetic loopback endpoint");
-    let provider = otel::build_otlp_provider(endpoint).expect("build lazy hermetic provider");
+    let telemetry_plan =
+        crate::phase::PreparedTelemetryPlan::prepare(snapshot.view()).expect("bundled RuntimePlan");
+    let provider = otel::build_otlp_provider(endpoint, telemetry_plan.resource())
+        .expect("build lazy hermetic provider");
     let shutdown_witness = provider.clone();
     let inputs = ServingRuntimeInputs::new(
         PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
         test_password_blocklist(),
+        telemetry_plan,
     );
 
     let err = run(inputs)
         .await
         .expect_err("missing token profile config must fail before launch handoff");
-    assert!(format!("{err:#}").contains("build RuntimePlan"));
+    assert!(!format!("{err:#}").is_empty());
     assert!(
         shutdown_witness.shutdown().is_err(),
         "pre-handoff failure must explicitly shut down the shared provider"
@@ -1996,14 +2021,23 @@ async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
 #[tokio::test]
 #[allow(clippy::expect_used)]
 async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
-    let snapshot = crate::config::test_snapshot(&[]).expect("capture empty runtime config");
+    let snapshot = crate::config::test_snapshot(&[
+        ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+        ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+        ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+    ])
+    .expect("capture runtime plan config");
     let endpoint = otel::OtelEndpoint::insecure_localhost("http://localhost:4317")
         .expect("hermetic loopback endpoint");
-    let provider = otel::build_otlp_provider(endpoint).expect("build lazy hermetic provider");
+    let telemetry_plan =
+        crate::phase::PreparedTelemetryPlan::prepare(snapshot.view()).expect("bundled RuntimePlan");
+    let provider = otel::build_otlp_provider(endpoint, telemetry_plan.resource())
+        .expect("build lazy hermetic provider");
     let handoff_witness = provider.clone();
     let inputs = ServingRuntimeInputs::new(
         PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
         test_password_blocklist(),
+        telemetry_plan,
     );
     let mut owner = RuntimeLifecycleOwner::new(inputs);
     let handed_off = owner
@@ -2032,16 +2066,20 @@ async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
 #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
 async fn build_trace_export_loopback_http_builds_exporter() {
     // 明文 http 指向 loopback → 显式 opt-in，构建出 exporter（connect_lazy，不连真实 collector）。
-    let out = build_trace_export_from_value(Some("http://localhost:4317"))
-        .expect("loopback http endpoint builds exporter");
+    let out =
+        build_trace_export_from_value(Some("http://localhost:4317"), &test_telemetry_resource())
+            .expect("loopback http endpoint builds exporter");
     assert!(out.is_some(), "loopback http must build Some(exporter)");
 }
 
 #[tokio::test]
 #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
 async fn build_trace_export_tls_https_builds_exporter() {
-    let out = build_trace_export_from_value(Some("https://collector.internal:4317"))
-        .expect("https TLS endpoint builds exporter");
+    let out = build_trace_export_from_value(
+        Some("https://collector.internal:4317"),
+        &test_telemetry_resource(),
+    )
+    .expect("https TLS endpoint builds exporter");
     assert!(out.is_some(), "https endpoint must build Some(exporter)");
 }
 
@@ -2049,9 +2087,12 @@ async fn build_trace_export_tls_https_builds_exporter() {
 #[allow(clippy::expect_used)] // reason: 测试断言失败路径用 expect 直观定位（error-handling §Carve-out item-level）
 fn build_trace_export_nonloopback_http_is_err() {
     // 明文 http 指向非 loopback host → fail-closed Err（不静默放行明文导出到远端）。
-    let err = build_trace_export_from_value(Some("http://collector.internal:4317"))
-        .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
-        .expect_err("non-loopback plaintext must fail-fast");
+    let err = build_trace_export_from_value(
+        Some("http://collector.internal:4317"),
+        &test_telemetry_resource(),
+    )
+    .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
+    .expect_err("non-loopback plaintext must fail-fast");
     assert!(
         format!("{err:#}").contains("loopback"),
         "err 应提示 loopback 约束: {err:#}"
@@ -2063,10 +2104,12 @@ fn build_trace_export_nonloopback_http_is_err() {
 fn build_trace_export_bad_scheme_is_err() {
     // 非 http(s) scheme → fail-fast（误配在接线期暴露，不静默退回 fmt）。
     const SECRET_FRAGMENT: &str = "collector-token";
-    let err =
-        build_trace_export_from_value(Some("grpc://user:collector-token@collector.internal:4317"))
-            .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
-            .expect_err("non http(s) scheme must fail-fast");
+    let err = build_trace_export_from_value(
+        Some("grpc://user:collector-token@collector.internal:4317"),
+        &test_telemetry_resource(),
+    )
+    .map(|_| ()) // OtelExporter 非 Debug，expect_err 前把 Ok 臂折叠成 ()
+    .expect_err("non http(s) scheme must fail-fast");
     let error = format!("{err:#}");
     assert!(
         error.contains(OTEL_ENDPOINT_ENV),

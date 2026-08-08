@@ -80,17 +80,12 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt;
-use tracing_subscriber::layer::SubscriberExt as _;
-use tracing_subscriber::util::SubscriberInitExt as _;
-
 use crate::config::{
     ProjectionOperatorTokenConfig, RuntimeConfigSnapshot, ServiceTokenConfig, SnapshotConfig,
 };
 use crate::infra::oidc::ServiceTokenReplayOwner;
 use crate::phase::{OperatorRuntimeCapability, PreparedRuntimeInputs};
-use crate::{build_trace_export, prepare_local_before_external, prepare_operator_local};
+use crate::prepare_operator_local;
 
 const SERVICE_TOKEN_REPLAY_STORE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -133,7 +128,8 @@ fn parse_positive_usize(raw: &str, flag: &str) -> anyhow::Result<usize> {
 
 /// Prepare operator inputs without loading serving-only password policy data.
 pub fn prepare_runtime() -> anyhow::Result<OperatorRuntimeInputs> {
-    let (prepared, ()) = crate::prepare_runtime_kernel(crate::prepare_operator_local)?;
+    let (prepared, (), _runtime_plan) =
+        crate::prepare_runtime_kernel(crate::prepare_operator_local)?;
     OperatorRuntimeInputs::new(prepared)
 }
 
@@ -151,19 +147,16 @@ fn prepare_projection_operator_runtime_kernel() -> anyhow::Result<PreparedRuntim
     let runtime_config = RuntimeConfigSnapshot::capture_projection_operator_process_snapshot()
         .context("capture projection operator runtime configuration")?;
     let config = runtime_config.view();
-    let ((), trace_export) = prepare_local_before_external(config, prepare_operator_local, || {
-        build_trace_export(config)
-    })?;
-    let filter = config
-        .value("RUST_LOG")
-        .and_then(|raw| EnvFilter::try_new(raw).ok())
-        .unwrap_or_else(|| EnvFilter::new("info"));
-    let otel_layer = trace_export.as_ref().map(|exporter| exporter.layer());
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(std::io::stderr))
-        .with(otel_layer)
-        .init();
+    let telemetry_plan = crate::phase::PreparedTelemetryPlan::prepare(config)?;
+    let ((), trace_export) =
+        crate::telemetry::prepare_local_before_external(config, prepare_operator_local, || {
+            crate::telemetry::build_trace_export(config, telemetry_plan.resource())
+        })?;
+    crate::telemetry::install_runtime_subscriber(
+        telemetry_plan.filter(),
+        telemetry_plan.resource().clone(),
+        trace_export.as_ref(),
+    )?;
     Ok(PreparedRuntimeInputs::new(runtime_config, trace_export))
 }
 
@@ -188,6 +181,24 @@ pub async fn shutdown_projection_runtime(
     mut runtime_inputs: ProjectionOperatorRuntimeInputs,
 ) -> anyhow::Result<()> {
     crate::shutdown_prepared_runtime(runtime_inputs.prepared_mut()).await
+}
+
+/// Combine an operator command with its telemetry cleanup without hiding the primary failure.
+pub fn combine_command_and_cleanup(
+    command_result: anyhow::Result<()>,
+    cleanup_result: anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    match (command_result, cleanup_result) {
+        (Ok(()), cleanup_result) => cleanup_result,
+        (Err(command_error), Ok(())) => Err(command_error),
+        (Err(command_error), Err(cleanup_error)) => {
+            tracing::error!(
+                cleanup_error = %secure::redact_error(cleanup_error.as_ref()),
+                "operator command failed and telemetry cleanup also failed; preserving command error"
+            );
+            Err(command_error)
+        }
+    }
 }
 
 #[cfg(test)]

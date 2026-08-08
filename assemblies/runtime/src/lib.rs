@@ -42,6 +42,8 @@ pub mod operator;
 #[path = "generated/providers_gen.rs"]
 mod providers_gen;
 #[cfg(test)]
+mod telemetry_tests;
+#[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
 const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
@@ -53,7 +55,13 @@ mod runtime_inventory;
 pub mod saga_runtime;
 mod secret_config;
 pub mod support;
+mod telemetry;
 pub(crate) use secret_config::EnvSecret;
+#[cfg(test)]
+use telemetry::{
+    OTEL_ENDPOINT_ENV, build_trace_export, build_trace_export_from_value,
+    prepare_local_before_external,
+};
 
 pub use distributed_runtime::DistributedRuntimeDeps;
 pub use domains::settings::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
@@ -92,48 +100,6 @@ use diport::ManagedResource as _;
 use primitives::MacKey;
 use std::sync::Arc;
 
-/// otel OTLP/gRPC 导出端点环境变量（**按需开启**：未设 → 不导出 trace，仅 fmt 日志；设了 → 按 scheme 派发 typed endpoint）。
-const OTEL_ENDPOINT_ENV: &str = "RSS_OTEL_ENDPOINT";
-
-/// 从进程配置快照构建可选 otel trace 导出 exporter。
-fn build_trace_export(config: SnapshotConfig<'_>) -> anyhow::Result<Option<otel::OtelExporter>> {
-    build_trace_export_from_value(config.value(OTEL_ENDPOINT_ENV))
-}
-
-/// 从显式原始值构建可选 exporter（纯解析内核，**不**触碰配置源或全局 subscriber）。
-///
-/// **按需开启**：[`OTEL_ENDPOINT_ENV`] 未设 → `Ok(None)`（仅 fmt 日志，不导出 trace）。设了则按 scheme 派发
-/// typed [`otel::OtelEndpoint`]——`https://` → TLS（生产默认）；`http://` → 仅 loopback host 显式明文 opt-in
-/// （非 loopback 即 `Err`，零信任 fail-closed）；其它 scheme → `Err`。**fail-fast**：误配在组合根接线期即暴露，
-/// 不静默退回 fmt（值非法 ≠ 未配）。Exporter 由 [`run`] 交给 `runtimeexec` 的唯一 shutdown owner 并在关停时 flush。
-fn build_trace_export_from_value(raw: Option<&str>) -> anyhow::Result<Option<otel::OtelExporter>> {
-    let Some(raw) = raw else {
-        return Ok(None);
-    };
-    let endpoint = if raw.starts_with("https://") {
-        otel::OtelEndpoint::tls(raw).context("RSS_OTEL_ENDPOINT https (TLS) endpoint")?
-    } else if raw.starts_with("http://") {
-        otel::OtelEndpoint::insecure_localhost(raw)
-            .context("RSS_OTEL_ENDPOINT http endpoint must target a loopback host")?
-    } else {
-        // 错误只含变量名、不含 raw 值（endpoint 可携 userinfo/token，避免明文进启动日志；调试细节经
-        // OtelEndpoint::{tls,insecure_localhost} 的 error chain 上层已足够）。
-        anyhow::bail!("{OTEL_ENDPOINT_ENV} must be https:// (TLS) or http:// to a loopback host");
-    };
-    let provider = otel::build_otlp_provider(endpoint).context("build OTLP/gRPC trace provider")?;
-    Ok(Some(otel::OtelExporter::new(provider)))
-}
-
-fn prepare_local_before_external<Local, External>(
-    config: SnapshotConfig<'_>,
-    prepare_local: impl FnOnce(SnapshotConfig<'_>) -> anyhow::Result<Local>,
-    build_external: impl FnOnce() -> anyhow::Result<External>,
-) -> anyhow::Result<(Local, External)> {
-    let local = prepare_local(config)?;
-    let external = build_external()?;
-    Ok((local, external))
-}
-
 fn prepare_serving_local(
     config: SnapshotConfig<'_>,
 ) -> anyhow::Result<Arc<secure::DigestPasswordBlocklist>> {
@@ -151,44 +117,68 @@ fn prepare_operator_local(_: SnapshotConfig<'_>) -> anyhow::Result<()> {
 /// serving-only capability.
 fn prepare_runtime_kernel<Local>(
     prepare_local: impl FnOnce(SnapshotConfig<'_>) -> anyhow::Result<Local>,
-) -> anyhow::Result<(PreparedRuntimeInputs, Local)> {
-    use tracing_subscriber::EnvFilter;
-    use tracing_subscriber::fmt;
-    use tracing_subscriber::layer::SubscriberExt as _;
-    use tracing_subscriber::util::SubscriberInitExt as _;
-
+) -> anyhow::Result<(PreparedRuntimeInputs, Local, phase::PreparedTelemetryPlan)> {
     let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot()
         .context("capture process runtime configuration")?;
     let config = runtime_config.view();
+    let telemetry_plan = phase::PreparedTelemetryPlan::prepare(config)?;
     let (local, trace_export) =
-        prepare_local_before_external(config, prepare_local, || build_trace_export(config))?;
-    let filter = config
-        .value("RUST_LOG")
-        .and_then(|raw| EnvFilter::try_new(raw).ok())
-        .unwrap_or_else(|| EnvFilter::new("info"));
-    let otel_layer = trace_export.as_ref().map(|exporter| exporter.layer());
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(fmt::layer().with_writer(std::io::stderr))
-        .with(otel_layer)
-        .init();
+        telemetry::prepare_local_before_external(config, prepare_local, || {
+            telemetry::build_trace_export(config, telemetry_plan.resource())
+        })?;
+    telemetry::install_runtime_subscriber(
+        telemetry_plan.filter(),
+        telemetry_plan.resource().clone(),
+        trace_export.as_ref(),
+    )?;
     Ok((
         PreparedRuntimeInputs::new(runtime_config, trace_export),
         local,
+        telemetry_plan,
     ))
 }
 
 /// Prepare serving inputs, sealing the local password policy before any external provider.
 ///
 /// 组合根 binary 入口在 [`run`] **之前**调用——否则运行时入口的全部结构化日志
-/// （bind / serve / shutdown / fail-fast）皆为 no-op。`RUST_LOG`、[`OTEL_ENDPOINT_ENV`] 与后续
+/// （bind / serve / shutdown / fail-fast）皆为 no-op。`RUST_LOG`、[`telemetry::OTEL_ENDPOINT_ENV`] 与后续
 /// serving consumer 全部来自这个 snapshot，不再读取 ambient environment。密码 blocklist 在
 /// snapshot 后立即加载并成为必填 [`ServingRuntimeInputs`] typestate，任何 OTLP/外部 provider 都晚于它。
 ///
 /// Only this type can enter [`run`] or [`shutdown_runtime`].
 pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
-    let (prepared, password_blocklist) = prepare_runtime_kernel(prepare_serving_local)?;
-    Ok(ServingRuntimeInputs::new(prepared, password_blocklist))
+    let (prepared, password_blocklist, telemetry_plan) =
+        prepare_runtime_kernel(prepare_serving_local)?;
+    Ok(ServingRuntimeInputs::new(
+        prepared,
+        password_blocklist,
+        telemetry_plan,
+    ))
+}
+
+/// Emit a process-terminal failure through the installed JSON subscriber.
+///
+/// Preparation failures before subscriber installation use one safe CLI line; a process can
+/// therefore emit either pre-runtime CLI text or the versioned JSON stream, never both.
+pub fn report_process_error(error: &anyhow::Error) {
+    if !telemetry::report_process_error(error) {
+        eprintln!("{}", safe_process_error_line(error));
+    }
+}
+
+fn safe_process_error_line(error: &anyhow::Error) -> String {
+    let single_line: String = error
+        .to_string()
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect();
+    secure::redact_observation_field("process_error", &single_line).to_string()
 }
 
 /// Flush the trace exporter when a prepared runtime exits before serving launch.

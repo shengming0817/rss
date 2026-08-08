@@ -5322,6 +5322,7 @@ dependencies = [
  "identity",
  "identity-composition",
  "ids",
+ "jsonschema",
  "metrics",
  "metrics-exporter-prometheus",
  "observ",

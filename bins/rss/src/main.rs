@@ -85,7 +85,7 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run_main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let command = classify_command(&args)?;
     if let CommandFamily::VaultAllowlistValidation = command {
@@ -113,8 +113,8 @@ async fn main() -> anyhow::Result<()> {
         let runtime_inputs = runtime::operator::prepare_projection_runtime()?;
         let operator_result =
             runtime::operator::run_projection_control_command(prepared, &runtime_inputs).await;
-        runtime::operator::shutdown_projection_runtime(runtime_inputs).await?;
-        return operator_result;
+        let cleanup_result = runtime::operator::shutdown_projection_runtime(runtime_inputs).await;
+        return runtime::operator::combine_command_and_cleanup(operator_result, cleanup_result);
     }
     if let OperatorCommand::Saga = command {
         let prepared = match runtime::operator::prepare_saga_command(&args)? {
@@ -133,8 +133,9 @@ async fn main() -> anyhow::Result<()> {
         let operator_result =
             runtime::operator::run_device_latent_inspection_command(prepared, &runtime_inputs)
                 .await;
-        runtime::operator::shutdown_device_latent_runtime(runtime_inputs).await?;
-        return operator_result;
+        let cleanup_result =
+            runtime::operator::shutdown_device_latent_runtime(runtime_inputs).await;
+        return runtime::operator::combine_command_and_cleanup(operator_result, cleanup_result);
     }
     if let OperatorCommand::L2DrRecovery = command {
         // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
@@ -154,8 +155,8 @@ async fn main() -> anyhow::Result<()> {
         let runtime_inputs = runtime::operator::prepare_runtime()?;
         let operator_result =
             runtime::operator::run_reconcile_target_command(prepared, &runtime_inputs).await;
-        runtime::operator::shutdown_runtime(runtime_inputs).await?;
-        return operator_result;
+        let cleanup_result = runtime::operator::shutdown_runtime(runtime_inputs).await;
+        return runtime::operator::combine_command_and_cleanup(operator_result, cleanup_result);
     }
     if let OperatorCommand::AuditLedgerVerify = command {
         // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
@@ -166,8 +167,8 @@ async fn main() -> anyhow::Result<()> {
         let runtime_inputs = runtime::operator::prepare_runtime()?;
         let operator_result =
             runtime::operator::run_audit_ledger_verify_command(prepared, &runtime_inputs).await;
-        runtime::operator::shutdown_runtime(runtime_inputs).await?;
-        return operator_result;
+        let cleanup_result = runtime::operator::shutdown_runtime(runtime_inputs).await;
+        return runtime::operator::combine_command_and_cleanup(operator_result, cleanup_result);
     }
     if let OperatorCommand::SettingsConfigValueMaintenance = command {
         // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
@@ -180,8 +181,8 @@ async fn main() -> anyhow::Result<()> {
         let operator_result =
             runtime::operator::run_settings_config_value_maintenance(prepared, &runtime_inputs)
                 .await;
-        runtime::operator::shutdown_runtime(runtime_inputs).await?;
-        return operator_result;
+        let cleanup_result = runtime::operator::shutdown_runtime(runtime_inputs).await;
+        return runtime::operator::combine_command_and_cleanup(operator_result, cleanup_result);
     }
     if let OperatorCommand::Dlq = command {
         // Parse / help before prepare_runtime so `--help` stays reachable without secret bundle.
@@ -192,8 +193,8 @@ async fn main() -> anyhow::Result<()> {
         let runtime_inputs = runtime::operator::prepare_runtime()?;
         let operator_result =
             runtime::operator::run_dlq_control_command(prepared, &runtime_inputs).await;
-        runtime::operator::shutdown_runtime(runtime_inputs).await?;
-        return operator_result;
+        let cleanup_result = runtime::operator::shutdown_runtime(runtime_inputs).await;
+        return runtime::operator::combine_command_and_cleanup(operator_result, cleanup_result);
     }
     // Remaining closed operator command: JWKS export (no prepare-first clap family).
     // Prepare-first families already returned above; match keeps OperatorCommand exhaustive.
@@ -226,8 +227,22 @@ async fn main() -> anyhow::Result<()> {
             runtime::operator::run_rss_access_jwks_export_command(&args, &runtime_inputs).await
         }
     };
-    runtime::operator::shutdown_runtime(runtime_inputs).await?;
-    operator_result
+    let cleanup_result = runtime::operator::shutdown_runtime(runtime_inputs).await;
+    runtime::operator::combine_command_and_cleanup(operator_result, cleanup_result)
+}
+
+fn process_exit(result: anyhow::Result<()>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            runtime::report_process_error(&error);
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    process_exit(run_main())
 }
 
 #[cfg(test)]
@@ -249,6 +264,23 @@ mod tests {
             classify_command(&args(&["migrate-all"])),
             Ok(CommandFamily::Operator(OperatorCommand::Postgres))
         ));
+    }
+
+    #[test]
+    fn operator_cleanup_preserves_the_primary_command_error() {
+        let error = runtime::operator::combine_command_and_cleanup(
+            Err(anyhow::anyhow!("primary command failure")),
+            Err(anyhow::anyhow!("secondary cleanup failure")),
+        )
+        .expect_err("command must remain failed");
+        assert_eq!(error.to_string(), "primary command failure");
+
+        let cleanup_error = runtime::operator::combine_command_and_cleanup(
+            Ok(()),
+            Err(anyhow::anyhow!("cleanup after success")),
+        )
+        .expect_err("cleanup failure after success must fail");
+        assert_eq!(cleanup_error.to_string(), "cleanup after success");
     }
 
     #[test]
@@ -381,5 +413,14 @@ mod tests {
             assert!(message.contains(ns), "missing namespace {ns}: {message}");
         }
         assert!(!message.contains("SECRET_BAIT"), "argv echoed: {message}");
+    }
+
+    #[test]
+    fn process_exit_never_delegates_errors_to_rust_text_termination() {
+        assert_eq!(process_exit(Ok(())), std::process::ExitCode::SUCCESS);
+        assert_eq!(
+            process_exit(Err(anyhow::anyhow!("safe failure"))),
+            std::process::ExitCode::FAILURE
+        );
     }
 }

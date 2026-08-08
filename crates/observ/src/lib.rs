@@ -3,6 +3,7 @@
 //! 提供：
 //! - metrics label 闭值集（HttpLabel / EventLabel / CertLabel），编译期防高基数扩散
 //! - provider-agnostic MetricLabel 出口（adapters/otel 负责映射 KeyValue；本 crate 不引 otel）
+//! - sink-neutral [`TelemetryResource`]（RuntimePlan 铸造一次，JSON/OTLP 只做具名映射）
 //!
 //! 注：审计 sink（`AuditEvent` / `AuditOutcome` / `AuditSink`）是可替换-provider DI 注入端口，
 //! 已迁 `diport`（issue #1075，ADR-003 DI port 收敛）——消费方经 `diport::AuditSink` 注入。
@@ -15,12 +16,14 @@
 
 mod device_latent;
 mod localtx;
+mod telemetry;
 
 pub use device_latent::{DeviceLatentMetric, DeviceLatentObservation};
 pub use localtx::{
     LocalTxActionableAlert, LocalTxMetric, LocalTxMetricPurpose, LocalTxObservation,
     LocalTxOperationsDescriptor, LocalTxRetryPressureClassification, localtx_operations_descriptor,
 };
+pub use telemetry::{TelemetryResource, TelemetryResourceError};
 
 // ─── metrics label 闭值集 ───────────────────────────────────────────────────
 
@@ -200,6 +203,22 @@ impl MetricLabel for CertLabel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn telemetry_resource_rejects_empty_identity_and_has_named_accessors() {
+        for values in [
+            ("", "assembly-fp", "plan-fp"),
+            ("runtime", "", "plan-fp"),
+            ("runtime", "assembly-fp", ""),
+        ] {
+            assert!(TelemetryResource::try_new(values.0, values.1, values.2).is_err());
+        }
+        let resource = TelemetryResource::try_new("runtime", "assembly-fp", "plan-fp")
+            .expect("non-empty resource");
+        assert_eq!(resource.service_name(), "runtime");
+        assert_eq!(resource.assembly_fingerprint(), "assembly-fp");
+        assert_eq!(resource.runtime_plan_fingerprint(), "plan-fp");
+    }
 
     // ── HttpLabel ────────────────────────────────────────────────────────
     #[test]

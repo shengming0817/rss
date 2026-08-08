@@ -15,7 +15,7 @@ fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
     match args {
         [] => Ok(CommandFamily::Serving),
         [command] if command == "version" => Ok(CommandFamily::Version),
-        _ => anyhow::bail!("unknown server command: {args:?}"),
+        _ => anyhow::bail!("unknown server command; expected: version"),
     }
 }
 
@@ -28,7 +28,7 @@ fn format_version_lines() -> String {
 }
 
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn run_main() -> anyhow::Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match classify_command(&args)? {
         CommandFamily::Version => {
@@ -40,6 +40,20 @@ async fn main() -> anyhow::Result<()> {
             runtime::run(runtime_inputs).await
         }
     }
+}
+
+fn process_exit(result: anyhow::Result<()>) -> std::process::ExitCode {
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(error) => {
+            runtime::report_process_error(&error);
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn main() -> std::process::ExitCode {
+    process_exit(run_main())
 }
 
 #[cfg(test)]
@@ -60,7 +74,14 @@ mod tests {
             classify_command(&args(&[])),
             Ok(CommandFamily::Serving)
         ));
-        assert!(classify_command(&args(&["bogus"])).is_err());
+        let secret_bait = "bogus\nSECRET_BAIT";
+        let error = classify_command(&args(&[secret_bait]))
+            .err()
+            .unwrap_or_else(|| unreachable!());
+        assert_eq!(
+            error.to_string(),
+            "unknown server command; expected: version"
+        );
         assert!(classify_command(&args(&["version", "extra"])).is_err());
     }
 
@@ -79,6 +100,15 @@ mod tests {
             lines.lines().count(),
             2,
             "expected exactly two lines:\n{lines}"
+        );
+    }
+
+    #[test]
+    fn process_exit_never_delegates_errors_to_rust_text_termination() {
+        assert_eq!(process_exit(Ok(())), std::process::ExitCode::SUCCESS);
+        assert_eq!(
+            process_exit(Err(anyhow::anyhow!("safe failure"))),
+            std::process::ExitCode::FAILURE
         );
     }
 }

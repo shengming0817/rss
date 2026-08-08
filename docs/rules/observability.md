@@ -21,6 +21,25 @@
   `rss_instrument_err_level` dylint（INVARIANT INSTRUMENT-ERR-LEVEL-01）。真 5xx / 正确性·安全·持久化
   失败仍由 handler 显式 `tracing::error!`（或确需时 `err(level = "error")`）记 ERROR。
 
+Runtime-managed serving、operator 与 Projection stderr 只输出逐行 JSON v1；不存在文本、双写或兼容开关。
+权威 schema 是
+`docs/spec/009-observability-priority-levels/contracts/structured-log-schema.json`：顶层字段固定，未知 tracing
+字段只能进入 `attributes`，缺失 trace/request 上下文显式为 `null`。`resource` 只含从已验证
+RuntimePlan 投影并由 `observ::TelemetryResource` 封闭持有的 `service.name`、assembly fingerprint 与
+runtime-plan fingerprint；JSON/OTLP 只能通过具名 getter 映射。未启用 OTLP 时不伪造
+trace/span ID。schema 顶层形状发生变化必须升级版本，不读取旧版本。
+本文件在 #2038 前只有未版本化、未接入 runtime sink 的 request/correlation 字段片段，不是旧日志 envelope；
+#2038 按批准的破坏性切换原地建立第一个 runtime envelope（`schema_version = 1`），不保留该占位片段的 identity
+或兼容读取路径。后续已发布 envelope 的形状变化才递增版本。
+生产 binary 以 `ExitCode` 终止，不把 `anyhow::Result` 交给 Rust 的文本 termination formatter；
+subscriber 已安装后的终态错误经同一 JSON layer 记录；安装前的 offline CLI/preparation 错误只输出经
+`secure` observation funnel 清洗的单行摘要并以非零状态退出。单个进程不可能先进入 JSON generation 再走
+pre-runtime 文本路径，故两种 wire 不会混流。独立 postgres `migrate-all` subscriber 不属于
+runtime-managed 日志契约。
+
+`RUST_LOG` 未设置时默认 `info`；一旦设置，空值或非法 directive 必须在任何外部 exporter/provider 构造前
+fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留可能携密的 parser source。
+
 ## Redaction
 
 > **作用面 = observe-time**。本节只把明文挡在 Debug / 日志 / trace / `last_error` 等输出面之外，
@@ -29,6 +48,8 @@
 
 - span error、span string attribute、tracing subscriber 敏感字段与持久化 `last_error` 都必须
   fail-closed redaction，且统一收口到 `secure` crate，不得存在第二条清洗路径。
+- JSON/OTLP observation sink 的 string 字段统一调用 `secure::redact_observation_field`，由该入口按顺序完成
+  敏感 key sweep 与 URL userinfo scrub；sink 不得自行串联或复制两步逻辑。
 - 带脱敏声明的值进入任何输出面前必须经 `secure` 的字段级输出入口按**声明的字段策略**渲染。
   字段声明优先于 key 猜测：值在变成字符串之前已脱敏，exporter 的 key-sweep 只是兜底。
 - 输出通道必须显式区分受信进程内诊断与外部不可信 sink；后者对部分泄露 mode 必须塌缩为完全脱敏。

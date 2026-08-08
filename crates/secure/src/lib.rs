@@ -50,7 +50,8 @@ pub use pseudonym::{
 pub use redaction::{
     FieldRedaction, LastError, PiiKind, Redact, RedactField, RedactScope, RedactValue, Redacted,
     RedactionHashError, RedactionHashKey, RedactionMode, Redactor, Sensitivity, redact_error,
-    redact_field, redact_hash, redact_struct, redact_url_credentials, safe,
+    redact_field, redact_hash, redact_observation_field, redact_struct, redact_url_credentials,
+    safe,
 };
 pub use refresh::{OpaqueToken, digest};
 pub use saga_receipt_integrity::{

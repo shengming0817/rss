@@ -20,7 +20,65 @@
 mod pipeline;
 
 #[cfg(feature = "backend")]
+pub use observ::TelemetryResource;
+#[cfg(feature = "test-support")]
+pub use pipeline::test_support;
+#[cfg(feature = "backend")]
 pub use pipeline::{OtelEndpoint, OtelEndpointError, OtelError, build_otlp_provider};
+
+/// Valid trace/span identifiers projected from the currently entered tracing span.
+#[cfg(feature = "backend")]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TraceIds {
+    trace_id: String,
+    span_id: String,
+}
+
+#[cfg(feature = "backend")]
+impl TraceIds {
+    pub fn trace_id(&self) -> &str {
+        &self.trace_id
+    }
+
+    pub fn span_id(&self) -> &str {
+        &self.span_id
+    }
+}
+
+/// Return identifiers from the active OpenTelemetry context, if one is installed and valid.
+#[cfg(feature = "backend")]
+pub fn current_trace_ids() -> Option<TraceIds> {
+    use opentelemetry::trace::TraceContextExt as _;
+
+    // The bridge layer enables OpenTelemetry context activation by default. Reading the activated
+    // context works inside sibling subscriber callbacks, where recursively querying
+    // `tracing::Span::current()` is intentionally suppressed by tracing's dispatcher guard.
+    let context = opentelemetry::Context::current();
+    let span = context.span();
+    let span_context = span.span_context();
+    span_context.is_valid().then(|| TraceIds {
+        trace_id: span_context.trace_id().to_string(),
+        span_id: span_context.span_id().to_string(),
+    })
+}
+
+/// Return identifiers for a resolved tracing span, including an explicit event parent that is not
+/// currently entered.
+#[cfg(feature = "backend")]
+pub fn trace_ids_for_span(
+    span_id: &tracing::span::Id,
+    dispatch: &tracing::Dispatch,
+) -> Option<TraceIds> {
+    use opentelemetry::trace::TraceContextExt as _;
+
+    let context = tracing_opentelemetry::get_otel_context(span_id, dispatch)?;
+    let span = context.span();
+    let span_context = span.span_context();
+    span_context.is_valid().then(|| TraceIds {
+        trace_id: span_context.trace_id().to_string(),
+        span_id: span_context.span_id().to_string(),
+    })
+}
 
 use diport::{ManagedResource, ShutdownError};
 
@@ -114,7 +172,7 @@ mod backend_tests {
     //! 导出行为矩阵（InMemorySpanExporter 确定性捕获，无 live collector）：
     //! tracing span → 桥接 Layer → OTLP 导出 round-trip / observ::MetricLabel→KeyValue 映射 /
     //! OTLP/gRPC provider 构建 + 生命周期（name + shutdown）。
-    use super::{OtelEndpoint, OtelExporter, build_otlp_provider, to_key_value};
+    use super::{OtelEndpoint, OtelExporter, TelemetryResource, build_otlp_provider, to_key_value};
     use diport::ManagedResource;
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
     use rstest::rstest;
@@ -136,14 +194,21 @@ mod backend_tests {
         OtelEndpoint::insecure_localhost(endpoint).expect("valid loopback http endpoint")
     }
 
+    fn resource() -> TelemetryResource {
+        TelemetryResource::try_new("runtime", "assembly-fp", "plan-fp")
+            .expect("non-empty telemetry resource")
+    }
+
     #[allow(clippy::expect_used)]
     fn build_ok(endpoint: OtelEndpoint) -> SdkTracerProvider {
-        build_otlp_provider(endpoint).expect("valid endpoint builds provider (connect_lazy)")
+        build_otlp_provider(endpoint, &resource())
+            .expect("valid endpoint builds provider (connect_lazy)")
     }
 
     #[allow(clippy::expect_used)]
     fn build_err(endpoint: OtelEndpoint) -> super::OtelError {
-        build_otlp_provider(endpoint).expect_err("invalid endpoint must yield OtelError")
+        build_otlp_provider(endpoint, &resource())
+            .expect_err("invalid endpoint must yield OtelError")
     }
 
     #[test]

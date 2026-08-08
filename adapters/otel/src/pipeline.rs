@@ -5,15 +5,34 @@
 //! - [`RedactingSpanExporter`]：导出边界 key-sweep + free-form URL-scrub 脱敏（**defense-in-depth 兜底**，#1361）；
 //!   首要防线是 call-site 字段策略（`secure::safe(&v, scope)` / 派生 `Debug`），在值变成 span 属性字符串前按声明
 //!   策略脱敏；兜底只见类型擦除后的 `String`：DSN 内联凭据经 URL-scrub 剥除，但非 URL 的 `email`/`subject` 原值仍透传。
-//! - [`build_otlp_provider`]：endpoint → 已建脱敏 `SdkTracerProvider` 的 fail-fast typed 构建步骤。
+//! - [`build_otlp_provider`]：endpoint + required resource → 已建脱敏 `SdkTracerProvider` 的 fail-fast typed 构建步骤。
 
 use diport::RedactedSource;
+use observ::TelemetryResource;
+use opentelemetry::trace::Status;
 use opentelemetry::{KeyValue, Value};
 use opentelemetry_otlp::{SpanExporter as OtlpSpanExporter, WithExportConfig as _};
 use opentelemetry_sdk::Resource;
 use opentelemetry_sdk::error::OTelSdkResult;
 use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
-use secure::{redact_field, redact_url_credentials};
+use secure::redact_observation_field;
+
+/// INVARIANT: OTEL-RESOURCE-REQUIRED-01 { level = "Hard", exec = "native-compile", source = "code", native = "required sink-neutral TelemetryResource parameter with no default overload" } -- an OTLP provider cannot be built without the exact non-empty service, assembly and RuntimePlan identity supplied by the composition root.
+fn to_otel_resource(resource: &TelemetryResource) -> Resource {
+    Resource::builder_empty()
+        .with_attributes([
+            KeyValue::new("service.name", resource.service_name().to_owned()),
+            KeyValue::new(
+                "rss.assembly.fingerprint",
+                resource.assembly_fingerprint().to_owned(),
+            ),
+            KeyValue::new(
+                "rss.runtime_plan.fingerprint",
+                resource.runtime_plan_fingerprint().to_owned(),
+            ),
+        ])
+        .build()
+}
 
 /// OTLP exporter pipeline 构建失败（endpoint 非法 / 传输初始化失败）。
 ///
@@ -121,7 +140,7 @@ fn is_loopback_http(endpoint: &str) -> bool {
 /// 类型擦除后的 `String`：DSN 内联凭据经 URL-scrub 剥除（不依赖 key），但非 URL 的自由文本 PII（如
 /// `email`/`subject` 原值）仍透传，须由 call-site 字段策略覆盖（#1361）。
 ///
-/// key-sweep 按 [`secure::redact_field`] 单源 funnel 清洗 span/event/link 属性中已知敏感 key
+/// [`secure::redact_observation_field`] 单源 funnel 清洗 span/event/link 属性中已知敏感 key
 /// （`authorization`/`access_token`/`session`/`cookie`/`jwt`… → `<redacted>`），防凭据经 tracing→OTLP
 /// 裸传（`observability.md` §redaction；脱敏落在导出最外边界，fail-closed）。
 #[derive(Debug)]
@@ -138,10 +157,9 @@ impl<E> RedactingSpanExporter<E> {
 
 /// 就地清洗一组属性的 string 值（非 string 值无自由文本 PII，跳过——避免把计数 / 布尔等 typed 值误改成字符串）。
 ///
-/// 两步（`observability.md` §redaction：「先按 key 判敏感，再做 free-form scrub」）：
-/// 1. **key-sweep**：[`secure::redact_field`] 按敏感 key（`authorization`/`session`/`cookie`/`jwt`… → `<redacted>`）；
-/// 2. **free-form scrub**：对结果再经 [`secure::redact_url_credentials`] 剥 URL 内联凭据——**不依赖 key 名**，
-///    故 `dsn`/`url` 等非敏感 key 携内联 DSN（`postgres://u:p@h/db`）也剥成 `postgres://<redacted>@h/db`。
+/// `secure::redact_observation_field` 在 secure 单源内按顺序执行 key-sweep 与 URL userinfo scrub；
+/// `dsn`/`url` 等非敏感 key 携内联 DSN（`postgres://u:p@h/db`）也会剥成
+/// `postgres://<redacted>@h/db`。
 ///
 /// **defense-in-depth 兜底**（#1361）：仍有 key-sweep + URL-scrub 都不覆盖的盲区——非 URL 且非敏感 key 的
 /// 自由文本 PII（如 `email`/`subject` 原值），须由 call-site 字段策略（`secure::safe(&v, scope)` / 派生 `Debug`）覆盖。
@@ -152,9 +170,7 @@ fn redact_attributes(attributes: &mut [KeyValue]) {
         }
         let replacement = {
             let current = kv.value.as_str();
-            let keyed = redact_field(kv.key.as_str(), current.as_ref());
-            // free-form scrub：key-sweep 结果再剥 URL 凭据（DSN userinfo 不依赖 key 名）。
-            let scrubbed = redact_url_credentials(keyed.as_str());
+            let scrubbed = redact_observation_field(kv.key.as_str(), current.as_ref());
             (scrubbed.as_str() != current.as_ref()).then(|| scrubbed.as_str().to_owned())
         };
         if let Some(value) = replacement {
@@ -166,8 +182,23 @@ fn redact_attributes(attributes: &mut [KeyValue]) {
 impl<E: SpanExporter> SpanExporter for RedactingSpanExporter<E> {
     async fn export(&self, mut batch: Vec<SpanData>) -> OTelSdkResult {
         for span in &mut batch {
+            let name = redact_observation_field("otel.name", span.name.as_ref());
+            if name.as_str() != span.name.as_ref() {
+                span.name = name.as_str().to_owned().into();
+            }
+            if let Status::Error { description } = &mut span.status {
+                let scrubbed =
+                    redact_observation_field("otel.status_description", description.as_ref());
+                if scrubbed.as_str() != description.as_ref() {
+                    *description = scrubbed.as_str().to_owned().into();
+                }
+            }
             redact_attributes(&mut span.attributes);
             for event in &mut span.events.events {
+                let name = redact_observation_field("otel.event.name", event.name.as_ref());
+                if name.as_str() != event.name.as_ref() {
+                    event.name = name.as_str().to_owned().into();
+                }
                 redact_attributes(&mut event.attributes);
             }
             for link in &mut span.links.links {
@@ -196,7 +227,10 @@ impl<E: SpanExporter> SpanExporter for RedactingSpanExporter<E> {
 ///
 /// `endpoint` 是 typed [`OtelEndpoint`]：TLS（`https://`）或显式 opt-in 的本地明文——非 TLS 不再是隐式
 /// 成功路径（fail-closed）。tonic channel 惰性连接（`connect_lazy`），构建不连真实 collector（连接发生在首次导出）。
-pub fn build_otlp_provider(endpoint: OtelEndpoint) -> Result<SdkTracerProvider, OtelError> {
+pub fn build_otlp_provider(
+    endpoint: OtelEndpoint,
+    resource: &TelemetryResource,
+) -> Result<SdkTracerProvider, OtelError> {
     let exporter = OtlpSpanExporter::builder()
         .with_tonic()
         .with_endpoint(endpoint.as_str())
@@ -204,15 +238,145 @@ pub fn build_otlp_provider(endpoint: OtelEndpoint) -> Result<SdkTracerProvider, 
         .map_err(OtelError::new)?;
     Ok(SdkTracerProvider::builder()
         .with_batch_exporter(RedactingSpanExporter::new(exporter))
+        .with_resource(to_otel_resource(resource))
         .build())
+}
+
+#[cfg(feature = "test-support")]
+pub mod test_support {
+    use super::{RedactingSpanExporter, TelemetryResource, to_otel_resource};
+    use opentelemetry_sdk::Resource;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Debug)]
+    pub struct RecordedSpan {
+        name: String,
+        trace_id: String,
+        span_id: String,
+        attributes: BTreeMap<String, String>,
+        events: Vec<BTreeMap<String, String>>,
+    }
+
+    impl RecordedSpan {
+        pub fn name(&self) -> &str {
+            &self.name
+        }
+
+        pub fn trace_id(&self) -> &str {
+            &self.trace_id
+        }
+
+        pub fn span_id(&self) -> &str {
+            &self.span_id
+        }
+
+        pub fn attributes(&self) -> &BTreeMap<String, String> {
+            &self.attributes
+        }
+
+        pub fn events(&self) -> &[BTreeMap<String, String>] {
+            &self.events
+        }
+    }
+
+    #[derive(Debug, Default)]
+    struct RecordingState {
+        resource: BTreeMap<String, String>,
+        spans: Vec<RecordedSpan>,
+    }
+
+    #[derive(Clone, Debug, Default)]
+    pub struct TraceRecorder(Arc<Mutex<RecordingState>>);
+
+    impl TraceRecorder {
+        pub fn resource(&self) -> BTreeMap<String, String> {
+            self.0
+                .lock()
+                .map(|state| state.resource.clone())
+                .unwrap_or_default()
+        }
+
+        pub fn spans(&self) -> Vec<RecordedSpan> {
+            self.0
+                .lock()
+                .map(|state| state.spans.clone())
+                .unwrap_or_default()
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct RecordingExporter(TraceRecorder);
+
+    fn string_attributes(attributes: &[opentelemetry::KeyValue]) -> BTreeMap<String, String> {
+        attributes
+            .iter()
+            .map(|attribute| {
+                (
+                    attribute.key.as_str().to_owned(),
+                    attribute.value.to_string(),
+                )
+            })
+            .collect()
+    }
+
+    impl SpanExporter for RecordingExporter {
+        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+            if let Ok(mut state) = self.0.0.lock() {
+                state.spans.extend(batch.into_iter().map(|span| {
+                    RecordedSpan {
+                        name: span.name.into_owned(),
+                        trace_id: span.span_context.trace_id().to_string(),
+                        span_id: span.span_context.span_id().to_string(),
+                        attributes: string_attributes(&span.attributes),
+                        events: span
+                            .events
+                            .events
+                            .iter()
+                            .map(|event| string_attributes(&event.attributes))
+                            .collect(),
+                    }
+                }));
+            }
+            Ok(())
+        }
+
+        fn set_resource(&mut self, resource: &Resource) {
+            if let Ok(mut state) = self.0.0.lock() {
+                state.resource = resource
+                    .iter()
+                    .map(|(key, value)| (key.as_str().to_owned(), value.to_string()))
+                    .collect();
+            }
+        }
+    }
+
+    /// Hermetic JSON+OTel composition seam; no collector, socket or process-global subscriber.
+    pub fn recording_exporter(
+        resource: &TelemetryResource,
+    ) -> (crate::OtelExporter, TraceRecorder) {
+        let recorder = TraceRecorder::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(RedactingSpanExporter::new(RecordingExporter(
+                recorder.clone(),
+            )))
+            .with_resource(to_otel_resource(resource))
+            .build();
+        (crate::OtelExporter::new(provider), recorder)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     //! pipeline 行为：OtelError 脱敏 / OtelEndpoint typed 安全边界 / RedactingSpanExporter 导出脱敏。
     //! 确定性，不依赖外部 collector。
-    use super::{OtelEndpoint, OtelError, RedactingSpanExporter, redact_attributes};
-    use opentelemetry::trace::TracerProvider as _;
+    use super::{
+        OtelEndpoint, OtelError, RedactingSpanExporter, TelemetryResource, redact_attributes,
+        to_otel_resource,
+    };
+    use opentelemetry::trace::{Status, TracerProvider as _};
     use opentelemetry::{KeyValue, Value};
     use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider, SpanData};
     use rstest::rstest;
@@ -274,6 +438,33 @@ mod tests {
         assert_eq!(OtelEndpoint::insecure_localhost(endpoint).is_ok(), ok);
     }
 
+    #[test]
+    fn telemetry_resource_is_closed_and_projects_exact_otel_attributes() {
+        let resource = TelemetryResource::try_new("runtime", "assembly-fp", "plan-fp")
+            .expect("non-empty telemetry resource");
+        assert_eq!(resource.service_name(), "runtime");
+        assert_eq!(resource.assembly_fingerprint(), "assembly-fp");
+        assert_eq!(resource.runtime_plan_fingerprint(), "plan-fp");
+        let projected = to_otel_resource(&resource)
+            .iter()
+            .map(|(key, value)| (key.as_str().to_owned(), value.to_string()))
+            .collect::<std::collections::BTreeMap<_, _>>();
+        assert_eq!(
+            projected,
+            std::collections::BTreeMap::from([
+                (
+                    "rss.assembly.fingerprint".to_owned(),
+                    "assembly-fp".to_owned()
+                ),
+                (
+                    "rss.runtime_plan.fingerprint".to_owned(),
+                    "plan-fp".to_owned()
+                ),
+                ("service.name".to_owned(), "runtime".to_owned()),
+            ])
+        );
+    }
+
     // ── RedactingSpanExporter 导出边界脱敏 ─────────────────────────────────
     #[test]
     fn redact_attributes_scrubs_sensitive_string_keys_only() {
@@ -322,6 +513,40 @@ mod tests {
         assert_eq!(attr("session_id").as_deref(), Some("<redacted>"));
         // 非敏感 key 原样保留——证明脱敏非全量恒抹（anti-vacuity）。
         assert_eq!(attr("user_id").as_deref(), Some("u-42"));
+    }
+
+    #[test]
+    fn redacting_exporter_scrubs_promoted_name_and_status_description() {
+        let mem = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(RedactingSpanExporter::new(mem.clone()))
+            .build();
+        let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("test"));
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let span = tracing::info_span!(
+                "static_name",
+                otel.name = "probe http://safe/x then postgres://user:SECRET_BAIT@db/rss",
+                otel.status_description = "amqp://user:SECRET_BAIT@mq/v"
+            );
+            let _entered = span.enter();
+            tracing::info!(
+                "probe http://safe/x then postgres://user:SECRET_BAIT@db/rss and amqp://u:p@mq/v"
+            );
+        });
+
+        let spans = finished(&mem);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].name,
+            "probe http://safe/x then postgres://<redacted>@db/rss"
+        );
+        assert_eq!(spans[0].status, Status::error("amqp://<redacted>@mq/v"));
+        assert_eq!(
+            spans[0].events.events[0].name,
+            "probe http://safe/x then postgres://<redacted>@db/rss and amqp://<redacted>@mq/v"
+        );
+        assert!(!format!("{:?}", spans[0]).contains("SECRET_BAIT"));
     }
 
     // ── key-sweep + free-form URL-scrub + 剩余盲区（#1361 review F1）──────────

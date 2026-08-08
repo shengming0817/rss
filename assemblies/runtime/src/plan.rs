@@ -28,6 +28,7 @@ pub struct RuntimePlan {
     workflow_activation: Option<eventexec::WorkflowActivationPlan>,
     workflow_runtime: Option<eventexec::WorkflowRuntimePlan>,
     assembly_identity: String,
+    telemetry_resource: observ::TelemetryResource,
 }
 
 /// A validated listener projection that can only be minted from [`RuntimePlan`].
@@ -128,16 +129,29 @@ impl RuntimePlan {
             .map_err(RuntimePlanError::Protocol)?;
         let workflow_activation = eventexec::WorkflowActivationPlan::select(&plan)
             .map_err(RuntimePlanError::WorkflowRuntime)?;
+        let assembly_identity = lock.identity().name().to_owned();
+        let telemetry_resource = observ::TelemetryResource::try_new(
+            assembly_identity.as_str(),
+            plan.assembly_fingerprint().as_str(),
+            plan.runtime_plan_fingerprint().as_str(),
+        )
+        .map_err(RuntimePlanError::TelemetryResource)?;
         Ok(Self {
             plan,
             workflow_activation: Some(workflow_activation),
             workflow_runtime: None,
-            assembly_identity: lock.identity().name().to_owned(),
+            assembly_identity,
+            telemetry_resource,
         })
     }
 
     pub const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.plan
+    }
+
+    /// Project the single application telemetry resource from the verified plan identity.
+    pub(crate) const fn telemetry_resource(&self) -> &observ::TelemetryResource {
+        &self.telemetry_resource
     }
 
     pub(crate) fn projection_capture(&self) -> eventexec::ProjectionCaptureView<'_> {
@@ -199,11 +213,19 @@ impl RuntimePlan {
     ) -> Result<Self, RuntimePlanError> {
         let workflow_activation = eventexec::WorkflowActivationPlan::select(&plan)
             .map_err(RuntimePlanError::WorkflowRuntime)?;
+        let assembly_identity = assembly_identity.into();
+        let telemetry_resource = observ::TelemetryResource::try_new(
+            assembly_identity.as_str(),
+            plan.assembly_fingerprint().as_str(),
+            plan.runtime_plan_fingerprint().as_str(),
+        )
+        .map_err(RuntimePlanError::TelemetryResource)?;
         Ok(Self {
             plan,
             workflow_activation: Some(workflow_activation),
             workflow_runtime: None,
-            assembly_identity: assembly_identity.into(),
+            assembly_identity,
+            telemetry_resource,
         })
     }
 
@@ -347,6 +369,8 @@ pub(crate) enum RuntimePlanError {
     },
     #[error("compile bundled RuntimePlan protocol failed: {0}")]
     Protocol(#[source] assembly_schema::RuntimePlanError),
+    #[error("project bundled RuntimePlan telemetry identity failed")]
+    TelemetryResource(#[source] observ::TelemetryResourceError),
     #[error("compile bundled workflow runtime plan failed: {0}")]
     WorkflowRuntime(#[source] eventexec::WorkflowRuntimeError),
     #[error("bundled workflow runtime plan was already bound")]
@@ -683,6 +707,21 @@ mod tests {
         assert!(!json.contains(SECRET_BAIT));
         assert!(!debug.contains(SECRET_BAIT));
         assert!(!debug.contains("oidc::OidcProvider"));
+    }
+
+    #[test]
+    fn telemetry_resource_projects_the_exact_verified_runtime_plan_identity() {
+        let runtime_plan = bundled(&[]);
+        let resource = runtime_plan.telemetry_resource();
+        assert_eq!(resource.service_name(), runtime_plan.assembly_identity());
+        assert_eq!(
+            resource.assembly_fingerprint(),
+            runtime_plan.as_typed().assembly_fingerprint().as_str()
+        );
+        assert_eq!(
+            resource.runtime_plan_fingerprint(),
+            runtime_plan.as_typed().runtime_plan_fingerprint().as_str()
+        );
     }
 
     #[test]

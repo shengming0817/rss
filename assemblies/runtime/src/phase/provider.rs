@@ -73,8 +73,7 @@ impl UncommittedListenerPdpLifecycle {
 
 impl<'a> Planned<'a> {
     pub(super) async fn build_providers(self) -> anyhow::Result<<Self as RuntimePhaseState>::Next> {
-        let runtime_plan = crate::plan::RuntimePlan::bundled(self.runtime_inputs.config())
-            .context("build RuntimePlan")?;
+        let runtime_plan = self.runtime_inputs.take_runtime_plan();
         let listener_execution_plan = runtime_plan.listener_execution_plan();
         let placement_execution_plan =
             runtime_plan.placement_execution_plan(self.runtime_inputs.config());

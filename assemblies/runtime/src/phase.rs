@@ -50,6 +50,41 @@ use bootstrap::DomainModuleResult;
 use infra::domain_transport::DomainTransportRuntime;
 use std::sync::Arc;
 
+/// Preparation-time telemetry identity owned by the runtime phase boundary.
+///
+/// This keeps the verified plan and its two telemetry projections together until serving takes
+/// the plan into the phase chain. Operator paths consume only the filter/resource projection.
+pub(crate) struct PreparedTelemetryPlan {
+    filter: tracing_subscriber::EnvFilter,
+    runtime_plan: crate::plan::RuntimePlan,
+}
+
+impl PreparedTelemetryPlan {
+    pub(crate) fn prepare(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        use anyhow::Context as _;
+
+        let filter = crate::telemetry::parse_log_filter(config.value("RUST_LOG"))?;
+        let runtime_plan =
+            crate::plan::RuntimePlan::bundled(config).context("build RuntimePlan")?;
+        Ok(Self {
+            filter,
+            runtime_plan,
+        })
+    }
+
+    pub(crate) fn filter(&self) -> tracing_subscriber::EnvFilter {
+        self.filter.clone()
+    }
+
+    pub(crate) fn resource(&self) -> &observ::TelemetryResource {
+        self.runtime_plan.telemetry_resource()
+    }
+
+    fn into_runtime_plan(self) -> crate::plan::RuntimePlan {
+        self.runtime_plan
+    }
+}
+
 const PG_MODULE_COMMITTED_ONCE: &str = "PG module is committed once";
 const TOKEN_MODULE_COMMITTED_ONCE: &str = "token provider module is committed once";
 
@@ -147,19 +182,23 @@ impl PreparedRuntimeInputs {
 /// Serving-only runtime inputs.
 ///
 /// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned process snapshot and a non-optional typed password blocklist, while operator inputs cannot be passed to [`crate::run`]; serving and operator provider APIs can only borrow the unforgeable [`SnapshotConfig`] minted from these owned inputs, and Projection dispatch accepts only its distinct nested input owner.
+/// INVARIANT: RUNTIME-TELEMETRY-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "private required RuntimePlan constructor input plus take-once phase handoff" } -- serving telemetry and runtime inventory originate from the exact preparation-time verified RuntimePlan; the provider phase has no fallback compiler or parallel identity registry.
 pub struct ServingRuntimeInputs {
     prepared: PreparedRuntimeInputs,
     password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
+    runtime_plan: Option<crate::plan::RuntimePlan>,
 }
 
 impl ServingRuntimeInputs {
     pub(crate) fn new(
         prepared: PreparedRuntimeInputs,
         password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
+        telemetry_plan: PreparedTelemetryPlan,
     ) -> Self {
         Self {
             prepared,
             password_blocklist,
+            runtime_plan: Some(telemetry_plan.into_runtime_plan()),
         }
     }
 
@@ -171,6 +210,13 @@ impl ServingRuntimeInputs {
     /// Borrow the typed local policy loaded before any external provider construction.
     pub(crate) fn password_blocklist(&self) -> &std::sync::Arc<secure::DigestPasswordBlocklist> {
         &self.password_blocklist
+    }
+
+    /// Move the preparation-time plan exactly once into the serving phase chain.
+    pub(crate) fn take_runtime_plan(&mut self) -> crate::plan::RuntimePlan {
+        self.runtime_plan
+            .take()
+            .unwrap_or_else(|| unreachable!("prepared RuntimePlan enters the phase chain once"))
     }
 
     /// Move the optional trace exporter into the launch phase while retaining the process snapshot
@@ -461,17 +507,6 @@ mod tests {
 
     static PHASE_LOG_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-    struct MissingConfigSource;
-
-    impl crate::config::RuntimeConfigSource for MissingConfigSource {
-        fn read(
-            &mut self,
-            _key: &crate::config::RuntimeConfigKey,
-        ) -> crate::config::CapturedConfigValue {
-            crate::config::CapturedConfigValue::Missing
-        }
-    }
-
     struct BaitConfigSource;
 
     impl crate::config::RuntimeConfigSource for BaitConfigSource {
@@ -543,11 +578,18 @@ mod tests {
 
     #[test]
     fn runtime_config_inputs_separate_serving_policy_from_operator_capabilities() {
-        let snapshot = RuntimeConfigSnapshot::capture_test(MissingConfigSource)
-            .expect("closed catalog capture succeeds");
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("closed catalog capture succeeds");
+        let telemetry_plan =
+            PreparedTelemetryPlan::prepare(snapshot.view()).expect("bundled RuntimePlan");
         let blocklist = test_password_blocklist();
         let prepared = PreparedRuntimeInputs::new(snapshot, None);
-        let mut serving = ServingRuntimeInputs::new(prepared, Arc::clone(&blocklist));
+        let mut serving =
+            ServingRuntimeInputs::new(prepared, Arc::clone(&blocklist), telemetry_plan);
         assert!(serving.config().value("RSS_VAULT_TOKEN").is_none());
         assert!(Arc::ptr_eq(serving.password_blocklist(), &blocklist));
         assert!(serving.take_trace_export().is_none());
