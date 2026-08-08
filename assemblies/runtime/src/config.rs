@@ -600,9 +600,9 @@ pub(crate) enum RuntimeConfigCaptureError {
 ///
 /// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- private storage, by-value source consumption, mutually exclusive owned serving/operator/Projection inputs, the sole `RuntimeServingConfig` aggregate mapper, exact generated-domain inputs, and private-field `SnapshotConfig` signatures make snapshot omission and capability forgery unrepresentable for migrated serving, event/domain/DLX/worker, PostgreSQL maintenance, OIDC JWKS export, Projection control, and Vault-backed settings-maintenance consumers.
 ///
-/// The Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` carrier in `runtime-baseline` guards the production
-/// capture-to-consumer flow; the independent `RUNTIME-ENV-FUNNEL-01` gate enforces the complete
-/// runtime-crate direct-reader inventory.
+/// `config_tests` owns the Medium `RUNTIME-CONFIG-SNAPSHOT-LIVE-01` behavioral carrier. The
+/// risk-centric `RUNTIME-CONFIG-ESCAPE-01` residual and independent `RUNTIME-ENV-FUNNEL-01` gate
+/// reject production ambient-reader escapes that Rust's type boundary cannot make unrepresentable.
 pub(crate) struct RuntimeConfigSnapshot {
     values: BTreeMap<RuntimeConfigKey, CapturedConfigValue>,
 }

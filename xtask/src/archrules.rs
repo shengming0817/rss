@@ -413,16 +413,19 @@ const FUNNELS: &[FunnelSpec] = &[
         upstream: &[invariant("WIRING-DEPS-INFRA-ONLY-01")],
         downstream: &[
             invariant("RUNTIME-CONFIG-SNAPSHOT-LIVE-01"),
-            invariant("RUNTIME-PHASE-TRANSITION-LIVE-01"),
             invariant("RUNTIME-PROVIDER-BIJECTION-LIVE-01"),
             invariant("RUNTIME-PLAN-LIVE-CLOSURE-01"),
-            invariant("EVENT-TRANSPORT-OUTPUT-FUNNEL-01"),
-            invariant("RUNTIME-LISTENER-PLAN-EXECUTION-LIVE-01"),
             invariant("RUNTIMEEXEC-LAUNCH-OWNERSHIP-01"),
+            invariant("RUNTIME-CONFIG-ESCAPE-01"),
+            invariant("RUNTIME-SECRET-TRANSFER-01"),
+            invariant("RUNTIME-PROVIDER-BYPASS-01"),
+            invariant("RUNTIME-LIFECYCLE-BYPASS-01"),
+            invariant("RUNTIME-PLAN-BINDING-BYPASS-01"),
+            invariant("RUNTIME-SERVICE-TOKEN-REPLAY-BYPASS-01"),
         ],
         residual: ResidualDisposition::AcceptedMedium {
-            risk: "跨文件 runtime 装配集合仍可能出现未识别的新语法形态",
-            why_no_low_cost_hardening: "Rust 类型系统锁定 phase/plan/provider/listener/lifecycle 载体；七个 canonical AST owner 以 closed mutation、synthetic red 与真实 workspace anti-vacuity 补齐跨文件关系",
+            risk: "跨文件 runtime config/secret/provider/lifecycle/plan/replay 旁路或 binary lifecycle join 漂移仍可能出现新语法形态",
+            why_no_low_cost_hardening: "Rust 类型系统与 canonical behavior owner 锁定内部关系；六个 risk-centric residual 只补齐跨文件不可表达的 escape 与 binary process dispatch join",
         },
     },
     FunnelSpec {
@@ -448,10 +451,10 @@ const FUNNELS: &[FunnelSpec] = &[
         key: "event-transport-output",
         source_issues: &[ISSUE_EVENT_TRANSPORT_OUTPUT],
         upstream: &[invariant("EVENT-TRANSPORT-OUTPUT-TYPE-01")],
-        downstream: &[invariant("EVENT-TRANSPORT-OUTPUT-FUNNEL-01")],
+        downstream: &[invariant("RUNTIME-PROVIDER-BYPASS-01")],
         residual: ResidualDisposition::AcceptedMedium {
-            risk: "跨文件 event output 唯一 merge 与 launch 相对顺序仍可能出现 AST visitor 未识别的新语法形态",
-            why_no_low_cost_hardening: "Rust 类型系统已锁定 owned DomainModuleResult 返回形状，但无法表达跨文件唯一调用与 LIFO 相对顺序；synthetic-red/green AST 门覆盖已知旁路",
+            risk: "跨文件 event provider receipt 旁路仍可能出现 AST visitor 未识别的新语法形态",
+            why_no_low_cost_hardening: "owned DomainModuleResult 与 provider transaction 已锁定内部行为；RUNTIME-PROVIDER-BYPASS-01 仅拒绝跨文件 raw/legacy 构造与 receipt 绕过",
         },
     },
     FunnelSpec {
@@ -5624,6 +5627,11 @@ members = ["rss_demo"]
             issues.iter().copied().collect::<BTreeSet<_>>(),
             expected_source_issues()
         );
+        Ok(())
+    }
+
+    #[test]
+    fn funnel_matrix_has_exact_runtime_and_eventing_relations() -> Result<()> {
         let pg_runtime = FUNNELS
             .iter()
             .find(|funnel| {
@@ -5691,8 +5699,13 @@ members = ["rss_demo"]
         );
         assert_eq!(
             event_output.downstream,
-            [invariant("EVENT-TRANSPORT-OUTPUT-FUNNEL-01")]
+            [invariant("RUNTIME-PROVIDER-BYPASS-01")]
         );
+        Ok(())
+    }
+
+    #[test]
+    fn funnel_matrix_has_exact_rls_relation_and_closed_sides() -> Result<()> {
         let rls = FUNNELS
             .iter()
             .find(|funnel| funnel.key == "rls")

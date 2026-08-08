@@ -1,4 +1,6 @@
 //! Plan-owned local domain composition capability.
+//!
+//! INVARIANT: RUNTIME-PLAN-LIVE-CLOSURE-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::domain_execution_plan_rejects_missing_extra_duplicate_and_reorder + tests::exact_relation_rejects_missing_extra_wrong_id_and_duplicates + tests::runtime_plan_live_relations_reject_each_typed_mapping_drift", anti_vacuity = "tests::runtime_plan_live_closure_matches_typed_relations" } -- the real generated wire → validate → compose path compares provider, placement, domain, and listener relations as exact typed sets. Cross-file handwritten factories, raw generated catalogs, and alternate activation owners remain forbidden by `RUNTIME-PLAN-BINDING-BYPASS-01`.
 
 use assembly_schema::AssemblyDomain;
 use bootstrap::{DomainBinding, DomainModuleResult, Registry};

@@ -182,11 +182,11 @@ impl PgRuntimeHandle {
 - Provider 关闭顺序漂移收敛：PG owner 交出的 guards 固定 primary → optional audit-admin，所有 provider
   resources/workers 合并为 completed provider module；Launch 在 domain module 前注册它，LIFO 使
   event/domain/listener 先排空。部分构造失败时 transaction 只注册已存在 resources 并逆序关闭，不启动 worker。
-  类型系统 Hard 锁定 role-specific permit/owner 的单次消费；14 项 exact set、8 个 sealed output batches、唯一 finish/async rollback/handoff
-  由 synthetic-red/anti-vacuity Medium runtime baseline 补齐。
+  类型系统 Hard 锁定 role-specific permit/owner 的单次消费；catalog exact join、sealed output batches、finish/async rollback/handoff
+  由 `provider_output` 的 transaction 行为测试补齐，runtime baseline 只拒绝跨文件 raw/legacy/receipt bypass。
 - Event output 分叉威胁收敛：`wire_event_transport` 的 crate-private owned 返回类型使旧 `.module/.infra_guards`
   投影不可编译（`EVENT-TRANSPORT-OUTPUT-TYPE-01`，Hard）；跨文件唯一 resource 派生、run merge 与 launch
-  注册顺序由 `EVENT-TRANSPORT-OUTPUT-FUNNEL-01` 的 synthetic-red/anti-vacuity AST 门补齐（Medium）。
+  receipt 与 rollback 由 provider transaction 行为测试拥有，跨文件 raw/legacy 绕过由 `RUNTIME-PROVIDER-BYPASS-01` 补齐（Medium）。
 
 结论：既有 adapter/domain、typed route/auth 与跨域隔离安全边界均不降级；binding/output 分离进一步强化这些边界。
 
@@ -199,10 +199,10 @@ impl PgRuntimeHandle {
 | compose-before-drain 生命周期顺序 | **Hard（封闭 API）** | 私有 `domain/output` + 唯一公开 `compose_bindings` output 出口；成功后才 drain，失败在 drain 前返回；compile-fail rustdoc 锁定外部直接取 output 不可编译 |
 | 具体域依赖完整性 | **Hard（已有 typed 构造器处）** | settings/identity/audit 已有统一 async `module(&impl XModuleSource)` 参数 funnel；source trait 按域 sealed、生产实现仅 `SharedRuntimeDeps`，具体依赖完整性仍由各 domain typed 构造器的必填位置参承载，`DomainBinding` 本身不内省或验证这些依赖 |
 | result 三出口完整聚合与保序 | **Medium（测试 + baseline gate）** | bootstrap 单测锁定 `merge`/`Extend`；`cargo xtask runtime-baseline verify` 检查三字段与 merge 全字段覆盖 |
-| provider 输出形状与 live 集合 | **Hard（类型 + 所有权）/ Medium（exact-set baseline）** | private raw permit + 14 种不可互换的 role-specific consuming permit + non-Clone `ProviderBuild`/`CompletedProviderBuild`；`ProviderOutput` 只能经 8 个 sealed constructors 携带 owned `DomainModuleResult` 与对应 receipts，并从实际 module 推导 channel union；runtime baseline 锁 14 项生成 catalog、每项唯一消费、8 个 output batches、唯一 finish/async rollback/handoff，并以 synthetic red + real-workspace anti-vacuity 防空门 |
+| provider 输出形状与 live 集合 | **Hard（类型 + 所有权）/ Medium（行为测试 + residual）** | private raw permit + 不可互换的 role-specific consuming permit + non-Clone `ProviderBuild`/`CompletedProviderBuild`；`ProviderOutput` 只能经 sealed constructors 携带 owned `DomainModuleResult` 与对应 receipts，并从实际 module 推导 channel union；`provider_output` transaction 测试锁 catalog exact join、receipt completeness、partial rollback 与 primary error，`RUNTIME-PROVIDER-BYPASS-01` 只守跨文件 raw/legacy/receipt escape |
 | PG owner / handle 权限分离 | **Hard（类型 + 可见性）** | `PgRuntimeDeps` non-`Clone` 且只包 `PgRuntimeHandle`；handle `Clone` 但只暴露能力投影，生命周期字段/API 不可见；compile-fail/pass UI tests 锁 owner 不可克隆、handle 无 lifecycle API、能力投影可用 |
-| PG 生命周期单次消费 | **Hard（所有权 + `FnOnce`）/ Medium（runtime baseline）** | `into_runtime_parts(self)` 与 factory `spawn(self, token)` 按值消费；唯一 `build_pg_runtime_module` 在 BuildInfra 生成 `DomainModuleResult` 并立即进入 `ProviderBuild`，不跨 phase 暴露 PG batch；`RUNTIME-PROVIDER-BIJECTION-LIVE-01` 锁唯一生产调用与 provider-before-domain 注册 |
-| Event transport 单一 output | **Hard（类型 + 可见性）/ Medium（runtime baseline）** | `EVENT-TRANSPORT-OUTPUT-TYPE-01` 以 crate-private `wire_event_transport -> DomainModuleResult` 禁止旧字段投影；`EVENT-TRANSPORT-OUTPUT-FUNNEL-01` 以 synthetic-red/anti-vacuity AST 门锁 AMQP resources 唯一派生、run 唯一 merge、launch 公共 helper 注册（AcceptedMedium） |
+| PG 生命周期单次消费 | **Hard（所有权 + `FnOnce`）/ Medium（行为测试）** | `into_runtime_parts(self)` 与 factory `spawn(self, token)` 按值消费；`build_pg_runtime_module` 在 BuildInfra 生成 `DomainModuleResult` 并立即进入 `ProviderBuild`，不跨 phase 暴露 PG batch；`RUNTIME-PROVIDER-BIJECTION-LIVE-01` 由 provider transaction 行为测试锁 receipt completeness、rollback 与 completed handoff |
+| Event transport 单一 output | **Hard（类型 + 可见性）/ Medium（runtime baseline）** | `EVENT-TRANSPORT-OUTPUT-TYPE-01` 以 crate-private `wire_event_transport -> DomainModuleResult` 禁止旧字段投影；provider transaction 行为测试锁 receipt/rollback，`RUNTIME-PROVIDER-BYPASS-01` 仅守跨文件 raw/legacy provider 与 receipt 绕过（AcceptedMedium） |
 | 域形 vs infra port 归属（已立 ADR-005） | **Hard（crate 图 + 编译器）** | `allows(DiPort,Domain)=false` + cargo 未声明 import 不到 |
 
 无 Soft 新增 enforcement。

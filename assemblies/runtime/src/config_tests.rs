@@ -1,3 +1,5 @@
+//! INVARIANT: RUNTIME-CONFIG-SNAPSHOT-LIVE-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "runtime_config_snapshot_reads_source_once_and_replays_stable_values + serving_snapshot_rejects_projection_secret_channels_and_cannot_capture_role_identity + runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_generation + token_profile_config_rejects_missing_and_invalid_required_selections + token_profile_config_rejects_legacy_env_instead_of_dual_reading_it", anti_vacuity = "runtime_config_snapshot_reads_source_once_and_replays_stable_values + runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_generation" } -- snapshot generation stability, profile separation, required production configuration, and no-fallback behavior are behavior-owned beside the private typed snapshot boundary; cross-file ambient-reader and fallback escape risk remains in `RUNTIME-CONFIG-ESCAPE-01`.
+//!
 #![allow(clippy::expect_used)]
 // reason: focused configuration tests use expect for direct assertion failures.
 

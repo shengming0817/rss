@@ -753,34 +753,6 @@ mod tests {
             .ok_or("runtimeexec repository root")?;
         let source = RepositoryAssemblyManifestV2::discover_v2(
             repository_root,
-            &repository_root.join("assemblies/settingsonly"),
-        )?;
-        let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
-            "../../../assemblies/settingsonly/assembly.lock.json"
-        ))?
-        .verify_repository_v2(&source)?
-        .into_executable();
-        Ok(ParsedRuntimePlan::from_json_slice_bound(
-            include_bytes!("../../../assemblies/settingsonly/runtime-plan.json"),
-            source.canonical(),
-            &lock,
-        )?)
-    }
-
-    fn workflow_runtime(runtime: &ParsedRuntimePlan) -> TestResult<eventexec::WorkflowRuntimePlan> {
-        Ok(eventexec::WorkflowRuntimePlan::compile(
-            runtime.as_plan(),
-            eventexec::WorkflowCapabilityCatalog::empty(),
-        )?)
-    }
-
-    fn identityaudit_runtime_plan() -> TestResult<ParsedRuntimePlan> {
-        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .and_then(std::path::Path::parent)
-            .ok_or("runtimeexec repository root")?;
-        let source = RepositoryAssemblyManifestV2::discover_v2(
-            repository_root,
             &repository_root.join("assemblies/identityaudit"),
         )?;
         let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
@@ -790,6 +762,34 @@ mod tests {
         .into_executable();
         Ok(ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../../../assemblies/identityaudit/runtime-plan.json"),
+            source.canonical(),
+            &lock,
+        )?)
+    }
+
+    fn workflow_runtime(runtime: &ParsedRuntimePlan) -> TestResult<eventexec::WorkflowRuntimePlan> {
+        Ok(
+            eventexec::WorkflowActivationPlan::select(runtime.as_plan())?
+                .bind(std::iter::empty(), std::iter::empty())?,
+        )
+    }
+
+    fn alternate_runtime_plan() -> TestResult<ParsedRuntimePlan> {
+        let repository_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .ok_or("runtimeexec repository root")?;
+        let source = RepositoryAssemblyManifestV2::discover_v2(
+            repository_root,
+            &repository_root.join("assemblies/runtime"),
+        )?;
+        let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
+            "../../../assemblies/runtime/assembly.lock.json"
+        ))?
+        .verify_repository_v2(&source)?
+        .into_executable();
+        Ok(ParsedRuntimePlan::from_json_slice_bound(
+            include_bytes!("../../../assemblies/runtime/runtime-plan.json"),
             source.canonical(),
             &lock,
         )?)
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn inventory_rejects_activated_workflows_from_another_runtime_plan() -> TestResult {
         let runtime = runtime_plan()?;
-        let other_runtime = identityaudit_runtime_plan()?;
+        let other_runtime = alternate_runtime_plan()?;
         let other_workflows = workflow_runtime(&other_runtime)?;
         let providers = runtime
             .provider_plans()

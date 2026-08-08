@@ -1,5 +1,5 @@
 # runtime-baseline v2
-# generated-by: cargo xtask runtime-baseline list
+# generated-by: cargo xtask runtime-baseline update
 # static-facts-only: dynamic environment/provider state is documented, not enforced here
 
 [sources]

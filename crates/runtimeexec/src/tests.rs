@@ -1,3 +1,5 @@
+//! INVARIANT: RUNTIMEEXEC-LAUNCH-OWNERSHIP-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "executor_drains_in_exact_dependency_lifo_order + signal_installer_failure_drains_lifecycle_batches_once_in_lifo_order + executor_rejects_zero_listeners_after_registering_and_drains_owned_resources + abort_during_execute_transfers_stack_and_drains_exactly_once + total_drain_budget_bounds_multiple_hanging_resources", anti_vacuity = "executor_drains_in_exact_dependency_lifo_order + abort_during_execute_transfers_stack_and_drains_exactly_once" } -- LaunchTransaction and StartupTransaction behavior own cancellation transfer, non-empty readiness, exact-once LIFO drain, primary-error preservation, and one total shutdown budget. Cross-file second launch/signal/shutdown owners remain forbidden by `RUNTIME-LIFECYCLE-BYPASS-01`.
+//!
 #![allow(clippy::expect_used)]
 // reason: lifecycle tests use expect for direct assertion failures and poisoned test mutexes.
 

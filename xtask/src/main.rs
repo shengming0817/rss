@@ -130,7 +130,7 @@ fn dispatch(command: Command) -> Result<()> {
             };
             archrules::matrix(action)
         }
-        Command::RuntimeBaseline(RuntimeBaselineCommand::List) => runtime_baseline::list(),
+        Command::RuntimeBaseline(RuntimeBaselineCommand::Update) => runtime_baseline::update(),
         Command::RuntimeBaseline(RuntimeBaselineCommand::Verify) => {
             diagnostic::run_check(&runtime_baseline::RuntimeBaseline)
         }

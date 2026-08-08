@@ -227,8 +227,8 @@ pub(crate) enum ArchrulesCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub(crate) enum RuntimeBaselineCommand {
-    /// 列出 runtime assembly baseline。
-    List,
+    /// 原子更新 committed runtime assembly baseline。
+    Update,
     /// runtime assembly baseline 漂移门（CI 门）。
     Verify,
 }
@@ -570,6 +570,10 @@ mod tests {
         );
         assert!(parse(&["archrules", "matrix", "--write", "--check"]).is_err());
         assert_eq!(
+            parse(&["runtime-baseline", "update"])?,
+            Command::RuntimeBaseline(RuntimeBaselineCommand::Update)
+        );
+        assert_eq!(
             parse(&["runtime-baseline", "verify"])?,
             Command::RuntimeBaseline(RuntimeBaselineCommand::Verify)
         );
@@ -588,6 +592,9 @@ mod tests {
         for bad in [
             &["archrules"][..],
             &["runtime-baseline"][..],
+            &["runtime-baseline", "list"][..],
+            &["runtime-baseline", "write"][..],
+            &["runtime-baseline", "update", "extra"][..],
             &["runtime-root"][..],
             &["runtime-deps", "guard", "extra"][..],
         ] {

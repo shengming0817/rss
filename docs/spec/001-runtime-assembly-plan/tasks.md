@@ -30,7 +30,7 @@ Validation: `cargo xtask verify --fast`; marker scan over `docs/spec/001-runtime
 
 - [ ] T006 [US1] Add current runtime assembly baseline document in `docs/architecture/runtime-assembly-baseline.md`.
 - [ ] T007 [US2] Add committed generated baseline at `runtime-baseline/runtime.txt`.
-- [ ] T008 [US2] Add `cargo xtask runtime-baseline list|verify` in `xtask/src/runtime_baseline.rs`, `xtask/src/main.rs`, and `xtask/src/verify.rs`.
+- [ ] T008 [US2] Add `cargo xtask runtime-baseline update|verify` in `xtask/src/runtime_baseline.rs`, `xtask/src/main.rs`, and `xtask/src/verify.rs`.
 - [ ] T009 [US2] Add red/green tests for command parsing, rendering, drift, missing baseline, empty inputs, and missing anchors.
 
 Validation: `cargo test -p xtask runtime_baseline`; `cargo test -p xtask parse_command_runtime_baseline`; `cargo xtask runtime-baseline verify`; `cargo xtask archrules verify`; `cargo xtask verify --fast`.
