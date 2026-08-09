@@ -158,6 +158,11 @@ required-features = ["integration"]
 name = "migration_0103_device_command_expiry"
 path = "tests/migration_0103_device_command_expiry.rs"
 
+[[test]]
+name = "migration_0104_abac_policy_operator_values_upgrade"
+path = "tests/migration_0104_abac_policy_operator_values_upgrade.rs"
+required-features = ["integration"]
+
 # Affected（无 live PG 资源；默认可构建，不绑 RemoteOnly 调度身份）。
 [[test]]
 name = "migration_0087_device_command_fencing_contract"

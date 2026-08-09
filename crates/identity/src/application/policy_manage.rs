@@ -2410,61 +2410,82 @@ mod tests {
     }
 
     #[test]
-    fn multibyte_wire_accepts_chars_but_domain_rejects_over_byte_bound_on_create() {
-        // "あ" = 3 UTF-8 bytes; 86 chars = 258 bytes > ATTR_VALUE_MAX_LEN, but chars < wire maxLength.
-        let multibyte = "あ".repeat(86);
-        assert_eq!(multibyte.chars().count(), 86);
-        assert_eq!(multibyte.len(), 258);
-        assert!(multibyte.len() > ATTR_VALUE_MAX_LEN);
-        assert!(multibyte.chars().count() <= ATTR_VALUE_MAX_LEN);
-
-        let req = serde_json::from_value::<IdentityPoliciesCreateRequest>(serde_json::json!({
-            "policyId": "policy-multibyte",
-            "contractId": "identity.policies-list",
-            "permission": "identity:policy:read",
-            "effectiveFrom": 1_700_000_000,
-            "rules": [{
-                "condition": {
-                    "attribute": "principal.kind",
-                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": multibyte } }
-                },
-                "effect": "allow"
-            }]
-        }))
-        .expect("wire Unicode maxLength must accept 86 multibyte chars");
-
-        assert!(matches!(
-            PolicyCreateDraft::try_from(req),
-            Err(PolicyManageError::PolicyValueTooLong)
-        ));
+    fn create_wire_rejects_multibyte_operator_values_over_byte_bound() {
+        let over = "あ".repeat(86);
+        assert_eq!(over.len(), 258);
+        let operators = [
+            serde_json::json!({ "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": over } }),
+            serde_json::json!({ "family": "membership", "predicate": "in", "operand": { "kind": "set", "valueType": "string", "values": [over] } }),
+            serde_json::json!({ "family": "string", "predicate": "glob", "operand": { "kind": "pattern", "valueType": "string", "value": over } }),
+        ];
+        for operator in operators {
+            let req = serde_json::from_value::<IdentityPoliciesCreateRequest>(serde_json::json!({
+                "policyId": "policy-multibyte",
+                "contractId": "identity.policies-list",
+                "permission": "identity:policy:read",
+                "effectiveFrom": 1_700_000_000,
+                "rules": [{
+                    "condition": { "attribute": "principal.kind", "operator": operator },
+                    "effect": "allow"
+                }]
+            }));
+            assert!(
+                req.is_err(),
+                "generated transport accepted an operator value over 256 UTF-8 bytes"
+            );
+        }
     }
 
     #[test]
-    fn multibyte_wire_accepts_chars_but_domain_rejects_over_byte_bound_on_update() {
-        let multibyte = "あ".repeat(86);
-        assert!(multibyte.len() > ATTR_VALUE_MAX_LEN);
-        assert!(multibyte.chars().count() <= ATTR_VALUE_MAX_LEN);
+    fn update_wire_rejects_multibyte_operator_values_over_byte_bound() {
+        let over = "あ".repeat(86);
+        let operators = [
+            serde_json::json!({ "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": over } }),
+            serde_json::json!({ "family": "membership", "predicate": "in", "operand": { "kind": "set", "valueType": "string", "values": [over] } }),
+            serde_json::json!({ "family": "string", "predicate": "regex", "operand": { "kind": "pattern", "valueType": "string", "value": over } }),
+        ];
+        for operator in operators {
+            let req = serde_json::from_value::<IdentityPoliciesUpdateRequest>(serde_json::json!({
+                "expectedVersion": 1,
+                "contractId": "identity.policies-list",
+                "permission": "identity:policy:read",
+                "effectiveFrom": 1_700_000_000,
+                "rules": [{
+                    "condition": { "attribute": "principal.kind", "operator": operator },
+                    "effect": "allow"
+                }]
+            }));
+            assert!(
+                req.is_err(),
+                "generated transport accepted an update value over 256 UTF-8 bytes"
+            );
+        }
+    }
 
-        let req = serde_json::from_value::<IdentityPoliciesUpdateRequest>(serde_json::json!({
-            "expectedVersion": 1,
-            "contractId": "identity.policies-list",
-            "permission": "identity:policy:read",
-            "effectiveFrom": 1_700_000_000,
-            "rules": [{
-                "condition": {
-                    "attribute": "principal.kind",
-                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": multibyte } }
-                },
-                "effect": "allow"
-            }]
-        }))
-        .expect("wire Unicode maxLength must accept 86 multibyte chars on update");
-
-        let policy_id = PolicyId::parse("policy-multibyte-upd").expect("policy id");
-        assert!(matches!(
-            PolicyUpdateDraft::try_from_wire(policy_id, req),
-            Err(PolicyManageError::PolicyValueTooLong)
-        ));
+    #[test]
+    fn wire_accepts_exact_256_byte_multibyte_operator_values() {
+        let exact = format!("{}a", "あ".repeat(85));
+        assert_eq!(exact.len(), ATTR_VALUE_MAX_LEN);
+        for operator in [
+            serde_json::json!({ "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": exact } }),
+            serde_json::json!({ "family": "membership", "predicate": "in", "operand": { "kind": "set", "valueType": "string", "values": [exact] } }),
+            serde_json::json!({ "family": "string", "predicate": "glob", "operand": { "kind": "pattern", "valueType": "string", "value": exact } }),
+        ] {
+            let req = serde_json::from_value::<IdentityPoliciesCreateRequest>(serde_json::json!({
+                "policyId": "policy-multibyte-exact",
+                "contractId": "identity.policies-list",
+                "permission": "identity:policy:read",
+                "effectiveFrom": 1_700_000_000,
+                "rules": [{
+                    "condition": { "attribute": "principal.kind", "operator": operator },
+                    "effect": "allow"
+                }]
+            }));
+            assert!(
+                req.is_ok(),
+                "generated transport rejected an exact 256-byte value: {req:?}"
+            );
+        }
     }
 
     #[tokio::test]

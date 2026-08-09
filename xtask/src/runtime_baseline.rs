@@ -1454,6 +1454,24 @@ fn transparent_tail_expression(block: &syn::Block) -> Option<&syn::Expr> {
     }
 }
 
+/// The executable entry is allowed exactly one statement before its transparent tail: installing
+/// the redacted panic hook before `#[tokio::main]` constructs a runtime. All other wrappers remain
+/// single-expression carriers.
+fn lifecycle_main_tail_expression(block: &syn::Block) -> Option<&syn::Expr> {
+    let [
+        syn::Stmt::Expr(hook, Some(_)),
+        syn::Stmt::Expr(tail, semicolon),
+    ] = block.stmts.as_slice()
+    else {
+        return None;
+    };
+    if compact_tokens(hook) != "runtimeexec::install_redacted_panic_hook()" {
+        return None;
+    }
+    (semicolon.is_none() || matches!(transparent_expr(tail), syn::Expr::Return(_)))
+        .then(|| transparent_expr(tail))
+}
+
 fn local_call_name(expression: &syn::Expr) -> Option<String> {
     let syn::Expr::Path(path) = transparent_expr(expression) else {
         return None;
@@ -1570,9 +1588,8 @@ fn resolve_runtime_binary_lifecycle_owner<'a>(
             "rss binary lifecycle owner `{owner_name}` cannot contain nested function, closure, or async-block carriers"
         ));
     }
-    let entry = transparent_tail_expression(&main.block).ok_or_else(|| {
-        "rss binary `main` must be one transparent tail expression reaching its lifecycle owner"
-            .to_owned()
+    let entry = lifecycle_main_tail_expression(&main.block).ok_or_else(|| {
+        "rss binary `main` must install the redacted panic hook before one transparent tail expression reaching its lifecycle owner".to_owned()
     })?;
     let mut stack = vec!["main".to_owned()];
     let mut owner_paths = Vec::new();
@@ -3188,6 +3205,15 @@ mod tests {
             "fn lifecycle_container() {{\n    async fn hidden_lifecycle_owner() -> anyhow::Result<()> {{\n{owner_body}\n    }}\n}}"
         );
         let cases = [
+            (
+                "panic hook is not installed before runtime construction",
+                canonical.replacen(
+                    "    runtimeexec::install_redacted_panic_hook();\n    process_exit(run_main())",
+                    "    process_exit(run_main())",
+                    1,
+                ),
+                "must install the redacted panic hook",
+            ),
             (
                 "lifecycle owner is unreachable",
                 canonical.replacen(

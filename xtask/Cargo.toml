@@ -25,7 +25,7 @@ toml = { workspace = true }
 typify = { workspace = true }
 schemars = { workspace = true }
 prettyplease = { workspace = true }
-syn = { workspace = true, features = ["visit"] }   # visit: CMD-FUNNEL-01 守卫 AST 扫描子进程构造点
+syn = { workspace = true, features = ["visit", "visit-mut"] }   # visit: CMD-FUNNEL-01；visit-mut: closed schema rewrites
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 rustix = { workspace = true }

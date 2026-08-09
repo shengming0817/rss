@@ -705,6 +705,7 @@ fn render_contract_body(
     let mut redaction_policies: StructPolicies = BTreeMap::new();
     let mut protection_policies: StructProtectionPolicies = BTreeMap::new();
     let mut deferred_string_lengths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    let mut utf8_byte_length_markers = BTreeSet::new();
     // ref: typify-impl/src/{lib.rs,convert.rs}@01153fa2fea45d660400e3060d91fa2e102976d8
     // `add_ref_types` is the narrow upstream seam for registering resolved shared definitions
     // before roots; RSS keeps resolution local and deterministic instead of adding a registry.
@@ -727,6 +728,9 @@ fn render_contract_body(
                 format!("解析 schema {} 的 deferred string marker", path.display())
             })?,
         );
+        utf8_byte_length_markers.extend(collect_utf8_byte_length_markers(&value).with_context(
+            || format!("解析 schema {} 的 UTF-8 byte length marker", path.display()),
+        )?);
         if c.manifest().kind == ContractKind::Http
             && c.manifest().schemas.request.as_deref() == Some(schema_file)
             && schema_declares_property(&value, "tenantId")
@@ -786,6 +790,7 @@ fn render_contract_body(
     let mut parsed =
         syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
     defer_marked_string_length_validation(&mut parsed, &deferred_string_lengths)?;
+    rewrite_utf8_byte_length_validation(&mut parsed, &utf8_byte_length_markers)?;
     apply_redaction_policy(&mut parsed, &redaction_policies);
     allow_derivable_default_impls(&mut parsed);
     allow_unwrap_in_defaults_mod(&mut parsed);
@@ -2661,6 +2666,8 @@ fn is_safe_codegen_string(s: &str) -> bool {
 }
 
 const DEFER_STRING_LENGTH_VALIDATION: &str = "x-defer-string-length-validation";
+const RSS_LENGTH_UNIT: &str = "x-rss-length-unit";
+const UTF8_BYTES_LENGTH_UNIT: &str = "utf8-bytes";
 const DEFERRED_LENGTH_ALLOWED_KEYS: &[&str] = &[
     "$comment",
     "default",
@@ -2758,6 +2765,283 @@ fn merge_deferred_string_lengths(
     for (struct_name, fields) in source {
         target.entry(struct_name).or_default().extend(fields);
     }
+}
+
+/// 收集 RSS UTF-8 byte 长度 marker。最近的 titled schema 与相对 JSON path 共同构成稳定
+/// identity：可区分 property/oneOf/array.items，也能消除 resolved shared definition 的重复展开。
+fn collect_utf8_byte_length_markers(schema: &serde_json::Value) -> Result<BTreeSet<String>> {
+    fn visit(
+        node: &serde_json::Value,
+        anchor: Option<&str>,
+        path: &mut Vec<String>,
+        out: &mut BTreeSet<String>,
+    ) -> Result<()> {
+        if let Some(items) = node.as_array() {
+            for (index, value) in items.iter().enumerate() {
+                path.push(index.to_string());
+                visit(value, anchor, path, out)?;
+                path.pop();
+            }
+            return Ok(());
+        }
+        let Some(object) = node.as_object() else {
+            return Ok(());
+        };
+        let title = object.get("title").and_then(serde_json::Value::as_str);
+        let saved_path = title.map(|_| std::mem::take(path));
+        let anchor = title.or(anchor);
+        if let Some(unit) = object.get(RSS_LENGTH_UNIT) {
+            let unit = unit.as_str().ok_or_else(|| {
+                anyhow::anyhow!("{RSS_LENGTH_UNIT} at /{} must be a string", path.join("/"))
+            })?;
+            if unit != UTF8_BYTES_LENGTH_UNIT {
+                bail!(
+                    "{RSS_LENGTH_UNIT} at /{} only accepts {UTF8_BYTES_LENGTH_UNIT:?}, got {unit:?}",
+                    path.join("/")
+                );
+            }
+            if object.get("type").and_then(serde_json::Value::as_str) != Some("string") {
+                bail!(
+                    "{RSS_LENGTH_UNIT} at /{} requires type=string",
+                    path.join("/")
+                );
+            }
+            let max = object
+                .get("maxLength")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|max| *max > 0)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "{RSS_LENGTH_UNIT} at /{} requires a positive integer maxLength",
+                        path.join("/")
+                    )
+                })?;
+            let anchor = anchor.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{RSS_LENGTH_UNIT} at /{} requires a titled ancestor",
+                    path.join("/")
+                )
+            })?;
+            let identity = format!("{anchor}:/{}:{max}", path.join("/"));
+            if !out.insert(identity.clone()) {
+                bail!("duplicate {RSS_LENGTH_UNIT} marker identity {identity}");
+            }
+        }
+        for (key, value) in object {
+            path.push(key.clone());
+            visit(value, anchor, path, out)?;
+            path.pop();
+        }
+        if let Some(saved_path) = saved_path {
+            *path = saved_path;
+        }
+        Ok(())
+    }
+
+    let mut out = BTreeSet::new();
+    visit(schema, None, &mut Vec::new(), &mut out)?;
+    Ok(out)
+}
+
+fn tuple_schema(attrs: &[syn::Attribute]) -> Result<Option<serde_json::Value>> {
+    let mut docs = String::new();
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("doc")) {
+        let syn::Meta::NameValue(meta) = &attr.meta else {
+            continue;
+        };
+        let syn::Expr::Lit(expr) = &meta.value else {
+            continue;
+        };
+        let syn::Lit::Str(line) = &expr.lit else {
+            continue;
+        };
+        docs.push_str(&line.value());
+        docs.push('\n');
+    }
+    let Some((_, tail)) = docs.split_once("```json") else {
+        return Ok(None);
+    };
+    let Some((json, _)) = tail.split_once("```") else {
+        bail!("generated tuple rustdoc has an unterminated JSON schema fence");
+    };
+    Ok(Some(
+        serde_json::from_str(json.trim()).context("parse generated tuple JSON schema rustdoc")?,
+    ))
+}
+
+/// typify 继续生成 sealed newtype constructor funnel；本 pass 只重写标记类型的 maximum
+/// comparator。minLength/pattern 与未标 standard maxLength 仍保持 Draft-07 字符语义。
+fn rewrite_utf8_byte_length_validation(
+    file: &mut syn::File,
+    marker_identities: &BTreeSet<String>,
+) -> Result<()> {
+    let mut marked_types = BTreeMap::<String, usize>::new();
+    for item in &file.items {
+        let syn::Item::Struct(item) = item else {
+            continue;
+        };
+        if !matches!(item.fields, syn::Fields::Unnamed(_)) {
+            continue;
+        }
+        let Some(schema) = tuple_schema(&item.attrs)? else {
+            continue;
+        };
+        let Some(unit) = schema.get(RSS_LENGTH_UNIT) else {
+            continue;
+        };
+        if unit.as_str() != Some(UTF8_BYTES_LENGTH_UNIT)
+            || schema.get("type").and_then(serde_json::Value::as_str) != Some("string")
+        {
+            bail!(
+                "generated marked tuple {} lost closed string marker shape",
+                item.ident
+            );
+        }
+        let max = schema
+            .get("maxLength")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|max| usize::try_from(max).ok())
+            .ok_or_else(|| {
+                anyhow::anyhow!("generated marked tuple {} lost maxLength", item.ident)
+            })?;
+        marked_types.insert(item.ident.to_string(), max);
+    }
+    if marked_types.len() != marker_identities.len() {
+        bail!(
+            "{RSS_LENGTH_UNIT} marker/type count mismatch: markers={}, generated_types={}",
+            marker_identities.len(),
+            marked_types.len()
+        );
+    }
+
+    struct MaximumToBytes<'a> {
+        argument: &'a syn::Ident,
+        max: usize,
+        comparisons: usize,
+    }
+    impl syn::visit_mut::VisitMut for MaximumToBytes<'_> {
+        fn visit_expr_binary_mut(&mut self, node: &mut syn::ExprBinary) {
+            syn::visit_mut::visit_expr_binary_mut(self, node);
+            if !matches!(node.op, syn::BinOp::Gt(_)) {
+                return;
+            }
+            let syn::Expr::MethodCall(count) = node.left.as_ref() else {
+                return;
+            };
+            if count.method != "count" || !count.args.is_empty() {
+                return;
+            }
+            let syn::Expr::MethodCall(chars) = count.receiver.as_ref() else {
+                return;
+            };
+            if chars.method != "chars" || !chars.args.is_empty() {
+                return;
+            }
+            let syn::Expr::Path(receiver) = chars.receiver.as_ref() else {
+                return;
+            };
+            if !receiver.path.is_ident(self.argument) {
+                return;
+            }
+            let syn::Expr::Lit(limit) = node.right.as_ref() else {
+                return;
+            };
+            let syn::Lit::Int(limit) = &limit.lit else {
+                return;
+            };
+            if limit.base10_parse::<usize>().ok() != Some(self.max) {
+                return;
+            }
+            let argument = self.argument;
+            node.left = Box::new(syn::parse_quote!(#argument.len()));
+            self.comparisons += 1;
+        }
+
+        fn visit_lit_str_mut(&mut self, literal: &mut syn::LitStr) {
+            let expected = format!("longer than {} characters", self.max);
+            if literal.value() == expected {
+                *literal = syn::LitStr::new(
+                    &format!("longer than {} UTF-8 bytes", self.max),
+                    literal.span(),
+                );
+            }
+        }
+    }
+
+    let mut rewritten = BTreeSet::new();
+    for item in &mut file.items {
+        let syn::Item::Impl(item) = item else {
+            continue;
+        };
+        let Some((_, trait_path, _)) = &item.trait_ else {
+            continue;
+        };
+        if trait_path
+            .segments
+            .last()
+            .is_none_or(|segment| segment.ident != "FromStr")
+        {
+            continue;
+        }
+        let syn::Type::Path(self_type) = item.self_ty.as_ref() else {
+            continue;
+        };
+        let Some(type_name) = self_type
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            continue;
+        };
+        let Some(max) = marked_types.get(&type_name).copied() else {
+            continue;
+        };
+        let method = item
+            .items
+            .iter_mut()
+            .find_map(|item| match item {
+                syn::ImplItem::Fn(method) if method.sig.ident == "from_str" => Some(method),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("marked type {type_name} has no FromStr constructor"))?;
+        let argument = method
+            .sig
+            .inputs
+            .first()
+            .and_then(|argument| match argument {
+                syn::FnArg::Typed(argument) => match argument.pat.as_ref() {
+                    syn::Pat::Ident(ident) => Some(&ident.ident),
+                    _ => None,
+                },
+                syn::FnArg::Receiver(_) => None,
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!("marked type {type_name} has unexpected FromStr input")
+            })?;
+        let mut visitor = MaximumToBytes {
+            argument,
+            max,
+            comparisons: 0,
+        };
+        syn::visit_mut::VisitMut::visit_block_mut(&mut visitor, &mut method.block);
+        if visitor.comparisons != 1 {
+            bail!(
+                "marked type {type_name} maximum rewrite count must be 1, got {}",
+                visitor.comparisons
+            );
+        }
+        rewritten.insert(type_name);
+    }
+    if rewritten.len() != marker_identities.len() || rewritten.len() != marked_types.len() {
+        bail!(
+            "{RSS_LENGTH_UNIT} rewrite count mismatch: markers={}, types={}, rewrites={}",
+            marker_identities.len(),
+            marked_types.len(),
+            rewritten.len()
+        );
+    }
+    Ok(())
 }
 
 /// typify 为 constrained string 生成 tuple newtype，并让 `FromStr` 承载 min/max 检查。对显式 marker
@@ -4905,7 +5189,113 @@ mod tests {
         let (_, tail) = rendered
             .split_once(&start)
             .ok_or_else(|| anyhow::anyhow!("missing FromStr impl for {type_name}"))?;
-        Ok(tail.split("\n    impl ").next().unwrap_or(tail))
+        Ok(tail
+            .split("\n}\nimpl ")
+            .next()
+            .unwrap_or_else(|| tail.split("\n    impl ").next().unwrap_or(tail)))
+    }
+
+    fn utf8_byte_length_fixture() -> anyhow::Result<String> {
+        let root = unique_tmp("codegen-utf8-bytes");
+        seed_http_sensitive(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"SensitiveSeedRequest","type":"object","required":["literal","values","pattern","label"],"properties":{"literal":{"type":"string","maxLength":4,"x-rss-length-unit":"utf8-bytes"},"values":{"type":"array","items":{"type":"string","maxLength":4,"x-rss-length-unit":"utf8-bytes"}},"pattern":{"type":"string","minLength":1,"maxLength":4,"x-rss-length-unit":"utf8-bytes"},"label":{"type":"string","maxLength":4}},"additionalProperties":false}"#,
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+        Ok(rendered)
+    }
+
+    #[test]
+    fn utf8_byte_length_marker_rewrites_only_marked_maximum_checks() -> anyhow::Result<()> {
+        let rendered = utf8_byte_length_fixture()?;
+        for type_name in [
+            "SensitiveSeedRequestLiteral",
+            "SensitiveSeedRequestValuesItem",
+            "SensitiveSeedRequestPattern",
+        ] {
+            let constructor = generated_from_str_impl(&rendered, type_name)?;
+            assert!(
+                constructor.contains("value.len() > 4usize")
+                    && constructor.contains("longer than 4 UTF-8 bytes"),
+                "marked type must enforce bytes in its sealed constructor: {constructor}"
+            );
+        }
+        let pattern = generated_from_str_impl(&rendered, "SensitiveSeedRequestPattern")?;
+        assert!(
+            pattern.contains("value.chars().count() < 1usize"),
+            "marker must preserve standard minLength semantics: {pattern}"
+        );
+        let control = generated_from_str_impl(&rendered, "SensitiveSeedRequestLabel")?;
+        assert!(
+            control.contains("value.chars().count() > 4usize") && !control.contains("value.len()"),
+            "unmarked maxLength is the anti-vacuity control: {control}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn utf8_byte_length_marker_is_closed_and_fail_closed() {
+        for (label, schema) in [
+            (
+                "unknown unit",
+                serde_json::json!({"title":"Root","type":"string","maxLength":4,"x-rss-length-unit":"characters"}),
+            ),
+            (
+                "missing maxLength",
+                serde_json::json!({"title":"Root","type":"string","x-rss-length-unit":"utf8-bytes"}),
+            ),
+            (
+                "wrong schema type",
+                serde_json::json!({"title":"Root","type":"integer","maxLength":4,"x-rss-length-unit":"utf8-bytes"}),
+            ),
+            (
+                "wrong marker type",
+                serde_json::json!({"title":"Root","type":"string","maxLength":4,"x-rss-length-unit":true}),
+            ),
+        ] {
+            assert!(
+                collect_utf8_byte_length_markers(&schema).is_err(),
+                "{label} must fail closed"
+            );
+        }
+        let duplicate_identity = serde_json::json!({
+            "title": "Root",
+            "allOf": [
+                {"title":"Repeated","type":"string","maxLength":4,"x-rss-length-unit":"utf8-bytes"},
+                {"title":"Repeated","type":"string","maxLength":4,"x-rss-length-unit":"utf8-bytes"}
+            ]
+        });
+        assert!(
+            collect_utf8_byte_length_markers(&duplicate_identity).is_err(),
+            "duplicate marker identity must fail closed"
+        );
+    }
+
+    #[test]
+    fn utf8_byte_length_marker_covers_property_one_of_and_array_items() -> anyhow::Result<()> {
+        let schema = serde_json::json!({
+            "title":"Root",
+            "type":"object",
+            "properties":{
+                "direct":{"type":"string","maxLength":4,"x-rss-length-unit":"utf8-bytes"},
+                "choice":{"oneOf":[{"type":"string","maxLength":4,"x-rss-length-unit":"utf8-bytes"},{"type":"boolean"}]},
+                "values":{"type":"array","items":{"type":"string","maxLength":4,"x-rss-length-unit":"utf8-bytes"}}
+            }
+        });
+        let markers = collect_utf8_byte_length_markers(&schema)?;
+        assert_eq!(markers.len(), 3);
+        assert!(
+            markers
+                .iter()
+                .any(|marker| marker.contains("properties/direct"))
+        );
+        assert!(markers.iter().any(|marker| marker.contains("oneOf/0")));
+        assert!(markers.iter().any(|marker| marker.contains("items")));
+        Ok(())
     }
 
     /// marker 必须只移除被标 constrained string 的 transport constructor 检查；未标样本继续检查，

@@ -127,7 +127,10 @@ fn compare_schemas_for_direction(
 ) -> Vec<RawBreak> {
     let mut out = Vec::new();
     match direction {
-        SchemaDirection::Input => compare_node(old, new, "", &mut out),
+        SchemaDirection::Input => {
+            compare_node(old, new, "", &mut out);
+            check_string_length_unit_tree(old, new, "", &mut out);
+        }
         SchemaDirection::Output => compare_output_node(old, new, "", &mut out),
     }
     check_redaction_policy(old, new, &mut out);
@@ -487,6 +490,52 @@ fn check_format(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
             detail: format!("{} format 由 `{of}` 变更为 `{nf}`", show(path)),
         }),
         Some(_) => {}
+    }
+}
+
+/// Project-default JSON Schema `maxLength` counts Unicode scalar values. Adding the closed RSS
+/// byte unit narrows the accepted input set for non-ASCII strings and therefore requires the same
+/// exact authorization as every other active-contract breaking change.
+fn check_string_length_unit(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    const LENGTH_UNIT: &str = "x-rss-length-unit";
+    const UTF8_BYTES: &str = "utf8-bytes";
+    if old.get(LENGTH_UNIT).and_then(Value::as_str) != Some(UTF8_BYTES)
+        && new.get(LENGTH_UNIT).and_then(Value::as_str) == Some(UTF8_BYTES)
+    {
+        out.push(RawBreak {
+            rule: BreakingRule::StringLengthUnitTightened,
+            pointer: path.to_string(),
+            detail: format!(
+                "{} string maxLength unit tightened from Unicode characters to UTF-8 bytes",
+                show(path)
+            ),
+        });
+    }
+}
+
+fn check_string_length_unit_tree(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    check_string_length_unit(old, new, path, out);
+    match (old, new) {
+        (Value::Object(old_fields), Value::Object(new_fields)) => {
+            for (key, old_value) in old_fields {
+                if let Some(new_value) = new_fields.get(key) {
+                    check_string_length_unit_tree(old_value, new_value, &child(path, key), out);
+                }
+            }
+        }
+        (Value::Array(old_items), Value::Array(new_items)) => {
+            for (index, (old_value, new_value)) in
+                old_items.iter().zip(new_items.iter()).enumerate()
+            {
+                check_string_length_unit_tree(
+                    old_value,
+                    new_value,
+                    &format!("{path}[{index}]"),
+                    out,
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -2735,6 +2784,32 @@ mod tests {
         let no_fmt = json!({"properties": {"ts": {"type":"string"}}});
         let add_fmt = json!({"properties": {"ts": {"type":"string","format":"date"}}});
         assert!(compare_schemas(&no_fmt, &add_fmt).is_empty());
+    }
+
+    #[test]
+    fn utf8_byte_length_unit_tightening_is_breaking() {
+        let characters = json!({"type":"string","maxLength":256});
+        let bytes = json!({
+            "type":"string",
+            "maxLength":256,
+            "x-rss-length-unit":"utf8-bytes"
+        });
+        assert_eq!(
+            rules(&compare_schemas(&characters, &bytes)),
+            vec![BreakingRule::StringLengthUnitTightened]
+        );
+        assert!(compare_schemas(&bytes, &characters).is_empty());
+        assert!(compare_schemas(&bytes, &bytes).is_empty());
+
+        let nested_characters = json!({"oneOf":[characters.clone()], "items":characters});
+        let nested_bytes = json!({"oneOf":[bytes.clone()], "items":bytes});
+        assert_eq!(
+            rules(&compare_schemas(&nested_characters, &nested_bytes)),
+            vec![
+                BreakingRule::StringLengthUnitTightened,
+                BreakingRule::StringLengthUnitTightened,
+            ]
+        );
     }
 
     /// ENUM_VALUE_DELETED：删 enum 值 red；新增 enum 值 green。

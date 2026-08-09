@@ -29,6 +29,12 @@ has four families:
 | membership | `in`, `notIn` | homogeneous, unique, canonical set of 1–32 values |
 | string | `startsWith`, `endsWith`, `contains`, `glob`, `regex` | non-empty pattern ≤256 bytes |
 
+The active v1 contract expresses this string boundary once as `maxLength: 256` plus the closed
+`x-rss-length-unit: utf8-bytes` marker. Codegen rewrites only marked sealed constructors to byte
+counting; domain value objects independently enforce the same bound. PostgreSQL migration 0104
+adds a versioned validator and validated CHECK over every policy operator/value subtree, while 0102
+continues to own the independent typed resource-attribute CHECK.
+
 There is no implicit coercion. Missing LHS/RHS, a declared/runtime type mismatch, malformed data, or
 an unknown family is a no-match and therefore fail-closed. Negated predicates are evaluated only
 after presence and type validation. Regex is compiled at authoring/hydration, never in the request

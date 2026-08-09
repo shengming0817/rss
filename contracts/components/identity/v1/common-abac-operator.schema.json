@@ -42,7 +42,8 @@
             },
             "value": {
               "type": "string",
-              "maxLength": 256
+              "maxLength": 256,
+              "x-rss-length-unit": "utf8-bytes"
             }
           },
           "additionalProperties": false
@@ -261,7 +262,8 @@
               "uniqueItems": true,
               "items": {
                 "type": "string",
-                "maxLength": 256
+                "maxLength": 256,
+                "x-rss-length-unit": "utf8-bytes"
               }
             }
           },
@@ -393,7 +395,8 @@
         "value": {
           "type": "string",
           "minLength": 1,
-          "maxLength": 256
+          "maxLength": 256,
+          "x-rss-length-unit": "utf8-bytes"
         }
       },
       "additionalProperties": false

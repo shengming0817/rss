@@ -2862,7 +2862,8 @@ pub mod policies_create {
     ///        },
     ///        "value": {
     ///          "type": "string",
-    ///          "maxLength": 256
+    ///          "maxLength": 256,
+    ///          "x-rss-length-unit": "utf8-bytes"
     ///        },
     ///        "valueType": {
     ///          "type": "string",
@@ -3057,7 +3058,8 @@ pub mod policies_create {
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "maxLength": 256,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -3080,8 +3082,8 @@ pub mod policies_create {
     impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             Ok(Self(value.to_string()))
         }
@@ -3788,7 +3790,8 @@ pub mod policies_create {
     ///    "value": {
     ///      "type": "string",
     ///      "maxLength": 256,
-    ///      "minLength": 1
+    ///      "minLength": 1,
+    ///      "x-rss-length-unit": "utf8-bytes"
     ///    },
     ///    "valueType": {
     ///      "type": "string",
@@ -3887,7 +3890,8 @@ pub mod policies_create {
     ///{
     ///  "type": "string",
     ///  "maxLength": 256,
-    ///  "minLength": 1
+    ///  "minLength": 1,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -3910,8 +3914,8 @@ pub mod policies_create {
     impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             if value.chars().count() < 1usize {
                 return Err("shorter than 1 characters".into());
@@ -4056,7 +4060,8 @@ pub mod policies_create {
     ///          "type": "array",
     ///          "items": {
     ///            "type": "string",
-    ///            "maxLength": 256
+    ///            "maxLength": 256,
+    ///            "x-rss-length-unit": "utf8-bytes"
     ///          },
     ///          "maxItems": 32,
     ///          "minItems": 1,
@@ -4267,7 +4272,8 @@ pub mod policies_create {
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "maxLength": 256,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -4290,8 +4296,8 @@ pub mod policies_create {
     impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandValuesItem {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             Ok(Self(value.to_string()))
         }
@@ -4826,7 +4832,7 @@ pub mod policies_create {
         "identity",
         "identity.policies-create",
         "v1",
-        "sha256:3085cd85fb55a838f0d6abe97470f4bd9ba63b50b4702e7694de02afdc8024fd",
+        "sha256:715d7b9f7b6176b7ee054ec752b1d602012552e357342d82d5fd62118ae599a1",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -5976,7 +5982,8 @@ pub mod policies_get {
     ///        },
     ///        "value": {
     ///          "type": "string",
-    ///          "maxLength": 256
+    ///          "maxLength": 256,
+    ///          "x-rss-length-unit": "utf8-bytes"
     ///        },
     ///        "valueType": {
     ///          "type": "string",
@@ -6171,7 +6178,8 @@ pub mod policies_get {
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "maxLength": 256,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -6194,8 +6202,8 @@ pub mod policies_get {
     impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             Ok(Self(value.to_string()))
         }
@@ -6902,7 +6910,8 @@ pub mod policies_get {
     ///    "value": {
     ///      "type": "string",
     ///      "maxLength": 256,
-    ///      "minLength": 1
+    ///      "minLength": 1,
+    ///      "x-rss-length-unit": "utf8-bytes"
     ///    },
     ///    "valueType": {
     ///      "type": "string",
@@ -7001,7 +7010,8 @@ pub mod policies_get {
     ///{
     ///  "type": "string",
     ///  "maxLength": 256,
-    ///  "minLength": 1
+    ///  "minLength": 1,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -7024,8 +7034,8 @@ pub mod policies_get {
     impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             if value.chars().count() < 1usize {
                 return Err("shorter than 1 characters".into());
@@ -7170,7 +7180,8 @@ pub mod policies_get {
     ///          "type": "array",
     ///          "items": {
     ///            "type": "string",
-    ///            "maxLength": 256
+    ///            "maxLength": 256,
+    ///            "x-rss-length-unit": "utf8-bytes"
     ///          },
     ///          "maxItems": 32,
     ///          "minItems": 1,
@@ -7381,7 +7392,8 @@ pub mod policies_get {
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "maxLength": 256,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -7404,8 +7416,8 @@ pub mod policies_get {
     impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandValuesItem {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             Ok(Self(value.to_string()))
         }
@@ -7940,7 +7952,7 @@ pub mod policies_get {
         "identity",
         "identity.policies-get",
         "v1",
-        "sha256:6318a5a723250bcc82141eaf1f030c25e66d98e77d6aea4f79735fe3261f4d12",
+        "sha256:65e11785b76610c85003c74ee87a34de754820120c8736b33624a1bc3f37c3ed",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -8913,7 +8925,8 @@ pub mod policies_list {
     ///        },
     ///        "value": {
     ///          "type": "string",
-    ///          "maxLength": 256
+    ///          "maxLength": 256,
+    ///          "x-rss-length-unit": "utf8-bytes"
     ///        },
     ///        "valueType": {
     ///          "type": "string",
@@ -9108,7 +9121,8 @@ pub mod policies_list {
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "maxLength": 256,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -9131,8 +9145,8 @@ pub mod policies_list {
     impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             Ok(Self(value.to_string()))
         }
@@ -9839,7 +9853,8 @@ pub mod policies_list {
     ///    "value": {
     ///      "type": "string",
     ///      "maxLength": 256,
-    ///      "minLength": 1
+    ///      "minLength": 1,
+    ///      "x-rss-length-unit": "utf8-bytes"
     ///    },
     ///    "valueType": {
     ///      "type": "string",
@@ -9938,7 +9953,8 @@ pub mod policies_list {
     ///{
     ///  "type": "string",
     ///  "maxLength": 256,
-    ///  "minLength": 1
+    ///  "minLength": 1,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -9961,8 +9977,8 @@ pub mod policies_list {
     impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             if value.chars().count() < 1usize {
                 return Err("shorter than 1 characters".into());
@@ -10107,7 +10123,8 @@ pub mod policies_list {
     ///          "type": "array",
     ///          "items": {
     ///            "type": "string",
-    ///            "maxLength": 256
+    ///            "maxLength": 256,
+    ///            "x-rss-length-unit": "utf8-bytes"
     ///          },
     ///          "maxItems": 32,
     ///          "minItems": 1,
@@ -10318,7 +10335,8 @@ pub mod policies_list {
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "maxLength": 256,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -10341,8 +10359,8 @@ pub mod policies_list {
     impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandValuesItem {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             Ok(Self(value.to_string()))
         }
@@ -10888,7 +10906,7 @@ pub mod policies_list {
         "identity",
         "identity.policies-list",
         "v1",
-        "sha256:72d8bdcce36c69a8267b231ec701778606bd7c1b2c780f8fe1010c1b4e17449d",
+        "sha256:4ee4b3cc0ca8f9e3487454687dd02cd68f7532c20919e178666fdb224aba442c",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -11924,7 +11942,8 @@ pub mod policies_update {
     ///        },
     ///        "value": {
     ///          "type": "string",
-    ///          "maxLength": 256
+    ///          "maxLength": 256,
+    ///          "x-rss-length-unit": "utf8-bytes"
     ///        },
     ///        "valueType": {
     ///          "type": "string",
@@ -12119,7 +12138,8 @@ pub mod policies_update {
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "maxLength": 256,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -12142,8 +12162,8 @@ pub mod policies_update {
     impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             Ok(Self(value.to_string()))
         }
@@ -12850,7 +12870,8 @@ pub mod policies_update {
     ///    "value": {
     ///      "type": "string",
     ///      "maxLength": 256,
-    ///      "minLength": 1
+    ///      "minLength": 1,
+    ///      "x-rss-length-unit": "utf8-bytes"
     ///    },
     ///    "valueType": {
     ///      "type": "string",
@@ -12949,7 +12970,8 @@ pub mod policies_update {
     ///{
     ///  "type": "string",
     ///  "maxLength": 256,
-    ///  "minLength": 1
+    ///  "minLength": 1,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -12972,8 +12994,8 @@ pub mod policies_update {
     impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             if value.chars().count() < 1usize {
                 return Err("shorter than 1 characters".into());
@@ -13118,7 +13140,8 @@ pub mod policies_update {
     ///          "type": "array",
     ///          "items": {
     ///            "type": "string",
-    ///            "maxLength": 256
+    ///            "maxLength": 256,
+    ///            "x-rss-length-unit": "utf8-bytes"
     ///          },
     ///          "maxItems": 32,
     ///          "minItems": 1,
@@ -13329,7 +13352,8 @@ pub mod policies_update {
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "maxLength": 256,
+    ///  "x-rss-length-unit": "utf8-bytes"
     ///}
     /// ```
     /// </details>
@@ -13352,8 +13376,8 @@ pub mod policies_update {
     impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandValuesItem {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            if value.len() > 256usize {
+                return Err("longer than 256 UTF-8 bytes".into());
             }
             Ok(Self(value.to_string()))
         }
@@ -14200,7 +14224,7 @@ pub mod policies_update {
         "identity",
         "identity.policies-update",
         "v1",
-        "sha256:8e48356808570578d678ef8ef5b643921d40b53012146a52d0a0540af046d6c5",
+        "sha256:351d4dbaeb0b3479a64764eed8c894371fb3ba5b416d138afc7afc4d4102dc36",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

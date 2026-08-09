@@ -2251,3 +2251,51 @@ lock / catalog precondition，也禁止手写部分 DDL。
    ```
 5. 已提交后的缺陷只能通过新 forward migration 修复。数据库级回滚必须连同迁移前完整备份和旧
    artifact 一起整体恢复。
+
+### 0104 Common ABAC policy operator/value CHECK
+
+`0104` 补齐 `abac_policies.rules` 的 durable operator/value 不变式。它是 pre-GA 单事务、非滚动
+hard cut：取得 `ACCESS EXCLUSIVE` 后，用即将安装的 versioned validator 审计全部 policy；任一坏行
+只报告 `tenant_id/policy_id` 坐标并使整个迁移回滚，不截断、不删除、不猜测或局部修复数据。
+
+1. 停止 policy 写入，取得完整数据库备份，确认数据库 `server_encoding` 为不可变的 `UTF8`、所有新
+   binary 已部署就绪且 ledger 精确为 103。非 UTF-8 数据库会 fail-closed；这也证明 0102 的
+   `octet_length(text)` resource-attribute CHECK 正在计算 UTF-8 bytes：
+
+   ```sql
+   SELECT max(version) = 103 AS exact_pre_0104_ledger,
+          bool_and(success) FILTER (WHERE version = 103) AS version_103_success
+     FROM public._sqlx_migrations;
+
+   SHOW server_encoding;
+
+   SELECT tenant_id, id
+     FROM public.abac_policies
+    WHERE NOT public.rss_abac_policy_operator_values_valid_v1(rules);
+   ```
+
+   审计查询只有在临时事务中先执行 0104 的函数定义时可用；标准流程应直接运行 migration，并以其
+   fail-closed 坐标报告为准，禁止把函数从 migration 拆出后永久安装。
+2. 运行唯一的 `rss postgres migrate-all` Job。迁移自带 5 秒 lock timeout 与 5 分钟 statement
+   timeout。失败时 ledger 仍为 103，函数与 CHECK 均回滚；按完整、已 review 的 policy 文档通过管理面
+   重写。若 malformed 文档无法 hydrate，只能在备份与审计记录下精确替换整份文档或先停用后修复。
+3. 修复全部坐标后重跑同一 migration，并执行 postflight：
+
+   ```sql
+   SELECT max(version) = 104 AS exact_post_0104_ledger,
+          bool_and(success) FILTER (WHERE version = 104) AS version_104_success
+     FROM public._sqlx_migrations;
+
+   SELECT count(*) = 1 AS exact_validated_policy_value_check
+     FROM pg_constraint
+    WHERE conrelid = 'public.abac_policies'::regclass
+      AND conname = 'abac_policies_operator_values_v1'
+      AND convalidated;
+
+   SELECT count(*) = 0 AS no_invalid_operator_values
+     FROM public.abac_policies
+    WHERE NOT public.rss_abac_policy_operator_values_valid_v1(rules);
+   ```
+4. ledger 为 104 后只允许 forward migration；不得 `CREATE OR REPLACE` v1 validator 后假定既有行已
+   重验。规则变化必须创建新版本函数、新 CHECK 并重新验证。旧 artifact 因 exact-head ledger 与新
+   CHECK 不可恢复；数据库级回滚仅允许连同迁移前完整备份和旧 artifact 整体恢复。

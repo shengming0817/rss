@@ -21,8 +21,8 @@
 //! （funnel 边界 = `pub(crate)`，不对外）。
 //!
 //! **`PolicyValue` 例外**：允许空串、无字符白名单；仅字节长度超 [`ATTR_VALUE_MAX_LEN`] →
-//! `PolicyValueError::TooLong`。域权威为 UTF-8 **字节** ≤256；wire JSON Schema `maxLength` 按
-//! Unicode **字符数**（typify）校验——多字节字符可过 wire 而被域拒。
+//! `PolicyValueError::TooLong`。域权威为 UTF-8 **字节** ≤256；wire contract 通过 closed
+//! `x-rss-length-unit = utf8-bytes` marker 将 generated constructor 收紧到同一字节语义。
 //!
 //! # 对标
 //!
@@ -98,9 +98,7 @@ const PATTERN_MAX_LEN: usize = 256;
 #[allow(dead_code)]
 const ATTR_KEY_MAX_LEN: usize = 128;
 /// 属性值字节长度上界（与 `GLOB_MAX_LEN` / `PATTERN_MAX_LEN` 对齐；防 Like/glob_match DoS）。
-///
-/// Soft 双单位：域权威 = UTF-8 **字节**；HTTP wire JSON Schema `maxLength` = Unicode **字符**
-/// （Hard 对齐 defer #1947）。
+/// Contract generated constructor、领域值对象与 PostgreSQL CHECK 均执行同一 UTF-8 byte 上界。
 pub const ATTR_VALUE_MAX_LEN: usize = 256;
 
 /// 校验失败原因（私有；各 newtype 映射到自己的对外错误枚举 Empty / Format）。

@@ -33,6 +33,10 @@
 | `PolicyRule` | `attribute_key + closed typed operator + effect(Allow|Deny)` | equality/ordering/membership/string family；family-specific operand 令错配不可表达；集合 1–32 同型唯一；regex 预编译 | ADR-025 |
 | `Policy` | `id: PolicyId, rules: Vec<PolicyRule>` | funnel 构造 | 签名冻结 |
 
+string 上界不是 transport/domain 双单位：Common ABAC schema 的 `maxLength: 256` 由闭值
+`x-rss-length-unit: utf8-bytes` 驱动 generated `FromStr/TryFrom/Deserialize` 按字节拒绝；domain
+`PolicyValue` / `StringOperator` 保留独立字节 funnel，PostgreSQL policy CHECK 则守住 raw SQL 写入。
+
 **纯逻辑**：`evaluate_abac(&Principal, &[AbacAttribute], &Policy) -> Decision`——**deny-overrides**：任一命中的 Deny 规则 → 整体 Deny；否则有命中 Allow → Allow；无规则命中 → 默认 Deny；跨租 / 类型不匹配 fail-closed 不命中。
 
 > `PolicyRule` 扩 operator/effect 是在冻结签名内补字段语义；若 `vocab::Decision` 需 Obligations/FieldMask 才能表达 effect 之外的义务，则 PR2 内最小扩展 `vocab`（base crate，PR body 标注），否则用现有 `Decision::{Allow,Deny}`。
