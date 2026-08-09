@@ -4,7 +4,7 @@
 ./hack/cargo.sh test -p tracewire
 ./hack/cargo.sh test -p httpserve --lib
 ./hack/cargo.sh test -p eventexec --lib build_consume_span_
-./hack/cargo.sh xtask public-api --layer engine --check
+./hack/cargo.sh xtask public-api internal --layer engine --check
 ```
 
 Inspect an enabled listener request for one `http.server.request` span. A matched request uses

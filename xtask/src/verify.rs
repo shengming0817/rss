@@ -14,8 +14,8 @@
 //!
 //! **`cargo xtask ci full`（[`run_ci`]）= 本地完整 CI 聚合**（issue #1132）：
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
-//! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api --check`（Release API 的轴 A 审查 +
-//! internal curated exported-symbol 漂移审查，见 `publicapi.rs`）。
+//! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api internal --check`（internal signature
+//! exact-set 漂移审查；Release owner 接线由 #2048 独立完成，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci full` 只供本地一次性跑全部
 //! CI 门。两者与固定 GitHub jobs 均经 [`plan_for`] 与 [`FixedCiJob`] 的 Hard 闭集派生，杜绝门集漂移。
 //!
@@ -27,8 +27,8 @@
 //!
 //! **`cargo-udeps` 仍不入三者**（多余/未声明依赖，需 nightly `-Z`，与根 stable 1.96 冲突）——独立可选门。
 //! `cargo-semver-checks`（可发布 Release API 的轴 A 语义破坏检测）当前所有 crate `publish = false` ⇒
-//! `--workspace` 选 0 包、门空转，故本轮不入 ci；`public-api --check` 继续非空转审查 exported-symbol
-//! 漂移，但 internal curated baseline 不因此获得 SemVer。待 crate 可发布后 follow-up 接入（见 PR body）。
+//! `--workspace` 选 0 包、门空转，故本轮不入 ci；`public-api internal --check` 继续非空转审查 internal
+//! exported-symbol 漂移，但 baseline 不因此获得 SemVer。Release owner 由 #2048 接入。
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "check", source = "code" }—— 本地 verify/ci-full 默认 keep-going、显式 fail-fast；远端 typed job 保持 fail-fast；任一门步失败均非零退出。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "check", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
@@ -191,8 +191,7 @@ enum InternalCheck {
     PostgresFeatureMatrix,
     /// ci 专用：`cargo llvm-cov nextest`（兼 nextest 门）+ basis/engine ≥90% 覆盖率判定（见 `coverage.rs`）。
     Coverage,
-    /// ci 专用：`public-api --check`（Release API 的轴 A 审查 + internal curated exported-symbol 漂移审查，
-    /// 见 `publicapi.rs`）。
+    /// ci 专用：`public-api internal --check`（internal signature exact-set 漂移审查，见 `publicapi.rs`）。
     PublicApiCheck,
 }
 
@@ -793,7 +792,7 @@ fn step_secure_production_trybuild() -> Step {
 
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
 // 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
-// public-api --check（Release API 的轴 A 审查 + internal curated exported-symbol 漂移审查）。
+// public-api internal --check（internal signature exact-set 漂移审查；release owner 由 #2048 接线）。
 // ci 的 cargo 门带 `--locked`：CI 确定性构建——Cargo.lock 缺失/漂移即 fail（不静默改锁），与
 // `cargo run --locked -p xtask -- ci` 入口共同锁全链（入口锁 xtask 子树，build --workspace --locked 锁
 // 全 workspace 依赖解析）。verify（本地快门）**不**带 --locked，留本地迭代余地（review #206 codex F2）。
@@ -1424,9 +1423,13 @@ fn run_internal(
             };
             crate::coverage::run(scope, opts.execution_policy)
         }
-        // basis+engine+curated extras 全集（layer=None）：Release API 承载轴 A；internal curated 只承载
-        // exported-symbol 漂移审查。check=true 漂移门 fail-closed（PUBLICAPI-DRIFT-GATE-01）。
-        InternalCheck::PublicApiCheck => crate::publicapi::run(true, false, None),
+        // #2048 接管 release drift / SemVer / leakage 接线前，release-check 明确只执行 internal owner。
+        InternalCheck::PublicApiCheck => {
+            crate::publicapi::run(crate::publicapi::Command::Internal {
+                check: true,
+                layer: None,
+            })
+        }
     }
 }
 
@@ -4612,8 +4615,8 @@ mod tests {
         Ok(())
     }
 
-    /// ci 用覆盖率门**替** nextest（同跑兼测试），并尾追 public-api（Release API 轴 A + internal
-    /// exported-symbol 漂移审查）；二者皆 ToolGatedInternal。
+    /// ci 用覆盖率门**替** nextest（同跑兼测试），并尾追 internal signature exact-set；
+    /// Release owner 的 drift / SemVer / leakage 接线由 #2048 完成。二者皆 ToolGatedInternal。
     #[test]
     fn ci_replaces_nextest_with_coverage_and_adds_public_api() -> anyhow::Result<()> {
         let plan = plan_for(RELEASE_CHECK);

@@ -121,15 +121,9 @@ pub(crate) enum Command {
         #[arg(long = "only", action = clap::ArgAction::Append)]
         only: Vec<String>,
     },
-    /// 封装面 baseline（包装 cargo-public-api）。
-    PublicApi {
-        #[arg(long)]
-        check: bool,
-        #[arg(long)]
-        allow_missing: bool,
-        #[arg(long, value_enum)]
-        layer: Option<publicapi::Layer>,
-    },
+    /// Internal signature / Release API baseline（包装 cargo-public-api）。
+    #[command(subcommand)]
+    PublicApi(publicapi::Command),
     /// CI plan / run / gate / local preflight。
     #[command(subcommand)]
     Ci(CiCommand),
@@ -689,22 +683,28 @@ mod tests {
     #[test]
     fn try_parse_public_api_and_ci_surface() -> Result<()> {
         assert_eq!(
-            parse(&["public-api"])?,
-            Command::PublicApi {
+            parse(&["public-api", "internal"])?,
+            Command::PublicApi(publicapi::Command::Internal {
                 check: false,
-                allow_missing: false,
                 layer: None,
-            }
+            })
         );
         assert_eq!(
-            parse(&["public-api", "--layer", "basis", "--check"])?,
-            Command::PublicApi {
+            parse(&["public-api", "internal", "--layer", "basis", "--check"])?,
+            Command::PublicApi(publicapi::Command::Internal {
                 check: true,
-                allow_missing: false,
-                layer: Some(publicapi::Layer::Basis),
-            }
+                layer: Some(publicapi::InternalLayer::Basis),
+            })
         );
-        assert!(parse(&["public-api", "--layer", "nope"]).is_err());
+        assert_eq!(
+            parse(&["public-api", "release", "--check"])?,
+            Command::PublicApi(publicapi::Command::Release { check: true })
+        );
+        assert!(parse(&["public-api"]).is_err());
+        assert!(parse(&["public-api", "--check"]).is_err());
+        assert!(parse(&["public-api", "internal", "--allow-missing"]).is_err());
+        assert!(parse(&["public-api", "release", "--layer", "basis"]).is_err());
+        assert!(parse(&["public-api", "internal", "--layer", "nope"]).is_err());
         assert!(parse(&["ci"]).is_err());
         assert_eq!(
             parse(&["ci", "full", "--fail-fast"])?,

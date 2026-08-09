@@ -136,6 +136,11 @@ pub(crate) fn open_parent_directory(path: &Path) -> Result<ParentDirectory> {
 }
 
 #[cfg(unix)]
+pub(crate) fn open_directory_capability(path: &Path) -> Result<ParentDirectory> {
+    open_parent_directory(&path.join(".rss-directory-capability"))
+}
+
+#[cfg(unix)]
 fn open_or_create_parent_directory(path: &Path) -> Result<ParentDirectory> {
     open_parent_directory_impl(path, true)
 }
@@ -392,29 +397,104 @@ pub(crate) fn atomic_replace(path: &Path, content: &[u8]) -> Result<()> {
     atomic_replace_fallback(path, content)
 }
 
-#[cfg(unix)]
-fn atomic_replace_unix(path: &Path, content: &[u8]) -> Result<()> {
-    atomic_replace_unix_with_hook(path, content, |_| {})
+/// Remove one regular file without ever following a symlinked parent or leaf.
+///
+/// The target identity is checked immediately before the dirfd-relative unlink. A concurrent
+/// parent rename therefore cannot redirect deletion to a different directory tree.
+#[cfg(all(unix, test))]
+fn remove_regular_file(path: &Path) -> Result<()> {
+    remove_regular_file_unix_with_hook(path, || {})
+}
+
+#[cfg(all(unix, test))]
+fn remove_regular_file_unix_with_hook(path: &Path, after_open: impl FnOnce()) -> Result<()> {
+    let parent = open_parent_directory(path)?;
+    remove_regular_file_in_directory_inner(&parent, parent.file_name(), path, after_open)
+}
+
+#[cfg(all(unix, test))]
+fn remove_regular_file_in_directory_inner(
+    parent: &ParentDirectory,
+    file_name: &OsStr,
+    display_path: &Path,
+    after_open: impl FnOnce(),
+) -> Result<()> {
+    use rustix::fs::{AtFlags, fsync, unlinkat};
+
+    let target = TargetPublication::inspect_named(parent, file_name)?;
+    ensure!(
+        matches!(target, TargetPublication::Existing { .. }),
+        "删除目标不存在: {}",
+        display_path.display()
+    );
+    after_open();
+    target.ensure_unchanged_named(parent, file_name)?;
+    unlinkat(parent.fd(), file_name, AtFlags::empty())
+        .with_context(|| format!("安全删除 {} 失败", display_path.display()))?;
+    fsync(parent.fd())?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn remove_regular_file(path: &Path) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("{} 无父目录", path.display()))?;
+    let canonical_parent = fs::canonicalize(parent).context("解析删除目标父目录失败")?;
+    ensure!(canonical_parent.is_dir(), "删除目标父路径不是目录");
+    let metadata = fs::symlink_metadata(path).context("读取删除目标 metadata 失败")?;
+    ensure!(
+        metadata.is_file() && !metadata.file_type().is_symlink(),
+        "删除目标不是普通文件"
+    );
+    fs::remove_file(path)?;
+    ensure!(
+        fs::canonicalize(parent).context("重新解析删除目标父目录失败")? == canonical_parent,
+        "删除期间父目录被替换"
+    );
+    Ok(())
 }
 
 #[cfg(unix)]
+fn atomic_replace_unix(path: &Path, content: &[u8]) -> Result<()> {
+    atomic_replace_unix_inner(path, content, |_| {})
+}
+
+#[cfg(all(unix, test))]
 fn atomic_replace_unix_with_hook(
     path: &Path,
     content: &[u8],
     temp_ready: impl FnOnce(&fs::File),
 ) -> Result<()> {
+    atomic_replace_unix_inner(path, content, temp_ready)
+}
+
+#[cfg(unix)]
+fn atomic_replace_unix_inner(
+    path: &Path,
+    content: &[u8],
+    temp_ready: impl FnOnce(&fs::File),
+) -> Result<()> {
+    let parent = open_or_create_parent_directory(path)?;
+    atomic_replace_in_directory_inner(&parent, parent.file_name(), path, content, temp_ready)
+}
+
+#[cfg(unix)]
+fn atomic_replace_in_directory_inner(
+    parent: &ParentDirectory,
+    file_name: &OsStr,
+    display_path: &Path,
+    content: &[u8],
+    temp_ready: impl FnOnce(&fs::File),
+) -> Result<()> {
     use rustix::fs::{AtFlags, Mode, OFlags, fchmod, fsync, openat, renameat, unlinkat};
 
-    let parent = open_or_create_parent_directory(path)?;
-    let file_name = parent
-        .file_name()
-        .to_str()
-        .context("generated 文件名不是 UTF-8")?;
-    let target = TargetPublication::inspect(&parent)?;
+    let file_name_str = file_name.to_str().context("generated 文件名不是 UTF-8")?;
+    let target = TargetPublication::inspect_named(parent, file_name)?;
     let mut opened = None;
     for _ in 0..64 {
         let temp_name = format!(
-            ".{file_name}.tmp-{}-{}",
+            ".{file_name_str}.tmp-{}-{}",
             std::process::id(),
             TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed)
         );
@@ -441,16 +521,11 @@ fn atomic_replace_unix_with_hook(
         file.flush()?;
         file.sync_all()?;
         temp_ready(&file);
-        target.ensure_unchanged(&parent)?;
+        target.ensure_unchanged_named(parent, file_name)?;
         fchmod(&file, target.mode()).context("设置 committed generated 文件 mode 失败")?;
         file.sync_all()?;
-        renameat(
-            parent.fd(),
-            temp_name.as_str(),
-            parent.fd(),
-            parent.file_name(),
-        )
-        .with_context(|| format!("renameat {temp_name} -> {} 失败", path.display()))?;
+        renameat(parent.fd(), temp_name.as_str(), parent.fd(), file_name)
+            .with_context(|| format!("renameat {temp_name} -> {} 失败", display_path.display()))?;
         drop(file);
         fsync(parent.fd())?;
         Ok(())
@@ -476,10 +551,10 @@ enum TargetPublication {
 
 #[cfg(unix)]
 impl TargetPublication {
-    fn inspect(parent: &ParentDirectory) -> Result<Self> {
+    fn inspect_named(parent: &ParentDirectory, file_name: &OsStr) -> Result<Self> {
         use rustix::fs::{AtFlags, FileType, Mode, statat};
 
-        match statat(parent.fd(), parent.file_name(), AtFlags::SYMLINK_NOFOLLOW) {
+        match statat(parent.fd(), file_name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(stat) => {
                 ensure!(
                     FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile,
@@ -504,10 +579,10 @@ impl TargetPublication {
         }
     }
 
-    fn ensure_unchanged(self, parent: &ParentDirectory) -> Result<()> {
+    fn ensure_unchanged_named(self, parent: &ParentDirectory, file_name: &OsStr) -> Result<()> {
         use rustix::fs::{AtFlags, FileType, statat};
 
-        let current = statat(parent.fd(), parent.file_name(), AtFlags::SYMLINK_NOFOLLOW);
+        let current = statat(parent.fd(), file_name, AtFlags::SYMLINK_NOFOLLOW);
         match (self, current) {
             (Self::Missing { .. }, Err(error)) if error == rustix::io::Errno::NOENT => Ok(()),
             (
@@ -745,6 +820,36 @@ mod tests {
         assert!(atomic_replace(&output, b"must not publish\n").is_err());
         assert!(fs::symlink_metadata(&output)?.file_type().is_symlink());
         assert_eq!(fs::read(&outside)?, b"outside\n");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remove_regular_file_never_follows_replaced_parent_or_leaf() -> anyhow::Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let fixture = Fixture::new("remove-capability")?;
+        let owner = fixture.root.join("owner");
+        let moved_owner = fixture.root.join("moved-owner");
+        let outside = fixture.root.join("outside");
+        fs::create_dir(&owner)?;
+        fs::create_dir(&outside)?;
+        fs::write(owner.join("stale.txt"), b"owned\n")?;
+        fs::write(outside.join("stale.txt"), b"outside\n")?;
+
+        remove_regular_file_unix_with_hook(&owner.join("stale.txt"), || {
+            fs::rename(&owner, &moved_owner).expect("move opened owner");
+            symlink(&outside, &owner).expect("replace owner with symlink");
+        })?;
+        assert!(!moved_owner.join("stale.txt").exists());
+        assert_eq!(fs::read(outside.join("stale.txt"))?, b"outside\n");
+
+        let outside_leaf = fixture.root.join("outside-leaf.txt");
+        fs::write(&outside_leaf, b"outside leaf\n")?;
+        let linked_leaf = moved_owner.join("linked.txt");
+        symlink(&outside_leaf, &linked_leaf)?;
+        assert!(remove_regular_file(&linked_leaf).is_err());
+        assert_eq!(fs::read(outside_leaf)?, b"outside leaf\n");
         Ok(())
     }
 

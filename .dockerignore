@@ -23,6 +23,7 @@ lints/
 # docs/ 中的 runtime-plan schema 被 assembly-schema `include_str!` 消费，必须留在构建 context。
 specs/
 public-api/
+release-api/
 hack/
 
 # ── 部署清单自身（compose/env/smoke 非构建输入；排除避免编辑它们时 bust 构建缓存）─────────────────

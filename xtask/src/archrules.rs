@@ -2672,22 +2672,6 @@ fn validate_closed_invariant_bindings(
 }
 
 fn scan_public_api(root: &Path, index: &mut Index) -> Result<()> {
-    let baseline_dir = root.join("public-api");
-    let target_crates = crate::publicapi::target_crates(None);
-    let mut missing = Vec::new();
-    for krate in &target_crates {
-        if !baseline_dir.join(format!("{krate}.txt")).exists() {
-            missing.push(*krate);
-        }
-    }
-    if !missing.is_empty() {
-        index.findings.push(finding(
-            Rule::MissingCarrier,
-            "public-api",
-            format!("缺 public-api baseline: {}", missing.join(", ")),
-        ));
-        return Ok(());
-    }
     let path = root.join("xtask/src/publicapi.rs");
     let gate = xtask_gate(root, &path)?;
     scan_invariant_file(
@@ -2695,7 +2679,7 @@ fn scan_public_api(root: &Path, index: &mut Index) -> Result<()> {
         index,
         &path,
         "public-api",
-        format!("{} baseline", target_crates.len()),
+        "owner-aware exact-set baselines",
         gate.as_deref(),
     )
 }
@@ -5356,20 +5340,21 @@ members = ["rss_demo", "rss_orphan"]
     }
 
     #[test]
-    fn public_api_requires_every_target_baseline() -> Result<()> {
+    fn public_api_carrier_does_not_duplicate_typed_catalog() -> Result<()> {
         let root = unique_tmp("archrules-public-api");
-        for krate in crate::publicapi::target_crates(None).into_iter().skip(1) {
-            write(&root.join(format!("public-api/{krate}.txt")), "baseline\n")?;
-        }
+        write(
+            &root.join("xtask/src/publicapi.rs"),
+            "//! INVARIANT: PUBLICAPI-DEMO-01 { level = \"Medium\", exec = \"release-check\", source = \"public-api\" }\n",
+        )?;
         let mut index = Index::default();
         scan_public_api(&root, &mut index)?;
         assert!(
             index
-                .findings
+                .records
                 .iter()
-                .any(|f| f.rule == Rule::MissingCarrier),
+                .any(|record| record.id == "PUBLICAPI-DEMO-01"),
             "{:?}",
-            index.findings
+            index.records
         );
         fs::remove_dir_all(root)?;
         Ok(())
@@ -5586,9 +5571,6 @@ members = ["rss_demo"]
             &root.join("xtask/src/publicapi.rs"),
             "//! INVARIANT: PUBLICAPI-DEMO-01 { level = \"Medium\", exec = \"release-check\", source = \"public-api\" }\n",
         )?;
-        for krate in crate::publicapi::target_crates(None) {
-            write(&root.join(format!("public-api/{krate}.txt")), "demo\n")?;
-        }
         write(
             &root.join("lints/rss_demo/Cargo.toml"),
             "[package]\nname = \"rss_demo\"\n",

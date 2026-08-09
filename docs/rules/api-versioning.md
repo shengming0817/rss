@@ -25,8 +25,8 @@ compensation effect scope、idempotency/compensation/retry class 或 retry polic
 ## 轴 A / 轴 B 边界
 
 轴 A 只覆盖由产品面 owner 与 release artifact 明确承诺的 Rust API 和 authoring schema。RSS 当前没有外部 Rust API
-调用方，因此轴 A 的破坏变更不保留旧 Rust API shim；Release API 符号面仍由 `cargo public-api` /
-`cargo-semver-checks` 显式审查。
+调用方，因此轴 A 的破坏变更不保留旧 Rust API shim。本 PR 提供 release-selected exported-symbol baseline
+命令；Release drift 的 release-check 接线、`cargo-semver-checks`、公共依赖与 leakage 由 #2048 完成。
 
 Platform Application 的 #2045 精确设计由
 [`platform_application_waist` executable contract](../../xtask/tests/fixtures/platform_application_waist/src/lib.rs) 单源拥有。
@@ -48,6 +48,17 @@ internal。package version、MSRV、Cargo publish eligibility 以及 binary/imag
 仓内 `pub` 只表示 Rust 跨 crate 可见性，不自动进入轴 A。`publish = false` 的 internal crate 可以保留
 `cargo public-api` curated baseline 作为安全敏感 exported-symbol 漂移审查，但该 baseline 不把 internal crate 提升为
 Release API，也不产生外部 SemVer 承诺；`diport` 属于这一类 Internal Provider Contract。
+
+baseline 有且只有两个 owner：`public-api/*.txt` 是 internal signature drift carrier，
+`release-api/*.txt` 是正向选择 package 的轴 A exported Rust surface carrier。二者从同一份 validated
+Release Surface 派生并互斥；snapshot、`pub`、publishability 或 artifact 存在都不能替代正向选择。
+更新先在 `.cache/public-api-staging/` 构造并持久化完整 immutable generation，再通过单次原子目录交换
+切换 owner；shared/exclusive OS lock 覆盖同一 owner 的 check/update 全过程。进程中断只会留下 ignored
+staging generation，下一次持锁更新在构造新 generation 前清理；live `public-api/` / `release-api/` 始终是
+完整旧 generation 或完整新 generation，不存在逐文件发布、补偿式 rollback 或伪 content-CAS 路径。
+分别使用 `cargo xtask public-api internal [--layer basis|engine|curated] [--check]` 与
+`cargo xtask public-api release [--check]`。缺失、漂移、孤儿或异常目录均 fail-closed，不存在 missing
+宽限、手填 package、路径 alias、双写或兼容 reader。
 
 轴 B 是版本化 wire contract，不使用轴 A 的“不留 shim”结论绕过消费方隔离。
 `active` wire 发生破坏式变更时必须：

@@ -240,11 +240,7 @@ fn dispatch(command: Command) -> Result<()> {
             fail_fast,
             &only,
         ),
-        Command::PublicApi {
-            check,
-            allow_missing,
-            layer,
-        } => publicapi::run(check, allow_missing, layer),
+        Command::PublicApi(command) => publicapi::run(command),
         Command::Ci(CiCommand::Full {
             allow_missing_tools,
             fail_fast,

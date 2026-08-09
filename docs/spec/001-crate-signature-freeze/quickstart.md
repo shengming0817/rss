@@ -22,19 +22,19 @@ cargo clippy -p <crate...> --all-targets -- -D warnings
 cargo nextest run -p <crate...>                  # 仅 shape 测试，无行为断言
 
 # 4. 封装面 baseline（入口由 PR-0 落地；PR-1 用 basis、PR-2 用 engine；需 nightly rustdoc-json）
-cargo xtask public-api --layer basis          # PR-1：生成基础层 baseline 并 commit
-cargo xtask public-api --layer engine         # PR-2：生成引擎层 baseline 并 commit
-cargo xtask public-api --layer basis --check  # 漂移门：缺失/不一致即 fail-fast（不在 cargo xtask verify 聚合内）
-cargo xtask public-api --check --allow-missing # 仅 PR-0 自检：宽限「baseline 尚未产出」（drift 仍 fail）
+cargo xtask public-api internal --layer basis          # 生成基础层 internal baseline 并 commit
+cargo xtask public-api internal --layer engine         # 生成引擎层 internal baseline 并 commit
+cargo xtask public-api internal --layer basis --check  # 缺失/不一致即 fail-closed
+cargo xtask public-api release --check                 # 校验正向选择的 Release API exact-set
 ```
 
 ## 各层预期结果
 
 | unit | 通过判据 |
 |---|---|
-| **PR-0** | ADR-004 conventions 合并 + conventions.md 薄引用；`cargo xtask public-api` 工具入口就绪 |
-| **PR-1** 基础 | `cargo build -p vocab -p ids -p secure -p support -p runctx` 绿；`cargo xtask public-api --layer basis` baseline 已 commit；无内部分组依赖（deny 绿） |
-| **PR-2** 引擎 | `cargo build -p consistency -p primitives` 绿；L0 引擎 trait 泛型静态分发编译过；`cargo xtask public-api --layer engine` baseline 已 commit；不依赖服务/域/adapters |
+| **PR-0** | ADR-004 conventions 合并 + conventions.md 薄引用；typed `public-api internal\|release` 工具入口就绪 |
+| **PR-1** 基础 | `cargo build -p vocab -p ids -p secure -p support -p runctx` 绿；`cargo xtask public-api internal --layer basis` baseline 已 commit；无内部分组依赖（deny 绿） |
+| **PR-2** 引擎 | `cargo build -p consistency -p primitives` 绿；L0 引擎 trait 泛型静态分发编译过；`cargo xtask public-api internal --layer engine` baseline 已 commit；不依赖服务/域/adapters |
 | **PR-diport** | `cargo build -p diport` 绿；DI port trait dyn-compatible（`trybuild` compile-pass/fail）；`deny.toml` wrappers 绿（PR-diport 当时仅 infra port；ADR-005 后白名单扩为 `diport` + 定义域形 repo port 的域 crate，见 DIPORT-MACRO-CONFINE-01′）；ADR-003 §8 三风险已验证；architecture.md/deny.toml/rust-standards/domain-patterns 已回写 |
 | **PR-3** 服务 | 7 服务 crate `cargo build` 绿；`Domain::init` 返回 Result（不 panic）；非 DI 接缝（RouteGroup/Disposition/HandlerFn）冻结；DI port 已在 diport；不依赖域/adapters |
 | **PR-4** 域 | 5 域 crate `cargo build` 绿；域间无 import（deny 绿）；domain 类型未 derive Serialize（编译/grep 核）；**域形 repo/service port 在域 crate `pub mod ports`**（ADR-005 Option 2；provider-agnostic infra port 在 diport） |

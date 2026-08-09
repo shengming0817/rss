@@ -1,37 +1,34 @@
-//! `cargo xtask public-api` —— 库 exported-symbol baseline（封装外部 `cargo-public-api`）。
+//! 两类 Rust exported-symbol baseline 的唯一实现。
 //!
-//! 用途：Release API crate 的轴 A 签名审查 + 安全敏感 internal curated extras 的 exported 符号面漂移审查，
-//! 形成可 commit 的 baseline。internal curated baseline 不把 crate 提升为 Release API，也不产生 SemVer 承诺
-//! （见 `docs/rules/api-versioning.md`）。
-//!
-//! **PR-0 仅落工具入口**；baseline 快照随 PR-1/PR-2 产出并 commit 到 `public-api/<crate>.txt`
-//! （PR-1 `--layer basis`、PR-2 `--layer engine`、安全敏感例外 `--layer curated`；无 `--layer` =
-//! basis + engine + curated extras 全集，收口 GATE 用）。
-//!
-//! **漂移门闭环**：`--check` 对目标层任一 baseline 缺失 / 不一致 **默认 fail-fast**；仅 PR-0
-//! 自检可显式 `--allow-missing` 宽限缺失（drift 仍 fail）——对齐 cargo-public-api snapshot-gate
-//! 范式，杜绝「无 baseline 也绿」的误绿。
+//! `internal` owner 写入 `public-api/`，只证明内部签名漂移；`release` owner 写入
+//! `release-api/`，目标严格来自 validated positive Release Surface。baseline 本身不授予 Release API。
 //!
 //! 依赖：外部 `cargo-public-api`（版本由 CI tool catalog 编译期派生）+ 钉版 nightly rustdoc-json
 //! （`rustup toolchain install <PINNED_NIGHTLY>`，见 [`PINNED_NIGHTLY`]）。未满足时本命令给指引并**非零退出**（非静默 noop）。
 //!
-//! **不在 `cargo xtask verify` 聚合门内**：verify 聚合每次代码改动的强制门（fmt/build/clippy/nextest/deny/
-//! dylint + meta）；public-api 是**库 exported-symbol baseline 漂移门**（Release API 承载轴 A SemVer；internal
-//! curated extras 只承载安全/封装审查，需 nightly rustdoc-json 重新生成 baseline），语义与触发节奏不同，故为
-//! 独立可选门（单独 `cargo xtask public-api --check`）。
+//! **不在 `cargo xtask verify` 聚合门内**：本命令提供 internal signature 与 release-selected exported-symbol
+//! baseline；当前 release-check 只执行 internal owner。Release drift 接线、SemVer、公共依赖与 leakage 由
+//! #2048 独立完成。
 //!
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— 工具缺失 fail-fast，不静默成功。
-//! INVARIANT: PUBLICAPI-DRIFT-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— `--check` 缺失/漂移默认 fail-fast；缺失豁免仅经显式 `--allow-missing`。
+//! INVARIANT: PUBLICAPI-DRIFT-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— owner exact-set 的缺失、漂移、孤儿和异常目录均 fail-closed。
 //! INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "release-check", source = "public-api" }—— rustdoc-json 用钉版 nightly（[`PINNED_NIGHTLY`]，非 rolling）；该 pin 四处
 //!   一致：`PINNED_NIGHTLY` ⇔ `lints/rust-toolchain.toml` channel ⇔ reusable CI `RSS_NIGHTLY_PINNED`（三方功能值，
 //!   `pinned_nightly_single_source_of_truth` 守）+ `verify.rs` public-api install_hint（`verify::tests::
 //!   public_api_install_hint_pins_nightly` 守，绑真实字段值非源码全文）。漂移即 fail。
 
 use crate::layers::{BASIS_CRATES, ENGINE_CRATES};
-use crate::workspace_root;
 use anyhow::{Context, Result, bail};
-use std::path::PathBuf;
-use std::process::Command;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
+use std::sync::atomic::{AtomicU64, Ordering};
+use workspacefacts::{PackageKey, TargetKind, WorkspaceFacts};
+
+static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 // 分层成员单源 = `layers.rs`（basis = PR-1 验收集、engine = PR-2 验收集）；此处复用，不另列副本。
 // curated extras 不是架构 layer，只是安全敏感 exported-symbol 面的定点 golden 例外；其中 internal crate
@@ -53,14 +50,14 @@ const CURATED_EXTRA_CRATES: &[&str] = &["authn", "diport", "generated", "runtime
 /// `verify::tests::public_api_install_hint_pins_nightly` 守（绑真实 install_hint 字段值、非源码全文，避免注释
 /// 含 pin 的误绿）——漂移即 fail。**与 dylint nightly 成对、CI 只装一份**：dylint 因 `clippy_utils` rev 升 nightly 时——
 /// 该 rev 与本 nightly 配对（见 `lints/rss_*/Cargo.toml`，由 dylint 编译失败 **Hard** 强制，非本治理测试
-/// 覆盖）——**须同步重跑 `cargo xtask public-api` 重生成 `public-api/*.txt`**；忘记不会静默，会被
+/// 覆盖）——**须同步重跑 owner-typed `cargo xtask public-api internal|release`**；忘记不会静默，会被
 /// PUBLICAPI-DRIFT-GATE-01（`--check`，共用同一 pin）在 CI 直接 drift-fail 抓住。
 pub(crate) const PINNED_NIGHTLY: &str = "nightly-2026-04-16";
 
 /// 封装面 baseline 的目标层。无 `--layer` 时取 basis + engine + curated extras 全集（收口 GATE 用）。
 /// 服务/域/adapters 内部接缝默认多变，不整体入 baseline；安全敏感 crate 需定点列入 curated extras。
 #[derive(Debug, PartialEq, Eq, Clone, Copy, clap::ValueEnum)]
-pub(crate) enum Layer {
+pub(crate) enum InternalLayer {
     Basis,
     Engine,
     Curated,
@@ -69,11 +66,11 @@ pub(crate) enum Layer {
 /// 解析 layer → 目标 crate 集。`None` = basis + engine + curated extras（不另列第三份 ALL，避免漂移）。
 /// 排除 proc-macro 工具 crate（[`crate::layers::is_proc_macro`]）——其契约由 codegen golden 守，
 /// 非 SemVer 库 API 面，不入 public-api baseline。
-pub(crate) fn target_crates(layer: Option<Layer>) -> Vec<&'static str> {
+pub(crate) fn target_crates(layer: Option<InternalLayer>) -> Vec<&'static str> {
     let select: Vec<&'static str> = match layer {
-        Some(Layer::Basis) => BASIS_CRATES.to_vec(),
-        Some(Layer::Engine) => ENGINE_CRATES.to_vec(),
-        Some(Layer::Curated) => CURATED_EXTRA_CRATES.to_vec(),
+        Some(InternalLayer::Basis) => BASIS_CRATES.to_vec(),
+        Some(InternalLayer::Engine) => ENGINE_CRATES.to_vec(),
+        Some(InternalLayer::Curated) => CURATED_EXTRA_CRATES.to_vec(),
         None => BASIS_CRATES
             .iter()
             .chain(ENGINE_CRATES)
@@ -87,45 +84,794 @@ pub(crate) fn target_crates(layer: Option<Layer>) -> Vec<&'static str> {
         .collect()
 }
 
-/// 生成（`check=false`）或校验（`check=true`）目标层封装面 baseline。
-/// `allow_missing`：仅 PR-0 自检显式宽限缺失 baseline（默认缺失即 fail-fast，漂移门闭环）。
-pub(crate) fn run(check: bool, allow_missing: bool, layer: Option<Layer>) -> Result<()> {
-    ensure_tool_available()?;
-    let crates = target_crates(layer);
-    let dir = baseline_dir()?;
-    if !check {
-        std::fs::create_dir_all(&dir)
-            .with_context(|| format!("创建 baseline 目录失败: {}", dir.display()))?;
-    }
-
-    let mut drift = Vec::new();
-    let mut missing = Vec::new();
-    for krate in &crates {
-        let actual = capture_public_api(krate)?;
-        let path = dir.join(format!("{krate}.txt"));
-        if check {
-            match std::fs::read_to_string(&path) {
-                Ok(expected) if expected == actual => {}
-                Ok(_) => drift.push((*krate).to_owned()),
-                // 仅「baseline 尚未生成」(NotFound) 降级为警告；其余 I/O 错误（权限/损坏）fail-fast。
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                    missing.push((*krate).to_owned())
-                }
-                Err(e) => {
-                    return Err(e).with_context(|| format!("读 baseline 失败: {}", path.display()));
-                }
-            }
-        } else {
-            std::fs::write(&path, &actual)
-                .with_context(|| format!("写 baseline 失败: {}", path.display()))?;
-            eprintln!("public-api: 写入 baseline {}", path.display());
-        }
-    }
-    report(check, allow_missing, &drift, &missing)
+#[derive(Debug, PartialEq, Eq, clap::Subcommand)]
+pub(crate) enum Command {
+    /// Update/check internal signatures; update removes stale snapshots in the selected scope.
+    Internal {
+        /// Read-only fail-closed validation; without it, update the selected baseline scope.
+        #[arg(long)]
+        check: bool,
+        /// Limit update/check and stale cleanup to one complete layer ownership universe.
+        #[arg(long, value_enum)]
+        layer: Option<InternalLayer>,
+    },
+    /// Update/check the complete release-selected owner and remove stale snapshots on update.
+    Release {
+        /// Read-only fail-closed validation; without it, atomically update the complete owner.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
-fn baseline_dir() -> Result<PathBuf> {
-    Ok(workspace_root()?.join("public-api"))
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BaselineOwner {
+    Internal,
+    Release,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BaselineScope {
+    Complete(BaselineOwner),
+    InternalLayer(InternalLayer),
+}
+
+impl BaselineScope {
+    const fn owner(self) -> BaselineOwner {
+        match self {
+            Self::Complete(owner) => owner,
+            Self::InternalLayer(_) => BaselineOwner::Internal,
+        }
+    }
+}
+
+impl BaselineOwner {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Internal => "internal",
+            Self::Release => "release",
+        }
+    }
+
+    const fn directory(self) -> &'static str {
+        match self {
+            Self::Internal => "public-api",
+            Self::Release => "release-api",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct BaselineCatalog {
+    internal_universe: Vec<PackageKey>,
+    internal: Vec<PackageKey>,
+    release: Vec<PackageKey>,
+}
+
+impl BaselineCatalog {
+    fn derive(root: &Path, facts: &WorkspaceFacts) -> Result<Self> {
+        crate::workspace_facts::validate_command_funnel(root)?;
+        crate::assembly_governance::validate_source_funnel(root)?;
+        let ir = crate::assembly_governance::AssemblyGovernanceIr::<
+            crate::assembly_governance::Core,
+        >::load(root)?;
+        let artifacts = if crate::release_surface::requires_artifact_join(facts) {
+            let joined =
+                ir.join_artifacts(crate::assembly_governance::load_artifact_declaration(root)?)?;
+            crate::release_surface::project_artifacts(&joined)
+        } else {
+            Vec::new()
+        };
+        let (surface, findings) = crate::release_surface::validate(facts, &artifacts);
+        if !findings.is_empty() {
+            let details = findings
+                .iter()
+                .map(crate::diagnostic::format_finding)
+                .collect::<Vec<_>>()
+                .join("\n");
+            bail!("validated Release Surface 失败:\n{details}");
+        }
+        let surface = surface.context("validated Release Surface 未生成 typed surface")?;
+        Self::from_release_surface(facts, &surface)
+    }
+
+    fn from_release_surface(
+        facts: &WorkspaceFacts,
+        surface: &crate::release_surface::ReleaseSurface,
+    ) -> Result<Self> {
+        Self::from_selected_packages(
+            facts,
+            surface.packages().iter().map(|package| package.package()),
+        )
+    }
+
+    fn from_selected_packages<'a>(
+        facts: &WorkspaceFacts,
+        selected: impl IntoIterator<Item = &'a str>,
+    ) -> Result<Self> {
+        let release = selected
+            .into_iter()
+            .map(|name| resolve_library(facts, name))
+            .collect::<Result<BTreeSet<_>>>()?;
+        let internal_universe = target_crates(None)
+            .into_iter()
+            .map(|name| resolve_library(facts, name))
+            .collect::<Result<BTreeSet<_>>>()?;
+        let internal = internal_universe.difference(&release).cloned().collect();
+        Ok(Self {
+            internal_universe: internal_universe.into_iter().collect(),
+            internal,
+            release: release.into_iter().collect(),
+        })
+    }
+
+    fn plan(&self, scope: BaselineScope) -> BaselinePlan {
+        let (targets, universe) = match scope {
+            BaselineScope::Complete(BaselineOwner::Internal) => {
+                (self.internal.clone(), BaselineUniverse::Complete)
+            }
+            BaselineScope::Complete(BaselineOwner::Release) => {
+                (self.release.clone(), BaselineUniverse::Complete)
+            }
+            BaselineScope::InternalLayer(layer) => {
+                let selected = target_crates(Some(layer))
+                    .into_iter()
+                    .collect::<BTreeSet<_>>();
+                let targets = self
+                    .internal
+                    .iter()
+                    .filter(|package| selected.contains(package.as_str()))
+                    .cloned()
+                    .collect();
+                let universe = self
+                    .internal_universe
+                    .iter()
+                    .filter(|package| selected.contains(package.as_str()))
+                    .cloned()
+                    .collect();
+                (targets, BaselineUniverse::Packages(universe))
+            }
+        };
+        BaselinePlan {
+            scope,
+            universe,
+            targets,
+        }
+    }
+}
+
+fn resolve_library(facts: &WorkspaceFacts, name: &str) -> Result<PackageKey> {
+    let package = facts
+        .package_key(name)
+        .with_context(|| format!("baseline target `{name}` 不属于 workspace"))?;
+    let has_library = facts
+        .targets_for(&package)?
+        .iter()
+        .any(|target| target.kind() == TargetKind::Library);
+    if !has_library {
+        bail!("baseline target `{name}` 没有 library target");
+    }
+    Ok(package)
+}
+
+#[derive(Debug)]
+struct BaselinePlan {
+    scope: BaselineScope,
+    universe: BaselineUniverse,
+    targets: Vec<PackageKey>,
+}
+
+#[derive(Debug)]
+enum BaselineUniverse {
+    Complete,
+    Packages(BTreeSet<PackageKey>),
+}
+
+impl BaselineUniverse {
+    fn contains_file(&self, name: &str) -> bool {
+        match self {
+            Self::Complete => true,
+            Self::Packages(packages) => name
+                .strip_suffix(".txt")
+                .is_some_and(|package| packages.iter().any(|key| key.as_str() == package)),
+        }
+    }
+}
+
+pub(crate) fn run(command: Command) -> Result<()> {
+    let root = crate::workspace_root()?;
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+    let facts = command_facts.get()?;
+    let catalog = BaselineCatalog::derive(&root, facts)?;
+    let (plan, check) = match command {
+        Command::Internal { check, layer } => {
+            let scope = layer.map_or(
+                BaselineScope::Complete(BaselineOwner::Internal),
+                BaselineScope::InternalLayer,
+            );
+            (catalog.plan(scope), check)
+        }
+        Command::Release { check } => (
+            catalog.plan(BaselineScope::Complete(BaselineOwner::Release)),
+            check,
+        ),
+    };
+    execute(&root, &plan, check)
+}
+
+fn execute(root: &Path, plan: &BaselinePlan, check: bool) -> Result<()> {
+    let owner = plan.scope.owner();
+    let _owner_lock = BaselineOwnerLock::acquire(root, owner, check)?;
+    let dir = root.join(owner.directory());
+    let before = scan_baselines(&dir)?;
+    if plan.targets.is_empty() {
+        return finish_empty_or_orphan(plan, &dir, check, &before);
+    }
+
+    ensure_tool_available()?;
+    let target_dir = root.join(".cache/public-api-target");
+    let mut expected = BTreeMap::new();
+    for package in &plan.targets {
+        expected.insert(
+            format!("{}.txt", package.as_str()),
+            capture_public_api(root, package.as_str(), &target_dir)?.into_bytes(),
+        );
+    }
+    if scan_baselines(&dir)? != before {
+        bail!("baseline capture 期间目录发生并发变化: {}", dir.display());
+    }
+    let differences = differences(plan, &dir, &before.files, &expected);
+    if check {
+        return report_differences(owner, &differences);
+    }
+    apply_generation(&dir, plan, &before, &expected)?;
+    eprintln!(
+        "public-api {}: {} baseline 已原子更新",
+        owner.label(),
+        expected.len()
+    );
+    Ok(())
+}
+
+fn finish_empty_or_orphan(
+    plan: &BaselinePlan,
+    dir: &Path,
+    check: bool,
+    before: &BaselineSnapshot,
+) -> Result<()> {
+    if scan_baselines(dir)? != *before {
+        bail!("baseline 校验期间目录发生并发变化: {}", dir.display());
+    }
+    let expected = BTreeMap::new();
+    let differences = differences(plan, dir, &before.files, &expected);
+    if check {
+        return report_differences(plan.scope.owner(), &differences);
+    }
+    if differences
+        .items
+        .iter()
+        .any(|difference| difference.kind == DifferenceKind::Orphan)
+    {
+        apply_generation(dir, plan, before, &expected)?;
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DifferenceKind {
+    Missing,
+    Drift,
+    Orphan,
+}
+
+impl DifferenceKind {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Drift => "drift",
+            Self::Orphan => "orphan",
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct BaselineDifference {
+    kind: DifferenceKind,
+    package: String,
+    path: PathBuf,
+}
+
+#[derive(Default)]
+struct Differences {
+    items: Vec<BaselineDifference>,
+}
+
+fn differences(
+    plan: &BaselinePlan,
+    dir: &Path,
+    actual: &BTreeMap<String, Vec<u8>>,
+    expected: &BTreeMap<String, Vec<u8>>,
+) -> Differences {
+    let mut result = Differences::default();
+    for (name, bytes) in expected {
+        match actual.get(name) {
+            None => result
+                .items
+                .push(difference(DifferenceKind::Missing, dir, name)),
+            Some(current) if current != bytes => {
+                result
+                    .items
+                    .push(difference(DifferenceKind::Drift, dir, name))
+            }
+            Some(_) => {}
+        }
+    }
+    result.items.extend(
+        actual
+            .keys()
+            .filter(|name| plan.universe.contains_file(name) && !expected.contains_key(*name))
+            .map(|name| difference(DifferenceKind::Orphan, dir, name)),
+    );
+    result
+}
+
+fn difference(kind: DifferenceKind, dir: &Path, name: &str) -> BaselineDifference {
+    BaselineDifference {
+        kind,
+        package: name.strip_suffix(".txt").unwrap_or(name).to_owned(),
+        path: dir.join(name),
+    }
+}
+
+fn report_differences(owner: BaselineOwner, differences: &Differences) -> Result<()> {
+    if differences.items.is_empty() {
+        eprintln!("public-api {} --check: exact-set 无 drift", owner.label());
+        return Ok(());
+    }
+    let details = differences
+        .items
+        .iter()
+        .map(|difference| {
+            format!(
+                "status={} owner={} package={} path={}",
+                difference.kind.label(),
+                owner.label(),
+                difference.package,
+                difference.path.display()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!(
+        "public-api owner={} 校验失败（{} 项）:\n{}",
+        owner.label(),
+        differences.items.len(),
+        details
+    )
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BaselineSnapshot {
+    directory: Option<DirectoryIdentity>,
+    files: BTreeMap<String, Vec<u8>>,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DirectoryIdentity {
+    device: rustix::fs::Dev,
+    inode: u64,
+}
+
+#[cfg(not(unix))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DirectoryIdentity {
+    canonical_path: std::path::PathBuf,
+}
+
+fn scan_baselines(dir: &Path) -> Result<BaselineSnapshot> {
+    match fs::symlink_metadata(dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(BaselineSnapshot {
+            directory: None,
+            files: BTreeMap::new(),
+        }),
+        Err(error) => Err(error).with_context(|| format!("读取 {} 失败", dir.display())),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            bail!(
+                "baseline owner 路径必须是非 symlink 目录: {}",
+                dir.display()
+            )
+        }
+        Ok(metadata) => scan_baseline_files(dir, Some(directory_identity(dir, &metadata)?)),
+    }
+}
+
+#[cfg(unix)]
+fn directory_identity(_dir: &Path, metadata: &fs::Metadata) -> Result<DirectoryIdentity> {
+    use std::os::unix::fs::MetadataExt as _;
+    Ok(DirectoryIdentity {
+        device: metadata.dev() as rustix::fs::Dev,
+        inode: metadata.ino(),
+    })
+}
+
+#[cfg(not(unix))]
+fn directory_identity(dir: &Path, _metadata: &fs::Metadata) -> Result<DirectoryIdentity> {
+    Ok(DirectoryIdentity {
+        canonical_path: fs::canonicalize(dir)?,
+    })
+}
+
+fn scan_baseline_files(
+    dir: &Path,
+    directory: Option<DirectoryIdentity>,
+) -> Result<BaselineSnapshot> {
+    scan_baseline_files_with_hook(dir, directory, || {})
+}
+
+fn scan_baseline_files_with_hook(
+    dir: &Path,
+    directory: Option<DirectoryIdentity>,
+    after_identity: impl FnOnce(),
+) -> Result<BaselineSnapshot> {
+    after_identity();
+    let mut files = BTreeMap::new();
+    for entry in fs::read_dir(dir).with_context(|| format!("扫描 {} 失败", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let metadata = fs::symlink_metadata(&path)?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            bail!(
+                "baseline 目录含 symlink/子目录/异常条目: {}",
+                path.display()
+            );
+        }
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("baseline 文件名不是 UTF-8: {}", path.display()))?;
+        if Path::new(&name)
+            .extension()
+            .and_then(|value| value.to_str())
+            != Some("txt")
+        {
+            bail!("baseline 目录含非预期文件: {}", path.display());
+        }
+        let content = crate::generated_file::read_stable_utf8_file(
+            &path,
+            32 * 1024 * 1024,
+            "public-api baseline",
+        )?;
+        files.insert(name, content.into_bytes());
+    }
+    let after = fs::symlink_metadata(dir)?;
+    if after.file_type().is_symlink()
+        || !after.is_dir()
+        || directory.as_ref() != Some(&directory_identity(dir, &after)?)
+    {
+        bail!("baseline 目录在扫描期间被替换: {}", dir.display());
+    }
+    Ok(BaselineSnapshot { directory, files })
+}
+
+struct BaselineOwnerLock {
+    #[cfg(unix)]
+    _file: fs::File,
+}
+
+impl BaselineOwnerLock {
+    fn acquire(root: &Path, owner: BaselineOwner, shared: bool) -> Result<Self> {
+        #[cfg(not(unix))]
+        {
+            let _ = (root, owner, shared);
+            bail!("public-api owner lock / atomic generation update 不支持当前平台")
+        }
+        #[cfg(unix)]
+        {
+            use rustix::fs::{FileType, FlockOperation, Mode, OFlags, flock, fstat, openat};
+
+            let cache = root.join(".cache");
+            ensure_real_directory(&cache)?;
+            let lock_dir = cache.join("public-api-locks");
+            ensure_real_directory(&lock_dir)?;
+            let capability = crate::generated_file::open_directory_capability(&lock_dir)?;
+            let name = format!("{}.lock", owner.label());
+            let fd = openat(
+                capability.fd(),
+                name.as_str(),
+                OFlags::CREATE | OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )?;
+            let stat = fstat(&fd)?;
+            anyhow::ensure!(
+                FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile,
+                "baseline owner lock 不是普通文件"
+            );
+            flock(
+                &fd,
+                if shared {
+                    FlockOperation::LockShared
+                } else {
+                    FlockOperation::LockExclusive
+                },
+            )?;
+            Ok(Self {
+                _file: fs::File::from(fd),
+            })
+        }
+    }
+}
+
+fn ensure_real_directory(path: &Path) -> Result<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            anyhow::ensure!(
+                metadata.is_dir() && !metadata.file_type().is_symlink(),
+                "目录必须是非 symlink 真实目录: {}",
+                path.display()
+            );
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let parent = path
+                .parent()
+                .with_context(|| format!("{} 无父目录", path.display()))?;
+            anyhow::ensure!(parent.exists(), "目录父路径不存在: {}", parent.display());
+            fs::create_dir(path).with_context(|| format!("创建 {} 失败", path.display()))?;
+            fs::File::open(parent)?.sync_all()?;
+            Ok(())
+        }
+        Err(error) => Err(error).with_context(|| format!("读取 {} 失败", path.display())),
+    }
+}
+
+fn apply_generation(
+    dir: &Path,
+    plan: &BaselinePlan,
+    before: &BaselineSnapshot,
+    expected: &BTreeMap<String, Vec<u8>>,
+) -> Result<()> {
+    apply_generation_with_hook(dir, plan, before, expected, || Ok(()))
+}
+
+fn apply_generation_with_hook(
+    dir: &Path,
+    plan: &BaselinePlan,
+    before: &BaselineSnapshot,
+    expected: &BTreeMap<String, Vec<u8>>,
+    before_commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if scan_baselines(dir)? != *before {
+        bail!("baseline apply 前目录发生并发变化: {}", dir.display());
+    }
+    let intended = intended_generation(plan, before, expected);
+    let stage = prepare_generation(dir, plan.scope.owner(), &intended)?;
+    let result = commit_generation(dir, &stage, before, &intended, before_commit);
+    if result.is_err() && stage.exists() {
+        cleanup_generation(&stage).with_context(|| {
+            format!(
+                "baseline generation 提交失败且 staging 清理失败: {}",
+                stage.display()
+            )
+        })?;
+    }
+    result
+}
+
+fn intended_generation(
+    plan: &BaselinePlan,
+    before: &BaselineSnapshot,
+    expected: &BTreeMap<String, Vec<u8>>,
+) -> BTreeMap<String, Vec<u8>> {
+    let mut intended = before.files.clone();
+    intended.extend(
+        expected
+            .iter()
+            .map(|(name, bytes)| (name.clone(), bytes.clone())),
+    );
+    intended.retain(|name, _| expected.contains_key(name) || !plan.universe.contains_file(name));
+    intended
+}
+
+fn prepare_generation(
+    dir: &Path,
+    owner: BaselineOwner,
+    intended: &BTreeMap<String, Vec<u8>>,
+) -> Result<PathBuf> {
+    let root = dir
+        .parent()
+        .with_context(|| format!("{} 无 workspace root", dir.display()))?;
+    let cache = root.join(".cache");
+    ensure_real_directory(&cache)?;
+    let staging = cache.join("public-api-staging");
+    ensure_real_directory(&staging)?;
+    cleanup_stale_generations(&staging, owner)?;
+
+    let mut stage = None;
+    for _ in 0..64 {
+        let candidate = staging.join(format!(
+            "{}-{}-{}",
+            owner.label(),
+            std::process::id(),
+            GENERATION_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        match fs::create_dir(&candidate) {
+            Ok(()) => {
+                stage = Some(candidate);
+                break;
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(error).context("创建 baseline staging generation 失败"),
+        }
+    }
+    let stage = stage.context("baseline staging generation 名称冲突次数超限")?;
+    for (name, bytes) in intended {
+        anyhow::ensure!(
+            Path::new(name).components().count() == 1 && name.ends_with(".txt"),
+            "非法 baseline generation 文件名: {name}"
+        );
+        let path = stage.join(name);
+        let mut options = OpenOptions::new();
+        options.create_new(true).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt as _;
+            options.mode(0o644);
+        }
+        let mut file = options.open(&path)?;
+        file.write_all(bytes)?;
+        file.flush()?;
+        file.sync_all()?;
+    }
+    fs::File::open(&stage)?.sync_all()?;
+    fs::File::open(&staging)?.sync_all()?;
+    Ok(stage)
+}
+
+fn cleanup_stale_generations(staging: &Path, owner: BaselineOwner) -> Result<()> {
+    let prefix = format!("{}-", owner.label());
+    for entry in fs::read_dir(staging)? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("baseline staging 文件名不是 UTF-8"))?;
+        if name.starts_with(&prefix) {
+            let suffix = name
+                .strip_prefix(&prefix)
+                .context("owner generation prefix must match")?;
+            let (pid, sequence) = suffix
+                .split_once('-')
+                .context("baseline staging generation 名称形状非法")?;
+            anyhow::ensure!(
+                !pid.is_empty()
+                    && !sequence.is_empty()
+                    && pid.bytes().all(|byte| byte.is_ascii_digit())
+                    && sequence.bytes().all(|byte| byte.is_ascii_digit()),
+                "baseline staging generation 名称形状非法: {name}"
+            );
+            cleanup_generation(&entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn cleanup_generation(stage: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(stage)?;
+    anyhow::ensure!(
+        metadata.is_dir() && !metadata.file_type().is_symlink(),
+        "baseline staging 不是非 symlink 目录: {}",
+        stage.display()
+    );
+    for entry in fs::read_dir(stage)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("baseline staging 文件名不是 UTF-8"))?;
+        let metadata = fs::symlink_metadata(&path)?;
+        anyhow::ensure!(
+            metadata.is_file()
+                && !metadata.file_type().is_symlink()
+                && Path::new(&name)
+                    .extension()
+                    .and_then(|value| value.to_str())
+                    == Some("txt"),
+            "baseline staging 含异常条目: {}",
+            path.display()
+        );
+        fs::remove_file(&path)?;
+    }
+    fs::remove_dir(stage)?;
+    Ok(())
+}
+
+#[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
+fn commit_generation(
+    dir: &Path,
+    stage: &Path,
+    before: &BaselineSnapshot,
+    intended: &BTreeMap<String, Vec<u8>>,
+    before_commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    use rustix::fs::{RenameFlags, fsync, renameat_with};
+
+    anyhow::ensure!(
+        scan_baselines(dir)? == *before,
+        "baseline commit 前 live owner 已变化"
+    );
+    before_commit()?;
+    let root = dir.parent().context("baseline owner 无 parent")?;
+    let stage_parent = stage.parent().context("baseline stage 无 parent")?;
+    let owner_name = dir.file_name().context("baseline owner 无文件名")?;
+    let stage_name = stage.file_name().context("baseline stage 无文件名")?;
+    let root_capability = crate::generated_file::open_directory_capability(root)?;
+    let stage_capability = crate::generated_file::open_directory_capability(stage_parent)?;
+
+    if before.directory.is_some() {
+        renameat_with(
+            root_capability.fd(),
+            owner_name,
+            stage_capability.fd(),
+            stage_name,
+            RenameFlags::EXCHANGE,
+        )
+        .context("原子交换 baseline generation 失败")?;
+    } else {
+        renameat_with(
+            stage_capability.fd(),
+            stage_name,
+            root_capability.fd(),
+            owner_name,
+            RenameFlags::NOREPLACE,
+        )
+        .context("原子发布首个 baseline generation 失败")?;
+    }
+    fsync(root_capability.fd())?;
+    fsync(stage_capability.fd())?;
+
+    let live = scan_baselines(dir)?;
+    if live.files != *intended {
+        bail!(
+            "baseline generation commit 后 live owner 被并发修改；旧 generation 保留于 {}",
+            stage.display()
+        );
+    }
+    if before.directory.is_some() {
+        let displaced = scan_baselines(stage)?;
+        if displaced != *before {
+            renameat_with(
+                root_capability.fd(),
+                owner_name,
+                stage_capability.fd(),
+                stage_name,
+                RenameFlags::EXCHANGE,
+            )
+            .context("拒绝 raced generation 时恢复 live owner 失败")?;
+            fsync(root_capability.fd())?;
+            fsync(stage_capability.fd())?;
+            bail!("baseline commit 窗口检测到并发修改，已原子恢复 raced owner");
+        }
+        cleanup_generation(stage)?;
+        fsync(stage_capability.fd())?;
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "android", target_vendor = "apple")))]
+fn commit_generation(
+    _dir: &Path,
+    _stage: &Path,
+    _before: &BaselineSnapshot,
+    _intended: &BTreeMap<String, Vec<u8>>,
+    _before_commit: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    bail!("当前平台不支持原子 baseline generation exchange")
+}
+
+#[cfg(test)]
+fn baseline_dir() -> Result<std::path::PathBuf> {
+    Ok(crate::workspace_root()?.join(BaselineOwner::Internal.directory()))
 }
 
 /// 检测外部 cargo-public-api；缺失即 fail-fast 给安装指引（INVARIANT PUBLICAPI-TOOL-GATE-01）。
@@ -146,12 +892,12 @@ fn ensure_tool_available() -> Result<()> {
 /// 显式重设为 `toolchain`（剥离后成该变量唯一来源，CMD-ENV-CLEAN-01）——等价 `cargo +<toolchain> public-api`，
 /// 让 cargo-public-api 在钉版 nightly 下生成可复现 rustdoc-json（`is_probably_stable()`==false ⇒ 透传当前
 /// toolchain，不再强制 rolling `nightly`）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "release-check", source = "public-api" }.
-fn public_api_cmd(krate: &str, toolchain: &str, target_dir: &std::path::Path) -> Command {
+fn public_api_cmd(root: &Path, krate: &str, toolchain: &str, target_dir: &Path) -> ProcessCommand {
     let mut cmd = crate::cmd::cargo_cmd(
         crate::cmd::CargoSubcommand::PublicApi,
         &["-p", krate, "--omit", "blanket-impls"],
         &[("RUSTUP_TOOLCHAIN", toolchain)],
-        None,
+        Some(root),
     );
     // cargo-public-api 的 rustdoc-json 缓存不能与前序 all-features/coverage 编译共享；否则同一
     // CI 首次 check 可能读到不同 feature 面的旧 JSON，执行刷新后立即重跑却转绿。
@@ -159,14 +905,9 @@ fn public_api_cmd(krate: &str, toolchain: &str, target_dir: &std::path::Path) ->
     cmd
 }
 
-fn public_api_target_dir() -> Result<PathBuf> {
-    Ok(workspace_root()?.join(".cache/public-api-target"))
-}
-
 /// 运行 `cargo public-api -p <crate>`（钉版 nightly）捕获其封装面快照文本。
-fn capture_public_api(krate: &str) -> Result<String> {
-    let target_dir = public_api_target_dir()?;
-    let out = public_api_cmd(krate, PINNED_NIGHTLY, &target_dir)
+fn capture_public_api(root: &Path, krate: &str, target_dir: &Path) -> Result<String> {
+    let out = public_api_cmd(root, krate, PINNED_NIGHTLY, target_dir)
         .output()
         .with_context(|| format!("运行 cargo public-api -p {krate} 失败"))?;
     if !out.status.success() {
@@ -182,67 +923,18 @@ fn capture_public_api(krate: &str) -> Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// 汇报结果。生成模式只报数。校验模式漂移门闭环：
-/// - drift 非空 → fail-fast（最高优先，`--allow-missing` 不豁免漂移）。
-/// - missing 非空 → 默认 fail-fast；仅 `allow_missing`（PR-0 自检显式宽限）降级为警告。
-fn report(check: bool, allow_missing: bool, drift: &[String], missing: &[String]) -> Result<()> {
-    if !check {
-        eprintln!("public-api: baseline 生成完成");
-        return Ok(());
-    }
-    if !drift.is_empty() {
-        let (internal_curated, release): (Vec<_>, Vec<_>) = drift
-            .iter()
-            .partition(|krate| CURATED_EXTRA_CRATES.contains(&krate.as_str()));
-        let mut dispositions = Vec::new();
-        if !release.is_empty() {
-            dispositions.push(format!(
-                "Release API baseline: {}（按 api-versioning.md 轴 A 审查）",
-                release
-                    .iter()
-                    .map(|krate| krate.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        if !internal_curated.is_empty() {
-            dispositions.push(format!(
-                "internal curated baseline: {}（仅作 exported-symbol/封装漂移审查，不产生 SemVer 承诺）",
-                internal_curated
-                    .iter()
-                    .map(|krate| krate.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
-        }
-        bail!(
-            "public-api drift：{} crate 封装面与 committed baseline 不一致；{}",
-            drift.len(),
-            dispositions.join("；")
-        );
-    }
-    if !missing.is_empty() {
-        if !allow_missing {
-            bail!(
-                "public-api --check：{} crate 缺 committed baseline：{}（先 `cargo xtask public-api [--layer …]` 生成并提交；PR-0 自检可显式 `--allow-missing`）",
-                missing.len(),
-                missing.join(", ")
-            );
-        }
-        // reason: --allow-missing 是 PR-0 自检的显式宽限（baseline 尚未产出），非默认路径——drift 仍 fail。
-        eprintln!(
-            "public-api --check（--allow-missing）：{} crate 暂无 baseline，宽限通过：{}",
-            missing.len(),
-            missing.join(", ")
-        );
-    }
-    eprintln!("public-api --check: 无 drift");
-    Ok(())
+#[cfg(test)]
+fn public_api_target_dir() -> Result<std::path::PathBuf> {
+    Ok(crate::workspace_root()?.join(".cache/public-api-target"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::{Value, json};
+    use workspacefacts::testing::{
+        metadata_json, path_package, path_package_id, resolve_node, target,
+    };
 
     const HTTP_ROUTE_EVIDENCE_PRIVATE_FIELDS: &[&str] = &[
         "owner",
@@ -259,10 +951,6 @@ mod tests {
         "effect_profile",
     ];
 
-    fn v(items: &[&str]) -> Vec<String> {
-        items.iter().map(|s| (*s).to_owned()).collect()
-    }
-
     fn exposed_http_route_evidence_fields(baseline: &str) -> Vec<&'static str> {
         HTTP_ROUTE_EVIDENCE_PRIVATE_FIELDS
             .iter()
@@ -274,70 +962,467 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn report_generate_always_ok() {
-        assert!(report(false, false, &[], &[]).is_ok());
-    }
-
-    #[test]
-    fn report_check_clean_ok() {
-        assert!(report(true, false, &[], &[]).is_ok());
-    }
-
-    /// 复现测试（F1）：check 模式 missing-only **默认 fail-fast**（漂移门闭环，非误绿）。
-    #[test]
-    fn report_check_missing_only_fails_by_default() {
-        assert!(report(true, false, &[], &v(&["vocab", "ids"])).is_err());
-    }
-
-    /// 仅 `--allow-missing` 显式宽限 missing（PR-0 自检）。
-    #[test]
-    fn report_check_missing_only_ok_with_allow_missing() {
-        assert!(report(true, true, &[], &v(&["vocab", "ids"])).is_ok());
-    }
-
-    #[test]
-    fn report_check_drift_fails() {
-        assert!(report(true, false, &v(&["vocab"]), &[]).is_err());
-    }
-
-    /// F1 回归：同一次 full gate 的 Release-layer 与 internal curated drift 必须给出不同处置语义。
-    #[test]
-    fn report_check_drift_distinguishes_internal_curated_from_release_axis() {
-        let err = report(true, false, &v(&["vocab", "diport"]), &[])
-            .expect_err("drift 必须 fail-closed")
-            .to_string();
-        assert!(
-            err.contains("Release API baseline: vocab（按 api-versioning.md 轴 A 审查）"),
-            "Release-layer drift 须指向轴 A: {err}"
-        );
-        assert!(
-            err.contains(
-                "internal curated baseline: diport（仅作 exported-symbol/封装漂移审查，不产生 SemVer 承诺）"
+    fn baseline_plan(scope: BaselineScope, names: &[&str]) -> Result<BaselinePlan> {
+        let root = crate::workspace_root()?;
+        let facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = facts.get()?;
+        let universe = match scope {
+            BaselineScope::Complete(_) => BaselineUniverse::Complete,
+            BaselineScope::InternalLayer(layer) => BaselineUniverse::Packages(
+                target_crates(Some(layer))
+                    .into_iter()
+                    .map(|name| facts.package_key(name).map_err(Into::into))
+                    .collect::<Result<_>>()?,
             ),
-            "internal curated drift 不得被提升为轴 A: {err}"
-        );
+        };
+        Ok(BaselinePlan {
+            scope,
+            universe,
+            targets: names
+                .iter()
+                .map(|name| facts.package_key(name).map_err(Into::into))
+                .collect::<Result<_>>()?,
+        })
+    }
 
-        let internal_only = report(true, false, &v(&["diport"]), &[])
-            .expect_err("internal curated drift 必须 fail-closed")
-            .to_string();
-        assert!(internal_only.contains("internal curated baseline: diport"));
+    fn facts_with_nonempty_release_surface() -> Result<WorkspaceFacts> {
+        let mut names = target_crates(None);
+        names.push("alpha-release");
+        let mut packages = Vec::<Value>::new();
+        let mut member_ids = Vec::new();
+        let mut nodes = Vec::new();
+        for name in names {
+            let path = format!("/workspace/crates/{name}");
+            let mut package = path_package(
+                name,
+                &path,
+                vec![target(
+                    name,
+                    "lib",
+                    &format!("{path}/src/lib.rs"),
+                    true,
+                    &[],
+                )],
+                vec![],
+                json!({}),
+            );
+            if name == "alpha-release" {
+                package["publish"] = Value::Null;
+            }
+            let id = path_package_id(&path);
+            member_ids.push(id.clone());
+            nodes.push(resolve_node(&id, &[]));
+            packages.push(package);
+        }
+        let metadata = metadata_json("/workspace", packages, member_ids, nodes);
+        let mut metadata: Value = serde_json::from_str(&metadata)?;
+        metadata["metadata"] = json!({
+            "release-surface": {
+                "packages": [{
+                    "package": "alpha-release",
+                    "public-api-owner": "standalone-component",
+                    "api-stability": "experimental",
+                    "profiles": []
+                }],
+                "profile-artifacts": []
+            }
+        });
+        Ok(WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &serde_json::to_string(&metadata)?,
+        )?)
+    }
+
+    #[test]
+    fn closed_owner_routes_are_distinct() {
+        assert_eq!(BaselineOwner::Internal.directory(), "public-api");
+        assert_eq!(BaselineOwner::Release.directory(), "release-api");
+        assert_ne!(
+            BaselineOwner::Internal.directory(),
+            BaselineOwner::Release.directory()
+        );
+    }
+
+    #[test]
+    fn selected_release_library_moves_to_one_owner_with_stable_sorting() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let catalog = BaselineCatalog::from_selected_packages(facts, ["vocab", "ids"])?;
+        assert_eq!(
+            catalog
+                .release
+                .iter()
+                .map(PackageKey::as_str)
+                .collect::<Vec<_>>(),
+            vec!["ids", "vocab"]
+        );
+        let internal = catalog
+            .internal
+            .iter()
+            .map(PackageKey::as_str)
+            .collect::<BTreeSet<_>>();
+        assert!(!internal.contains("ids"));
+        assert!(!internal.contains("vocab"));
+        assert!(internal.contains("diport"));
+        Ok(())
+    }
+
+    #[test]
+    fn validated_nonempty_surface_flows_into_release_owner_catalog() -> Result<()> {
+        let facts = facts_with_nonempty_release_surface()?;
+        let (surface, findings) = crate::release_surface::validate(&facts, &[]);
+        assert!(findings.is_empty(), "{findings:?}");
+        let surface = surface.context("synthetic surface must validate")?;
+        let catalog = BaselineCatalog::from_release_surface(&facts, &surface)?;
+        assert_eq!(
+            catalog
+                .release
+                .iter()
+                .map(PackageKey::as_str)
+                .collect::<Vec<_>>(),
+            vec!["alpha-release"]
+        );
         assert!(
-            !internal_only.contains("轴 A"),
-            "internal-only drift 诊断不得出现轴 A: {internal_only}"
+            catalog
+                .internal
+                .iter()
+                .all(|package| package.as_str() != "alpha-release")
         );
+        Ok(())
     }
 
-    /// drift 优先 fail-fast，即便同时有 missing。
     #[test]
-    fn report_check_drift_fails_even_with_missing() {
-        assert!(report(true, false, &v(&["vocab"]), &v(&["ids"])).is_err());
+    fn real_workspace_catalog_has_empty_release_and_disjoint_owners() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let catalog = BaselineCatalog::derive(&root, facts)?;
+        assert!(catalog.release.is_empty());
+        let internal = catalog.internal.iter().collect::<BTreeSet<_>>();
+        let release = catalog.release.iter().collect::<BTreeSet<_>>();
+        assert!(internal.is_disjoint(&release));
+        assert_eq!(
+            internal.len(),
+            target_crates(None)
+                .into_iter()
+                .collect::<BTreeSet<_>>()
+                .len()
+        );
+        Ok(())
     }
 
-    /// `--allow-missing` 宽限缺失，但**绝不**豁免 drift。
     #[test]
-    fn report_check_drift_fails_even_with_allow_missing() {
-        assert!(report(true, true, &v(&["vocab"]), &v(&["ids"])).is_err());
+    fn release_selection_rejects_non_library_package() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let binary_only = facts
+            .workspace_packages()
+            .into_iter()
+            .find(|package| {
+                facts.targets_for(package.key()).is_ok_and(|targets| {
+                    targets
+                        .iter()
+                        .any(|target| target.kind() == TargetKind::Binary)
+                        && !targets
+                            .iter()
+                            .any(|target| target.kind() == TargetKind::Library)
+                })
+            })
+            .context("workspace must contain a binary-only negative fixture")?;
+        assert!(
+            BaselineCatalog::from_selected_packages(facts, [binary_only.key().as_str()]).is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn exact_set_reports_missing_drift_and_orphan_with_owner_paths() -> Result<()> {
+        let dir = Path::new("/repo/release-api");
+        let plan = baseline_plan(
+            BaselineScope::Complete(BaselineOwner::Release),
+            &["vocab", "ids"],
+        )?;
+        let actual = BTreeMap::from([
+            ("ids.txt".to_owned(), b"old".to_vec()),
+            ("stale.txt".to_owned(), b"stale".to_vec()),
+        ]);
+        let expected = BTreeMap::from([
+            ("ids.txt".to_owned(), b"new".to_vec()),
+            ("vocab.txt".to_owned(), b"new".to_vec()),
+        ]);
+        let diff = differences(&plan, dir, &actual, &expected);
+        assert_eq!(
+            diff.items,
+            vec![
+                BaselineDifference {
+                    kind: DifferenceKind::Drift,
+                    package: "ids".to_owned(),
+                    path: dir.join("ids.txt"),
+                },
+                BaselineDifference {
+                    kind: DifferenceKind::Missing,
+                    package: "vocab".to_owned(),
+                    path: dir.join("vocab.txt"),
+                },
+                BaselineDifference {
+                    kind: DifferenceKind::Orphan,
+                    package: "stale".to_owned(),
+                    path: dir.join("stale.txt"),
+                },
+            ]
+        );
+        let error = report_differences(BaselineOwner::Release, &diff)
+            .err()
+            .context("all differences must fail closed")?
+            .to_string();
+        assert!(error.contains("owner=release"));
+        assert!(error.contains("status=missing owner=release package=vocab"));
+        assert!(error.contains("status=orphan owner=release package=stale"));
+        Ok(())
+    }
+
+    #[test]
+    fn internal_layer_reports_release_selected_package_as_owner_moved_orphan() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let catalog = BaselineCatalog::from_selected_packages(facts.get()?, ["vocab"])?;
+        let plan = catalog.plan(BaselineScope::InternalLayer(InternalLayer::Basis));
+        let dir = Path::new("/repo/public-api");
+        let actual = BTreeMap::from([("vocab.txt".to_owned(), b"stale".to_vec())]);
+        let diff = differences(&plan, dir, &actual, &BTreeMap::new());
+
+        assert_eq!(
+            diff.items,
+            vec![BaselineDifference {
+                kind: DifferenceKind::Orphan,
+                package: "vocab".to_owned(),
+                path: dir.join("vocab.txt"),
+            }]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn absent_empty_release_directory_is_valid_without_tool() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-empty-release");
+        fs::create_dir(&root)?;
+        let plan = baseline_plan(BaselineScope::Complete(BaselineOwner::Release), &[])?;
+        execute(&root, &plan, true)?;
+        assert!(!root.join("release-api").exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn scanner_rejects_symlink_subdirectory_and_non_txt() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-shape");
+        let dir = root.join("release-api");
+        fs::create_dir_all(dir.join("nested"))?;
+        assert!(scan_baselines(&dir).is_err());
+        fs::remove_dir_all(dir.join("nested"))?;
+        fs::write(dir.join("README.md"), b"not owned")?;
+        assert!(scan_baselines(&dir).is_err());
+        fs::remove_file(dir.join("README.md"))?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink("missing", dir.join("link.txt"))?;
+            assert!(scan_baselines(&dir).is_err());
+        }
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanner_rejects_same_content_directory_identity_swap() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-scan-swap");
+        let dir = root.join("public-api");
+        let moved = root.join("moved-public-api");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("vocab.txt"), b"same")?;
+        let metadata = fs::symlink_metadata(&dir)?;
+        let identity = directory_identity(&dir, &metadata)?;
+        let result = scan_baseline_files_with_hook(&dir, Some(identity), || {
+            fs::rename(&dir, &moved).expect("move original baseline dir");
+            fs::create_dir(&dir).expect("create replacement baseline dir");
+            fs::write(dir.join("vocab.txt"), b"same").expect("write same-content replacement");
+        });
+        assert!(result.is_err());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn generation_rejects_concurrent_change_before_prepare() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-concurrent");
+        let dir = root.join("public-api");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("vocab.txt"), b"before")?;
+        let before = scan_baselines(&dir)?;
+        fs::write(dir.join("vocab.txt"), b"raced")?;
+        let expected = BTreeMap::from([("vocab.txt".to_owned(), b"after".to_vec())]);
+        let plan = baseline_plan(BaselineScope::Complete(BaselineOwner::Internal), &["vocab"])?;
+        assert!(apply_generation(&dir, &plan, &before, &expected).is_err());
+        assert_eq!(fs::read(dir.join("vocab.txt"))?, b"raced");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_prepare_preserves_live_generation() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-generation-failure");
+        let dir = root.join("public-api");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("vocab.txt"), b"before")?;
+        fs::write(dir.join("stale.txt"), b"stale")?;
+        let before = scan_baselines(&dir)?;
+        let expected = BTreeMap::from([("vocab.txt".to_owned(), b"after".to_vec())]);
+        let plan = baseline_plan(BaselineScope::Complete(BaselineOwner::Internal), &["vocab"])?;
+        let error = apply_generation_with_hook(&dir, &plan, &before, &expected, || {
+            bail!("synthetic prepare failure")
+        });
+        assert!(error.is_err());
+        assert_eq!(scan_baselines(&dir)?, before);
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn failed_first_generation_preserves_absent_owner() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-first-create-failure");
+        fs::create_dir(&root)?;
+        let dir = root.join("release-api");
+        let before = scan_baselines(&dir)?;
+        let expected = BTreeMap::from([("vocab.txt".to_owned(), b"after".to_vec())]);
+        let plan = baseline_plan(BaselineScope::Complete(BaselineOwner::Release), &["vocab"])?;
+
+        let error = apply_generation_with_hook(&dir, &plan, &before, &expected, || {
+            bail!("synthetic prepare failure")
+        });
+
+        assert!(error.is_err());
+        assert!(!dir.exists(), "failed first commit must preserve absence");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn prepare_keeps_live_owner_unchanged_until_commit() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-generation-prepare");
+        let dir = root.join("public-api");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("vocab.txt"), b"before")?;
+        fs::write(dir.join("stale.txt"), b"stale")?;
+        let before = scan_baselines(&dir)?;
+        let expected = BTreeMap::from([("vocab.txt".to_owned(), b"after".to_vec())]);
+        let plan = baseline_plan(BaselineScope::Complete(BaselineOwner::Internal), &["vocab"])?;
+
+        apply_generation_with_hook(&dir, &plan, &before, &expected, || {
+            anyhow::ensure!(
+                scan_baselines(&dir)? == before,
+                "prepare exposed a mixed live generation"
+            );
+            Ok(())
+        })?;
+
+        assert_eq!(fs::read(dir.join("vocab.txt"))?, b"after");
+        assert!(!dir.join("stale.txt").exists());
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn crashed_staging_generation_is_recovered_before_next_update() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-staging-recovery");
+        let staging = root.join(".cache/public-api-staging");
+        let crashed = staging.join("internal-999-1");
+        fs::create_dir_all(&crashed)?;
+        fs::write(crashed.join("vocab.txt"), b"old generation")?;
+        let dir = root.join("public-api");
+        let intended = BTreeMap::from([("vocab.txt".to_owned(), b"next".to_vec())]);
+
+        let prepared = prepare_generation(&dir, BaselineOwner::Internal, &intended)?;
+
+        assert!(!crashed.exists());
+        assert_eq!(scan_baselines(&prepared)?.files, intended);
+        cleanup_generation(&prepared)?;
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn generation_exchange_never_clobbers_concurrent_live_output() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-generation-race");
+        let dir = root.join("public-api");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("vocab.txt"), b"before")?;
+        let before = scan_baselines(&dir)?;
+        let expected = BTreeMap::from([("vocab.txt".to_owned(), b"after".to_vec())]);
+        let plan = baseline_plan(
+            BaselineScope::InternalLayer(InternalLayer::Basis),
+            &["vocab"],
+        )?;
+        let error = apply_generation_with_hook(&dir, &plan, &before, &expected, || {
+            fs::write(dir.join("vocab.txt"), b"concurrent")?;
+            Ok(())
+        });
+        assert!(error.is_err());
+        assert_eq!(fs::read(dir.join("vocab.txt"))?, b"concurrent");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn partial_update_rejects_but_preserves_unselected_concurrent_change() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-partial-cas");
+        let dir = root.join("public-api");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("vocab.txt"), b"before-vocab")?;
+        fs::write(dir.join("ids.txt"), b"before-ids")?;
+        let before = scan_baselines(&dir)?;
+        let expected = BTreeMap::from([("vocab.txt".to_owned(), b"after-vocab".to_vec())]);
+        let plan = baseline_plan(
+            BaselineScope::InternalLayer(InternalLayer::Basis),
+            &["vocab"],
+        )?;
+        let error = apply_generation_with_hook(&dir, &plan, &before, &expected, || {
+            fs::write(dir.join("ids.txt"), b"concurrent-ids")?;
+            Ok(())
+        });
+        assert!(error.is_err());
+        assert_eq!(fs::read(dir.join("vocab.txt"))?, b"before-vocab");
+        assert_eq!(fs::read(dir.join("ids.txt"))?, b"concurrent-ids");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn generation_commit_never_redirects_to_replacement_directory() -> Result<()> {
+        let root = crate::testutil::unique_tmp("publicapi-owner-swap");
+        let dir = root.join("public-api");
+        let moved = root.join("moved-public-api");
+        fs::create_dir_all(&dir)?;
+        fs::write(dir.join("vocab.txt"), b"before")?;
+        let before = scan_baselines(&dir)?;
+        let expected = BTreeMap::from([("vocab.txt".to_owned(), b"after".to_vec())]);
+        let plan = baseline_plan(
+            BaselineScope::InternalLayer(InternalLayer::Basis),
+            &["vocab"],
+        )?;
+        let error = apply_generation_with_hook(&dir, &plan, &before, &expected, || {
+            fs::rename(&dir, &moved)?;
+            fs::create_dir(&dir)?;
+            fs::write(dir.join("vocab.txt"), b"replacement")?;
+            Ok(())
+        });
+        assert!(error.is_err());
+        assert_eq!(fs::read(moved.join("vocab.txt"))?, b"before");
+        assert_eq!(fs::read(dir.join("vocab.txt"))?, b"replacement");
+        fs::remove_dir_all(root)?;
+        Ok(())
     }
 
     #[test]
@@ -361,26 +1446,29 @@ mod tests {
             .copied()
             .collect();
 
-        assert_eq!(target_crates(Some(Layer::Basis)), expected_basis);
-        assert_eq!(target_crates(Some(Layer::Engine)), expected_engine);
-        assert_eq!(target_crates(Some(Layer::Curated)), expected_curated);
+        assert_eq!(target_crates(Some(InternalLayer::Basis)), expected_basis);
+        assert_eq!(target_crates(Some(InternalLayer::Engine)), expected_engine);
+        assert_eq!(
+            target_crates(Some(InternalLayer::Curated)),
+            expected_curated
+        );
         assert_eq!(target_crates(None), expected_all);
         // len 仅由 exact-set 派生，禁止裸魔法数主证。
         assert_eq!(
-            target_crates(Some(Layer::Basis)).len(),
+            target_crates(Some(InternalLayer::Basis)).len(),
             expected_basis.len()
         );
         assert_eq!(
-            target_crates(Some(Layer::Engine)).len(),
+            target_crates(Some(InternalLayer::Engine)).len(),
             expected_engine.len()
         );
         assert_eq!(target_crates(None).len(), expected_all.len());
-        assert!(target_crates(Some(Layer::Basis)).contains(&"assembly-schema"));
-        assert!(target_crates(Some(Layer::Basis)).contains(&"authmint"));
-        assert!(target_crates(Some(Layer::Basis)).contains(&"sagaauthmint"));
-        assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
-        assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
-        assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
+        assert!(target_crates(Some(InternalLayer::Basis)).contains(&"assembly-schema"));
+        assert!(target_crates(Some(InternalLayer::Basis)).contains(&"authmint"));
+        assert!(target_crates(Some(InternalLayer::Basis)).contains(&"sagaauthmint"));
+        assert!(target_crates(Some(InternalLayer::Basis)).contains(&"vocab"));
+        assert!(target_crates(Some(InternalLayer::Engine)).contains(&"primitives"));
+        assert!(target_crates(Some(InternalLayer::Engine)).contains(&"tracewire"));
     }
 
     #[test]
@@ -389,24 +1477,24 @@ mod tests {
         assert!(target_crates(None).contains(&"diport"));
         assert!(target_crates(None).contains(&"generated"));
         assert!(target_crates(None).contains(&"runtimeexec"));
-        assert!(target_crates(Some(Layer::Basis)).contains(&"vocab"));
-        assert!(target_crates(Some(Layer::Engine)).contains(&"primitives"));
-        assert!(target_crates(Some(Layer::Engine)).contains(&"tracewire"));
+        assert!(target_crates(Some(InternalLayer::Basis)).contains(&"vocab"));
+        assert!(target_crates(Some(InternalLayer::Engine)).contains(&"primitives"));
+        assert!(target_crates(Some(InternalLayer::Engine)).contains(&"tracewire"));
     }
 
     #[test]
     fn target_crates_membership_keeps_curated_out_of_layers() {
-        assert!(!target_crates(Some(Layer::Basis)).contains(&"authn"));
-        assert!(!target_crates(Some(Layer::Engine)).contains(&"authn"));
+        assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"authn"));
+        assert!(!target_crates(Some(InternalLayer::Engine)).contains(&"authn"));
         // diport 是 DI-infra 层，既非 basis 也非 engine——只经 curated extras 入 baseline。
-        assert!(!target_crates(Some(Layer::Basis)).contains(&"diport"));
-        assert!(!target_crates(Some(Layer::Engine)).contains(&"diport"));
-        assert!(!target_crates(Some(Layer::Basis)).contains(&"generated"));
-        assert!(!target_crates(Some(Layer::Engine)).contains(&"generated"));
-        assert!(!target_crates(Some(Layer::Basis)).contains(&"runtimeexec"));
-        assert!(!target_crates(Some(Layer::Engine)).contains(&"runtimeexec"));
+        assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"diport"));
+        assert!(!target_crates(Some(InternalLayer::Engine)).contains(&"diport"));
+        assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"generated"));
+        assert!(!target_crates(Some(InternalLayer::Engine)).contains(&"generated"));
+        assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"runtimeexec"));
+        assert!(!target_crates(Some(InternalLayer::Engine)).contains(&"runtimeexec"));
         // proc-macro 工具 crate 不入 public-api baseline（契约由 codegen golden 守）。
-        assert!(!target_crates(Some(Layer::Basis)).contains(&"securederive"));
+        assert!(!target_crates(Some(InternalLayer::Basis)).contains(&"securederive"));
     }
 
     #[test]
@@ -786,7 +1874,8 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     /// `public_api_cmd` 构造 `cargo public-api -p <crate>`、cwd 为 None（与原 capture 行为一致）。
     #[test]
     fn public_api_cmd_sets_program_and_args() -> anyhow::Result<()> {
-        let cmd = public_api_cmd("vocab", PINNED_NIGHTLY, &public_api_target_dir()?);
+        let root = crate::workspace_root()?;
+        let cmd = public_api_cmd(&root, "vocab", PINNED_NIGHTLY, &public_api_target_dir()?);
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("cargo"));
         let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
         assert_eq!(
@@ -799,7 +1888,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
                 std::ffi::OsStr::new("blanket-impls"),
             ]
         );
-        assert_eq!(cmd.get_current_dir(), None);
+        assert_eq!(cmd.get_current_dir(), Some(root.as_path()));
         Ok(())
     }
 
@@ -807,7 +1896,8 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     /// （等价 `cargo +nightly-2026-04-16 public-api`，使 rustdoc-json 可复现）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "release-check", source = "public-api" }.
     #[test]
     fn public_api_cmd_injects_pinned_toolchain() -> anyhow::Result<()> {
-        let cmd = public_api_cmd("ids", PINNED_NIGHTLY, &public_api_target_dir()?);
+        let root = crate::workspace_root()?;
+        let cmd = public_api_cmd(&root, "ids", PINNED_NIGHTLY, &public_api_target_dir()?);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         assert!(
             envs.iter()
@@ -819,11 +1909,12 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     }
 
     /// rustdoc-json 快照必须使用独占 target，避免前序 all-features/coverage 产物令同一 CI 首次
-    /// `public-api --check` 漂移、立即重跑却转绿。
+    /// `public-api internal --check` 漂移、立即重跑却转绿。
     #[test]
     fn public_api_cmd_isolates_rustdoc_json_target() -> anyhow::Result<()> {
         let expected = public_api_target_dir()?;
-        let cmd = public_api_cmd("consistency", PINNED_NIGHTLY, &expected);
+        let root = crate::workspace_root()?;
+        let cmd = public_api_cmd(&root, "consistency", PINNED_NIGHTLY, &expected);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         assert!(
             envs.iter().any(|(k, v)| {
@@ -838,7 +1929,8 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     /// （`RUSTC`/`RUSTDOC`/`RUSTFLAGS`/…）仍被 env_remove —— 剥离后由显式 env 成唯一来源（CMD-ENV-CLEAN-01）。
     #[test]
     fn public_api_cmd_strips_other_ambient_but_resets_toolchain() -> anyhow::Result<()> {
-        let cmd = public_api_cmd("vocab", PINNED_NIGHTLY, &public_api_target_dir()?);
+        let root = crate::workspace_root()?;
+        let cmd = public_api_cmd(&root, "vocab", PINNED_NIGHTLY, &public_api_target_dir()?);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         for stripped in crate::cmd::STRIPPED_ENV
             .iter()
@@ -871,7 +1963,8 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     #[test]
     fn public_api_cmd_toolchain_arg_flows_through() -> anyhow::Result<()> {
         let fake = "nightly-1999-01-01";
-        let cmd = public_api_cmd("vocab", fake, &public_api_target_dir()?);
+        let root = crate::workspace_root()?;
+        let cmd = public_api_cmd(&root, "vocab", fake, &public_api_target_dir()?);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         assert!(
             envs.iter()

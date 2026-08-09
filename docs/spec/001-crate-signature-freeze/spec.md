@@ -30,7 +30,7 @@ RSS 是 GoCell(Go) 的 greenfield Rust 重写。迁移采用"最大并行"模型
 
 1. **Given** 基础+引擎 crate 仅有骨架 lib.rs，**When** 冻结其公开 trait/type 签名（body=todo!()），**Then** `cargo build` 这 7 个 crate 通过、无 `unused`/`dead_code` 报错。
 2. **Given** 已冻结的 DI port trait（如 `Clock`，归属 diport 待拍板），**When** 测试构造对应 mockall mock 并装入 `Box<DynX>`/`Arc<DynX>`（dynosaur wrapper），**Then** 编译通过（证明 dyn-compatible + DI 可注入）。
-3. **Given** 基础层 exported API，**When** 运行 `cargo xtask public-api`（PR-0 落地的封装入口）生成 baseline，**Then** 产出可 commit 的封装面快照供后续 diff。
+3. **Given** 基础层 exported API，**When** 运行 `cargo xtask public-api internal --layer basis` 生成 baseline，**Then** 产出可 commit 的 internal signature 快照供后续 diff。
 
 ---
 

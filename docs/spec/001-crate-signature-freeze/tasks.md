@@ -25,7 +25,7 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 **Purpose**: 落地签名编写约定单源，作为全部签名 PR 的 review 基准。
 
 - [x] T001 [PR-0] 落地签名 conventions 单源为 **ADR-004** `docs/architecture/202606220106-004-signature-conventions.md`（dynosaur async/dyn 二分、mock、ctx 范式 ADR-002、关闭逆序 ADR-001、必填依赖/Clock、serde 边界、sealed/newtype 方案②、unsafe 收敛、dynosaur pin、覆盖率豁免、对标 ref）；`contracts/conventions.md` 改薄引用 ADR-004
-- [x] T002 [P] [PR-0] 增 `cargo xtask public-api [--check]` 子命令（`xtask/src/main.rs` Command enum + `xtask/src/publicapi.rs`，包装外部 `cargo-public-api`，未装/缺 nightly 给指引）。仅落入口；baseline 快照在 PR-1/PR-2 产
+- [x] T002 [P] [PR-0] 增 typed `cargo xtask public-api internal|release` 子命令（`xtask/src/main.rs` Command enum + `xtask/src/publicapi.rs`，包装外部 `cargo-public-api`，未装/缺 nightly 给指引）。baseline 快照在 PR-1/PR-2 产出
 - [x] T003 [P] [PR-0] 在 epic 评论登记 spike 依赖门矩阵（ADR-002/ADR-003 横切、ADR-001 局部、diport 落地门、#998 软、dynosaur 回退路径），引用 `data-model.md` 实体4 + diport 落地待决项
 
 ---
