@@ -9,16 +9,24 @@ pub mod testing;
 
 mod build;
 mod declarations;
+mod release;
 
 pub use build::{
     ActivationNode, ActivationPath, BuildFacts, BuildPlatforms, BuildSelection, BuildSide,
     CargoPlatform, FeatureKey, FeatureSelection, ResolverVersion,
 };
+pub use release::{
+    ApiStability, OfficialProfile, PublicApiOwner, ReleasePackageSelection,
+    ReleaseProfileArtifactSelection, ReleaseSelection, ReleaseSelectionError,
+};
 
 use declarations::{
     PackageIndexes, index_resolve_nodes, parse_raw_metadata, project_direct_declarations,
 };
-use guppy::graph::{BuildTargetId, BuildTargetKind, DependencyDirection, PackageGraph};
+use guppy::graph::{
+    BuildTargetId, BuildTargetKind, DependencyDirection, PackageGraph, PackagePublish,
+};
+use semver::Version;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -60,6 +68,9 @@ pub enum TargetKind {
 pub struct WorkspacePackageFacts {
     key: PackageKey,
     repo_relative_root: PathBuf,
+    version: Version,
+    minimum_rust_version: Option<Version>,
+    publish_policy: PublishPolicy,
 }
 
 impl WorkspacePackageFacts {
@@ -72,6 +83,42 @@ impl WorkspacePackageFacts {
     #[must_use]
     pub fn repo_relative_root(&self) -> &Path {
         &self.repo_relative_root
+    }
+
+    /// Cargo-resolved package version.
+    #[must_use]
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    /// Cargo-resolved minimum supported Rust version, when declared.
+    #[must_use]
+    pub fn minimum_rust_version(&self) -> Option<&Version> {
+        self.minimum_rust_version.as_ref()
+    }
+
+    /// Cargo `publish` policy projected without conflating unrestricted and disabled.
+    #[must_use]
+    pub fn publish_policy(&self) -> &PublishPolicy {
+        &self.publish_policy
+    }
+}
+
+/// Owned projection of Cargo's three-state `publish` semantics.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublishPolicy {
+    /// `publish = false`, represented by Cargo metadata as an empty registry list.
+    Disabled,
+    /// No registry restriction (`publish = null` in Cargo metadata).
+    Unrestricted,
+    /// Publication is limited to this non-empty, stably ordered registry set.
+    Registries(BTreeSet<String>),
+}
+
+impl PublishPolicy {
+    #[must_use]
+    pub const fn is_publishable(&self) -> bool {
+        !matches!(self, Self::Disabled)
     }
 }
 
@@ -293,6 +340,9 @@ pub(crate) fn map_query_err(error: impl ToString) -> WorkspaceFactsError {
 #[derive(Debug)]
 struct PackageRecord {
     repo_relative_root: PathBuf,
+    version: Version,
+    minimum_rust_version: Option<Version>,
+    publish_policy: PublishPolicy,
     targets: Vec<TargetFacts>,
     direct_dependencies: Vec<DirectDependencyFacts>,
 }
@@ -303,6 +353,7 @@ pub struct WorkspaceFacts {
     graph: PackageGraph,
     packages: BTreeMap<PackageKey, PackageRecord>,
     package_roots: Vec<(PathBuf, PackageKey)>,
+    release_selection: Result<Option<ReleaseSelection>, ReleaseSelectionError>,
 }
 
 impl WorkspaceFacts {
@@ -333,6 +384,8 @@ impl WorkspaceFacts {
                 actual: actual_root.to_path_buf(),
             });
         }
+        let release_selection =
+            release::parse_release_selection(graph.workspace().metadata_table());
 
         let indexes = PackageIndexes::build(&raw.packages);
         let workspace_member_ids = raw
@@ -347,6 +400,20 @@ impl WorkspaceFacts {
         for (workspace_path, package) in graph.workspace().iter_by_path() {
             let root = normalize_relative_path(workspace_path.as_std_path())?;
             let key = PackageKey(package.name().to_owned());
+            let version = package.version().clone();
+            let minimum_rust_version = package.minimum_rust_version().cloned();
+            let publish_policy = match package.publish() {
+                PackagePublish::Unrestricted => PublishPolicy::Unrestricted,
+                PackagePublish::Registries([]) => PublishPolicy::Disabled,
+                PackagePublish::Registries(registries) => {
+                    PublishPolicy::Registries(registries.iter().cloned().collect())
+                }
+                _ => {
+                    return Err(WorkspaceFactsError::InvalidMetadata(
+                        "unsupported Cargo publish policy".to_owned(),
+                    ));
+                }
+            };
             let mut targets = package
                 .build_targets()
                 .map(|target| {
@@ -407,6 +474,9 @@ impl WorkspaceFacts {
                 key,
                 PackageRecord {
                     repo_relative_root: root,
+                    version,
+                    minimum_rust_version,
+                    publish_policy,
                     targets,
                     direct_dependencies,
                 },
@@ -424,7 +494,19 @@ impl WorkspaceFacts {
             graph,
             packages,
             package_roots,
+            release_selection,
         })
+    }
+
+    /// Return the strict positive Release Surface declaration, if the root workspace declares it.
+    ///
+    /// Invalid governance metadata is retained as a typed error instead of preventing unrelated
+    /// Cargo facts from loading, so the canonical xtask gate can emit a structured finding.
+    pub fn release_selection(&self) -> Result<Option<&ReleaseSelection>, ReleaseSelectionError> {
+        match &self.release_selection {
+            Ok(selection) => Ok(selection.as_ref()),
+            Err(error) => Err(error.clone()),
+        }
     }
 
     pub fn package_key(&self, name: &str) -> Result<PackageKey, WorkspaceFactsError> {
@@ -446,6 +528,9 @@ impl WorkspaceFacts {
             .map(|(key, record)| WorkspacePackageFacts {
                 key: key.clone(),
                 repo_relative_root: record.repo_relative_root.clone(),
+                version: record.version.clone(),
+                minimum_rust_version: record.minimum_rust_version.clone(),
+                publish_policy: record.publish_policy.clone(),
             })
             .collect()
     }

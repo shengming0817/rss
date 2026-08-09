@@ -55,6 +55,7 @@ mod promtool;
 mod provider_capabilities;
 mod publicapi;
 mod reconcile_outbox_command_guard;
+mod release_surface;
 mod repo_scope_guard;
 mod report_format;
 mod runtime_baseline;

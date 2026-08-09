@@ -26,7 +26,7 @@ use workspacefacts::{
 #[cfg(test)]
 use crate::assembly_governance::AssemblyFixtureBuilder;
 use crate::assembly_governance::{
-    AssemblyGovernanceIr, Core, GovernedAssembly, ProductionAssembly,
+    AssemblyGovernanceIr, Core, GovernedAssembly, ProductionAssembly, load_artifact_declaration,
 };
 use crate::contract::GovernedContract;
 use crate::contract::governance::ContractGovernanceIr;
@@ -59,8 +59,16 @@ impl std::error::Error for AssemblyCargoFactsError {}
 
 pub(crate) type Finding = diagnostic::Finding<Rule>;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum Rule {
+    /// Root workspace must carry the strict positive Release Surface declaration.
+    ReleaseSurfaceDeclaration,
+    /// Cargo publishable packages and selected release packages must be an exact set.
+    ReleaseSurfaceExactSet,
+    /// Selected package/API facts must resolve and remain internally consistent.
+    ReleaseSurfacePackage,
+    /// Official profile selection must explicitly join the designated supported artifact.
+    ReleaseSurfaceProfile,
     /// `assemblies/*/Cargo.toml` 必须有同目录 `assembly.toml`。
     MissingManifest,
     /// manifest 声明的 active domain 必须是 assembly crate 的直接 normal dependency。
@@ -170,11 +178,38 @@ impl GovernanceCheck for AssemblyValidate<'_> {
     fn check(&self) -> Result<(String, Vec<Finding>)> {
         crate::workspace_facts::validate_command_funnel(self.root)?;
         crate::assembly_governance::validate_source_funnel(self.root)?;
-        let (count, findings) = validate_root(self.root, self.facts)?;
-        Ok((format!("{count} assembly 声明全部通过"), findings))
+        let ir = AssemblyGovernanceIr::<Core>::load(self.root)?;
+        let (count, mut findings) = validate_governed_root(self.root, self.facts, &ir)?;
+        let artifact_projections = if crate::release_surface::requires_artifact_join(self.facts) {
+            let joined = ir.join_artifacts(load_artifact_declaration(self.root)?)?;
+            crate::release_surface::project_artifacts(&joined)
+        } else {
+            Vec::new()
+        };
+        let (surface, release_findings) =
+            crate::release_surface::validate(self.facts, &artifact_projections);
+        findings.extend(release_findings);
+        let (release_package_count, profile_artifact_count, observed_summary) = surface
+            .as_ref()
+            .map(|surface| {
+                (
+                    surface.packages().len(),
+                    surface.profile_artifacts().len(),
+                    surface.observed_summary(),
+                )
+            })
+            .unwrap_or_else(|| (0, 0, "release surface rejected".to_owned()));
+        Ok((
+            format!(
+                "{count} assembly 声明、{} release package 与 {} profile artifact 全部通过；{}",
+                release_package_count, profile_artifact_count, observed_summary
+            ),
+            findings,
+        ))
     }
 }
 
+#[cfg(test)]
 pub(crate) fn validate_root(root: &Path, facts: &WorkspaceFacts) -> Result<(usize, Vec<Finding>)> {
     let contract_governance = ContractGovernanceIr::load_consumer_workspace(root)?;
     let ir = AssemblyGovernanceIr::<Core>::load(root)?;
@@ -5901,6 +5936,27 @@ mod tests {
     fn load_fixture_contracts(root: &Path) -> anyhow::Result<Vec<GovernedContract>> {
         let governance = ContractGovernanceIr::load_test_fixture_root(&root.join("contracts"))?;
         governance.read(|contracts| Ok(contracts.to_vec()))
+    }
+
+    #[test]
+    fn assembly_validate_canonical_executor_reports_release_surface() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let check = AssemblyValidate::new(&root, command_facts.get()?);
+        let (summary, findings) = GovernanceCheck::check(&check)?;
+
+        assert!(
+            findings.is_empty(),
+            "canonical assembly executor must accept the real workspace: {findings:?}"
+        );
+        assert!(
+            summary.contains("release package")
+                && summary.contains("profile artifact")
+                && summary.contains("release packages=[")
+                && summary.contains("profile artifacts=["),
+            "canonical assembly executor lost its Release Surface carrier: {summary}"
+        );
+        Ok(())
     }
 
     fn validate_test_fixture_root_without_contracts(

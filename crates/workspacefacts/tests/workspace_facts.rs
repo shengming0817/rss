@@ -8,8 +8,9 @@ use workspacefacts::testing::{
     target,
 };
 use workspacefacts::{
-    DependencyKind, DependencyResolution, DependencySource, GitDependencyReq, PackageKey,
-    TargetKind, WorkspaceFacts, WorkspaceFactsError,
+    ApiStability, DependencyKind, DependencyResolution, DependencySource, GitDependencyReq,
+    OfficialProfile, PackageKey, PublicApiOwner, PublishPolicy, TargetKind, WorkspaceFacts,
+    WorkspaceFactsError,
 };
 
 fn synthetic_metadata() -> String {
@@ -472,6 +473,186 @@ fn workspace_package_catalog_is_owned_key_ordered_and_excludes_registry()
         ],
         "WorkspacePackageFacts must remain usable after WorkspaceFacts drops"
     );
+    Ok(())
+}
+
+#[test]
+fn release_package_facts_project_version_msrv_and_publish_policy_as_owned_values()
+-> Result<(), Box<dyn Error>> {
+    let mut metadata: serde_json::Value = serde_json::from_str(&synthetic_metadata())?;
+    let packages = metadata["packages"]
+        .as_array_mut()
+        .ok_or("synthetic packages must be an array")?;
+    for package in packages {
+        match package["name"].as_str() {
+            Some("consumer") => {
+                package["version"] = json!("1.2.3");
+                package["rust_version"] = json!("1.82");
+                package["publish"] = json!(null);
+            }
+            Some("leaf") => {
+                package["rust_version"] = json!(null);
+                package["publish"] = json!(["private", "crates-io"]);
+            }
+            Some("top") => {
+                package["publish"] = json!([]);
+            }
+            _ => {}
+        }
+    }
+
+    let facts = WorkspaceFacts::from_metadata_json(
+        Path::new("/workspace"),
+        &serde_json::to_string(&metadata)?,
+    )?;
+    let catalog = facts.workspace_packages();
+    drop(facts);
+
+    let package = |name: &str| {
+        catalog
+            .iter()
+            .find(|package| package.key().as_str() == name)
+            .ok_or_else(|| format!("missing synthetic package {name}"))
+    };
+    let consumer = package("consumer")?;
+    assert_eq!(consumer.version().to_string(), "1.2.3");
+    assert_eq!(
+        consumer.minimum_rust_version().map(ToString::to_string),
+        Some("1.82.0".to_owned())
+    );
+    assert_eq!(consumer.publish_policy(), &PublishPolicy::Unrestricted);
+
+    let leaf = package("leaf")?;
+    assert_eq!(leaf.minimum_rust_version(), None);
+    assert_eq!(
+        leaf.publish_policy(),
+        &PublishPolicy::Registries(BTreeSet::from([
+            "crates-io".to_owned(),
+            "private".to_owned(),
+        ]))
+    );
+
+    let top = package("top")?;
+    assert_eq!(top.publish_policy(), &PublishPolicy::Disabled);
+    assert!(!top.publish_policy().is_publishable());
+    assert!(consumer.publish_policy().is_publishable());
+    Ok(())
+}
+
+#[test]
+fn release_selection_is_strict_typed_and_distinguishes_absent_from_empty()
+-> Result<(), Box<dyn Error>> {
+    let absent =
+        WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &synthetic_metadata())?;
+    assert_eq!(absent.release_selection()?, None);
+
+    let mut metadata: serde_json::Value = serde_json::from_str(&synthetic_metadata())?;
+    metadata["metadata"] = json!({
+        "release-surface": {
+            "packages": [{
+                "package": "consumer",
+                "public-api-owner": "standalone-component",
+                "api-stability": "experimental",
+                "profiles": ["core", "eventing"]
+            }],
+            "profile-artifacts": [{
+                "profile": "core",
+                "assembly": "runtime"
+            }]
+        }
+    });
+    let facts = WorkspaceFacts::from_metadata_json(
+        Path::new("/workspace"),
+        &serde_json::to_string(&metadata)?,
+    )?;
+    let selection = facts
+        .release_selection()?
+        .ok_or("release selection must be declared")?;
+    assert_eq!(selection.packages().len(), 1);
+    let package = &selection.packages()[0];
+    assert_eq!(package.package(), "consumer");
+    assert_eq!(
+        package.public_api_owner(),
+        PublicApiOwner::StandaloneComponent
+    );
+    assert_eq!(package.api_stability(), ApiStability::Experimental);
+    assert_eq!(
+        package.profiles(),
+        &[OfficialProfile::Core, OfficialProfile::Eventing]
+    );
+    assert_eq!(selection.profile_artifacts().len(), 1);
+    assert_eq!(
+        selection.profile_artifacts()[0].profile(),
+        OfficialProfile::Core
+    );
+    assert_eq!(selection.profile_artifacts()[0].assembly(), "runtime");
+
+    let invalid_cases = [
+        json!({
+            "packages": [{
+                "package": "consumer",
+                "public-api-owner": "secret-bait",
+                "api-stability": "stable",
+                "profiles": []
+            }],
+            "profile-artifacts": []
+        }),
+        json!({
+            "packages": [{
+                "package": "consumer",
+                "public-api-owner": "platform-public",
+                "api-stability": "secret-bait",
+                "profiles": []
+            }],
+            "profile-artifacts": []
+        }),
+        json!({
+            "packages": [{
+                "package": "consumer",
+                "public-api-owner": "platform-public",
+                "api-stability": "stable",
+                "profiles": ["secret-bait"]
+            }],
+            "profile-artifacts": []
+        }),
+        json!({
+            "packages": [],
+            "profile-artifacts": [{"profile": "secret-bait", "assembly": "runtime"}]
+        }),
+        json!({
+            "packages": [{
+                "package": "consumer",
+                "public-api-owner": "platform-public",
+                "api-stability": "stable",
+                "profiles": [],
+                "release-status": "secret-bait"
+            }],
+            "profile-artifacts": []
+        }),
+    ];
+    for selection in invalid_cases {
+        let mut invalid: serde_json::Value = serde_json::from_str(&synthetic_metadata())?;
+        invalid["metadata"] = json!({"release-surface": selection});
+        let invalid_facts = WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &serde_json::to_string(&invalid)?,
+        )?;
+        let error = match invalid_facts.release_selection() {
+            Err(error) => error,
+            Ok(_) => return Err("unknown selection value/field must fail closed".into()),
+        };
+        assert!(
+            error
+                .subject()
+                .starts_with("workspace.metadata.release-surface."),
+            "invalid row path must be precise without echoing its value: {error}"
+        );
+        assert!(
+            error.detail().contains("invalid release selection")
+                && !error.to_string().contains("secret-bait"),
+            "diagnostic must be categorized without echoing raw TOML: {error}"
+        );
+    }
     Ok(())
 }
 

@@ -7929,7 +7929,10 @@ name = "workspacefacts"
 version = "0.0.0"
 dependencies = [
  "guppy",
+ "semver",
+ "serde",
  "serde_json",
+ "serde_path_to_error",
  "thiserror",
  "workspacefacts",
 ]
