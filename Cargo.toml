@@ -88,7 +88,7 @@ members = [
 ]
 # 自写 dylint lint workspace（nightly rustc_private，自成独立 workspace）——显式排除，
 # 不参与根 stable 1.96 构建。隔离主靠 lints/Cargo.toml 的 [workspace]，此处作可见防线。
-exclude = ["lints"]
+exclude = ["lints", "xtask/tests/fixtures/platform_application_waist"]
 
 # Positive Release Surface selection. Unlisted packages and profile artifacts remain internal.
 [workspace.metadata.release-surface]

@@ -6,7 +6,7 @@
 |---|---:|---|---|---|
 | RSS-NW-002 | #2042 | 最小 Release Surface 派生模型；未选 package 默认 internal | #2041 | Cargo/assembly facts exact-set + workspacefacts/release-check focused tests |
 | RSS-NW-003 | #2044 | Standalone Component 窄 API、依赖预算、失败语义与诊断非授权边界 | #2042 | Spec 011 normative allowlist + `DIAGCTX-NOT-AUTH-SOURCE-01` + focused current-state checks |
-| RSS-NW-004 | #2045 | Platform Application waist 与 internal 泄漏边界 | #2042 | compile-positive/negative fixtures + API design evidence |
+| RSS-NW-004 | #2045 | Platform Application waist 与 internal 泄漏边界 | #2042 | single executable contract + compile-positive/negative design evidence |
 | RSS-NW-005 | #2047 | internal signature 与 release-selected API baseline 分离 | #2044, #2045 | `cargo public-api` 两类 owner 的非重叠证明 |
 | RSS-NW-006 | #2048 | Release API compatibility、SemVer 与泄漏接入既有 release-check | #2047 | release-check positive/synthetic negative fixtures |
 

@@ -25,8 +25,14 @@ Platform façade 应表达应用作者稳定意图，而不是镜像内部 crate
 | 观察生命周期 | RuntimeHandle | worker/task ownership 与 shutdown internals |
 | 诊断失败 | Conditions/Diagnostics 的闭值 code、vetted public detail、retryability | raw provider/config/credential、PII、原始错误文本/source chain 与 inventory internals |
 
-表中名称是能力类别，不是 #2041 冻结的 Rust symbol。#2045 必须从当前类型和 consumer 场景推导精确签名，并优先
-选择 wrapper/visibility，而不是为未来扩展预建 trait。
+表中能力已由 #2045 映射到
+[`executable contract`](../../../xtask/tests/fixtures/platform_application_waist/src/lib.rs)；该文件是 exact symbol 与签名
+单源。设计选择 façade-owned value/view、private field、profile typestate 和 consuming lifecycle，而不是镜像 internal
+crate 图或为未来扩展预建 Provider/Profile trait。
+
+`Contract` 是唯一开放 authoring trait。Rust 无法用 private seal 只允许另一个生成 crate 实现 trait，因此 selective sealing
+会制造虚假 Hard 边界；正确边界是“开放声明、私有 admission”。外部 impl 可声明候选 contract，但无法取得 route、registry、
+provider 或 runtime capability；#2049 再把声明与 canonical generated facts 精确 join。
 
 ## Consumer 选择
 
@@ -56,6 +62,39 @@ API 暴露 verified identity/tenant 的 mint constructor，也不得引入 Provi
 | diagnostics/error 泄漏敏感详情 | sealed public/internal detail funnel + negative external fixture | Hard/Medium T1 |
 | 仓内 alias 冒充公共产品 | actual package + independent consumer | Medium T1/T2 接缝 |
 | SemVer 漂移 | release-selected baseline + N-1→N fixture | Medium T1 |
+
+### #2045 编译证明矩阵
+
+| Invariant | 正向防空 | 负向载体 | 等级/替换 owner |
+|---|---|---|---|
+| PLATFORM-WAIST-AUTHORITY-01 | context accessors、plain TenantId 可读 | Principal/Tenant/Context 私字段；TenantId 无 authority conversion | Medium T1；#2049 private projection Hard |
+| PLATFORM-WAIST-OWNERSHIP-01 | module/builder/handle 全路径可命名 | façade path 无 internal re-export、raw ownership 出口 | Medium T1；#2048 leakage gate |
+| PLATFORM-WAIST-DIAGNOSTIC-01 | code/retryable/typed detail 可读 | snapshot/detail 私有 mint、无 raw From/source/subject | Medium T1；#2049 sealed funnel Hard |
+| PLATFORM-WAIST-LIFECYCLE-01 | Core/Eventing build/start/shutdown 可编译 | marker/custom profile/Clone 被拒绝，重复 start/shutdown 为 moved value | Medium T1；#2049 typestate Hard |
+
+fixture manifest 的 `publish = false` 与跨 normal/dev/build/target dependency kind 的空集合由 Cargo metadata exact-set
+断言；每个 consumer 的 dependency set 也由 Cargo metadata 按 case 校验，正例只含 façade，serde 只属于 trait 负例。
+源文件以 `deny(private_interfaces, private_bounds)` 拒绝 indirect signature leakage；负例使用 rustc JSON 的 error code +
+primary source line exact-set，并将每条 expected diagnostic 绑定到该行的目标 symbol，禁止全局 stderr 词袋互相代偿。
+UI inventory 从目录稳定派生，要求唯一 `positive.rs`、每个 `*_fail.rs` 恰有同名 `.stderr` 且没有孤儿或未知文件。
+该证明不覆盖真实 dependency closure、`.crate` 内容、SemVer 或 T2，这些分别由 #2048/#2052 拥有。
+
+### Gate budget admission
+
+本轮只增加一个固定 selector：
+`./hack/cargo.sh test -p xtask --test platform_application_waist_trybuild`。它在一个 target 内合并上述四个 invariant，
+case inventory 由目录机器事实派生，不新增 release-check step、runtime runner、package consumer 或 T2/T3 carrier。
+
+现有 `authn` trybuild Hard proof 只拥有生产 `VerifiedJwt`、`ServiceToken`、mTLS/grant 等 authority constructor；
+`assembly-schema` private-field trybuild 只拥有 `AssemblyLock`/`RuntimePlan` 构造边界。两者均无法命名尚未落地的 Platform
+façade exact signature、开放 authoring trait、profile typestate 或消费式生命周期。把这些设计期失效模式并入任一既有 owner，
+会反向让生产 authority/assembly owner 依赖一个尚不存在的 façade，并制造错误的事实归属。因此本 gate 不替换既有证明；
+“未实现 façade 的 exact API shape 是否自洽且禁止面关闭”是现有 owner 不可表达的独立失效模式，这是本轮只加不减的预算理由。
+
+删除/合并条件是闭合的：#2048 先把 direct/re-export/generic/error/conversion leakage 接入既有 release-check owner；
+#2049 接纳真实 façade 时必须在同一提交迁移 exact signatures，并删除本 harness、UI inventory、独立 fixture 及仅为调度登记的
+xtask trybuild dev-dependency。真实 crate privacy、private construction 和 typestate 取代临时 Medium 设计载体，禁止双 owner 并存。
+#2052 只增加 actual `.crate`、同 revision independent consumer 与有界 T2，不复刻本设计 runner。
 
 Markdown 只记录能力和 owner，不扫描 Rust source 或充当兼容 gate。
 

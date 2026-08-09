@@ -23,13 +23,15 @@ repository、SemVer fixture、profile 或 runtime behavior。
 
 ### Phase A — API design（#2045）
 
-- 从真实应用场景定义最小能力类别和 exact public signature。
-- 对每个 internal 类型选择隐藏、只读 projection、wrapper 或受控 adapter；不得直接 re-export ownership detail。
-- 使用 compile-positive/negative fixture 证明设计可用且禁止面关闭，不实现 façade runtime behavior。
+- [x] 从真实应用场景定义最小能力类别，并在单一 executable contract 冻结 exact public signature。
+- [x] 对每个 internal 类型选择隐藏、只读 projection、wrapper 或受控 adapter；不直接 re-export ownership detail。
+- [x] 使用带 positive anti-vacuity 的 compile-positive/negative fixture 证明设计可用且禁止面关闭。
+- [x] 将载体诚实标为临时 T1/Medium；不实现 façade runtime behavior，不声称 package/SemVer/T2 证据。
 
 ### Phase B — Thin façade（#2049）
 
-- 只实现 #2045 接纳的 API，优先复用现有类型与逻辑。
+- 原子迁移并删除 #2045 executable contract，只实现其接纳 API，优先复用现有类型与逻辑。
+- 用 private verified projection、profile typestate 和 consuming handle 把临时 Medium 设计证据提升为真实 Hard 边界。
 - 由 #2048 的 release-check 和 compile fixture 覆盖直接/间接泄漏。
 - 不接真实 provider、不创建 DI container、不改变 startup/readiness/drain 行为。
 

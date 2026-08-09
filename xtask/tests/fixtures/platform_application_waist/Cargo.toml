@@ -1,0 +1,10 @@
+[package]
+name = "platform-application-waist-contract"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.96"
+publish = false
+
+[workspace]
+
+[dependencies]

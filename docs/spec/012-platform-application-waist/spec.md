@@ -1,8 +1,9 @@
 # Feature Specification: Platform Application waist 与外部消费证明
 
 **Created**: 2026-08-08
-**Status**: Accepted design baseline
+**Status**: Exact API contract frozen
 **Owner issue**: #2041
+**Exact API owner**: #2045
 
 ## 背景
 
@@ -19,7 +20,26 @@ provider、执行引擎、generated registry 或 assembly ownership。
 3. 由真实独立 repository 从最终 façade package tarball/local registry 执行有界 T2 应用 seam，建立 Release API、可信
    context/lifecycle 消费与 SemVer baseline。
 
-本文不冻结具体 Rust path、泛型参数或错误枚举；精确 API 设计由 #2045、实现由 #2049 拥有。
+能力边界由 #2041 拥有；#2045 已冻结精确 API 设计，#2049 拥有真实 façade 实现。
+
+## #2045 精确契约单源
+
+精确 Rust path、签名、泛型、可见性和闭值枚举的唯一规范源是
+[`platform_application_waist` executable contract](../../../xtask/tests/fixtures/platform_application_waist/src/lib.rs)。
+该 crate `publish = false`、不属于 workspace、依赖集合为空，只表达可编译的类型与可见性设计；本文不复制签名，避免
+Markdown 与 Rust 双真源。#2049 必须把接纳签名原子迁入真实 façade 并删除该 fixture。
+
+| 能力 | 冻结语义 | 明确禁止 |
+|---|---|---|
+| Contract/Handler | 开放 authoring；身份由 ID、版本和 schema digest 组成 | authoring impl 不授予 route/admission/runtime authority |
+| Verified request | 借用式 RequestContext、Principal、Tenant 只读 view | public mint、Clone、serde、raw subject/credential、plain TenantId→authority 转换 |
+| ApplicationModule | 只登记 contract/handler 意图；canonical admission 在 build 阶段 | Registry、DomainModuleResult、provider/route ownership bag |
+| Profile builder | 仅 Core/Eventing 私有 marker；build 与 start 消费前一阶段 | public Profile 扩展点、AssemblyLock/RuntimePlan constructor |
+| RuntimeHandle | 只读 snapshot；shutdown 消费 handle | Clone、JoinHandle/CancellationToken、raw runtime control |
+| Diagnostics | 登记过的 code + 强类型 public detail；三类阶段错误 | 任意 text、provider/config/credential/PII、raw error/source chain |
+
+开放 `Contract` 只表达作者声明。#2049 的 private admission adapter 必须将 ID、版本和 schema digest 与 canonical generated
+facts 精确 join；未知或冲突声明只能成为闭值 build diagnostic，不能形成 route 或 provider capability。
 
 ## 用户场景与独立验收
 
@@ -77,10 +97,14 @@ provider catalog、`diport`、generated registry、event execution/runtime execu
 - **FR-011**：Reference Extension、仓内 assembly 或 example 不得充当 Platform 外部 consumer 证明。
 - **FR-012**：Markdown 只承载接口意图与 traceability；边界 enforcement 必须由 Cargo/visibility、compile fixture、
   release API baseline 和真实 consumer 承担。
+- **FR-013**：#2045 exact contract 必须保持 `publish = false`、零依赖且不进入 workspace/release selection；其正负
+  compile proof 是临时 T1/Medium 设计载体，不得声称为真实 façade 或 package proof。
+- **FR-014**：Application build、start、shutdown 必须按所有权消费前一阶段；RuntimeHandle 不得 Clone。
+- **FR-015**：公开 stage error 仅为 Build/Start/Shutdown 三类，必须使用固定脱敏 Display/Debug、无 internal source。
 
 ## 非目标
 
-- 不在 #2041 或 #2045 实现 façade；不在 #2041 决定精确 Rust 签名。
+- 不在 #2041 或 #2045 实现 façade runtime；#2045 的 executable contract 不是 façade crate。
 - 不接入 `core`/`eventing` 真实 provider，不激活 official profile，不改变 runtime behavior。
 - 不创建第三方 Provider SPI、通用 DI、动态模块、插件、registry 或 marketplace。
 - 不新增 T3、production journey、artifact selector、SLO、dashboard 或 delivery automation。
@@ -95,3 +119,5 @@ provider catalog、`diport`、generated registry、event execution/runtime execu
 - **SC-005**：规格不把仓内 consumer、Reference Extension 或 assembly smoke 计作外部 Release API proof。
 - **SC-006**：#2045、#2047、#2048、#2049、#2051、#2052 的依赖和 proof owner 完整可追踪。
 - **SC-007**：外部 proof 同时覆盖 authoring、typed startup、verified request、diagnostics 与 bounded shutdown，且不升级为 T3。
+- **SC-008**：exact API 只有一个 executable source；正例 compile-use 每项承诺能力，负例分别命中 private field、缺失
+  conversion/re-export、缺失 Clone/扩展入口和 moved-value 错误。

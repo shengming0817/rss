@@ -28,6 +28,12 @@ compensation effect scope、idempotency/compensation/retry class 或 retry polic
 调用方，因此轴 A 的破坏变更不保留旧 Rust API shim；Release API 符号面仍由 `cargo public-api` /
 `cargo-semver-checks` 显式审查。
 
+Platform Application 的 #2045 精确设计由
+[`platform_application_waist` executable contract](../../xtask/tests/fixtures/platform_application_waist/src/lib.rs) 单源拥有。
+该 `publish = false`、零依赖 fixture 是临时 T1/Medium 设计证据，不属于 Release API：#2049 必须原子迁移并删除它，
+#2048 才把真实 façade 的 public API、公共依赖与泄漏纳入 release-check，#2052 才建立 actual package 与独立 consumer
+verdict。任何 internal path alias、deprecated re-export、shim 或 From/TryFrom 兼容入口都不允许作为迁移手段。
+
 根 `Cargo.toml` 的 `[workspace.metadata.release-surface]` 是轴 A 唯一正向发布选择：只有被选 package 及其
 public API owner、API stability 和显式 official-profile artifact 归属进入 Release Surface；未选 package 默认
 internal。package version、MSRV、Cargo publish eligibility 以及 binary/image identity 分别从同一次 Cargo metadata

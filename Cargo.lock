@@ -8014,6 +8014,7 @@ dependencies = [
  "syn 2.0.118",
  "time",
  "toml 0.8.23",
+ "trybuild",
  "typify",
  "vocab",
  "workspacefacts",

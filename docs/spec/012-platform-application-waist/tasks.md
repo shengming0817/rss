@@ -4,7 +4,7 @@
 
 | Logical ID | PBI | Outcome | Blocked-by | Canonical proof |
 |---|---:|---|---|---|
-| RSS-NW-004 | #2045 | Platform waist exact API、internal 泄漏与 public detail 边界 | #2042 | compile-positive/negative + sensitive-detail fixtures |
+| RSS-NW-004 | #2045 | Platform waist exact API、internal 泄漏与 public detail 边界 | #2042 | single executable contract + compile-positive/negative + sensitive-detail fixtures |
 | RSS-NW-005 | #2047 | release-selected API baseline | #2044, #2045 | `cargo public-api` owner separation |
 | RSS-NW-006 | #2048 | compatibility、SemVer 与泄漏进入既有 release-check | #2047 | release-check positive/synthetic negative fixtures |
 | RSS-NW-015 | #2049 | 薄 Platform Public façade | #2045, #2048 | façade tests + release baseline + forbidden leakage proof |
@@ -25,3 +25,10 @@
 - façade 只适配现有行为；任何 provider/profile/runtime closure 属于其它独立 PBI。
 - internal 泄漏优先由 Cargo、visibility、private/sealed type 消除，再用 compile fixture 和 release-check 补证。
 - consumer 必须拥有独立 repository/lockfile，只从 #2049 同一 revision 的 actual package 消费并执行完整有界 waist seam。
+
+## #2045 完成任务
+
+- [x] 冻结 Contract/Handler、verified views、module、Core/Eventing builder、consuming lifecycle 和 typed diagnostics。
+- [x] 建立唯一 `publish = false`、零依赖 executable contract，文档不复制 Rust 签名。
+- [x] 正例逐项 compile-use；负例覆盖 authority mint/conversion、internal ownership、indirect/error/detail leakage 与 lifecycle。
+- [x] 记录 #2049 原子迁移删除、#2048 release leakage、#2052 package/T2 的非重叠 owner。
