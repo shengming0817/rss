@@ -26,9 +26,9 @@ use identity::ports::device_certificate::{
     CertificateArtifactId, CertificateArtifactRequest, CertificateArtifactSource,
     CertificateAttemptAuthority, CertificateAttemptFence, CertificateConditionMutation,
     CertificatePublicKeyDigest, CertificateReconcileRepository,
-    CertificateReconcileRepositoryError, CertificateReconcileView, DeletionRequestOutcome,
-    DeviceCertificateCommandTtl, DeviceCertificateReconciler, DeviceIngressRepository,
-    DeviceIngressWrite, DraftEligibility, FencedMutationOutcome,
+    CertificateReconcileRepositoryError, CertificateReconcileView, CurrentCommandExpiryOutcome,
+    DeletionRequestOutcome, DeviceCertificateCommandTtl, DeviceCertificateReconciler,
+    DeviceIngressRepository, DeviceIngressWrite, DraftEligibility, FencedMutationOutcome,
     PersistedCertificateArtifactSnapshot, ProviderCertificateCandidate, ReportedStateHash,
     RotationOutcome,
 };
@@ -591,6 +591,13 @@ impl CertificateReconcileRepository<DraftEligibility> for SharedDraftCertificate
         CertificateReconcileRepositoryError,
     > {
         self.0.load_current_command_evidence(fence).await
+    }
+
+    async fn expire_due_current_command(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<CurrentCommandExpiryOutcome, CertificateReconcileRepositoryError> {
+        self.0.expire_due_current_command(fence).await
     }
 
     async fn append_artifact_receipt(

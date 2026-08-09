@@ -167,13 +167,10 @@ if observed != expected:
         );
     }
 
-    let wrapper_arg = wrapper
-        .to_str()
-        .context("wrapper executable probe path 不是 UTF-8")?;
     let mut public_command = external_cmd(
         ExternalProgram::SystemShell,
         &[
-            wrapper_arg,
+            "hack/cargo.sh",
             "xtask",
             "ci",
             "local",
@@ -208,7 +205,7 @@ if observed != expected:
         .context("wrapper help probe path 不是 UTF-8")?;
     let mut help_command = external_cmd(
         ExternalProgram::SystemShell,
-        &[wrapper_arg, "xtask", "ci", "local", "--help"],
+        &["hack/cargo.sh", "xtask", "ci", "local", "--help"],
         &[],
         Some(root),
     );

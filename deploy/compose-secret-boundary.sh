@@ -22,6 +22,7 @@ forbidden = {
     "RSS_AUDIT_AMQP_URL", "RSS_AUDIT_CHAIN_KEY_B64URL",
     "RSS_COMMAND_IDEMPOTENCY_KEYS_JSON", "RSS_DLX_ARCHIVE_VAULT_TOKEN",
     "RSS_DLX_HOT_VAULT_TOKEN", "RSS_PG_MIGRATOR_PASSWORD_FILE",
+    "RSS_PG_DATABASE_URL_FILE",
     "RSS_PG_PASSWORD_FILE", "RSS_PG_READ_PASSWORD_FILE",
     "RSS_PG_PROJECTION_READER_PASSWORD_FILE",
     "RSS_PG_PROJECTION_OPERATOR_PASSWORD_FILE",
@@ -98,6 +99,25 @@ if any(volume.get("read_only") is not True for volume in projection_volumes):
     raise SystemExit("projection operator mounts must all be read-only")
 if "/var/run/rss/secrets/serving-secret-bundle" in projection_targets:
     raise SystemExit("projection operator must not mount serving-secret-bundle")
+
+migration = services.get("migration") or {}
+migration_environment = migration.get("environment", {})
+expected_migration_url_file = "/run/rss-demo-secrets/pg-migration-database-url"
+if migration_environment.get("RSS_PG_DATABASE_URL_FILE") != expected_migration_url_file:
+    raise SystemExit("migration has invalid RSS_PG_DATABASE_URL_FILE")
+migration_volumes = migration.get("volumes", [])
+migration_targets = {str(volume.get("target")): volume for volume in migration_volumes}
+required_migration_targets = {
+    expected_migration_url_file,
+    "/run/rss-demo-secrets/pg-migrator-password",
+    "/run/rss-demo-tls/postgres/ca.pem",
+}
+if set(migration_targets) != required_migration_targets:
+    raise SystemExit(
+        "migration mount set is not exact: " + ",".join(sorted(migration_targets))
+    )
+if any(volume.get("read_only") is not True for volume in migration_volumes):
+    raise SystemExit("migration mounts must all be read-only")
 
 postgres = services.get("postgres") or {}
 postgres_environment = postgres.get("environment", {})
@@ -301,6 +321,12 @@ services:
     command: ["server", "/data", "--certs-dir", "/certs"]
   migration:
     image: rss:dev
+    environment:
+      RSS_PG_DATABASE_URL_FILE: /run/rss-demo-secrets/pg-migration-database-url
+    volumes:
+      - ./migration-url:/run/rss-demo-secrets/pg-migration-database-url:ro
+      - ./migrator:/run/rss-demo-secrets/pg-migrator-password:ro
+      - ./postgres-ca.pem:/run/rss-demo-tls/postgres/ca.pem:ro
   postgres:
     image: postgres:16-alpine
     environment:

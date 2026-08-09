@@ -1,0 +1,1 @@
+postgresql://postgres:postgres_demo_pw@postgres:5432/rss?sslmode=verify-full&sslrootcert=/run/rss-demo-tls/postgres/ca.pem

@@ -284,6 +284,7 @@ services:
     read_only: true
     user: "65532:65532"
     volumes:
+      - ./demo-secrets/pg-migration-database-url:/run/rss-demo-secrets/pg-migration-database-url:ro
       - ./demo-secrets/pg-migrator-password:/run/rss-demo-secrets/pg-migrator-password:ro
       - ./demo-tls/out/postgres/ca.pem:/run/rss-demo-tls/postgres/ca.pem:ro
     cap_drop:

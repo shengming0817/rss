@@ -1476,7 +1476,7 @@ fn runtime_binary_installs_hook(
     let Some(installer) = functions.get("install_process_hooks") else {
         return false;
     };
-    let Some(hook) = transparent_tail_expression(&installer.block) else {
+    let [syn::Stmt::Expr(hook, _)] = installer.block.stmts.as_slice() else {
         return false;
     };
     let syn::Expr::Call(hook) = transparent_expr(hook) else {

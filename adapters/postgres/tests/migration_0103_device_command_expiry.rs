@@ -28,12 +28,14 @@ fn expiry_funnel_is_exact_fenced_and_database_timed() {
 }
 
 #[test]
-fn serving_role_gets_only_fixed_eligibility_wrappers() {
+fn serving_role_gets_only_fixed_eligibility_wrappers() -> Result<(), &'static str> {
     assert!(MIGRATION.contains("OWNER TO rss_device_command_funnel_owner"));
     assert!(MIGRATION.contains("FROM PUBLIC, rss_app, rss_app_read"));
     assert!(MIGRATION.contains("TO rss_app;"));
     assert!(!MIGRATION.contains("GRANT UPDATE"));
-    let grant = MIGRATION.rfind("GRANT EXECUTE ON FUNCTION").unwrap();
+    let grant = MIGRATION
+        .rfind("GRANT EXECUTE ON FUNCTION")
+        .ok_or("migration must grant the fixed eligibility wrappers to the serving role")?;
     let serving = &MIGRATION[grant..];
     for operation in ["select", "settle"] {
         assert!(serving.contains(&format!("rss_{operation}_due_current_device_command_draft")));
@@ -42,4 +44,5 @@ fn serving_role_gets_only_fixed_eligibility_wrappers() {
         )));
         assert!(!serving.contains(&format!("rss_{operation}_due_current_device_command_core")));
     }
+    Ok(())
 }

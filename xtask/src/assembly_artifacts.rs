@@ -1303,6 +1303,7 @@ fn compose_serving_secret_bundle_is_closed(env_source: &str, bundle_source: &str
         "commandIdempotencyKeys",
         "dlxArchiveVaultToken",
         "dlxHotVaultToken",
+        "identityPseudonymKey",
         "pgPassword",
         "pgReadPassword",
         "pgDlxArchiverPassword",
@@ -2474,6 +2475,10 @@ mod tests {
             "real compose serving Secret boundary is not closed"
         );
         for (label, mutated_bundle) in [
+            (
+                "missing-identity-pseudonym-key",
+                bundle_source.replace("\"identityPseudonymKey\"", "\"removedPseudonymKey\""),
+            ),
             (
                 "missing-command-keyring",
                 bundle_source.replace("\"commandIdempotencyKeys\"", "\"removedKeyring\""),

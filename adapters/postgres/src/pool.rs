@@ -1064,7 +1064,7 @@ SELECT capability FROM capabilities ORDER BY capability
 // Byte-level golden of the complete effective capability catalog after the committed migration
 // head. Any migration that intentionally changes writer authority must update this reviewed value.
 const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:ff14653aea4dad6b5ebcc307152349462400851278b3c1eed3c94679e9ef0cc0";
+    "sha256:1b6004533cdbc851ca7a61703e5e166e1cfd865314f5cae62bec0e181c9da971";
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =

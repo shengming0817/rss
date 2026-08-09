@@ -168,10 +168,6 @@ bash "${SCRIPT_DIR}/demo-tls/generate-demo-cas.sh" >/dev/null \
     || fail "缺少 demo TLS CA：deploy/demo-tls/out/minio/CAs/rss-demo-s3-ca.pem"
 log "demo TLS material ✓"
 
-log "构建演示栈同版本镜像…"
-"${SCRIPT_DIR}/compose-secret-boundary.sh" >/dev/null \
-    || fail "compose serving Secret boundary 校验失败"
-log "compose serving Secret boundary ✓"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 # shellcheck source=server-version-identity.sh
 source "${SCRIPT_DIR}/server-version-identity.sh"
@@ -182,6 +178,10 @@ export BUILD_DATE
 BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
     || fail "无法生成 BUILD_DATE"
 rss_require_build_identity || fail "构建身份非法（GIT_SHA/BUILD_DATE）"
+log "构建演示栈同版本镜像…"
+"${SCRIPT_DIR}/compose-secret-boundary.sh" >/dev/null \
+    || fail "compose serving Secret boundary 校验失败"
+log "compose serving Secret boundary ✓"
 $COMPOSE build
 
 # ── 离线 preflight：同一 strict parser，且不注入 Vault/provider env、不发网络请求 ──────────────
@@ -202,7 +202,7 @@ if invalid_output="$(printf '%s\n' "{\"bindings\":[],\"$invalid_marker\":true}" 
     --entrypoint /usr/local/bin/rss rss-operator:dev vault-allowlist validate --stdin 2>&1)"; then
     fail "非法 Vault allowlist 被离线校验接受"
 fi
-[[ "$invalid_output" = "Error: vault allowlist validation failed: invalid-json" ]] \
+[[ "$invalid_output" = "vault allowlist validation failed: invalid-json" ]] \
     || fail "非法 Vault allowlist 未返回闭合静态分类"
 [[ "$invalid_output" != *"$invalid_marker"* ]] || fail "Vault allowlist 离线校验泄漏输入"
 log "Vault allowlist 离线合法/非法校验 ✓"
