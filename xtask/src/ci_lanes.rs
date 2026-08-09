@@ -147,6 +147,9 @@ pub(crate) enum ToolRequirement {
     CargoBuiltin(crate::cmd::CargoSubcommand),
     Nextest,
     CoverageTools,
+    PublicApiTools {
+        install_hint: &'static str,
+    },
     CargoTool {
         tool: crate::cmd::CargoSubcommand,
         install_hint: &'static str,
@@ -853,8 +856,7 @@ macro_rules! gate_catalog {
                         "public-api",
                         GateExecutor::Coverage,
                         CompileKind::Workspace,
-                        ToolRequirement::CargoTool {
-                            tool: crate::cmd::CargoSubcommand::PublicApi,
+                        ToolRequirement::PublicApiTools {
                             install_hint: PUBLIC_API_HINT,
                         },
                         EvidenceKind::PublicApi,
@@ -1059,6 +1061,8 @@ pub(crate) const LLVM_COV_HINT: &str = concat!(
 const PUBLIC_API_HINT: &str = concat!(
     "rustup toolchain install nightly-2026-04-16 && cargo install cargo-public-api@",
     env!("RSS_TOOL_VERSION_CARGO_PUBLIC_API"),
+    " --locked && cargo install cargo-semver-checks@",
+    env!("RSS_TOOL_VERSION_CARGO_SEMVER_CHECKS"),
     " --locked"
 );
 const fn gate(

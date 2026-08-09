@@ -72,7 +72,7 @@ lane_has_tool() {
     all:* | \
     *:sccache | \
     check:promtool | check:cargo-dylint | check:dylint-link | check:cargo-deny | \
-    check:cargo-audit | check:cargo-public-api | \
+    check:cargo-audit | check:cargo-public-api | check:cargo-semver-checks | \
     test-affected:cargo-nextest | test-affected:cargo-llvm-cov | \
     integration-critical:cargo-nextest | \
     audit:cargo-deny | audit:cargo-audit) return 0 ;;

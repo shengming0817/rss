@@ -25,13 +25,16 @@ compensation effect scope、idempotency/compensation/retry class 或 retry polic
 ## 轴 A / 轴 B 边界
 
 轴 A 只覆盖由产品面 owner 与 release artifact 明确承诺的 Rust API 和 authoring schema。RSS 当前没有外部 Rust API
-调用方，因此轴 A 的破坏变更不保留旧 Rust API shim。本 PR 提供 release-selected exported-symbol baseline
-命令；Release drift 的 release-check 接线、`cargo-semver-checks`、公共依赖与 leakage 由 #2048 完成。
+调用方，因此轴 A 的破坏变更不保留旧 Rust API shim。唯一 release-check `public-api` gate 同时执行 internal
+与 release exact-set、base/current 交集逐包且分别覆盖 default/all-features 的 `cargo-semver-checks`、公共依赖
+和结构化类型泄漏证明。两个 feature profile 分开捕获、分开诊断，不把 all-features 当成默认面的并集。首次选入
+package 不继承历史 internal `pub` 承诺；从清单显式移除 package 即终止其后续轴 A 承诺，不扫描其 internal
+历史、不生成 shim，也不引入双读或退出 metadata。仍在 base/current 交集内的 package 必须完成 SemVer 证明。
 
 Platform Application 的 #2045 精确设计由
 [`platform_application_waist` executable contract](../../xtask/tests/fixtures/platform_application_waist/src/lib.rs) 单源拥有。
 该 `publish = false`、零依赖 fixture 是临时 T1/Medium 设计证据，不属于 Release API：#2049 必须原子迁移并删除它，
-#2048 才把真实 façade 的 public API、公共依赖与泄漏纳入 release-check，#2052 才建立 actual package 与独立 consumer
+#2048 的通用 gate 只消费真实 Release Surface；#2049 选入 façade 后即自动纳入该证明，#2052 才建立 actual package 与独立 consumer
 verdict。任何 internal path alias、deprecated re-export、shim 或 From/TryFrom 兼容入口都不允许作为迁移手段。
 
 根 `Cargo.toml` 的 `[workspace.metadata.release-surface]` 是轴 A 唯一正向发布选择：只有被选 package 及其

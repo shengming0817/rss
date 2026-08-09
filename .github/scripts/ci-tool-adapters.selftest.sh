@@ -27,7 +27,7 @@ expect_failure() {
 }
 
 expect_output 'check owns the fixed source and supply-chain tools' \
-  'cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,sccache@0.15.0,promtool@3.5.3' \
+  'cargo-deny@0.19.9,cargo-audit@0.22.2,cargo-dylint@6.0.1,dylint-link@6.0.1,cargo-public-api@0.52.0,cargo-semver-checks@0.49.0,sccache@0.15.0,promtool@3.5.3' \
   "$ADAPTER" specs --lane check --backend all
 expect_output 'test-affected owns test and coverage tools' \
   'cargo-nextest@0.9.137,cargo-llvm-cov@0.8.7,sccache@0.15.0' \

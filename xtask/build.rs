@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-const EXPECTED_TOOLS: [&str; 9] = [
+const EXPECTED_TOOLS: [&str; 10] = [
     "cargo-nextest",
     "cargo-llvm-cov",
     "cargo-deny",
@@ -13,6 +13,7 @@ const EXPECTED_TOOLS: [&str; 9] = [
     "cargo-dylint",
     "dylint-link",
     "cargo-public-api",
+    "cargo-semver-checks",
     "sccache",
     "promtool",
 ];

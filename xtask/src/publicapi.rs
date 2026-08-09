@@ -6,9 +6,8 @@
 //! 依赖：外部 `cargo-public-api`（版本由 CI tool catalog 编译期派生）+ 钉版 nightly rustdoc-json
 //! （`rustup toolchain install <PINNED_NIGHTLY>`，见 [`PINNED_NIGHTLY`]）。未满足时本命令给指引并**非零退出**（非静默 noop）。
 //!
-//! **不在 `cargo xtask verify` 聚合门内**：本命令提供 internal signature 与 release-selected exported-symbol
-//! baseline；当前 release-check 只执行 internal owner。Release drift 接线、SemVer、公共依赖与 leakage 由
-//! #2048 独立完成。
+//! **不在 `cargo xtask verify` 快门内**：本命令提供 owner-typed baseline；完整 ReleaseCheck 的唯一
+//! `public-api` gate 在同一实现内聚合 internal/release exact-set、逐包 SemVer、公共依赖与类型泄漏。
 //!
 //! INVARIANT: PUBLICAPI-TOOL-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— 工具缺失 fail-fast，不静默成功。
 //! INVARIANT: PUBLICAPI-DRIFT-GATE-01 { level = "Medium", exec = "release-check", source = "public-api" }—— owner exact-set 的缺失、漂移、孤儿和异常目录均 fail-closed。
@@ -26,7 +25,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::sync::atomic::{AtomicU64, Ordering};
-use workspacefacts::{PackageKey, TargetKind, WorkspaceFacts};
+use workspacefacts::{PackageKey, PublicApiOwner, TargetKind, WorkspaceFacts};
 
 static GENERATION_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
@@ -145,6 +144,7 @@ struct BaselineCatalog {
     internal_universe: Vec<PackageKey>,
     internal: Vec<PackageKey>,
     release: Vec<PackageKey>,
+    library_targets: BTreeMap<PackageKey, String>,
 }
 
 impl BaselineCatalog {
@@ -197,10 +197,24 @@ impl BaselineCatalog {
             .map(|name| resolve_library(facts, name))
             .collect::<Result<BTreeSet<_>>>()?;
         let internal = internal_universe.difference(&release).cloned().collect();
+        let library_targets = internal_universe
+            .union(&release)
+            .map(|package| {
+                let target = facts
+                    .targets_for(package)?
+                    .iter()
+                    .find(|target| target.kind() == TargetKind::Library)
+                    .with_context(|| {
+                        format!("baseline target `{}` 没有 library target", package.as_str())
+                    })?;
+                Ok((package.clone(), target.name().to_owned()))
+            })
+            .collect::<Result<_>>()?;
         Ok(Self {
             internal_universe: internal_universe.into_iter().collect(),
             internal,
             release: release.into_iter().collect(),
+            library_targets,
         })
     }
 
@@ -235,6 +249,7 @@ impl BaselineCatalog {
             scope,
             universe,
             targets,
+            library_targets: self.library_targets.clone(),
         }
     }
 }
@@ -258,6 +273,328 @@ struct BaselinePlan {
     scope: BaselineScope,
     universe: BaselineUniverse,
     targets: Vec<PackageKey>,
+    library_targets: BTreeMap<PackageKey, String>,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct ReleaseSelectionDelta {
+    semver_packages: Vec<String>,
+    first_release_packages: Vec<String>,
+    removed_packages: Vec<String>,
+}
+
+impl ReleaseSelectionDelta {
+    fn derive(current: &BTreeSet<String>, base: &BTreeSet<String>) -> Self {
+        Self {
+            semver_packages: current.intersection(base).cloned().collect(),
+            first_release_packages: current.difference(base).cloned().collect(),
+            removed_packages: base.difference(current).cloned().collect(),
+        }
+    }
+}
+
+fn referenced_type_paths(tokens: &[public_api::tokens::Token]) -> BTreeSet<String> {
+    use public_api::tokens::Token;
+    let mut paths = BTreeSet::new();
+    for (index, token) in tokens.iter().enumerate() {
+        if !matches!(token, Token::Type(_)) {
+            continue;
+        }
+        let mut parts = vec![token.text()];
+        let mut cursor = index;
+        while cursor >= 2
+            && matches!(&tokens[cursor - 1], Token::Symbol(symbol) if symbol == "::")
+            && matches!(
+                &tokens[cursor - 2],
+                Token::Identifier(_) | Token::Type(_) | Token::Self_(_)
+            )
+        {
+            parts.push(tokens[cursor - 2].text());
+            cursor -= 2;
+        }
+        parts.reverse();
+        paths.insert(parts.join("::"));
+    }
+    paths
+}
+
+fn normalized_crate_name(name: &str) -> String {
+    name.replace('-', "_")
+}
+
+fn forbidden_type_root<'a>(
+    owner: PublicApiOwner,
+    library_target: &str,
+    path: &'a str,
+    workspace: &BTreeSet<String>,
+    selected: &BTreeSet<String>,
+    resolved_workspace_dependency: Option<&str>,
+) -> Option<&'a str> {
+    let (root, qualified) = path
+        .split_once("::")
+        .map_or((path, false), |(root, _)| (root, true));
+    if !qualified
+        || matches!(root, "std" | "core" | "alloc")
+        || root == normalized_crate_name(library_target)
+    {
+        return None;
+    }
+    let workspace_package = resolved_workspace_dependency.or_else(|| {
+        workspace
+            .iter()
+            .find(|candidate| normalized_crate_name(candidate) == root)
+            .map(String::as_str)
+    });
+    if let Some(candidate) = workspace_package {
+        return match owner {
+            PublicApiOwner::PlatformPublic => Some(root),
+            PublicApiOwner::StandaloneComponent => (!selected.contains(candidate)).then_some(root),
+        };
+    }
+    match owner {
+        PublicApiOwner::PlatformPublic => Some(root),
+        PublicApiOwner::StandaloneComponent if path == "tracing::Span" => None,
+        PublicApiOwner::StandaloneComponent => Some(root),
+    }
+}
+
+fn release_api_findings(
+    facts: &WorkspaceFacts,
+    surface: &crate::release_surface::ReleaseSurface,
+    captures: &BTreeMap<String, ApiCapture>,
+) -> Result<Vec<crate::diagnostic::Finding<ReleaseApiRule>>> {
+    let mut items = BTreeMap::new();
+    for release_package in surface.packages() {
+        let package = release_package.package();
+        let capture = captures
+            .get(package)
+            .with_context(|| format!("release package `{package}` 缺 API capture"))?;
+        let mut package_items = Vec::new();
+        for (profile, rustdoc_json) in &capture.rustdoc_json {
+            let api = public_api::Builder::from_rustdoc_json(rustdoc_json)
+                .build()
+                .with_context(|| {
+                    format!("解析 `{package}` {} rustdoc JSON 失败", profile.label())
+                })?;
+            let rustdoc: rustdoc_types::Crate =
+                serde_json::from_slice(&fs::read(rustdoc_json).with_context(|| {
+                    format!("读取 `{package}` {} rustdoc JSON 失败", profile.label())
+                })?)
+                .with_context(|| {
+                    format!(
+                        "解析 `{package}` {} typed rustdoc JSON 失败",
+                        profile.label()
+                    )
+                })?;
+            package_items.extend(
+                api.items()
+                    .map(|item| {
+                        Ok(ApiItemProjection {
+                            rendered: format!("profile={} {}", profile.label(), item),
+                            tokens: item.tokens().cloned().collect(),
+                            source_paths: source_type_paths(&rustdoc, item.id())?,
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?,
+            );
+        }
+        items.insert(package.to_owned(), package_items);
+    }
+    release_api_findings_from_items(facts, surface, &items)
+}
+
+#[derive(Debug)]
+struct ApiItemProjection {
+    rendered: String,
+    tokens: Vec<public_api::tokens::Token>,
+    source_paths: BTreeSet<String>,
+}
+
+fn release_api_findings_from_items(
+    facts: &WorkspaceFacts,
+    surface: &crate::release_surface::ReleaseSurface,
+    items: &BTreeMap<String, Vec<ApiItemProjection>>,
+) -> Result<Vec<crate::diagnostic::Finding<ReleaseApiRule>>> {
+    let workspace = facts
+        .workspace_packages()
+        .into_iter()
+        .map(|package| package.key().as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let selected = surface
+        .packages()
+        .iter()
+        .map(|package| package.package().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut findings = Vec::new();
+
+    for release_package in surface.packages() {
+        let package = release_package.package();
+        let package_key = facts
+            .package_key(package)
+            .with_context(|| format!("release package `{package}` 不属于 workspace"))?;
+        let dependencies = facts.direct_dependencies_for(&package_key)?;
+        let library_target = facts
+            .targets_for(&package_key)?
+            .iter()
+            .find(|target| target.kind() == TargetKind::Library)
+            .with_context(|| format!("release package `{package}` 缺 library target"))?
+            .name();
+        let package_items = items
+            .get(package)
+            .with_context(|| format!("release package `{package}` 缺 API item projection"))?;
+
+        for item in package_items {
+            let paths = referenced_type_paths(&item.tokens)
+                .union(&item.source_paths)
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            for path in paths {
+                let resolved_workspace =
+                    resolved_workspace_dependency(dependencies, &path, &workspace).or_else(|| {
+                        let root = path.split("::").next().unwrap_or(path.as_str());
+                        workspace
+                            .iter()
+                            .find(|candidate| normalized_crate_name(candidate) == root)
+                            .map(String::as_str)
+                    });
+                let Some(root) = forbidden_type_root(
+                    release_package.public_api_owner(),
+                    library_target,
+                    &path,
+                    &workspace,
+                    &selected,
+                    resolved_workspace,
+                ) else {
+                    let root = path.split("::").next().unwrap_or(path.as_str());
+                    if path.contains("::")
+                        && !matches!(path.split("::").next(), Some("std" | "core" | "alloc"))
+                        && root != normalized_crate_name(library_target)
+                        && !has_direct_normal_dependency(dependencies, &path, None)
+                    {
+                        findings.push(crate::diagnostic::finding(
+                            ReleaseApiRule::PublicDependency,
+                            release_subject(package, &item.rendered),
+                            format!(
+                                "public type `{path}` is not backed by a direct normal dependency"
+                            ),
+                        ));
+                    }
+                    continue;
+                };
+
+                findings.push(crate::diagnostic::finding(
+                    ReleaseApiRule::ForbiddenType,
+                    release_subject(package, &item.rendered),
+                    format!("forbidden public type `{path}` (crate root `{root}`)"),
+                ));
+                if resolved_workspace.is_some_and(|dependency| !selected.contains(dependency))
+                    || (resolved_workspace.is_some()
+                        && !has_direct_normal_dependency(dependencies, &path, resolved_workspace))
+                {
+                    findings.push(crate::diagnostic::finding(
+                        ReleaseApiRule::PublicDependency,
+                        release_subject(package, &item.rendered),
+                        format!("public workspace type `{path}` is not a selected direct normal dependency"),
+                    ));
+                }
+            }
+        }
+    }
+    findings.sort_by(|left, right| {
+        (left.rule, &left.subject, &left.detail).cmp(&(right.rule, &right.subject, &right.detail))
+    });
+    findings.dedup();
+    Ok(findings)
+}
+
+fn source_type_paths(
+    krate: &rustdoc_types::Crate,
+    item_id: rustdoc_types::Id,
+) -> Result<BTreeSet<String>> {
+    let item = krate
+        .index
+        .get(&item_id)
+        .with_context(|| format!("public rustdoc item {} 缺 index entry", item_id.0))?;
+    let value = serde_json::to_value(item).context("投影 rustdoc item 失败")?;
+    let mut ids = BTreeSet::new();
+    collect_source_ids(&value, &mut ids);
+    Ok(ids
+        .into_iter()
+        .filter_map(|id| krate.paths.get(&rustdoc_types::Id(id)))
+        .map(|summary| summary.path.join("::"))
+        .collect())
+}
+
+fn collect_source_ids(value: &serde_json::Value, ids: &mut BTreeSet<u32>) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, nested) in object {
+                if matches!(key.as_str(), "resolved_path" | "use") {
+                    if let Some(id) = nested
+                        .as_object()
+                        .and_then(|fields| fields.get("id"))
+                        .and_then(serde_json::Value::as_u64)
+                        .and_then(|id| u32::try_from(id).ok())
+                    {
+                        ids.insert(id);
+                    }
+                }
+                collect_source_ids(nested, ids);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for nested in values {
+                collect_source_ids(nested, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn release_subject(package: &str, rendered: &str) -> String {
+    let module = rendered
+        .split_whitespace()
+        .find(|part| part.contains("::"))
+        .unwrap_or("<root>")
+        .trim_matches(|character: char| {
+            !character.is_alphanumeric() && character != ':' && character != '_'
+        });
+    format!("package={package}/module={module}/item={rendered}")
+}
+
+fn has_direct_normal_dependency(
+    dependencies: &[workspacefacts::DirectDependencyFacts],
+    path: &str,
+    expected_package: Option<&str>,
+) -> bool {
+    let root = path.split("::").next().unwrap_or(path);
+    dependencies.iter().any(|dependency| {
+        dependency.kind() == workspacefacts::DependencyKind::Normal
+            && (normalized_crate_name(dependency.name()) == root
+                || dependency
+                    .resolved()
+                    .is_some_and(|resolved| normalized_crate_name(resolved.as_str()) == root))
+            && expected_package.is_none_or(|expected| {
+                dependency
+                    .resolved()
+                    .is_some_and(|resolved| resolved.as_str() == expected)
+            })
+    })
+}
+
+fn resolved_workspace_dependency<'a>(
+    dependencies: &'a [workspacefacts::DirectDependencyFacts],
+    path: &str,
+    workspace: &BTreeSet<String>,
+) -> Option<&'a str> {
+    let root = path.split("::").next().unwrap_or(path);
+    dependencies.iter().find_map(|dependency| {
+        let resolved = dependency.resolved()?.as_str();
+        (workspace.contains(resolved)
+            && (normalized_crate_name(dependency.name()) == root
+                || normalized_crate_name(resolved) == root))
+            .then_some(resolved)
+    })
 }
 
 #[derive(Debug)]
@@ -295,33 +632,411 @@ pub(crate) fn run(command: Command) -> Result<()> {
             check,
         ),
     };
-    execute(&root, &plan, check)
+    execute(&root, &plan, check).map(drop)
 }
 
-fn execute(root: &Path, plan: &BaselinePlan, check: bool) -> Result<()> {
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ReleaseApiRule {
+    PublicDependency,
+    ForbiddenType,
+}
+
+#[derive(Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ReleaseProofFailure {
+    stage: u8,
+    subject: String,
+    detail: String,
+}
+
+impl ReleaseProofFailure {
+    fn from_error(stage: u8, subject: impl Into<String>, error: anyhow::Error) -> Self {
+        Self {
+            stage,
+            subject: subject.into(),
+            detail: format!("{error:#}"),
+        }
+    }
+}
+
+fn collect_release_stage<T>(
+    failures: &mut Vec<ReleaseProofFailure>,
+    stage: u8,
+    subject: &str,
+    run: impl FnOnce() -> Result<T>,
+) -> Option<T> {
+    match run() {
+        Ok(value) => Some(value),
+        Err(error) => {
+            failures.push(ReleaseProofFailure::from_error(stage, subject, error));
+            None
+        }
+    }
+}
+
+/// Canonical ReleaseCheck proof. The Cargo graph and validated positive selection remain the typed
+/// authority; rustdoc token projection only closes residual public-signature leakage.
+/// INVARIANT: RELEASE-API-COMPAT-01 { level = "Medium", exec = "release-check", source = "rustdoc-json", synthetic_red = "tests::checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection", anti_vacuity = "tests::checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection" }.
+pub(crate) fn run_release_check(against: &str, allow_missing_tools: bool) -> Result<()> {
+    let root = crate::workspace_root()?;
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+    let facts = command_facts.get()?;
+    let catalog = BaselineCatalog::derive(&root, facts)?;
+
+    let mut failures = Vec::new();
+    collect_release_stage(&mut failures, 0, "internal-exact-set", || {
+        execute(
+            &root,
+            &catalog.plan(BaselineScope::Complete(BaselineOwner::Internal)),
+            true,
+        )
+    });
+
+    let base_revision = match merge_base(&root, against) {
+        Ok(revision) => Some(revision),
+        Err(error) => {
+            failures.push(ReleaseProofFailure::from_error(1, "base-revision", error));
+            None
+        }
+    };
+    let base_packages = match &base_revision {
+        Some(revision) => match release_packages_at(&root, revision) {
+            Ok(packages) => Some(packages),
+            Err(error) => {
+                failures.push(ReleaseProofFailure::from_error(
+                    1,
+                    "base-release-surface",
+                    error,
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    let current_packages = catalog
+        .release
+        .iter()
+        .map(|package| package.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let delta = base_packages
+        .as_ref()
+        .map(|base| ReleaseSelectionDelta::derive(&current_packages, base));
+
+    let captures = match execute(
+        &root,
+        &catalog.plan(BaselineScope::Complete(BaselineOwner::Release)),
+        true,
+    ) {
+        Ok(captures) => Some(captures),
+        Err(error) => {
+            failures.push(ReleaseProofFailure::from_error(
+                2,
+                "release-exact-set",
+                error,
+            ));
+            None
+        }
+    };
+
+    if !current_packages.is_empty() {
+        match (validated_release_surface(&root, facts), captures.as_ref()) {
+            (Ok(surface), Some(captures)) => {
+                match release_api_findings(facts, &surface, captures) {
+                    Ok(findings) => {
+                        failures.extend(findings.into_iter().map(|finding| ReleaseProofFailure {
+                            stage: 3,
+                            subject: finding.subject,
+                            detail: format!("rule={:?}: {}", finding.rule, finding.detail),
+                        }))
+                    }
+                    Err(error) => failures.push(ReleaseProofFailure::from_error(
+                        3,
+                        "release-type-projection",
+                        error,
+                    )),
+                }
+            }
+            (Err(error), _) => failures.push(ReleaseProofFailure::from_error(
+                3,
+                "validated-release-surface",
+                error,
+            )),
+            (Ok(_), None) => {}
+        }
+    }
+
+    if let (Some(delta), Some(base_revision)) = (&delta, &base_revision) {
+        if !delta.semver_packages.is_empty() {
+            match ensure_semver_tool_available(allow_missing_tools) {
+                Ok(true) => {
+                    if let Err(error) =
+                        run_semver_packages(&delta.semver_packages, |package, profile| {
+                            run_semver_check(&root, package, base_revision, profile)
+                        })
+                    {
+                        failures.push(ReleaseProofFailure::from_error(4, "semver", error));
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => failures.push(ReleaseProofFailure::from_error(
+                    4,
+                    "semver-prerequisite",
+                    error,
+                )),
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        failures.sort();
+        for failure in &failures {
+            eprintln!(
+                "release-check finding: stage={} subject={} detail={}",
+                failure.stage, failure.subject, failure.detail
+            );
+        }
+        bail!(
+            "release-check public-api: {} 项聚合校验失败",
+            failures.len()
+        );
+    }
+    let Some(delta) = delta else {
+        bail!("release-check public-api: base Release Surface 不可用")
+    };
+    if current_packages.is_empty() {
+        eprintln!(
+            "release-check public-api: Release Surface 为空；release drift/SemVer/leakage 无目标"
+        );
+    }
+    eprintln!(
+        "release-check public-api: {} release package(s), {} SemVer package comparison(s) × {} profiles, {} first-release baseline(s), {} explicit removal(s)",
+        current_packages.len(),
+        delta.semver_packages.len(),
+        ApiProfile::RELEASE.len(),
+        delta.first_release_packages.len(),
+        delta.removed_packages.len()
+    );
+    Ok(())
+}
+
+fn run_semver_packages(
+    packages: &[String],
+    mut run: impl FnMut(&str, ApiProfile) -> Result<()>,
+) -> Result<()> {
+    let mut failures = Vec::new();
+    for package in packages {
+        for profile in ApiProfile::RELEASE {
+            if let Err(error) = run(package, profile) {
+                failures.push(format!(
+                    "package={package}/profile={}: {error:#}",
+                    profile.label()
+                ));
+            }
+        }
+    }
+    if failures.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "release-check public-api: {} 项 SemVer 校验失败:\n{}",
+        failures.len(),
+        failures.join("\n")
+    )
+}
+
+fn validated_release_surface(
+    root: &Path,
+    facts: &WorkspaceFacts,
+) -> Result<crate::release_surface::ReleaseSurface> {
+    let ir =
+        crate::assembly_governance::AssemblyGovernanceIr::<crate::assembly_governance::Core>::load(
+            root,
+        )?;
+    let artifacts = if crate::release_surface::requires_artifact_join(facts) {
+        let joined =
+            ir.join_artifacts(crate::assembly_governance::load_artifact_declaration(root)?)?;
+        crate::release_surface::project_artifacts(&joined)
+    } else {
+        Vec::new()
+    };
+    let (surface, findings) = crate::release_surface::validate(facts, &artifacts);
+    if !findings.is_empty() {
+        bail!(
+            "validated Release Surface 失败:\n{}",
+            findings
+                .iter()
+                .map(crate::diagnostic::format_finding)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+    surface.context("validated Release Surface 未生成 typed surface")
+}
+
+fn merge_base(root: &Path, against: &str) -> Result<String> {
+    let output = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::SystemGit,
+        &["merge-base", against, "HEAD"],
+        &[],
+        Some(root),
+    )
+    .output()
+    .with_context(|| format!("运行 git merge-base {against} HEAD 失败"))?;
+    if !output.status.success() {
+        bail!(
+            "git merge-base {against} HEAD 非零退出:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let revision = String::from_utf8(output.stdout)?.trim().to_owned();
+    if revision.len() != 40 || !revision.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("git merge-base 返回非法 revision `{revision}`");
+    }
+    Ok(revision)
+}
+
+fn release_packages_at(root: &Path, revision: &str) -> Result<BTreeSet<String>> {
+    let object = format!("{revision}:Cargo.toml");
+    let output = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::SystemGit,
+        &["show", &object],
+        &[],
+        Some(root),
+    )
+    .output()
+    .with_context(|| format!("运行 git show {object} 失败"))?;
+    if !output.status.success() {
+        bail!(
+            "git show {object} 非零退出:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let manifest = String::from_utf8(output.stdout)?
+        .parse::<toml::Value>()
+        .context("解析 base Cargo.toml 失败")?;
+    let metadata = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("metadata"))
+        .cloned()
+        .unwrap_or_else(|| toml::Value::Table(toml::map::Map::new()));
+    let metadata = serde_json::to_value(metadata).context("投影 base workspace.metadata 失败")?;
+    let selection = workspacefacts::parse_release_selection(&metadata)
+        .map_err(anyhow::Error::new)?
+        .context("base Cargo.toml 缺 workspace.metadata.release-surface")?;
+    let mut packages = BTreeSet::new();
+    for package in selection.packages() {
+        if !packages.insert(package.package().to_owned()) {
+            bail!(
+                "base Cargo.toml Release Surface 重复选择 package `{}`",
+                package.package()
+            );
+        }
+    }
+    Ok(packages)
+}
+
+#[derive(Debug)]
+struct ApiCapture {
+    baseline: String,
+    rustdoc_json: Vec<(ApiProfile, PathBuf)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum ApiProfile {
+    Default,
+    AllFeatures,
+}
+
+impl ApiProfile {
+    const RELEASE: [Self; 2] = [Self::Default, Self::AllFeatures];
+
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::AllFeatures => "all-features",
+        }
+    }
+
+    const fn all_features(self) -> bool {
+        matches!(self, Self::AllFeatures)
+    }
+}
+
+fn combine_release_captures(default: ApiCapture, all_features: ApiCapture) -> ApiCapture {
+    let baseline = format!(
+        "== release-api profile: default ==\n{}\n== release-api profile: all-features ==\n{}\n",
+        default.baseline.trim_end_matches('\n'),
+        all_features.baseline.trim_end_matches('\n')
+    );
+    let mut rustdoc_json = default.rustdoc_json;
+    rustdoc_json.extend(all_features.rustdoc_json);
+    ApiCapture {
+        baseline,
+        rustdoc_json,
+    }
+}
+
+fn execute(root: &Path, plan: &BaselinePlan, check: bool) -> Result<BTreeMap<String, ApiCapture>> {
     let owner = plan.scope.owner();
     let _owner_lock = BaselineOwnerLock::acquire(root, owner, check)?;
     let dir = root.join(owner.directory());
     let before = scan_baselines(&dir)?;
     if plan.targets.is_empty() {
-        return finish_empty_or_orphan(plan, &dir, check, &before);
+        finish_empty_or_orphan(plan, &dir, check, &before)?;
+        return Ok(BTreeMap::new());
     }
 
     ensure_tool_available()?;
-    let target_dir = root.join(".cache/public-api-target");
-    let mut expected = BTreeMap::new();
+    let target_dir = root.join(".cache/public-api-target").join(owner.label());
+    let mut captures = BTreeMap::new();
     for package in &plan.targets {
-        expected.insert(
-            format!("{}.txt", package.as_str()),
-            capture_public_api(root, package.as_str(), &target_dir)?.into_bytes(),
-        );
+        let library_target = plan
+            .library_targets
+            .get(package)
+            .with_context(|| format!("{} 缺 library target identity", package.as_str()))?;
+        let capture = if owner == BaselineOwner::Release {
+            combine_release_captures(
+                capture_public_api(
+                    root,
+                    package.as_str(),
+                    library_target,
+                    &target_dir.join(ApiProfile::Default.label()),
+                    ApiProfile::Default,
+                )?,
+                capture_public_api(
+                    root,
+                    package.as_str(),
+                    library_target,
+                    &target_dir.join(ApiProfile::AllFeatures.label()),
+                    ApiProfile::AllFeatures,
+                )?,
+            )
+        } else {
+            capture_public_api(
+                root,
+                package.as_str(),
+                library_target,
+                &target_dir,
+                ApiProfile::Default,
+            )?
+        };
+        captures.insert(package.as_str().to_owned(), capture);
     }
+    let expected = captures
+        .iter()
+        .map(|(package, capture)| {
+            (
+                format!("{package}.txt"),
+                capture.baseline.as_bytes().to_vec(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     if scan_baselines(&dir)? != before {
         bail!("baseline capture 期间目录发生并发变化: {}", dir.display());
     }
     let differences = differences(plan, &dir, &before.files, &expected);
     if check {
-        return report_differences(owner, &differences);
+        report_differences(owner, &differences)?;
+        return Ok(captures);
     }
     apply_generation(&dir, plan, &before, &expected)?;
     eprintln!(
@@ -329,7 +1044,7 @@ fn execute(root: &Path, plan: &BaselinePlan, check: bool) -> Result<()> {
         owner.label(),
         expected.len()
     );
-    Ok(())
+    Ok(captures)
 }
 
 fn finish_empty_or_orphan(
@@ -888,14 +1603,109 @@ fn ensure_tool_available() -> Result<()> {
     )
 }
 
+fn ensure_semver_tool_available(allow_missing: bool) -> Result<bool> {
+    semver_tool_action(
+        crate::cmd::tool_available(crate::cmd::CargoSubcommand::SemverChecks),
+        allow_missing,
+    )
+}
+
+fn semver_tool_action(available: bool, allow_missing: bool) -> Result<bool> {
+    const VERSION: &str = env!("RSS_TOOL_VERSION_CARGO_SEMVER_CHECKS");
+    if available {
+        return Ok(true);
+    }
+    if allow_missing {
+        eprintln!(
+            "release-check: [跳过] SemVer comparison（缺 `cargo semver-checks`，--allow-missing-tools 宽限）。装：cargo install cargo-semver-checks@{VERSION} --locked"
+        );
+        return Ok(false);
+    }
+    bail!(
+        "未找到 `cargo semver-checks`。安装：\n  cargo install cargo-semver-checks@{VERSION} --locked"
+    )
+}
+
+fn run_semver_check(
+    root: &Path,
+    package: &str,
+    baseline_revision: &str,
+    profile: ApiProfile,
+) -> Result<()> {
+    let output = semver_check_cmd(root, package, baseline_revision, profile)
+        .output()
+        .with_context(|| format!("运行 cargo semver-checks -p {package} 失败"))?;
+    if !output.status.success() {
+        bail!(
+            "cargo semver-checks -p {package} profile={} 非零退出:\n{}",
+            profile.label(),
+            format_semver_failure(output.status.code(), &output.stdout, &output.stderr)
+        );
+    }
+    Ok(())
+}
+
+fn format_semver_failure(code: Option<i32>, stdout: &[u8], stderr: &[u8]) -> String {
+    let class = match code {
+        Some(100) => "compatibility-violation",
+        Some(101) => "tool-failure",
+        _ => "process-failure",
+    };
+    let code = code.map_or_else(|| "signal".to_owned(), |code| code.to_string());
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    format!(
+        "class={class} exit={code}\nstdout:\n{}\nstderr:\n{}",
+        if stdout.is_empty() {
+            "<empty>"
+        } else {
+            &stdout
+        },
+        if stderr.is_empty() {
+            "<empty>"
+        } else {
+            &stderr
+        }
+    )
+}
+
+fn semver_check_cmd(
+    root: &Path,
+    package: &str,
+    baseline_revision: &str,
+    profile: ApiProfile,
+) -> ProcessCommand {
+    let mut args = vec!["check-release", "--package", package];
+    if profile.all_features() {
+        args.push("--all-features");
+    }
+    args.extend(["--baseline-rev", baseline_revision]);
+    crate::cmd::cargo_cmd(
+        crate::cmd::CargoSubcommand::SemverChecks,
+        &args,
+        &[],
+        Some(root),
+    )
+}
+
 /// 构造 `cargo public-api -p <crate>` 子进程，经 [`crate::cmd::cargo_cmd`] 漏斗把 `RUSTUP_TOOLCHAIN`
 /// 显式重设为 `toolchain`（剥离后成该变量唯一来源，CMD-ENV-CLEAN-01）——等价 `cargo +<toolchain> public-api`，
 /// 让 cargo-public-api 在钉版 nightly 下生成可复现 rustdoc-json（`is_probably_stable()`==false ⇒ 透传当前
 /// toolchain，不再强制 rolling `nightly`）。INVARIANT: NIGHTLY-PIN-01 { level = "Medium", exec = "release-check", source = "public-api" }.
-fn public_api_cmd(root: &Path, krate: &str, toolchain: &str, target_dir: &Path) -> ProcessCommand {
+fn public_api_cmd(
+    root: &Path,
+    krate: &str,
+    toolchain: &str,
+    target_dir: &Path,
+    all_features: bool,
+) -> ProcessCommand {
+    let mut args = vec!["-p", krate, "--omit", "blanket-impls"];
+    if all_features {
+        args.push("--all-features");
+    }
     let mut cmd = crate::cmd::cargo_cmd(
         crate::cmd::CargoSubcommand::PublicApi,
-        &["-p", krate, "--omit", "blanket-impls"],
+        &args,
         &[("RUSTUP_TOOLCHAIN", toolchain)],
         Some(root),
     );
@@ -906,10 +1716,22 @@ fn public_api_cmd(root: &Path, krate: &str, toolchain: &str, target_dir: &Path) 
 }
 
 /// 运行 `cargo public-api -p <crate>`（钉版 nightly）捕获其封装面快照文本。
-fn capture_public_api(root: &Path, krate: &str, target_dir: &Path) -> Result<String> {
-    let out = public_api_cmd(root, krate, PINNED_NIGHTLY, target_dir)
-        .output()
-        .with_context(|| format!("运行 cargo public-api -p {krate} 失败"))?;
+fn capture_public_api(
+    root: &Path,
+    krate: &str,
+    library_target: &str,
+    target_dir: &Path,
+    profile: ApiProfile,
+) -> Result<ApiCapture> {
+    let out = public_api_cmd(
+        root,
+        krate,
+        PINNED_NIGHTLY,
+        target_dir,
+        profile.all_features(),
+    )
+    .output()
+    .with_context(|| format!("运行 cargo public-api -p {krate} 失败"))?;
     if !out.status.success() {
         let code = out
             .status
@@ -920,12 +1742,26 @@ fn capture_public_api(root: &Path, krate: &str, target_dir: &Path) -> Result<Str
             String::from_utf8_lossy(&out.stderr)
         );
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    let rustdoc_json = target_dir
+        .join("doc")
+        .join(format!("{}.json", normalized_crate_name(library_target)));
+    if !rustdoc_json.is_file() {
+        bail!(
+            "cargo public-api -p {krate} 未留下预期 rustdoc JSON: {}",
+            rustdoc_json.display()
+        );
+    }
+    Ok(ApiCapture {
+        baseline: String::from_utf8_lossy(&out.stdout).into_owned(),
+        rustdoc_json: vec![(profile, rustdoc_json)],
+    })
 }
 
 #[cfg(test)]
 fn public_api_target_dir() -> Result<std::path::PathBuf> {
-    Ok(crate::workspace_root()?.join(".cache/public-api-target"))
+    Ok(crate::workspace_root()?
+        .join(".cache/public-api-target")
+        .join(BaselineOwner::Internal.label()))
 }
 
 #[cfg(test)]
@@ -933,7 +1769,7 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use workspacefacts::testing::{
-        metadata_json, path_package, path_package_id, resolve_node, target,
+        metadata_json, path_dependency, path_package, path_package_id, resolve_node, target,
     };
 
     const HTTP_ROUTE_EVIDENCE_PRIVATE_FIELDS: &[&str] = &[
@@ -975,13 +1811,26 @@ mod tests {
                     .collect::<Result<_>>()?,
             ),
         };
+        let targets = names
+            .iter()
+            .map(|name| facts.package_key(name).map_err(Into::into))
+            .collect::<Result<Vec<_>>>()?;
+        let library_targets = targets
+            .iter()
+            .map(|package| {
+                let target = facts
+                    .targets_for(package)?
+                    .iter()
+                    .find(|target| target.kind() == TargetKind::Library)
+                    .context("test baseline target must be a library")?;
+                Ok((package.clone(), target.name().to_owned()))
+            })
+            .collect::<Result<_>>()?;
         Ok(BaselinePlan {
             scope,
             universe,
-            targets: names
-                .iter()
-                .map(|name| facts.package_key(name).map_err(Into::into))
-                .collect::<Result<_>>()?,
+            targets,
+            library_targets,
         })
     }
 
@@ -1024,6 +1873,66 @@ mod tests {
                     "api-stability": "experimental",
                     "profiles": []
                 }],
+                "profile-artifacts": []
+            }
+        });
+        Ok(WorkspaceFacts::from_metadata_json(
+            Path::new("/workspace"),
+            &serde_json::to_string(&metadata)?,
+        )?)
+    }
+
+    fn facts_with_selected_renamed_dependency() -> Result<WorkspaceFacts> {
+        let alpha_path = "/workspace/crates/alpha-release";
+        let beta_path = "/workspace/crates/beta-release";
+        let alpha_id = path_package_id(alpha_path);
+        let beta_id = path_package_id(beta_path);
+        let mut dependency = path_dependency("beta-release", beta_path);
+        dependency["rename"] = json!("beta_api");
+        let mut alpha = path_package(
+            "alpha-release",
+            alpha_path,
+            vec![target(
+                "facade_api",
+                "lib",
+                &format!("{alpha_path}/src/lib.rs"),
+                true,
+                &[],
+            )],
+            vec![dependency],
+            json!({}),
+        );
+        alpha["publish"] = Value::Null;
+        let mut beta = path_package(
+            "beta-release",
+            beta_path,
+            vec![target(
+                "beta_release",
+                "lib",
+                &format!("{beta_path}/src/lib.rs"),
+                true,
+                &[],
+            )],
+            vec![],
+            json!({}),
+        );
+        beta["publish"] = Value::Null;
+        let metadata = metadata_json(
+            "/workspace",
+            vec![alpha, beta],
+            vec![alpha_id.clone(), beta_id.clone()],
+            vec![
+                resolve_node(&alpha_id, &[("beta_api", &beta_id)]),
+                resolve_node(&beta_id, &[]),
+            ],
+        );
+        let mut metadata: Value = serde_json::from_str(&metadata)?;
+        metadata["metadata"] = json!({
+            "release-surface": {
+                "packages": [
+                    {"package":"alpha-release","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]},
+                    {"package":"beta-release","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]}
+                ],
                 "profile-artifacts": []
             }
         });
@@ -1875,7 +2784,13 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     #[test]
     fn public_api_cmd_sets_program_and_args() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let cmd = public_api_cmd(&root, "vocab", PINNED_NIGHTLY, &public_api_target_dir()?);
+        let cmd = public_api_cmd(
+            &root,
+            "vocab",
+            PINNED_NIGHTLY,
+            &public_api_target_dir()?,
+            false,
+        );
         assert_eq!(cmd.get_program(), std::ffi::OsStr::new("cargo"));
         let args: Vec<&std::ffi::OsStr> = cmd.get_args().collect();
         assert_eq!(
@@ -1897,7 +2812,13 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     #[test]
     fn public_api_cmd_injects_pinned_toolchain() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let cmd = public_api_cmd(&root, "ids", PINNED_NIGHTLY, &public_api_target_dir()?);
+        let cmd = public_api_cmd(
+            &root,
+            "ids",
+            PINNED_NIGHTLY,
+            &public_api_target_dir()?,
+            false,
+        );
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         assert!(
             envs.iter()
@@ -1914,7 +2835,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     fn public_api_cmd_isolates_rustdoc_json_target() -> anyhow::Result<()> {
         let expected = public_api_target_dir()?;
         let root = crate::workspace_root()?;
-        let cmd = public_api_cmd(&root, "consistency", PINNED_NIGHTLY, &expected);
+        let cmd = public_api_cmd(&root, "consistency", PINNED_NIGHTLY, &expected, false);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         assert!(
             envs.iter().any(|(k, v)| {
@@ -1930,7 +2851,13 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     #[test]
     fn public_api_cmd_strips_other_ambient_but_resets_toolchain() -> anyhow::Result<()> {
         let root = crate::workspace_root()?;
-        let cmd = public_api_cmd(&root, "vocab", PINNED_NIGHTLY, &public_api_target_dir()?);
+        let cmd = public_api_cmd(
+            &root,
+            "vocab",
+            PINNED_NIGHTLY,
+            &public_api_target_dir()?,
+            false,
+        );
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         for stripped in crate::cmd::STRIPPED_ENV
             .iter()
@@ -1964,7 +2891,7 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
     fn public_api_cmd_toolchain_arg_flows_through() -> anyhow::Result<()> {
         let fake = "nightly-1999-01-01";
         let root = crate::workspace_root()?;
-        let cmd = public_api_cmd(&root, "vocab", fake, &public_api_target_dir()?);
+        let cmd = public_api_cmd(&root, "vocab", fake, &public_api_target_dir()?, false);
         let envs: Vec<(&std::ffi::OsStr, Option<&std::ffi::OsStr>)> = cmd.get_envs().collect();
         assert!(
             envs.iter()
@@ -1972,6 +2899,38 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
                     && *v == Some(std::ffi::OsStr::new(fake))),
             "toolchain 入参应透传进 RUSTUP_TOOLCHAIN"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn release_capture_uses_all_features_without_changing_internal_capture() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let target = public_api_target_dir()?;
+        let release = public_api_cmd(&root, "vocab", PINNED_NIGHTLY, &target, true);
+        let internal = public_api_cmd(&root, "vocab", PINNED_NIGHTLY, &target, false);
+        assert!(release.get_args().any(|arg| arg == "--all-features"));
+        assert!(!internal.get_args().any(|arg| arg == "--all-features"));
+        Ok(())
+    }
+
+    #[test]
+    fn public_api_library_pin_matches_cli_tool_catalog() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let manifest = std::fs::read_to_string(root.join("Cargo.toml"))?.parse::<toml::Value>()?;
+        let dependency = manifest["workspace"]["dependencies"]["public-api"]["version"]
+            .as_str()
+            .context("workspace public-api dependency must carry an exact version")?;
+        let catalog = std::fs::read_to_string(root.join(".github/scripts/ci-tool-catalog.txt"))?;
+        let cli = catalog
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split('|');
+                (fields.next() == Some("cargo-public-api"))
+                    .then(|| fields.next())
+                    .flatten()
+            })
+            .context("cargo-public-api tool catalog row is missing")?;
+        assert_eq!(dependency, format!("={cli}"));
         Ok(())
     }
 
@@ -2070,6 +3029,366 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
             nightly_pins_agree(PINNED_NIGHTLY, &channel, &github_ci),
             "pinned nightly 三方漂移：PINNED_NIGHTLY={PINNED_NIGHTLY}, lints channel={channel}, github_ci={github_ci}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn release_selection_delta_checks_only_intersection_and_records_explicit_removal() {
+        let current = BTreeSet::from(["added".to_owned(), "kept".to_owned()]);
+        let base = BTreeSet::from(["kept".to_owned(), "removed".to_owned()]);
+        let delta = ReleaseSelectionDelta::derive(&current, &base);
+        assert_eq!(delta.semver_packages, vec!["kept"]);
+        assert_eq!(delta.first_release_packages, vec!["added"]);
+        assert_eq!(delta.removed_packages, vec!["removed"]);
+    }
+
+    #[test]
+    fn semver_command_is_per_package_all_features_and_revision_bound() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let command = semver_check_cmd(
+            &root,
+            "facade",
+            "0123456789abcdef0123456789abcdef01234567",
+            ApiProfile::AllFeatures,
+        );
+        let args = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            args,
+            [
+                "semver-checks",
+                "check-release",
+                "--package",
+                "facade",
+                "--all-features",
+                "--baseline-rev",
+                "0123456789abcdef0123456789abcdef01234567",
+            ]
+        );
+        assert!(!args.iter().any(|arg| arg == "--workspace"));
+        let default = semver_check_cmd(
+            &root,
+            "facade",
+            "0123456789abcdef0123456789abcdef01234567",
+            ApiProfile::Default,
+        );
+        assert!(!default.get_args().any(|arg| arg == "--all-features"));
+        Ok(())
+    }
+
+    #[test]
+    fn semver_runner_checks_both_profiles_for_every_selected_intersection_and_aggregates() {
+        let packages = vec!["alpha".to_owned(), "beta".to_owned(), "gamma".to_owned()];
+        let mut called = Vec::new();
+        let error = run_semver_packages(&packages, |package, profile| {
+            called.push((package.to_owned(), profile));
+            if matches!(package, "alpha" | "gamma") && profile == ApiProfile::Default {
+                bail!("synthetic breaking change")
+            }
+            Ok(())
+        })
+        .err()
+        .map(|error| error.to_string());
+        assert_eq!(called.len(), packages.len() * 2);
+        for package in &packages {
+            assert!(called.contains(&(package.clone(), ApiProfile::Default)));
+            assert!(called.contains(&(package.clone(), ApiProfile::AllFeatures)));
+        }
+        let error = error.as_deref().unwrap_or("");
+        assert!(error.contains("2 项 SemVer 校验失败"));
+        assert!(error.contains("package=alpha"));
+        assert!(error.contains("package=gamma"));
+        assert!(error.contains("profile=default"));
+    }
+
+    #[test]
+    fn release_capture_combines_default_and_all_features_without_unioning_them() {
+        let capture = combine_release_captures(
+            ApiCapture {
+                baseline: "pub fn facade::default_only()\n".to_owned(),
+                rustdoc_json: vec![(ApiProfile::Default, PathBuf::from("default.json"))],
+            },
+            ApiCapture {
+                baseline: "pub fn facade::feature_only()\n".to_owned(),
+                rustdoc_json: vec![(ApiProfile::AllFeatures, PathBuf::from("all.json"))],
+            },
+        );
+        assert!(capture.baseline.contains("profile: default"));
+        assert!(capture.baseline.contains("facade::default_only"));
+        assert!(capture.baseline.contains("profile: all-features"));
+        assert!(capture.baseline.contains("facade::feature_only"));
+        assert_eq!(capture.rustdoc_json.len(), 2);
+    }
+
+    #[test]
+    fn semver_failure_preserves_both_labeled_channels_and_exit_class() {
+        let message = format_semver_failure(Some(100), b"lint: function_missing", b"major bump");
+        assert!(message.contains("compatibility-violation"));
+        assert!(message.contains("stdout:\nlint: function_missing"));
+        assert!(message.contains("stderr:\nmajor bump"));
+        assert!(format_semver_failure(Some(101), b"", b"boom").contains("tool-failure"));
+    }
+
+    #[test]
+    fn semver_lazy_prerequisite_honors_explicit_missing_tool_policy() {
+        assert!(semver_tool_action(true, false).is_ok_and(|run| run));
+        assert!(semver_tool_action(false, true).is_ok_and(|run| !run));
+        assert!(semver_tool_action(false, false).is_err());
+    }
+
+    #[test]
+    fn release_stage_collector_continues_and_sorts_independent_failures() {
+        let mut called = Vec::new();
+        let mut failures = Vec::new();
+        for (stage, subject) in [(3, "leakage"), (0, "internal"), (2, "release")] {
+            collect_release_stage::<()>(&mut failures, stage, subject, || {
+                called.push(subject);
+                bail!("synthetic {subject} failure")
+            });
+        }
+        failures.sort();
+        assert_eq!(called, ["leakage", "internal", "release"]);
+        assert_eq!(
+            failures
+                .iter()
+                .map(|failure| failure.subject.as_str())
+                .collect::<Vec<_>>(),
+            ["internal", "release", "leakage"]
+        );
+    }
+
+    #[test]
+    fn structured_tokens_find_nested_reexport_error_and_conversion_type_paths() {
+        use public_api::tokens::Token::{Identifier, Symbol, Type};
+
+        let tokens = vec![
+            Identifier("core".into()),
+            Symbol("::".into()),
+            Type("Result".into()),
+            Symbol("<".into()),
+            Identifier("internal_crate".into()),
+            Symbol("::".into()),
+            Identifier("errors".into()),
+            Symbol("::".into()),
+            Type("SecretError".into()),
+            Symbol(",".into()),
+            Identifier("tracing".into()),
+            Symbol("::".into()),
+            Type("Span".into()),
+            Symbol(">".into()),
+        ];
+
+        assert_eq!(
+            referenced_type_paths(&tokens),
+            BTreeSet::from([
+                "core::Result".to_owned(),
+                "internal_crate::errors::SecretError".to_owned(),
+                "tracing::Span".to_owned(),
+            ])
+        );
+    }
+
+    #[test]
+    fn owner_policy_is_closed_and_anti_vacuous() {
+        let workspace = BTreeSet::from(["facade".to_owned(), "internal_crate".to_owned()]);
+        let selected = BTreeSet::from(["facade".to_owned()]);
+        assert_eq!(
+            forbidden_type_root(
+                workspacefacts::PublicApiOwner::PlatformPublic,
+                "facade",
+                "internal_crate::Secret",
+                &workspace,
+                &selected,
+                None,
+            ),
+            Some("internal_crate")
+        );
+        assert_eq!(
+            forbidden_type_root(
+                workspacefacts::PublicApiOwner::StandaloneComponent,
+                "facade",
+                "tracing::Span",
+                &workspace,
+                &selected,
+                None,
+            ),
+            None
+        );
+        assert_eq!(
+            forbidden_type_root(
+                workspacefacts::PublicApiOwner::StandaloneComponent,
+                "facade",
+                "opentelemetry_sdk::trace::Tracer",
+                &workspace,
+                &selected,
+                None,
+            ),
+            Some("opentelemetry_sdk")
+        );
+    }
+
+    #[test]
+    fn nonempty_release_surface_green_and_forbidden_workspace_type_red() -> anyhow::Result<()> {
+        use public_api::tokens::Token::{Identifier, Symbol, Type};
+
+        let facts = facts_with_nonempty_release_surface()?;
+        let (surface, findings) = crate::release_surface::validate(&facts, &[]);
+        assert!(
+            findings.is_empty(),
+            "synthetic Release Surface must be valid: {findings:?}"
+        );
+        let surface = surface.context("synthetic Release Surface missing")?;
+
+        let green = BTreeMap::from([(
+            "alpha-release".to_owned(),
+            vec![ApiItemProjection {
+                rendered: "pub fn alpha_release::clean() -> core::Result".to_owned(),
+                tokens: vec![
+                    Identifier("alpha_release".into()),
+                    Symbol("::".into()),
+                    Type("Public".into()),
+                    Identifier("core".into()),
+                    Symbol("::".into()),
+                    Type("Result".into()),
+                ],
+                source_paths: BTreeSet::new(),
+            }],
+        )]);
+        assert!(release_api_findings_from_items(&facts, &surface, &green)?.is_empty());
+
+        let red = BTreeMap::from([(
+            "alpha-release".to_owned(),
+            vec![ApiItemProjection {
+                rendered: "pub fn alpha_release::leak() -> vocab::Secret".to_owned(),
+                tokens: vec![
+                    Identifier("vocab".into()),
+                    Symbol("::".into()),
+                    Type("Secret".into()),
+                ],
+                source_paths: BTreeSet::new(),
+            }],
+        )]);
+        let findings = release_api_findings_from_items(&facts, &surface, &red)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == ReleaseApiRule::ForbiddenType
+                && finding
+                    .subject
+                    .contains("package=alpha-release/module=alpha_release::leak")
+                && finding.detail.contains("vocab::Secret")
+        }));
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == ReleaseApiRule::PublicDependency)
+        );
+
+        let reexport_red = BTreeMap::from([(
+            "alpha-release".to_owned(),
+            vec![ApiItemProjection {
+                rendered: "pub use alpha_release::Secret".to_owned(),
+                tokens: vec![
+                    Identifier("alpha_release".into()),
+                    Symbol("::".into()),
+                    Type("Secret".into()),
+                ],
+                source_paths: BTreeSet::from(["vocab::Secret".to_owned()]),
+            }],
+        )]);
+        let findings = release_api_findings_from_items(&facts, &surface, &reexport_red)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == ReleaseApiRule::ForbiddenType
+                && finding.detail.contains("vocab::Secret")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection() -> Result<()> {
+        let facts = facts_with_nonempty_release_surface()?;
+        let (surface, validation) = crate::release_surface::validate(&facts, &[]);
+        assert!(validation.is_empty(), "{validation:?}");
+        let surface = surface.context("synthetic Release Surface missing")?;
+        let fixture =
+            crate::workspace_root()?.join("xtask/tests/fixtures/release_api/reexport.json");
+        let captures = BTreeMap::from([(
+            "alpha-release".to_owned(),
+            ApiCapture {
+                baseline: String::new(),
+                rustdoc_json: vec![
+                    (ApiProfile::Default, fixture.clone()),
+                    (ApiProfile::AllFeatures, fixture),
+                ],
+            },
+        )]);
+
+        let findings = release_api_findings(&facts, &surface, &captures)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == ReleaseApiRule::ForbiddenType
+                && finding.detail.contains("vocab::Secret")
+        }));
+        for profile in ApiProfile::RELEASE {
+            assert!(findings.iter().any(|finding| {
+                finding
+                    .subject
+                    .contains(&format!("profile={}", profile.label()))
+            }));
+        }
+        assert!(findings.iter().any(|finding| {
+            finding.rule == ReleaseApiRule::PublicDependency
+                && finding.subject.contains("package=alpha-release")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn typed_rustdoc_source_ids_cover_reexports_and_nested_resolved_paths() {
+        let value = json!({
+            "inner": {
+                "use": {"source":"vocab::Secret","name":"Secret","id": 17,"is_glob":false},
+                "function": {"output":{"resolved_path":{"path":"Alias","id":23,"args":null}}}
+            }
+        });
+        let mut ids = BTreeSet::new();
+        collect_source_ids(&value, &mut ids);
+        assert_eq!(ids, BTreeSet::from([17, 23]));
+    }
+
+    #[test]
+    fn selected_direct_normal_dependency_is_allowed_through_cargo_rename() -> anyhow::Result<()> {
+        use public_api::tokens::Token::{Identifier, Symbol, Type};
+
+        let facts = facts_with_selected_renamed_dependency()?;
+        let (surface, validation) = crate::release_surface::validate(&facts, &[]);
+        assert!(validation.is_empty(), "{validation:?}");
+        let surface = surface.context("synthetic selected dependency surface missing")?;
+        let items = BTreeMap::from([
+            (
+                "alpha-release".to_owned(),
+                vec![ApiItemProjection {
+                    rendered: "pub fn facade_api::api() -> beta_api::Public".to_owned(),
+                    tokens: vec![
+                        Identifier("facade_api".into()),
+                        Symbol("::".into()),
+                        Type("OwnPublic".into()),
+                        Identifier("beta_api".into()),
+                        Symbol("::".into()),
+                        Type("Public".into()),
+                    ],
+                    source_paths: BTreeSet::new(),
+                }],
+            ),
+            (
+                "beta-release".to_owned(),
+                vec![ApiItemProjection {
+                    rendered: "pub struct beta_release::Public".to_owned(),
+                    tokens: vec![Type("Public".into())],
+                    source_paths: BTreeSet::new(),
+                }],
+            ),
+        ]);
+        assert!(release_api_findings_from_items(&facts, &surface, &items)?.is_empty());
         Ok(())
     }
 }

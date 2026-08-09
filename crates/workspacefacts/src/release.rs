@@ -129,7 +129,7 @@ impl ReleaseSelectionError {
     }
 }
 
-pub(crate) fn parse_release_selection(
+pub fn parse_release_selection(
     workspace_metadata: &Value,
 ) -> Result<Option<ReleaseSelection>, ReleaseSelectionError> {
     let Some(selection) = workspace_metadata.get("release-surface") else {

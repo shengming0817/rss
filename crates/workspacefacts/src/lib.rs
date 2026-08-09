@@ -18,6 +18,7 @@ pub use build::{
 pub use release::{
     ApiStability, OfficialProfile, PublicApiOwner, ReleasePackageSelection,
     ReleaseProfileArtifactSelection, ReleaseSelection, ReleaseSelectionError,
+    parse_release_selection,
 };
 
 use declarations::{

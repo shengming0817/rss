@@ -265,8 +265,8 @@ active PR 的 Medium enforcement；运行时激活状态、required-check 状态
 本地差异 preflight 统一使用 `make ci CI_BASE=<remote>/develop`：10 分钟有界、unknown 默认本地忽略并留痕，
 只跑受影响 package 与定向治理测试；显式全量 `cargo xtask ci full` 仅供人工诊断，不是 PR 完成条件。
 nightly/develop 重型门集包含 `verify` 全门（build/clippy 升 `--all-features --all-targets`）、覆盖率门
-（引擎-基础 ≥90%，无 ratchet 例外）、`public-api internal --check`（只检查 internal signature owner；
-Release API owner 的 drift / SemVer / leakage 接线由 #2048 独立完成）与供应链门。
+（引擎-基础 ≥90%，无 ratchet 例外）、唯一 `public-api` gate（internal/release exact-set、逐包 SemVer、
+公共依赖与结构化类型泄漏）与供应链门。
 **供应链门**必须同时覆盖依赖内容与时间维度：`cargo deny check`（advisories/licenses/bans/sources）
 守当前依赖集，advisory-scoped 定时刷新覆盖「未变依赖」后来披露 CVE。
 实际 schedule、forge 与 required-check 状态以

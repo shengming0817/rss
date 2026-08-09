@@ -296,6 +296,7 @@ pub(crate) enum CargoSubcommand {
     Audit,
     Dylint,
     PublicApi,
+    SemverChecks,
     LlvmCovReport,
 }
 
@@ -337,6 +338,7 @@ impl CargoSubcommand {
             Self::Audit => "audit",
             Self::Dylint => "dylint",
             Self::PublicApi => "public-api",
+            Self::SemverChecks => "semver-checks",
             Self::LlvmCovReport => "llvm-cov",
         }
     }

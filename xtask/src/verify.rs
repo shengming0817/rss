@@ -14,8 +14,8 @@
 //!
 //! **`cargo xtask ci full`（[`run_ci`]）= 本地完整 CI 聚合**（issue #1132）：
 //! verify 全门 + build/clippy 升 `--all-features --all-targets` + 覆盖率门（`cargo llvm-cov nextest` 替
-//! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ `public-api internal --check`（internal signature
-//! exact-set 漂移审查；Release owner 接线由 #2048 独立完成，见 `publicapi.rs`）。
+//! nextest，强制 basis/engine ≥90%，见 `coverage.rs`）+ 唯一 `public-api` gate（internal/release
+//! exact-set、逐包 SemVer、公共依赖与类型泄漏，见 `publicapi.rs`）。
 //! `verify` 仍是 **stable-only 本地快门**（不需 nightly / llvm-cov）；`ci full` 只供本地一次性跑全部
 //! CI 门。两者与固定 GitHub jobs 均经 [`plan_for`] 与 [`FixedCiJob`] 的 Hard 闭集派生，杜绝门集漂移。
 //!
@@ -26,9 +26,8 @@
 //! CVE。两者在各自 run 内 fail-closed；`ci-gate` 激活为 required check 或建立 forge bridge 前均不阻断 Azure 合入。
 //!
 //! **`cargo-udeps` 仍不入三者**（多余/未声明依赖，需 nightly `-Z`，与根 stable 1.96 冲突）——独立可选门。
-//! `cargo-semver-checks`（可发布 Release API 的轴 A 语义破坏检测）当前所有 crate `publish = false` ⇒
-//! `--workspace` 选 0 包、门空转，故本轮不入 ci；`public-api internal --check` 继续非空转审查 internal
-//! exported-symbol 漂移，但 baseline 不因此获得 SemVer。Release owner 由 #2048 接入。
+//! `cargo-semver-checks` 只对 base/current Release Surface 交集逐包执行，禁止 `--workspace` 空转；首次
+//! 选入只建立 release baseline。internal exported-symbol baseline 始终独立执行且不因此获得 SemVer。
 //!
 //! INVARIANT: VERIFY-AGGREGATE-01 { level = "Medium", exec = "check", source = "code" }—— 本地 verify/ci-full 默认 keep-going、显式 fail-fast；远端 typed job 保持 fail-fast；任一门步失败均非零退出。
 //! INVARIANT: VERIFY-TOOL-GATE-01 { level = "Medium", exec = "check", source = "code" }—— 缺外部工具默认 fail-closed；豁免仅经显式 `--allow-missing-tools`。
@@ -792,7 +791,7 @@ fn step_secure_production_trybuild() -> Step {
 
 // ci 专用：build/clippy 升 `--all-features --all-targets`（编译态全覆盖，含 integration-gated 代码——
 // 仅编译不运行 ⇒ 无需 DB/broker）；覆盖率门替 nextest（兼跑 workspace 测试 + basis/engine ≥90%）；
-// public-api internal --check（internal signature exact-set 漂移审查；release owner 由 #2048 接线）。
+// 唯一 public-api gate 聚合 internal/release exact-set、SemVer、公共依赖与类型泄漏。
 // ci 的 cargo 门带 `--locked`：CI 确定性构建——Cargo.lock 缺失/漂移即 fail（不静默改锁），与
 // `cargo run --locked -p xtask -- ci` 入口共同锁全链（入口锁 xtask 子树，build --workspace --locked 锁
 // 全 workspace 依赖解析）。verify（本地快门）**不**带 --locked，留本地迭代余地（review #206 codex F2）。
@@ -1176,6 +1175,12 @@ fn run_one(
             let subcommand = match step.id.spec().tool() {
                 ToolRequirement::CargoTool { tool, .. } => tool,
                 ToolRequirement::CargoBuiltin(subcommand) => subcommand,
+                ToolRequirement::PublicApiTools { .. } => {
+                    bail!(
+                        "{}: public-api tools 只允许绑定 internal executor",
+                        step.label()
+                    )
+                }
                 _ => bail!("{}: cargo step 缺 typed subcommand", step.label()),
             };
             let args = step
@@ -1213,6 +1218,14 @@ fn run_one(
             crate::nextest::is_available,
             execute,
         ),
+        ToolRequirement::PublicApiTools { install_hint } => run_public_api_tools_gated(
+            lane,
+            opts.allow_missing_tools,
+            step.label(),
+            tool_available(crate::cmd::CargoSubcommand::PublicApi),
+            install_hint,
+            execute,
+        ),
         ToolRequirement::CargoTool { tool, install_hint } => run_tool_gated(
             lane,
             tool_available(tool),
@@ -1223,6 +1236,31 @@ fn run_one(
             execute,
         ),
     }
+}
+
+fn run_public_api_tools_gated(
+    lane: &str,
+    allow_missing: bool,
+    label: &str,
+    public_api_available: bool,
+    install_hint: &str,
+    on_run: impl FnOnce() -> Result<()>,
+) -> Result<()> {
+    if public_api_available {
+        // SemVer is a lazy prerequisite: an empty or first-release-only surface has no
+        // comparison target and must not require the tool. The in-process proof probes it
+        // fail-closed immediately before the first actual comparison.
+        return on_run();
+    }
+    run_tool_gated(
+        lane,
+        false,
+        allow_missing,
+        "public-api",
+        install_hint,
+        label,
+        on_run,
+    )
 }
 
 /// LocalOnly runtime evidence is a required full-verify claim, so the generic
@@ -1423,12 +1461,8 @@ fn run_internal(
             };
             crate::coverage::run(scope, opts.execution_policy)
         }
-        // #2048 接管 release drift / SemVer / leakage 接线前，release-check 明确只执行 internal owner。
         InternalCheck::PublicApiCheck => {
-            crate::publicapi::run(crate::publicapi::Command::Internal {
-                check: true,
-                layer: None,
-            })
+            crate::publicapi::run_release_check(&opts.contract_against, opts.allow_missing_tools)
         }
     }
 }
@@ -4586,6 +4620,45 @@ mod tests {
         }
     }
 
+    #[test]
+    fn public_api_gate_requires_capture_tool_but_defers_semver_tool_until_comparison() {
+        let executed = std::cell::Cell::new(false);
+        assert!(
+            run_public_api_tools_gated(
+                "release-check",
+                false,
+                "public-api",
+                false,
+                "install",
+                || {
+                    executed.set(true);
+                    Ok(())
+                }
+            )
+            .is_err()
+        );
+        assert!(!executed.get());
+
+        assert!(
+            run_public_api_tools_gated(
+                "release-check",
+                false,
+                "public-api",
+                true,
+                "install",
+                || {
+                    executed.set(true);
+                    Ok(())
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            executed.get(),
+            "empty/first-release proof must not require SemVer tooling"
+        );
+    }
+
     fn missing_coverage_tool_step() -> Step {
         Step {
             id: GateId::Coverage,
@@ -4615,8 +4688,8 @@ mod tests {
         Ok(())
     }
 
-    /// ci 用覆盖率门**替** nextest（同跑兼测试），并尾追 internal signature exact-set；
-    /// Release owner 的 drift / SemVer / leakage 接线由 #2048 完成。二者皆 ToolGatedInternal。
+    /// ci 用覆盖率门**替** nextest（同跑兼测试），并由唯一 public-api gate 聚合 internal/release
+    /// exact-set、SemVer、公共依赖与 forbidden-type leakage。二者皆 ToolGatedInternal。
     #[test]
     fn ci_replaces_nextest_with_coverage_and_adds_public_api() -> anyhow::Result<()> {
         let plan = plan_for(RELEASE_CHECK);
@@ -4646,11 +4719,15 @@ mod tests {
         ));
         assert!(matches!(
             pa.id.spec().tool(),
-            ToolRequirement::CargoTool {
-                tool: crate::cmd::CargoSubcommand::PublicApi,
-                ..
-            }
+            ToolRequirement::PublicApiTools { .. }
         ));
+        assert_eq!(
+            plan.iter()
+                .filter(|step| step.id == GateId::PublicApi)
+                .count(),
+            1,
+            "release compatibility proofs must retain one canonical gate"
+        );
         Ok(())
     }
 
@@ -5886,7 +5963,7 @@ mod tests {
         // reason: 非 ToolGatedInternal 变体回退空串（必不含 pin），令下面 assert 以失败信息暴露形态变化，
         // 而非 panic（生产代码禁 panic，clippy Medium）。
         let install_hint = match step_public_api().id.spec().tool() {
-            ToolRequirement::CargoTool { install_hint, .. } => install_hint,
+            ToolRequirement::PublicApiTools { install_hint } => install_hint,
             _ => "",
         };
         assert!(

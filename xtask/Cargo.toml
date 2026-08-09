@@ -29,6 +29,8 @@ syn = { workspace = true, features = ["visit"] }   # visit: CMD-FUNNEL-01 守卫
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 rustix = { workspace = true }
+public-api = { workspace = true }
+rustdoc-types = { workspace = true }
 semver = { workspace = true }
 time = { workspace = true }
 sha2 = { workspace = true }
