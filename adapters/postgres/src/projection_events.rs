@@ -111,10 +111,6 @@ impl ProjectionWriteRegistry {
         Self::default()
     }
 
-    pub(crate) fn bindings(&self) -> &[ProjectionInputBinding] {
-        &self.bindings
-    }
-
     pub(crate) fn is_bound(
         &self,
         source_domain: &str,
@@ -968,15 +964,35 @@ mod smoke {
         selected.clear();
 
         assert!(registry.is_bound("owner", "owner.contract-a", "v1", HASH, "owner.fact-a"));
-        assert!(
-            !registry.is_bound(
+        for candidate in [
+            (
                 "foreign-owner",
                 "owner.contract-a",
                 "v1",
                 HASH,
-                "owner.fact-a"
+                "owner.fact-a",
             ),
-            "a contract tuple from another source domain must not be captured"
-        );
+            ("owner", "owner.contract-b", "v1", HASH, "owner.fact-a"),
+            ("owner", "owner.contract-a", "v2", HASH, "owner.fact-a"),
+            (
+                "owner",
+                "owner.contract-a",
+                "v1",
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                "owner.fact-a",
+            ),
+            ("owner", "owner.contract-a", "v1", HASH, "owner.fact-b"),
+        ] {
+            assert!(
+                !registry.is_bound(
+                    candidate.0,
+                    candidate.1,
+                    candidate.2,
+                    candidate.3,
+                    candidate.4
+                ),
+                "every canonical binding coordinate must match"
+            );
+        }
     }
 }

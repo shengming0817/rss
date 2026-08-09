@@ -311,7 +311,6 @@ eventing_read_map_runner!(ServingReadLane, saga_read_map, SagaConcern);
 eventing_read_map_runner!(FaultMatrixReadLane, saga_fault_read_map, SagaConcern);
 #[cfg(feature = "fault-matrix-test-support")]
 eventing_read_map_runner!(FaultMatrixReadLane, l2_dr_fault_read_map, OutboxConcern);
-eventing_read_runner!(ServingReadLane, dlq_read, DlqConcern);
 eventing_read_runner!(MaintenanceReadLane, dlq_read, DlqConcern);
 eventing_read_runner!(ServingReadLane, inbox_read, InboxConcern);
 
@@ -348,36 +347,24 @@ pub(crate) struct CommandAliasKey<'a> {
 /// the one operator replay operation.
 #[derive(Clone)]
 pub(crate) struct DlqReplayProjection {
-    bindings: std::sync::Arc<[vocab::ProjectionInputBinding]>,
+    registry: ProjectionWriteRegistry,
 }
 
 impl DlqReplayProjection {
     pub(crate) fn from_capture(capture: eventexec::ProjectionCaptureView<'_>) -> Self {
         Self {
-            bindings: std::sync::Arc::from(capture.bindings()),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn from_selected(bindings: &[vocab::ProjectionInputBinding]) -> Self {
-        Self {
-            bindings: std::sync::Arc::from(bindings),
-        }
-    }
-
-    pub(crate) fn from_registry(registry: &ProjectionWriteRegistry) -> Self {
-        Self {
-            bindings: std::sync::Arc::from(registry.bindings()),
+            registry: ProjectionWriteRegistry::from_capture(capture),
         }
     }
 
     fn is_bound(&self, replay: &ReplayedOutboxAppend) -> bool {
-        self.bindings.iter().any(|binding| {
-            binding.contract_id() == replay.contract_id
-                && binding.version() == replay.contract_version
-                && binding.schema_hash() == replay.schema_hash
-                && binding.topic() == replay.topic
-        })
+        self.registry.is_bound(
+            &replay.domain,
+            &replay.contract_id,
+            &replay.contract_version,
+            &replay.schema_hash,
+            &replay.topic,
+        )
     }
 }
 
@@ -1457,25 +1444,6 @@ pub(crate) struct DlqListFilter<'a> {
 macro_rules! impl_dlq_write {
     ($lane:ty) => {
         impl EventingTx<'_, $lane, DlqConcern> {
-            pub(crate) async fn dlq_load_replay_dead_letter(
-                &mut self,
-                dead_letter_id: &str,
-            ) -> Result<Option<ReplayDeadLetterRow>, sqlx::Error> {
-                sqlx::query_as(
-                    r#"
-                    SELECT source_kind, message_id, producer_domain, consumer_domain,
-                           contract_id, replay_capsule, replay_capsule_key_ref, topic,
-                           consumer_group
-                    FROM dead_letter
-                    WHERE id = $1::uuid AND tenant_id = $2::uuid
-                    "#,
-                )
-                .bind(dead_letter_id)
-                .bind(self.tenant.to_string())
-                .fetch_optional(&mut *self.conn)
-                .await
-            }
-
             pub(crate) async fn dlq_redrive_outbox(
                 &mut self,
                 event_id: &str,
@@ -1509,8 +1477,28 @@ macro_rules! impl_dlq_write {
     };
 }
 
-impl_dlq_write!(ServingWriteLane);
 impl_dlq_write!(MaintenanceWriteLane);
+
+impl EventingTx<'_, MaintenanceWriteLane, DlqConcern> {
+    pub(crate) async fn dlq_load_replay_dead_letter(
+        &mut self,
+        dead_letter_id: &str,
+    ) -> Result<Option<ReplayDeadLetterRow>, sqlx::Error> {
+        sqlx::query_as(
+            r#"
+            SELECT source_kind, message_id, producer_domain, consumer_domain,
+                   contract_id, replay_capsule, replay_capsule_key_ref, topic,
+                   consumer_group
+            FROM dead_letter
+            WHERE id = $1::uuid AND tenant_id = $2::uuid
+            "#,
+        )
+        .bind(dead_letter_id)
+        .bind(self.tenant.to_string())
+        .fetch_optional(&mut *self.conn)
+        .await
+    }
+}
 
 macro_rules! impl_dlq_read {
     ($lane:ty) => {
@@ -1659,7 +1647,6 @@ macro_rules! impl_dlq_read {
     };
 }
 
-impl_dlq_read!(ServingReadLane);
 impl_dlq_read!(MaintenanceReadLane);
 
 pub(crate) struct RelayDeadLetterInsert<'a> {
@@ -1952,6 +1939,11 @@ impl<C: GeneratedOutboxConcern> EventingTx<'_, ServingWriteLane, C> {
     }
 }
 
+pub(crate) enum ReplayedOutboxWriteError {
+    Append(OutboxAppendError),
+    ProjectionMirror(sqlx::Error),
+}
+
 macro_rules! impl_replayed_outbox_write {
     ($lane:ty, $append:ident, $visibility:vis) => {
         impl EventingTx<'_, $lane, DlqConcern> {
@@ -2026,19 +2018,29 @@ macro_rules! impl_replayed_outbox_write {
                 &mut self,
                 replay: ReplayedOutboxAppend,
                 projection: &DlqReplayProjection,
-            ) -> Result<OutboxAppendOutcome, OutboxAppendError> {
+            ) -> Result<OutboxAppendOutcome, ReplayedOutboxWriteError> {
                 if self.tenant != replay.tenant {
-                    return Err(OutboxAppendError::InvalidIdentity);
+                    return Err(ReplayedOutboxWriteError::Append(
+                        OutboxAppendError::InvalidIdentity,
+                    ));
                 }
                 let metadata = SensitiveJson::new(
                     serde_json::from_slice::<serde_json::Value>(replay.metadata_json.expose())
-                        .map_err(|_| OutboxAppendError::InvalidIdentity)?,
+                        .map_err(|_| {
+                            ReplayedOutboxWriteError::Append(
+                                OutboxAppendError::InvalidIdentity,
+                            )
+                        })?,
                 );
                 if !metadata.expose().is_object() {
-                    return Err(OutboxAppendError::InvalidIdentity);
+                    return Err(ReplayedOutboxWriteError::Append(
+                        OutboxAppendError::InvalidIdentity,
+                    ));
                 }
                 let metadata_json = std::str::from_utf8(replay.metadata_json.expose())
-                    .map_err(|_| OutboxAppendError::InvalidIdentity)?;
+                    .map_err(|_| {
+                        ReplayedOutboxWriteError::Append(OutboxAppendError::InvalidIdentity)
+                    })?;
                 let tenant_id = self.tenant.to_string();
                 let fingerprint = OutboxFactIdentity::new(
                     &replay.event_id,
@@ -2054,26 +2056,32 @@ macro_rules! impl_replayed_outbox_write {
                     metadata.expose(),
                 )
                 .fingerprint();
-                let inserted = self.outbox_insert_replayed(&replay, metadata_json).await?;
+                let inserted = self
+                    .outbox_insert_replayed(&replay, metadata_json)
+                    .await
+                    .map_err(OutboxAppendError::from)
+                    .map_err(ReplayedOutboxWriteError::Append)?;
                 let outcome = if let Some(stored) = inserted.as_deref() {
                     classify_append_fingerprint(
                         fingerprint,
                         AppendFingerprintObservation::Inserted(stored),
-                    )?
+                    )
+                    .map_err(ReplayedOutboxWriteError::Append)?
                 } else {
                     let stored = self
                         .outbox_load_replayed_fingerprint(&replay.event_id)
-                        .await?;
+                        .await
+                        .map_err(OutboxAppendError::from)
+                        .map_err(ReplayedOutboxWriteError::Append)?;
                     classify_append_fingerprint(
                         fingerprint,
                         AppendFingerprintObservation::Existing(stored.as_deref()),
-                    )?
+                    )
+                    .map_err(ReplayedOutboxWriteError::Append)?
                 };
                 if outcome == OutboxAppendOutcome::Inserted
                     && projection.is_bound(&replay)
                 {
-                    let metadata_json = std::str::from_utf8(replay.metadata_json.expose())
-                        .map_err(|error| sqlx::Error::Decode(Box::new(error)))?;
                     self.replayed_projection_append(ProjectionAppend {
                         event_id: &replay.event_id,
                         domain: &replay.domain,
@@ -2088,7 +2096,8 @@ macro_rules! impl_replayed_outbox_write {
                         partition_key: None,
                         causation_id: replay.causation_id.as_deref(),
                     })
-                    .await?;
+                    .await
+                    .map_err(ReplayedOutboxWriteError::ProjectionMirror)?;
                 }
                 Ok(outcome)
             }
@@ -2096,11 +2105,6 @@ macro_rules! impl_replayed_outbox_write {
     };
 }
 
-impl_replayed_outbox_write!(
-    ServingWriteLane,
-    outbox_append_replayed_with_projection,
-    pub(crate)
-);
 impl_replayed_outbox_write!(MaintenanceWriteLane, dlq_append_replayed, pub(crate));
 
 impl<C: GeneratedOutboxConcern> EventingTx<'_, ServingWriteLane, C> {

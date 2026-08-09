@@ -1976,24 +1976,6 @@ impl PgMaintenanceDeps {
         )
     }
 
-    #[cfg(all(
-        test,
-        feature = "domain-settings",
-        feature = "domain-identity",
-        feature = "domain-audit"
-    ))]
-    fn dlq_store_with_projection_bindings_for_test(
-        &self,
-        payload_protector: DlxPayloadProtector,
-        projection_inputs: &[vocab::ProjectionInputBinding],
-    ) -> PgDlqStore {
-        PgDlqStore::with_replay_projection_maintenance(
-            &self.store,
-            payload_protector,
-            DlqReplayProjection::from_selected(projection_inputs),
-        )
-    }
-
     /// 不允许 consumer payload replay 的 inspection/outbox-redrive store。
     #[must_use]
     pub fn dlq_store_without_payload_replay(&self) -> PgDlqStore {
@@ -3153,6 +3135,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "test-support")]
     #[tokio::test]
     async fn maintenance_capabilities_construct_without_general_infra_escape()
     -> Result<(), Box<dyn std::error::Error>> {
@@ -3186,10 +3169,8 @@ mod tests {
             "audit.session-projection",
         )?;
         let _ = (receipt, selector);
-        let _ = deps.dlq_store_with_projection_bindings_for_test(
-            payload_protector(),
-            generated::event::PROJECTION_INPUTS,
-        );
+        let plan = eventexec::WorkflowRuntimePlan::generated_projection_capture_fixture();
+        let _ = deps.dlq_store(payload_protector(), plan.projection_capture());
         let _ = deps.dlq_store_without_payload_replay();
         Ok(())
     }

@@ -24,7 +24,7 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
 | `outbox_relay_tick_duration_seconds` | Histogram | `phase` | relay tick | phase=`claim`(原子租约相)/`publish`(同批即时并发中继的 wall time + adapter 内 settle 相) |
 | `outbox_same_id_window_expired_total` | Counter | `domain`,`contract_id`,`tenant_id`,`phase` | broker publish 前 DB preflight | phase=`automatic`/`redrive` 的绝对 same-ID deadline 到期；不调用 broker，行 settle 到 DLX |
 | `outbox_relay_settlement_failure_total` | Counter | `domain`,`contract_id`,`tenant_id`,`operation`,`reason` | postgres settlement funnel | operation=`published|retry|dlx|same_id_expiry_dlx`；reason=`timeout|expired|lost_lease|storage|payload_protection|invariant` |
-| `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` | operator mutation 结果；kind=`dead_letter_replay`/`outbox_dlx_redrive`；一次性 CLI 发射，长期告警看 audit/log |
+| `dlq_redrive_total` | Counter | `tenant_id`,`kind`,`outcome` | `rss dlq replay-dead-letter` / `redrive-outbox` | operator mutation 结果；dead-letter replay 存储失败 outcome 直接为闭值阶段，不双报 `store`；一次性 CLI 发射，长期告警看 audit/log |
 | `consumer_dlx_skip_total` | Counter | `domain`,`reason` | consumer fail-closed preflight path | 跳过 app DLX 写入的诊断计数；reason 为 malformed id / tenant authority / envelope header / inbox receipt context 闭集 |
 | `consumer_dlx_write_total` | Counter | `domain`,`outcome` | consumer app DLX store wrapper | app DLX 写入结果；outcome=`ok`/`error`，error 同时把 consumer health 标为 degraded |
 | `consumer_subscribe_retry_total` | Counter | `domain`,`outcome` | ackable subscribe 监督循环 | subscribe 失败或 delivery stream 非取消断流后的退避重入；outcome=`subscribe_error`/`stream_end`；**禁止** topic / error text 入 label |
@@ -75,7 +75,9 @@ metric 集，并给 relay/sweeper 驱动参数加构造期 fail-fast 护栏。
   仍看 `outbox_publish_total` / `outbox_dlx_total`。
 - `dlq_redrive_total.kind/outcome`：闭合于 `eventexec::DlqMutationKind::as_label()`、mutation outcome 与
   `DlqError::as_label()`；常见 outcome 为 `inserted` / `already_exists` / `redriven` / `not_found` / `expired`，依赖或数据错误为
-  `invalid_payload` / `invalid_schema_headers` / `payload_key_unavailable` / `payload_key_forbidden` / `store`。禁止把
+  `invalid_payload` / `invalid_schema_headers` / `payload_key_unavailable` / `payload_key_forbidden`；replay 存储失败为
+  `fetch_dead_letter` / `encode_metadata` / `append_outbox` / `projection_mirror` / `transaction`。通用 `store` 只用于
+  非 replay DLQ 操作。禁止把
   event id、dead_letter id、partition key 或错误文本放进 label。
 - `consumer_dlx_write_total.outcome`：闭合于 `eventexec::consumer_worker` 的 DLX wrapper，值 `ok`/`error`；
   禁止携带 handler error、tenant、message id 或 payload 派生值。

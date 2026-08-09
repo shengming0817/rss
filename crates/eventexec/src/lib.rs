@@ -64,10 +64,10 @@ pub use dlq::{
     AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntryKind, DlqEntrySummary, DlqError,
     DlqInspectRequest, DlqInspectTarget, DlqListQuery, DlqListResult, DlqMutationKind,
     DlqMutationMetricOutcome, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome,
-    DlqReplayRequest, DlqStore, OperatorDlqCapability, OutboxExpiredResolutionKind,
-    OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket,
-    VerifiedOperatorSubject, record_dlq_mutation_error, record_dlq_outbox_redrive,
-    record_dlq_replay, record_outbox_expired_resolution,
+    DlqReplayRequest, DlqReplayStoreStage, DlqStore, OperatorDlqCapability,
+    OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
+    OutboxResolutionChangeTicket, VerifiedOperatorSubject, record_dlq_mutation_error,
+    record_dlq_outbox_redrive, record_dlq_replay, record_outbox_expired_resolution,
 };
 
 pub mod dr_recovery;

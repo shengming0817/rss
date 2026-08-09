@@ -347,6 +347,12 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 - 审计 kind 与 action 是固定闭值；v1 不提供 destructive `skip` 或旧命令别名。
 - replay 必须传 operator capability、typed id 与调用方提供的新幂等键；不得删除原 `dead_letter` 行、
   不得重置 inbox done、不得直接 broker replay。replay 从同一 capsule 恢复 schema header，缺失或非法 fail-closed。
+- replay 只能由 maintenance provider 经 sealed `ProjectionCaptureView` 构造；serving provider 不具备 replay
+  capability，也不存在 raw binding/test-only 注入入口。是否镜像 projection 必须唯一委托同一
+  `ProjectionWriteRegistry`，按 source domain、contract、version、schema hash、topic 完整匹配，不得复制判定。
+- replay 存储失败必须闭合为 `fetch_dead_letter|encode_metadata|append_outbox|projection_mirror|transaction`；
+  日志只允许固定 stage、SQLSTATE、constraint 与 key-provider kind，不得记录 payload、metadata、capsule、
+  key ref 或原始错误 source chain。
 - saga 与 projection 的 `dead_letter` 只作审计与诊断，不支持 replay 成 outbox。
 - serving role 必须被显式撤销 redrive / resolve 函数的 EXECUTE 权限。
 - 不存在 plaintext fallback decoder；解密错误必须区分坏 payload 与依赖/配置错误。
@@ -413,7 +419,8 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 - **串行有序门禁**：harness 构造必填 DLQ store 与一枚串行有序 witness，非串行投递路径拿不到 witness，
   编译期即挂不上 projection。witness 只能由声明串行有序的 source 铸造，铸造资格由 dylint allowlist 守。
 - outbox 派生投影的 durable journal 只由 outbox writer funnel 写入，且仅当 outbox 行新插入并命中 generated
-  projection registry 时才在同一事务内镜像。registry 不提供 raw string topic 注册 API。
+  projection registry 时才在同一事务内镜像。DLQ replay 复用该 registry 的完整五元组判定，不维护第二份
+  binding 比较；registry 不提供 raw string topic 注册 API。
 - journal 读写只经固定 `SECURITY DEFINER` 函数；serving role 只有 append/probe EXECUTE，独立
   `rss_projection_reader` 只有 scoped read EXECUTE，两者都不持 raw table 权限。source scope 只能由 sealed
   assembly target 绑定 tenant 后铸造，并携带 projection id、definition version/schema digest、generated input

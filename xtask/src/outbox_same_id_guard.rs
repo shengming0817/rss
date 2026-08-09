@@ -152,9 +152,11 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "adapters/postgres/src/dlq.rs",
-        purpose: "DLQ operation routes expired resolution through both exact tenant lanes",
+        purpose: "DLQ operation routes expired resolution through the maintenance tenant lane",
         anchors: &[
+            "write: TenantDb<MaintenanceWriteLane>",
             "async fn resolve_expired_outbox(",
+            ".dlq_write(",
             "dlq_tenant_scope(tenant)",
             "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {",
             "OutboxExpiredResolutionOutcome::Resolved",
@@ -170,7 +172,6 @@ const CARRIERS: &[Carrier] = &[
             "input: DlqExpiredResolution<'_>",
             "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)",
             ".bind(self.tenant.to_string())",
-            "impl_dlq_write!(ServingWriteLane);",
             "impl_dlq_write!(MaintenanceWriteLane);",
         ],
     },
@@ -415,28 +416,28 @@ fn scan_expired_resolution_topology(
         let body = rust_item_body(source, signature);
         let call = "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {";
         let sequence = [
-            "DlqLane::Serving { write, .. }",
-            call,
-            "DlqLane::Maintenance { write, .. }",
+            ".write",
+            ".dlq_write(",
+            "dlq_tenant_scope(tenant)",
             call,
             "Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved)",
             "Ok(-2) => Ok(OutboxExpiredResolutionOutcome::EvidenceRejected)",
         ];
         let scoped = body.is_some_and(|body| {
-            body.matches(call).count() == 2
-                && body.matches("dlq_tenant_scope(tenant)").count() == 2
-                && body.matches("DlqExpiredResolution {").count() == 2
+            body.matches(call).count() == 1
+                && body.matches("dlq_tenant_scope(tenant)").count() == 1
+                && body.matches("DlqExpiredResolution {").count() == 1
                 && contains_in_order(body, &sequence)
         });
         if source.contains("rss_outbox_resolve_expired(")
             || source.matches(signature).count() != 1
-            || source.matches(call).count() != 2
+            || source.matches(call).count() != 1
             || !scoped
         {
             findings.push(finding(
                 Rule::MissingSemanticAnchor,
                 DLQ_PATH,
-                "expired-resolution必须由 DLQ operation 经 serving/maintenance tenant lane 调用 closed façade，repo不得拥有 SQL",
+                "expired-resolution必须由 DLQ operation 仅经 maintenance tenant lane 调用 closed façade，repo不得拥有 SQL",
             ));
         }
     }
@@ -510,7 +511,6 @@ macro_rules! impl_dlq_write {
         }
     };
 }
-impl_dlq_write!(ServingWriteLane);
 impl_dlq_write!(MaintenanceWriteLane);
 "#
             .to_owned(),
@@ -523,24 +523,17 @@ async fn resolve_expired_outbox(
     request: OutboxExpiredResolutionRequest,
 ) -> Result<OutboxExpiredResolutionOutcome, DlqError> {
     let tenant = request.tenant();
-    let result = match &self.lane {
-        DlqLane::Serving { write, .. } => write.write(
+    let result = self
+        .write
+        .dlq_write(
             dlq_tenant_scope(tenant),
             move |conn| Box::pin(async move {
                 conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
                     event_id: &event_id,
                 }).await
             }),
-        ).await,
-        DlqLane::Maintenance { write, .. } => write.write(
-            dlq_tenant_scope(tenant),
-            move |conn| Box::pin(async move {
-                conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
-                    event_id: &event_id,
-                }).await
-            }),
-        ).await,
-    };
+        )
+        .await;
     match result {
         Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved),
         Ok(-2) => Ok(OutboxExpiredResolutionOutcome::EvidenceRejected),
@@ -550,6 +543,13 @@ async fn resolve_expired_outbox(
 "#
             .to_owned(),
         );
+        sources
+            .get_mut(DLQ_PATH)
+            .expect("DLQ fixture carrier")
+            .insert_str(
+                0,
+                "struct PgDlqStore { write: TenantDb<MaintenanceWriteLane> }\n",
+            );
         sources
     }
 

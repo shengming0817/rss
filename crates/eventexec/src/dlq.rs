@@ -752,6 +752,37 @@ pub struct DlqMutationMetricOutcome {
     label: &'static str,
 }
 
+/// Closed failure stage for PostgreSQL-backed dead-letter replay storage.
+///
+/// The stage is intentionally data-free: it is safe for logs and metric labels and prevents
+/// adapter errors from leaking payload, metadata, capsule, key-reference, or database details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DlqReplayStoreStage {
+    FetchDeadLetter,
+    EncodeMetadata,
+    AppendOutbox,
+    ProjectionMirror,
+    Transaction,
+}
+
+impl DlqReplayStoreStage {
+    pub const fn as_label(self) -> &'static str {
+        match self {
+            Self::FetchDeadLetter => "fetch_dead_letter",
+            Self::EncodeMetadata => "encode_metadata",
+            Self::AppendOutbox => "append_outbox",
+            Self::ProjectionMirror => "projection_mirror",
+            Self::Transaction => "transaction",
+        }
+    }
+}
+
+impl std::fmt::Display for DlqReplayStoreStage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_label())
+    }
+}
+
 impl DlqMutationMetricOutcome {
     pub fn replay(outcome: DlqReplayOutcome) -> Self {
         Self {
@@ -802,6 +833,8 @@ pub enum DlqError {
     PayloadKeyForbidden,
     #[error("dlq replay outbox fact conflict")]
     FactConflict(#[source] consistency::OutboxFactConflict),
+    #[error("dlq replay store failed at {0}")]
+    ReplayStore(DlqReplayStoreStage),
     #[error("dlq store failed")]
     Store,
     #[error("expired outbox resolution input is invalid")]
@@ -820,6 +853,7 @@ impl DlqError {
             Self::PayloadKeyUnavailable => "payload_key_unavailable",
             Self::PayloadKeyForbidden => "payload_key_forbidden",
             Self::FactConflict(_) => "fact_conflict",
+            Self::ReplayStore(stage) => stage.as_label(),
             Self::Store => "store",
             Self::InvalidResolutionInput => "invalid_resolution_input",
         }
@@ -1305,6 +1339,11 @@ mod tests {
                 DlqMutationKind::OutboxDlxRedrive,
                 &DlqError::NotFound,
             );
+            record_dlq_mutation_error(
+                tenant,
+                DlqMutationKind::DeadLetterReplay,
+                &DlqError::ReplayStore(DlqReplayStoreStage::ProjectionMirror),
+            );
         });
 
         let rendered = handle.render();
@@ -1322,6 +1361,28 @@ mod tests {
         assert!(rendered.contains("inserted"), "{rendered}");
         assert!(rendered.contains("expired"), "{rendered}");
         assert!(rendered.contains("not_found"), "{rendered}");
+        assert!(rendered.contains("projection_mirror"), "{rendered}");
         assert!(rendered.contains("evidence_rejected"), "{rendered}");
+    }
+
+    #[test]
+    fn replay_store_stages_have_fixed_display_error_and_metric_labels() {
+        for (stage, expected) in [
+            (DlqReplayStoreStage::FetchDeadLetter, "fetch_dead_letter"),
+            (DlqReplayStoreStage::EncodeMetadata, "encode_metadata"),
+            (DlqReplayStoreStage::AppendOutbox, "append_outbox"),
+            (DlqReplayStoreStage::ProjectionMirror, "projection_mirror"),
+            (DlqReplayStoreStage::Transaction, "transaction"),
+        ] {
+            assert_eq!(stage.as_label(), expected);
+            assert_eq!(stage.to_string(), expected);
+            let error = DlqError::ReplayStore(stage);
+            assert_eq!(error.as_label(), expected);
+            assert_eq!(DlqMutationMetricOutcome::error(&error).as_label(), expected);
+            assert_eq!(
+                error.to_string(),
+                format!("dlq replay store failed at {expected}")
+            );
+        }
     }
 }

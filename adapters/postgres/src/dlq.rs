@@ -1,18 +1,13 @@
 //! PostgreSQL DLQ inspection/replay adapter (#1214).
 
-#[cfg(all(test, feature = "integration"))]
-use crate::PgStore;
 use crate::cotx::eventing::{
     DeadLetterRow, DlqExpiredResolution, DlqListFilter, DlqReplayProjection, OutboxDlxRow,
+    ReplayedOutboxWriteError,
 };
-use crate::cotx::{
-    MaintenanceReadLane, MaintenanceWriteLane, ServingReadLane, ServingWriteLane, TenantDb,
-    TenantScopeHandle,
-};
+use crate::cotx::{MaintenanceReadLane, MaintenanceWriteLane, TenantDb, TenantScopeHandle};
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector, SensitiveJson};
 use crate::outbox::{OutboxAppendError, ReplayedOutboxAppend};
-use crate::pool::{VerifiedPgMaintenanceStore, VerifiedPgReadStore, VerifiedPgWriteStore};
-use crate::projection_events::ProjectionWriteRegistry;
+use crate::pool::VerifiedPgMaintenanceStore;
 use consistency::OutboxAppendOutcome;
 use diport::key_provider::{KeyProviderError, KeyProviderErrorKind};
 use diport::{
@@ -22,9 +17,9 @@ use diport::{
 use eventexec::{
     DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
     DlqListResult, DlqMutationKind, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome,
-    DlqReplayRequest, DlqStore, OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
-    record_dlq_mutation_error, record_dlq_outbox_redrive, record_dlq_replay,
-    record_outbox_expired_resolution,
+    DlqReplayRequest, DlqReplayStoreStage, DlqStore, OutboxExpiredResolutionOutcome,
+    OutboxExpiredResolutionRequest, record_dlq_mutation_error, record_dlq_outbox_redrive,
+    record_dlq_replay, record_outbox_expired_resolution,
 };
 
 /// DLQ-private tenant authority. Its private constructor keeps replay and maintenance access tied
@@ -51,203 +46,101 @@ fn dlq_tenant_scope(tenant: vocab::TenantId) -> DlqTenantScope {
     DlqTenantScope::new(tenant)
 }
 
-macro_rules! replay_dead_letter_on_pool {
-    ($pool:expr, $request:expr, $payload_protector:expr, $projection:expr, $append:ident) => {{
-        let projection = $projection;
-        $pool
-            .dlq_write(
-                dlq_tenant_scope($request.tenant()),
-                move |mut conn| {
-                    let payload_protector = $payload_protector.clone();
-                    Box::pin(async move {
-                        let row = conn
-                            .dlq_load_replay_dead_letter($request.dead_letter_id().as_str())
-                            .await
-                            .map_err(db_error("replay.fetch_dead_letter"))?;
+async fn replay_dead_letter_on_pool(
+    pool: &TenantDb<MaintenanceWriteLane>,
+    request: DlqReplayRequest,
+    payload_protector: &DlxPayloadProtector,
+    projection: DlqReplayProjection,
+) -> Result<DlqReplayOutcome, DlqError> {
+    let payload_protector = payload_protector.clone();
+    pool.dlq_write(
+        dlq_tenant_scope(request.tenant()),
+        move |mut conn| {
+            Box::pin(async move {
+                let row = conn
+                    .dlq_load_replay_dead_letter(request.dead_letter_id().as_str())
+                    .await
+                    .map_err(replay_db_error(DlqReplayStoreStage::FetchDeadLetter))?;
 
-                        let Some(row) = row else {
-                            return Err(DlqError::NotFound);
-                        };
+                let Some(row) = row else {
+                    return Err(DlqError::NotFound);
+                };
 
-                        match parse_source(&row.source_kind)? {
-                            DeadLetterSource::Consumer => {}
-                            DeadLetterSource::OutboxRelay
-                            | DeadLetterSource::Projection
-                            | DeadLetterSource::Saga => return Err(DlqError::NotReplayable),
-                        }
+                let source = DeadLetterSource::parse(&row.source_kind).ok_or_else(|| {
+                    replay_store_error(DlqReplayStoreStage::FetchDeadLetter, None)
+                })?;
+                match source {
+                    DeadLetterSource::Consumer => {}
+                    DeadLetterSource::OutboxRelay
+                    | DeadLetterSource::Projection
+                    | DeadLetterSource::Saga => return Err(DlqError::NotReplayable),
+                }
 
-                        let decoded = payload_protector
-                            .decrypt_replay_capsule(
-                                DlxPayloadContext::new(
-                                    $request.tenant(),
-                                    &row.source_kind,
-                                    &row.producer_domain,
-                                    row.consumer_domain.as_deref(),
-                                    &row.contract_id,
-                                    &row.topic,
-                                    row.consumer_group.as_deref(),
-                                    &row.message_id,
-                                ),
-                                &row.replay_capsule,
-                                &row.replay_capsule_key_ref,
-                            )
-                            .await
-                            .map_err(|err| {
-                                dlq_payload_error(
-                                    "replay.decrypt_replay_capsule",
-                                    $request.dead_letter_id().as_str(),
-                                    $request.tenant(),
-                                    err,
-                                )
-                            })?;
-                        let (payload, mut metadata) = decoded.into_parts();
-                        let (contract_version, schema_hash) =
-                            replay_schema_columns(metadata.expose())?;
-                        let metadata = SensitiveJson::new(replay_metadata(
-                            metadata.take(),
-                            $request.tenant(),
-                            $request.dead_letter_id().as_str(),
+                let decoded = payload_protector
+                    .decrypt_replay_capsule(
+                        DlxPayloadContext::new(
+                            request.tenant(),
+                            &row.source_kind,
+                            &row.producer_domain,
+                            row.consumer_domain.as_deref(),
+                            &row.contract_id,
+                            &row.topic,
+                            row.consumer_group.as_deref(),
                             &row.message_id,
-                        ));
-                        let metadata_json = secure::Plaintext::new(
-                            serde_json::to_vec(metadata.expose()).map_err(|_| DlqError::Store)?,
-                        );
+                        ),
+                        &row.replay_capsule,
+                        &row.replay_capsule_key_ref,
+                    )
+                    .await
+                    .map_err(dlq_payload_error)?;
+                let (payload, mut metadata) = decoded.into_parts();
+                let (contract_version, schema_hash) = replay_schema_columns(metadata.expose())?;
+                let metadata = SensitiveJson::new(replay_metadata(
+                    metadata.take(),
+                    request.tenant(),
+                    request.dead_letter_id().as_str(),
+                    &row.message_id,
+                ));
+                let metadata_json =
+                    secure::Plaintext::new(serde_json::to_vec(metadata.expose()).map_err(
+                        |_| replay_store_error(DlqReplayStoreStage::EncodeMetadata, None),
+                    )?);
 
-                        let outcome = conn
-                            .$append(
-                                ReplayedOutboxAppend {
-                                    event_id: $request.replay_id().as_str().to_string(),
-                                    tenant: $request.tenant(),
-                                    domain: row.producer_domain,
-                                    topic: row.topic,
-                                    contract_id: row.contract_id,
-                                    contract_version,
-                                    schema_hash,
-                                    payload,
-                                    metadata_json,
-                                    causation_id: None,
-                                },
-                                &projection,
-                            )
-                            .await
-                            .map_err(append_error("replay.insert_outbox"))?;
+                let outcome = conn
+                    .dlq_append_replayed(
+                        ReplayedOutboxAppend {
+                            event_id: request.replay_id().as_str().to_string(),
+                            tenant: request.tenant(),
+                            domain: row.producer_domain,
+                            topic: row.topic,
+                            contract_id: row.contract_id,
+                            contract_version,
+                            schema_hash,
+                            payload,
+                            metadata_json,
+                            causation_id: None,
+                        },
+                        &projection,
+                    )
+                    .await
+                    .map_err(replayed_outbox_error)?;
 
-                        match outcome {
-                            OutboxAppendOutcome::Inserted => Ok(DlqReplayOutcome::Inserted),
-                            OutboxAppendOutcome::SameFact => Ok(DlqReplayOutcome::AlreadyExists),
-                        }
-                    })
-                },
-                db_error("replay.tx"),
-            )
-            .await
-    }};
+                match outcome {
+                    OutboxAppendOutcome::Inserted => Ok(DlqReplayOutcome::Inserted),
+                    OutboxAppendOutcome::SameFact => Ok(DlqReplayOutcome::AlreadyExists),
+                }
+            })
+        },
+        replay_db_error(DlqReplayStoreStage::Transaction),
+    )
+    .await
 }
 
 /// PostgreSQL implementation of [`DlqStore`].
 pub struct PgDlqStore {
-    lane: DlqLane,
-    replay: DlqReplayCapability,
-}
-
-// The serving lane is an explicit capability boundary even though the current composition root
-// only exposes operator DLQ access through `PgMaintenanceDeps`; unit tests exercise both lanes.
-#[allow(dead_code)]
-enum DlqLane {
-    Serving {
-        read: TenantDb<ServingReadLane>,
-        write: TenantDb<ServingWriteLane>,
-    },
-    Maintenance {
-        read: TenantDb<MaintenanceReadLane>,
-        write: TenantDb<MaintenanceWriteLane>,
-    },
-}
-
-impl DlqLane {
-    async fn inspect_dead_letter(
-        &self,
-        tenant: vocab::TenantId,
-        id: String,
-    ) -> Result<Option<DeadLetterRow>, sqlx::Error> {
-        match self {
-            Self::Serving { read, .. } => {
-                read.dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
-                    Box::pin(async move { tx.dlq_inspect_dead_letter(&id).await })
-                })
-                .await
-            }
-            Self::Maintenance { read, .. } => {
-                read.dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
-                    Box::pin(async move { tx.dlq_inspect_dead_letter(&id).await })
-                })
-                .await
-            }
-        }
-    }
-
-    async fn inspect_outbox(
-        &self,
-        tenant: vocab::TenantId,
-        event_id: String,
-    ) -> Result<Option<OutboxDlxRow>, sqlx::Error> {
-        match self {
-            Self::Serving { read, .. } => {
-                read.dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
-                    Box::pin(async move { tx.dlq_inspect_outbox(&event_id).await })
-                })
-                .await
-            }
-            Self::Maintenance { read, .. } => {
-                read.dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
-                    Box::pin(async move { tx.dlq_inspect_outbox(&event_id).await })
-                })
-                .await
-            }
-        }
-    }
-
-    async fn list_dead_letters(
-        &self,
-        tenant: vocab::TenantId,
-        filter: DlqListOwned,
-    ) -> Result<Vec<DeadLetterRow>, sqlx::Error> {
-        match self {
-            Self::Serving { read, .. } => {
-                read.dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
-                    Box::pin(async move { tx.dlq_list_dead_letters(filter.as_filter()).await })
-                })
-                .await
-            }
-            Self::Maintenance { read, .. } => {
-                read.dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
-                    Box::pin(async move { tx.dlq_list_dead_letters(filter.as_filter()).await })
-                })
-                .await
-            }
-        }
-    }
-
-    async fn list_outbox(
-        &self,
-        tenant: vocab::TenantId,
-        filter: DlqListOwned,
-    ) -> Result<Vec<OutboxDlxRow>, sqlx::Error> {
-        match self {
-            Self::Serving { read, .. } => {
-                read.dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
-                    Box::pin(async move { tx.dlq_list_outbox(filter.as_filter()).await })
-                })
-                .await
-            }
-            Self::Maintenance { read, .. } => {
-                read.dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
-                    Box::pin(async move { tx.dlq_list_outbox(filter.as_filter()).await })
-                })
-                .await
-            }
-        }
-    }
+    read: TenantDb<MaintenanceReadLane>,
+    write: TenantDb<MaintenanceWriteLane>,
+    replay: MaintenanceReplayCapability,
 }
 
 struct DlqListOwned {
@@ -276,94 +169,24 @@ impl DlqListOwned {
     }
 }
 
-enum DlqReplayCapability {
-    Serving {
-        payload_protector: DlxPayloadProtector,
-    },
-    Maintenance {
+enum MaintenanceReplayCapability {
+    Enabled {
         payload_protector: DlxPayloadProtector,
         projection: DlqReplayProjection,
     },
     Disabled,
 }
 
-#[cfg(all(test, feature = "integration"))]
-impl PgStore {
-    pub(crate) fn dlq_with_projection_bindings(
-        &self,
-        payload_protector: DlxPayloadProtector,
-        projection_bindings: &[vocab::ProjectionInputBinding],
-    ) -> PgDlqStore {
-        let projection_registry = ProjectionWriteRegistry::from_selected(projection_bindings);
-        PgDlqStore {
-            lane: DlqLane::Serving {
-                read: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
-                write:
-                    TenantDb::<ServingWriteLane>::from_unverified_with_projection_registry_for_test(
-                        self,
-                        projection_registry,
-                    ),
-            },
-            replay: DlqReplayCapability::Serving { payload_protector },
-        }
-    }
-
-    pub(crate) fn dlq_without_payload_replay(&self) -> PgDlqStore {
-        PgDlqStore {
-            lane: DlqLane::Serving {
-                read: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
-                write: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
-            },
-            replay: DlqReplayCapability::Disabled,
-        }
-    }
-}
-
 impl PgDlqStore {
-    #[allow(dead_code)]
-    pub(crate) fn with_projection_registry(
-        reader: &VerifiedPgReadStore,
-        writer: &VerifiedPgWriteStore,
-        payload_protector: DlxPayloadProtector,
-        projection_registry: ProjectionWriteRegistry,
-    ) -> Self {
-        Self {
-            lane: DlqLane::Serving {
-                read: TenantDb::<ServingReadLane>::new(reader),
-                write: TenantDb::<ServingWriteLane>::with_projection_registry(
-                    writer,
-                    projection_registry,
-                ),
-            },
-            replay: DlqReplayCapability::Serving { payload_protector },
-        }
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn without_payload_replay(
-        reader: &VerifiedPgReadStore,
-        writer: &VerifiedPgWriteStore,
-    ) -> Self {
-        Self {
-            lane: DlqLane::Serving {
-                read: TenantDb::<ServingReadLane>::new(reader),
-                write: TenantDb::<ServingWriteLane>::new(writer),
-            },
-            replay: DlqReplayCapability::Disabled,
-        }
-    }
-
     pub(crate) fn with_replay_projection_maintenance(
         store: &VerifiedPgMaintenanceStore,
         payload_protector: DlxPayloadProtector,
         projection: DlqReplayProjection,
     ) -> Self {
         Self {
-            lane: DlqLane::Maintenance {
-                read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
-                write: TenantDb::<MaintenanceWriteLane>::new_maintenance(store),
-            },
-            replay: DlqReplayCapability::Maintenance {
+            read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
+            write: TenantDb::<MaintenanceWriteLane>::new_maintenance(store),
+            replay: MaintenanceReplayCapability::Enabled {
                 payload_protector,
                 projection,
             },
@@ -372,11 +195,9 @@ impl PgDlqStore {
 
     pub(crate) fn without_payload_replay_maintenance(store: &VerifiedPgMaintenanceStore) -> Self {
         Self {
-            lane: DlqLane::Maintenance {
-                read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
-                write: TenantDb::<MaintenanceWriteLane>::new_maintenance(store),
-            },
-            replay: DlqReplayCapability::Disabled,
+            read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
+            write: TenantDb::<MaintenanceWriteLane>::new_maintenance(store),
+            replay: MaintenanceReplayCapability::Disabled,
         }
     }
 }
@@ -406,39 +227,24 @@ impl DlqStore for PgDlqStore {
         request: DlqReplayRequest,
     ) -> Result<DlqReplayOutcome, DlqError> {
         let tenant = request.tenant();
-        let result = match (&self.lane, &self.replay) {
-            (
-                DlqLane::Serving { write, .. },
-                DlqReplayCapability::Serving { payload_protector },
-            ) => {
-                let projection = DlqReplayProjection::from_registry(&write.projection_registry());
-                replay_dead_letter_on_pool!(
-                    write,
+        let result = match &self.replay {
+            MaintenanceReplayCapability::Enabled {
+                payload_protector,
+                projection,
+            } => {
+                replay_dead_letter_on_pool(
+                    &self.write,
                     request,
                     payload_protector,
-                    projection,
-                    outbox_append_replayed_with_projection
+                    projection.clone(),
                 )
+                .await
             }
-            (
-                DlqLane::Maintenance { write, .. },
-                DlqReplayCapability::Maintenance {
-                    payload_protector,
-                    projection,
-                },
-            ) => replay_dead_letter_on_pool!(
-                write,
-                request,
-                payload_protector,
-                projection.clone(),
-                dlq_append_replayed
-            ),
-            (_, DlqReplayCapability::Disabled) => {
+            MaintenanceReplayCapability::Disabled => {
                 let err = DlqError::PayloadKeyUnavailable;
                 record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, &err);
                 return Err(err);
             }
-            _ => return Err(DlqError::Store),
         };
         match &result {
             Ok(outcome) => record_dlq_replay(tenant, *outcome),
@@ -455,38 +261,20 @@ impl DlqStore for PgDlqStore {
     ) -> Result<DlqRedriveOutcome, DlqError> {
         let event_id = request.event_id().as_str().to_string();
         let tenant = request.tenant();
-        let result = match &self.lane {
-            DlqLane::Serving { write, .. } => {
-                write
-                    .dlq_write(
-                        dlq_tenant_scope(tenant),
-                        move |mut conn| {
-                            Box::pin(async move {
-                                conn.dlq_redrive_outbox(&event_id)
-                                    .await
-                                    .map_err(db_error("redrive.update_outbox"))
-                            })
-                        },
-                        db_error("redrive.tx"),
-                    )
-                    .await
-            }
-            DlqLane::Maintenance { write, .. } => {
-                write
-                    .dlq_write(
-                        dlq_tenant_scope(tenant),
-                        move |mut conn| {
-                            Box::pin(async move {
-                                conn.dlq_redrive_outbox(&event_id)
-                                    .await
-                                    .map_err(db_error("redrive.update_outbox"))
-                            })
-                        },
-                        db_error("redrive.tx"),
-                    )
-                    .await
-            }
-        };
+        let result = self
+            .write
+            .dlq_write(
+                dlq_tenant_scope(tenant),
+                move |mut conn| {
+                    Box::pin(async move {
+                        conn.dlq_redrive_outbox(&event_id)
+                            .await
+                            .map_err(db_error("redrive.update_outbox"))
+                    })
+                },
+                db_error("redrive.tx"),
+            )
+            .await;
 
         let outcome = match result {
             Ok(1) => Ok(DlqRedriveOutcome::Redriven),
@@ -516,50 +304,26 @@ impl DlqStore for PgDlqStore {
             .map(|value| value.as_str().to_owned());
         let change_ticket = request.change_ticket().as_str().to_owned();
         let operator_subject = request.operator_subject().as_str().to_owned();
-        let result = match &self.lane {
-            DlqLane::Serving { write, .. } => {
-                write
-                    .dlq_write(
-                        dlq_tenant_scope(tenant),
-                        move |mut conn| {
-                            Box::pin(async move {
-                                conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
-                                    event_id: &event_id,
-                                    kind,
-                                    change_ticket: &change_ticket,
-                                    operator_subject: &operator_subject,
-                                    evidence_event_id: evidence_event_id.as_deref(),
-                                })
-                                .await
-                                .map_err(db_error("resolve_expired.update_outbox"))
-                            })
-                        },
-                        db_error("resolve_expired.tx"),
-                    )
-                    .await
-            }
-            DlqLane::Maintenance { write, .. } => {
-                write
-                    .dlq_write(
-                        dlq_tenant_scope(tenant),
-                        move |mut conn| {
-                            Box::pin(async move {
-                                conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
-                                    event_id: &event_id,
-                                    kind,
-                                    change_ticket: &change_ticket,
-                                    operator_subject: &operator_subject,
-                                    evidence_event_id: evidence_event_id.as_deref(),
-                                })
-                                .await
-                                .map_err(db_error("resolve_expired.update_outbox"))
-                            })
-                        },
-                        db_error("resolve_expired.tx"),
-                    )
-                    .await
-            }
-        };
+        let result = self
+            .write
+            .dlq_write(
+                dlq_tenant_scope(tenant),
+                move |mut conn| {
+                    Box::pin(async move {
+                        conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
+                            event_id: &event_id,
+                            kind,
+                            change_ticket: &change_ticket,
+                            operator_subject: &operator_subject,
+                            evidence_event_id: evidence_event_id.as_deref(),
+                        })
+                        .await
+                        .map_err(db_error("resolve_expired.update_outbox"))
+                    })
+                },
+                db_error("resolve_expired.tx"),
+            )
+            .await;
 
         let outcome = match result {
             Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved),
@@ -587,8 +351,10 @@ impl PgDlqStore {
     ) -> Result<DlqEntrySummary, DlqError> {
         let id = id.to_string();
         let row = self
-            .lane
-            .inspect_dead_letter(tenant, id)
+            .read
+            .dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
+                Box::pin(async move { tx.dlq_inspect_dead_letter(&id).await })
+            })
             .await
             .map_err(db_error("inspect.fetch_dead_letter"))?;
         row.ok_or(DlqError::NotFound)?
@@ -602,8 +368,10 @@ impl PgDlqStore {
     ) -> Result<DlqEntrySummary, DlqError> {
         let event_id = event_id.to_string();
         let row = self
-            .lane
-            .inspect_outbox(tenant, event_id)
+            .read
+            .dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
+                Box::pin(async move { tx.dlq_inspect_outbox(&event_id).await })
+            })
             .await
             .map_err(db_error("inspect.outbox_tx"))?;
         row.ok_or(DlqError::NotFound)?.into_summary(tenant)
@@ -632,10 +400,9 @@ impl PgDlqStore {
             .map(|cursor| cursor.last_kind().cursor_part().to_string());
         let cursor_id = query.cursor().map(|cursor| cursor.last_id().to_string());
         let rows = self
-            .lane
-            .list_dead_letters(
-                tenant,
-                DlqListOwned {
+            .read
+            .dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
+                let filter = DlqListOwned {
                     producer_domain,
                     consumer_domain,
                     source,
@@ -644,8 +411,9 @@ impl PgDlqStore {
                     cursor_kind,
                     cursor_id,
                     limit: i64::from(fetch_limit),
-                },
-            )
+                };
+                Box::pin(async move { tx.dlq_list_dead_letters(filter.as_filter()).await })
+            })
             .await
             .map_err(db_error("list.fetch_dead_letter"))?;
 
@@ -677,10 +445,9 @@ impl PgDlqStore {
         let cursor_id = query.cursor().map(|cursor| cursor.last_id().to_string());
         let limit = i64::from(query.fetch_limit());
         let rows = self
-            .lane
-            .list_outbox(
-                tenant,
-                DlqListOwned {
+            .read
+            .dlq_read(dlq_tenant_scope(tenant), move |mut tx| {
+                let filter = DlqListOwned {
                     producer_domain: domain,
                     consumer_domain: None,
                     source: None,
@@ -689,8 +456,9 @@ impl PgDlqStore {
                     cursor_kind,
                     cursor_id,
                     limit,
-                },
-            )
+                };
+                Box::pin(async move { tx.dlq_list_outbox(filter.as_filter()).await })
+            })
             .await
             .map_err(db_error("list.outbox_tx"))?;
 
@@ -823,33 +591,54 @@ fn db_error(operation: &'static str) -> impl Fn(sqlx::Error) -> DlqError {
     }
 }
 
-fn append_error(operation: &'static str) -> impl Fn(OutboxAppendError) -> DlqError {
-    move |error| match error {
-        OutboxAppendError::Conflict(conflict) => DlqError::FactConflict(conflict),
-        other => {
-            tracing::warn!(
-                target: "postgres",
-                operation,
-                error = %secure::redact_error(&other),
-                "dlq: outbox append error"
-            );
-            DlqError::Store
+fn replay_db_error(stage: DlqReplayStoreStage) -> impl Fn(sqlx::Error) -> DlqError {
+    move |error| replay_store_error(stage, Some(&error))
+}
+
+fn replay_store_error(
+    stage: DlqReplayStoreStage,
+    database_error: Option<&sqlx::Error>,
+) -> DlqError {
+    let database_error = database_error.and_then(|error| error.as_database_error());
+    let sqlstate = database_error
+        .and_then(sqlx::error::DatabaseError::code)
+        .map(|code| code.into_owned())
+        .unwrap_or_else(|| "none".to_string());
+    let constraint = database_error
+        .and_then(sqlx::error::DatabaseError::constraint)
+        .unwrap_or("none");
+    tracing::warn!(
+        target: "postgres",
+        stage = stage.as_label(),
+        sqlstate,
+        constraint,
+        "dlq: replay store failed"
+    );
+    DlqError::ReplayStore(stage)
+}
+
+fn replayed_outbox_error(error: ReplayedOutboxWriteError) -> DlqError {
+    match error {
+        ReplayedOutboxWriteError::Append(OutboxAppendError::Conflict(conflict)) => {
+            DlqError::FactConflict(conflict)
+        }
+        ReplayedOutboxWriteError::Append(OutboxAppendError::Storage(error)) => {
+            replay_store_error(DlqReplayStoreStage::AppendOutbox, Some(&error))
+        }
+        ReplayedOutboxWriteError::Append(
+            OutboxAppendError::CanonicalDrift | OutboxAppendError::InvalidIdentity,
+        ) => replay_store_error(DlqReplayStoreStage::AppendOutbox, None),
+        ReplayedOutboxWriteError::ProjectionMirror(error) => {
+            replay_store_error(DlqReplayStoreStage::ProjectionMirror, Some(&error))
         }
     }
 }
 
-fn dlq_payload_error(
-    operation: &'static str,
-    dead_letter_id: &str,
-    tenant: vocab::TenantId,
-    err: KeyProviderError,
-) -> DlqError {
+fn dlq_payload_error(err: KeyProviderError) -> DlqError {
     let kind = err.kind();
     tracing::warn!(
         target: "postgres",
-        operation,
-        dead_letter_id,
-        tenant_id = %tenant,
+        stage = "decrypt_payload",
         key_provider_kind = ?kind,
         "dlq: replay capsule decrypt failed"
     );
@@ -957,50 +746,60 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    // reason: unit test fixture uses a known canonical tenant id.
     fn key_provider_rejected_maps_to_invalid_payload() {
         let err = KeyProviderError::new(
             KeyProviderErrorKind::Rejected,
             std::io::Error::other("bad ciphertext"),
         );
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
-            .expect("canonical tenant");
-        assert!(matches!(
-            dlq_payload_error("test", "dl-1", tenant, err),
-            DlqError::InvalidPayload
-        ));
+        assert!(matches!(dlq_payload_error(err), DlqError::InvalidPayload));
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    // reason: unit test fixture uses a known canonical tenant id.
     fn key_provider_unavailable_stays_retryable_dependency_error() {
         let err = KeyProviderError::new(
             KeyProviderErrorKind::Unavailable,
             std::io::Error::other("kms unavailable"),
         );
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
-            .expect("canonical tenant");
         assert!(matches!(
-            dlq_payload_error("test", "dl-1", tenant, err),
+            dlq_payload_error(err),
             DlqError::PayloadKeyUnavailable
         ));
     }
 
     #[test]
-    #[allow(clippy::expect_used)]
-    // reason: unit test fixture uses a known canonical tenant id.
     fn key_provider_forbidden_stays_operator_config_error() {
         let err = KeyProviderError::new(
             KeyProviderErrorKind::Forbidden,
             std::io::Error::other("policy denied"),
         );
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
-            .expect("canonical tenant");
         assert!(matches!(
-            dlq_payload_error("test", "dl-1", tenant, err),
+            dlq_payload_error(err),
             DlqError::PayloadKeyForbidden
         ));
+    }
+
+    #[test]
+    fn replay_write_errors_map_to_closed_store_stages() {
+        for (error, expected) in [
+            (
+                ReplayedOutboxWriteError::Append(OutboxAppendError::CanonicalDrift),
+                DlqReplayStoreStage::AppendOutbox,
+            ),
+            (
+                ReplayedOutboxWriteError::Append(OutboxAppendError::Storage(
+                    sqlx::Error::RowNotFound,
+                )),
+                DlqReplayStoreStage::AppendOutbox,
+            ),
+            (
+                ReplayedOutboxWriteError::ProjectionMirror(sqlx::Error::RowNotFound),
+                DlqReplayStoreStage::ProjectionMirror,
+            ),
+        ] {
+            assert!(matches!(
+                replayed_outbox_error(error),
+                DlqError::ReplayStore(stage) if stage == expected
+            ));
+        }
     }
 }

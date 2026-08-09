@@ -662,6 +662,14 @@ pub(in super::super) fn runtime_pg_config(
     .with_acquire_timeout(std::time::Duration::from_secs(5))
 }
 
+pub(in super::super) async fn connect_pg_maintenance(
+    fixture: &testkit::OwnedPgFixture,
+) -> Result<crate::PgMaintenanceDeps, TestError> {
+    let params = fixture.owner_params();
+    let config = runtime_pg_config(params, &params.username, &params.password);
+    Ok(PgRuntimeDeps::connect_maintenance(&config).await?)
+}
+
 pub(in super::super) async fn provision_runtime_logins(
     fixture: &testkit::OwnedPgFixture,
 ) -> TestResult {

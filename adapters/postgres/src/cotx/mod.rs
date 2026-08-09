@@ -577,19 +577,6 @@ impl TenantDb<ServingWriteLane> {
             },
         }
     }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn from_unverified_with_projection_registry_for_test(
-        store: &crate::PgStore,
-        projection_registry: ProjectionWriteRegistry,
-    ) -> Self {
-        Self {
-            pool: store.pool.clone(),
-            lane: ServingWriteLane {
-                projection_registry,
-            },
-        }
-    }
 }
 
 impl TenantDb<ProjectionOperatorWriteLane> {

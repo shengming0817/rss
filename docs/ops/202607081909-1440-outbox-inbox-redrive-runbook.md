@@ -205,8 +205,10 @@ rss dlq redrive-outbox \
 - `outbox_partition_blocked_depth{domain,contract_id,tenant_id}`：blocked 后继行数。
 - `outbox_same_id_window_expired_total{domain,contract_id,tenant_id,phase}`：relay publish preflight 发现
   deadline 到期；`phase=automatic|redrive`，broker publish 未发生。
-- `dlq_redrive_total{tenant_id,kind,outcome}`：operator mutation 结果；`kind=dead_letter_replay|outbox_dlx_redrive`，
-  outbox redrive outcome 包含 `redriven|not_found|expired`。该计数只在进程安装 metrics recorder 时可采集；
+- `dlq_redrive_total{tenant_id,kind,outcome}`：operator mutation 结果；`kind=dead_letter_replay|outbox_dlx_redrive|outbox_dlx_resolve_expired`，
+  outbox redrive outcome 包含 `redriven|not_found|expired`；dead-letter replay 的存储失败直接使用闭值阶段
+  `fetch_dead_letter|encode_metadata|append_outbox|projection_mirror|transaction`，不再同时上报 `store`。
+  该计数只在进程安装 metrics recorder 时可采集；
   `rss dlq` 是一次性 operator 进程，不承诺 Prometheus scrape 面，长期告警以 relay/consumer 常驻进程 metric
   与 `dlq.maintenance` audit/log 为准。
 - `outbox_publish_total{status="requeue|reject"}`：broker publish transient/permanent 处置。
@@ -228,6 +230,17 @@ mutation，partition 不会被解锁。CLI 输出 `outcome=expired`、以非零�
 - `NotExpired`：目标仍在 redrive window；修复上游后走 `redrive-outbox`，不得提前放弃。
 - `NotReplayable`：`outbox_relay`、`saga`、`projection` dead_letter 不支持 replay 成 outbox。
 - `InvalidSchemaHeaders` / `InvalidPayload`：先修数据/代码，不要重复 replay。
+- `FetchDeadLetter`：先检查 PostgreSQL 可用性与 maintenance tenant transaction；若连接正常，则通过受控
+  数据库路径核对 persisted `source_kind` 是否仍属于闭值 catalog。非法 `source_kind` 是 schema/数据不变量
+  漂移，修复数据或代码前不得重复 replay；原 dead-letter 未删除。
+- `EncodeMetadata`：停止重试并修复 replay metadata 编码不变量；不会产生 outbox 写入。
+- `AppendOutbox`：按 SQLSTATE/constraint 检查 outbox 写入权限或约束；fact conflict 仍单独返回 typed conflict。
+- `ProjectionMirror`：核对 generated capture 与数据库 projection input catalog 的完整
+  domain/contract/version/schema/topic；该阶段失败会回滚同事务内的 outbox 与 projection 写入。
+- `Transaction`：检查 begin/commit/rollback 路径与数据库连接；在确认事务结局前不要改用直接 broker publish。
+
+replay 失败日志只提供闭值 stage、SQLSTATE、constraint 或 key-provider kind。payload、metadata、capsule、
+key ref 与原始 source chain 不属于诊断面；需要定位时使用审计 id 通过受控数据库路径核查。
 - `PayloadKeyUnavailable` / `PayloadKeyForbidden`：恢复 Vault/key provider 后重试。
 - `Store`：检查 Postgres、RLS、SECURITY DEFINER 函数权限和 migration 版本。
 
