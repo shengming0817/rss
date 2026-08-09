@@ -1737,6 +1737,34 @@ fn select_verify_plan(plan: Vec<Step>, only: &[String]) -> Result<Vec<Step>> {
         .collect())
 }
 
+/// Execute the selected local meta gates inside the already provenance-checked snapshot worker.
+/// This is the in-process equivalent of the historical nested `cargo xtask verify --only ...`.
+pub(crate) fn run_local_meta(
+    root: &Path,
+    gates: &[GateId],
+    contract_against: &str,
+    execution_policy: crate::cmd::ExecutionPolicy,
+    ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
+) -> Result<()> {
+    let opts = VerifyOpts {
+        fast: false,
+        allow_missing_tools: false,
+        partition: None,
+        nextest_lane: crate::nextest::NextestLane::Verify,
+        core_test_selection: crate::nextest::CoreTestSelection::workspace(),
+        contract_against: contract_against.to_owned(),
+        coverage_typed_job: false,
+        execution_policy,
+    };
+    let only = gates
+        .iter()
+        .map(|gate| gate.spec().label().to_owned())
+        .collect::<Vec<_>>();
+    let plan = select_verify_plan(verify_plan(&opts), &only)?;
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(root);
+    run_resumable_labeled_plan("verify", &plan, &opts, root, &command_facts, ledger)
+}
+
 /// verify 入口：按 registry 顺序执行所选 plan；默认 keep-going，显式 `--fail-fast` 首错停止。
 pub(crate) fn run(
     fast: bool,

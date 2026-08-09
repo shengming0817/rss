@@ -10,7 +10,7 @@
 | 入口 | 默认 target |
 |------|-------------|
 | `make` / `hack/cargo.sh` | N 槽租约池（默认 `N=5`，根 `$HOME/.cache/rss-cargo-target-pool/slot-K`） |
-| 直接 `cargo` / `cargo xtask` | worktree-local `.cache/cargo-target`（`.cargo/config.toml`） |
+| 直接 `cargo` / `cargo xtask` | worktree-local `.cache/cargo-target`；`ci local` 除外，必须走受控 wrapper |
 | CI job | `$RUNNER_TEMP/rss-cargo-target`（不受池影响） |
 
 环境变量：
@@ -27,6 +27,25 @@
 槽语义：同一时刻一个槽只属于一个 worktree（sticky 热复用）。换租时 wipe 槽内容
 （fingerprint 含绝对路径，旧产物对新 worktree 无热复用价值）。池满且无死进程可回收时
 fail-closed，提示先跑 `gc`、加大 N 或删除 worktree。
+
+`ci local` 的 Cargo 从 detached committed snapshot 执行，但 lease 的 `worktree`、`branch` 与长寿
+worker PID 仍绑定原 attached caller。snapshot 源位于 caller worktree git dir 下的私有、revision-keyed
+cache；复用前执行 `git clean -ffdx`、精确 HEAD 与 clean-status 校验。Cargo target 继续使用 caller 的
+sticky 槽，因此 snapshot 路径和 target 身份都稳定，同时不把 detached checkout 误登记为独立 worktree。
+
+snapshot cache 的精确路径是 caller worktree 的 `git rev-parse --git-dir` 下
+`rss-ci-local/sources/<40-hex-revision>/tree`。每个 revision 从 clean 校验开始到 snapshot xtask
+退出都持有 `sources/.locks/<revision>.lock` 的 POSIX 排他所有权；并发冷发布等待同一 owner 并复用赢家，等待时间
+计入外层 600 秒。取消会清理该 worker 的 staging 与 owner。cache 自动保留最近 8 个 revision；GC 只删除能以
+同一机制非阻塞取得所有权的旧 revision，遇到活跃或争用时 fail-safe 跳过，后续运行再回收，因此并发期间可
+短暂超过 8 个。手工清理时不得直接删除 `.locks` 或仍有 owner 的 revision；先停止对应 local CI，再删除整个
+`rss-ci-local/sources` 可安全冷重建。
+
+local CI 的继承 pipe/token 是防止 ambient 环境误入内部 worker 的一次性 handshake，不是跨权限安全
+capability：同一 UID 可观察并复刻其自身进程输入，因此本地 adversarial caller 不在信任模型内。真正需要抵抗
+同 UID 主动伪造时必须使用独立权限域 launcher/service，不能把环境变量、FD 或进程组身份当作 provenance。
+canonical `make ci` / `hack/cargo.sh xtask ci local` 仍由外层进程组 owner 从启动前固定 600 秒；内部 worker
+另将传入 deadline 收紧到自身启动后最多 600 秒，绝不接受调用方延长预算。
 
 ## 回收与 gc
 
@@ -94,6 +113,7 @@ compiler-cache 策略。
 ## 实现载体
 
 - `hack/target-pool.py` — 租约算法单源（`acquire` / `gc`）
-- `hack/cargo.sh` — 薄 hook
+- `hack/cargo.sh` — 普通 Cargo 薄 hook；`ci local` 在 Cargo 前转交 snapshot supervisor
+- `hack/ci-local-supervisor.py` — 600 秒进程组、revision/snapshot provenance 与单 xtask worker
 - `hack/cargo.selftest.sh` + `hack/tests/test_target_pool.py` — 机器门（经 `ci local` 的
   CargoWrapper 治理步）

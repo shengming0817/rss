@@ -1454,22 +1454,37 @@ fn transparent_tail_expression(block: &syn::Block) -> Option<&syn::Expr> {
     }
 }
 
-/// The executable entry is allowed exactly one statement before its transparent tail: installing
-/// the redacted panic hook before `#[tokio::main]` constructs a runtime. All other wrappers remain
-/// single-expression carriers.
-fn lifecycle_main_tail_expression(block: &syn::Block) -> Option<&syn::Expr> {
-    let [
-        syn::Stmt::Expr(hook, Some(_)),
-        syn::Stmt::Expr(tail, semicolon),
-    ] = block.stmts.as_slice()
-    else {
-        return None;
+fn runtime_binary_installs_hook(
+    entry: &syn::Expr,
+    functions: &BTreeMap<String, &syn::ItemFn>,
+    module_aliases: &BTreeMap<String, String>,
+) -> bool {
+    let syn::Expr::Call(entry) = transparent_expr(entry) else {
+        return false;
     };
-    if compact_tokens(hook) != "runtimeexec::install_redacted_panic_hook()" {
-        return None;
+    let Some(first_argument) = entry.args.first() else {
+        return false;
+    };
+    let syn::Expr::Call(handoff) = transparent_expr(first_argument) else {
+        return false;
+    };
+    if !handoff.args.is_empty()
+        || local_call_name(&handoff.func).as_deref() != Some("install_process_hooks")
+    {
+        return false;
     }
-    (semicolon.is_none() || matches!(transparent_expr(tail), syn::Expr::Return(_)))
-        .then(|| transparent_expr(tail))
+    let Some(installer) = functions.get("install_process_hooks") else {
+        return false;
+    };
+    let Some(hook) = transparent_tail_expression(&installer.block) else {
+        return false;
+    };
+    let syn::Expr::Call(hook) = transparent_expr(hook) else {
+        return false;
+    };
+    hook.args.is_empty()
+        && canonical_lifecycle_call_path(&hook.func, module_aliases).as_deref()
+            == Some("runtimeexec::install_redacted_panic_hook")
 }
 
 fn local_call_name(expression: &syn::Expr) -> Option<String> {
@@ -1511,6 +1526,9 @@ fn collect_transparent_owner_calls(
                 let mut path = stack.clone();
                 path.push(callee);
                 owner_paths.push(path.join(" -> "));
+                return Ok(());
+            }
+            if callee == "install_process_hooks" {
                 return Ok(());
             }
             let Some(function) = functions.get(&callee) else {
@@ -1588,8 +1606,8 @@ fn resolve_runtime_binary_lifecycle_owner<'a>(
             "rss binary lifecycle owner `{owner_name}` cannot contain nested function, closure, or async-block carriers"
         ));
     }
-    let entry = lifecycle_main_tail_expression(&main.block).ok_or_else(|| {
-        "rss binary `main` must install the redacted panic hook before one transparent tail expression reaching its lifecycle owner".to_owned()
+    let entry = transparent_tail_expression(&main.block).ok_or_else(|| {
+        "rss binary `main` must contain one transparent tail expression reaching its lifecycle owner".to_owned()
     })?;
     let mut stack = vec!["main".to_owned()];
     let mut owner_paths = Vec::new();
@@ -1599,6 +1617,12 @@ fn resolve_runtime_binary_lifecycle_owner<'a>(
             "rss binary `main` must reach lifecycle owner `{owner_name}` exactly once through a same-file transparent call chain; paths={owner_paths:?}"
         ));
     };
+    if !runtime_binary_installs_hook(entry, &functions, &module_aliases) {
+        return Err(
+            "rss binary `main` must install the redacted panic hook exactly once before reaching its lifecycle owner"
+                .to_owned(),
+        );
+    }
     Ok((owner, path.clone()))
 }
 
@@ -3206,13 +3230,31 @@ mod tests {
         );
         let cases = [
             (
-                "panic hook is not installed before runtime construction",
+                "redacted panic hook is missing",
                 canonical.replacen(
-                    "    runtimeexec::install_redacted_panic_hook();\n    process_exit(run_main())",
-                    "    process_exit(run_main())",
+                    "    runtimeexec::install_redacted_panic_hook();\n",
+                    "",
                     1,
                 ),
-                "must install the redacted panic hook",
+                "must install the redacted panic hook exactly once",
+            ),
+            (
+                "redacted panic hook is duplicated",
+                canonical.replacen(
+                    "    runtimeexec::install_redacted_panic_hook();\n",
+                    "    runtimeexec::install_redacted_panic_hook();\n    runtimeexec::install_redacted_panic_hook();\n",
+                    1,
+                ),
+                "must install the redacted panic hook exactly once",
+            ),
+            (
+                "structured panic activation cannot replace hook installation",
+                canonical.replacen(
+                    "runtimeexec::install_redacted_panic_hook();",
+                    "runtimeexec::activate_structured_panic_observation();",
+                    1,
+                ),
+                "must install the redacted panic hook exactly once",
             ),
             (
                 "lifecycle owner is unreachable",

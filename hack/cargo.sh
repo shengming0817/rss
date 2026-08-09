@@ -6,6 +6,47 @@ fail() {
     exit 1
 }
 
+repo_root=$(/usr/bin/git rev-parse --show-toplevel)
+repo_root=$(CDPATH='' cd -- "$repo_root" && pwd -P)
+
+# Canonical local CI materializes the committed snapshot before Cargo starts, so the only Rust
+# xtask is compiled from that snapshot. The supervisor remains the outermost 600-second owner.
+if [ "$#" -eq 4 ] && [ "$1" = xtask ] && [ "$2" = ci ] && [ "$3" = local ] &&
+    { [ "$4" = --help ] || [ "$4" = -h ]; }; then
+    exec cargo "$@"
+fi
+if [ "$#" -ge 3 ] && [ "$1" = xtask ] && [ "$2" = ci ] && [ "$3" = local ]; then
+    shift 3
+    exec /usr/bin/python3 "$repo_root/hack/ci-local-supervisor.py" \
+        --repo-root "$repo_root" --budget-seconds 600 --local-ci \
+        --cargo-wrapper "$0" -- "$@"
+fi
+
+ci_local_worker=0
+if [ "${1-}" = __ci-local-worker ]; then
+    shift
+    [ "${RSS_CI_LOCAL_WORKER-}" = 1 ] || fail "internal local-CI worker marker is missing"
+    [ "${RSS_CI_LOCAL_SUPERVISED-}" = 1 ] || fail "internal local-CI supervision marker is missing"
+    [ -n "${RSS_CI_CALLER_WORKTREE-}" ] || fail "internal local-CI caller worktree is missing"
+    [ "${RSS_CI_CALLER_BRANCH+x}" = x ] || fail "internal local-CI caller branch is missing"
+    /usr/bin/python3 - "${RSS_CI_LOCAL_HANDSHAKE_FD-}" \
+        "${RSS_CI_LOCAL_HANDSHAKE_TOKEN-}" <<'PY' ||
+import os
+import secrets
+import sys
+
+try:
+    descriptor = int(sys.argv[1])
+    token = bytes.fromhex(sys.argv[2])
+    observed = os.read(descriptor, len(token))
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if len(token) == 32 and secrets.compare_digest(observed, token) else 1)
+PY
+        fail "internal local-CI inherited handshake is missing or invalid"
+    ci_local_worker=1
+fi
+
 find_verified_sccache() {
     remaining_path=${PATH-}:
     while [ -n "$remaining_path" ]; do
@@ -28,8 +69,6 @@ find_verified_sccache() {
     return 1
 }
 
-repo_root=$(/usr/bin/git rev-parse --show-toplevel)
-repo_root=$(CDPATH='' cd -- "$repo_root" && pwd -P)
 tool_adapter="$repo_root/.github/scripts/ci-tool-adapters.sh"
 target_pool="$repo_root/hack/target-pool.py"
 
@@ -81,12 +120,18 @@ case "$pool_n_raw" in
             printf 'rss-cargo: pool=skipped reason=env-override\n' >&2
         else
             pool_root=${RSS_TARGET_POOL_ROOT:-$HOME/.cache/rss-cargo-target-pool}
+            lease_worktree=$repo_root
             branch=$(/usr/bin/git -C "$repo_root" rev-parse --abbrev-ref HEAD 2>/dev/null || printf '')
+            if [ "$ci_local_worker" = 1 ]; then
+                lease_worktree=$(CDPATH='' cd -- "$RSS_CI_CALLER_WORKTREE" && pwd -P) ||
+                    fail "cannot resolve internal local-CI caller worktree"
+                branch=$RSS_CI_CALLER_BRANCH
+            fi
             resolved_target=$(
                 /usr/bin/python3 "$target_pool" acquire \
                     --pool-root "$pool_root" \
                     --n "$pool_n_raw" \
-                    --worktree "$repo_root" \
+                    --worktree "$lease_worktree" \
                     --pid "$$" \
                     --branch "$branch"
             ) || fail "target pool acquire failed"
@@ -148,5 +193,31 @@ EOF
         ;;
     *) fail "RSS_COMPILER_CACHE must be auto or off, got: $compiler_cache_mode" ;;
 esac
+
+if [ "$ci_local_worker" = 1 ]; then
+    if ! /usr/bin/python3 -c '
+import subprocess, sys, time
+started = time.monotonic()
+environment = __import__("os").environ.copy()
+for name in (
+    "RSS_CI_LOCAL_WORKER", "RSS_CI_LOCAL_SUPERVISED",
+    "RSS_CI_LOCAL_HANDSHAKE_FD", "RSS_CI_LOCAL_HANDSHAKE_TOKEN", "RSS_CI_LOCAL_DEADLINE",
+    "RSS_CI_CALLER_WORKTREE", "RSS_CI_CALLER_BRANCH", "RSS_CI_EXPECTED_SNAPSHOT_ROOT",
+    "RSS_CI_EXPECTED_HEAD", "RSS_CI_EXPECTED_BASE", "RSS_CI_EXPECTED_MERGE_BASE",
+    "RSS_RUNTIME_ROOT_BASE", "RSS_LOCAL_CI_LEDGER_PATH", "RSS_LOCAL_CI_LEDGER_BRANCH",
+):
+    environment.pop(name, None)
+completed = subprocess.run(
+    ["cargo", "build", "--locked", "-p", "xtask", "--timings"],
+    check=False,
+    env=environment,
+)
+print(f"ci-local-profile: phase=xtask.build seconds={time.monotonic()-started:.3f}", file=sys.stderr)
+raise SystemExit(completed.returncode)
+'; then
+        fail "snapshot xtask build failed"
+    fi
+    exec "$CARGO_TARGET_DIR/debug/xtask" ci local "$@"
+fi
 
 exec cargo "$@"

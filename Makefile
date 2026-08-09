@@ -1,8 +1,8 @@
 # RSS 治理门的受控本地 bootstrap。
 #
 # typed gate plan 单源在 `cargo xtask`（跨平台、CI-ready、对齐 rust-analyzer xtask 范式）；Make
-# 通过 `hack/cargo.sh` 统一 build-jobs、ambient wrapper 清洗和 compiler-cache policy。直接执行
-# `cargo xtask` 使用同一 gate plan 与 target-dir 默认值，但不具备等价的外层 Cargo bootstrap。
+# 通过 `hack/cargo.sh` 统一 build-jobs、ambient wrapper 清洗和 compiler-cache policy；`ci local` 还会在
+# Cargo 前进入 committed-snapshot supervisor。直接执行 `cargo xtask ci local` 不具备来源边界并 fail-closed。
 #
 #   make verify       本地 stable-only 快门：默认 keep-going；VERIFY_ARGS 可传 --fail-fast/--only。
 #   make verify-fast  registry 显式 Always 的本地 meta 门；VERIFY_ARGS 可传 --fresh/--fail-fast/--only；冷缓存或 xtask
@@ -40,7 +40,7 @@ verify-hooks:
 	/usr/bin/python3 -m unittest discover -s .codex/hooks -p 'test_*.py'
 
 ci:
-	/usr/bin/python3 hack/ci-local-supervisor.py --repo-root "$(CURDIR)" --budget-seconds 600 -- $(RSS_CARGO) xtask ci local --base "$(CI_BASE)" $(CI_ARGS)
+	$(RSS_CARGO) xtask ci local --base "$(CI_BASE)" $(CI_ARGS)
 
 ci-full:
 	$(RSS_CARGO) xtask ci full $(CI_ARGS)

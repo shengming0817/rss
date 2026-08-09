@@ -58,6 +58,18 @@ pub(crate) const STRIPPED_ENV: &[&str] = &[
     // The local launcher explicitly hands both values to its detached verify child when needed.
     crate::local_run_ledger::PATH_ENV,
     crate::local_run_ledger::BRANCH_ENV,
+    crate::ci_impact::LOCAL_WORKER_ENV,
+    crate::ci_impact::LOCAL_SUPERVISED_ENV,
+    crate::ci_impact::LOCAL_HANDSHAKE_FD_ENV,
+    crate::ci_impact::LOCAL_HANDSHAKE_TOKEN_ENV,
+    crate::ci_impact::LOCAL_DEADLINE_ENV,
+    crate::ci_impact::LOCAL_CALLER_WORKTREE_ENV,
+    crate::ci_impact::LOCAL_CALLER_BRANCH_ENV,
+    crate::ci_impact::LOCAL_SNAPSHOT_ROOT_ENV,
+    crate::ci_impact::LOCAL_HEAD_ENV,
+    crate::ci_impact::LOCAL_BASE_ENV,
+    crate::ci_impact::LOCAL_MERGE_BASE_ENV,
+    crate::runtime_root_guard::BASE_ENV,
     // toolchain 选择
     "RUSTUP_TOOLCHAIN",
     "RUSTC",
@@ -283,7 +295,6 @@ impl ExternalProgram {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CargoSubcommand {
-    Xtask,
     Metadata,
     Check,
     #[cfg(test)]
@@ -325,7 +336,6 @@ impl ExecutionPolicy {
 impl CargoSubcommand {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::Xtask => "xtask",
             Self::Metadata => "metadata",
             Self::Check => "check",
             #[cfg(test)]

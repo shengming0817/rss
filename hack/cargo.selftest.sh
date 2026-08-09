@@ -273,6 +273,109 @@ make_diag="$TMP_ROOT/make.diag"
 grep -F 'source=pool-lease' "$make_diag" >/dev/null ||
     fail "Make did not use the diagnosed pool-lease Cargo wrapper"
 
+# The snapshot worker builds xtask through exactly one Cargo invocation while the target-pool
+# lease remains owned by the attached caller worktree/branch rather than the detached snapshot.
+worker_bin="$TMP_ROOT/worker-bin"
+worker_pool="$TMP_ROOT/worker-pool"
+worker_cargo_capture="$TMP_ROOT/worker-cargo.capture"
+worker_cargo_env_capture="$TMP_ROOT/worker-cargo-env.capture"
+worker_exec_capture="$TMP_ROOT/worker-exec.capture"
+mkdir -p "$worker_bin" "$worker_pool"
+cat >"$worker_bin/cargo" <<'EOF'
+#!/bin/sh
+set -eu
+printf 'cargo=%s\n' "$*" >>"$RSS_WORKER_CARGO_CAPTURE"
+printf 'handshake=%s token=%s\n' "${RSS_CI_LOCAL_HANDSHAKE_FD-absent}" \
+    "${RSS_CI_LOCAL_HANDSHAKE_TOKEN-absent}" >"$RSS_WORKER_CARGO_ENV_CAPTURE"
+mkdir -p "$CARGO_TARGET_DIR/debug"
+cat >"$CARGO_TARGET_DIR/debug/xtask" <<'INNER'
+#!/bin/sh
+set -eu
+{
+    printf 'pid=%s\n' "$$"
+    printf 'cwd=%s\n' "$(pwd -P)"
+    printf 'args=%s\n' "$*"
+} >"$RSS_WORKER_EXEC_CAPTURE"
+INNER
+chmod +x "$CARGO_TARGET_DIR/debug/xtask"
+EOF
+chmod +x "$worker_bin/cargo"
+help_capture="$TMP_ROOT/help-cargo.capture"
+(CDPATH='' cd -- "$root" && PATH="$worker_bin:/usr/bin:/bin" \
+    RSS_WORKER_CARGO_CAPTURE="$help_capture" \
+    RSS_WORKER_CARGO_ENV_CAPTURE="$TMP_ROOT/help-env.capture" \
+    RSS_WORKER_EXEC_CAPTURE="$TMP_ROOT/help-exec.capture" \
+    CARGO_TARGET_DIR="$TMP_ROOT/help-target" \
+    ./hack/cargo.sh xtask ci local --help >/dev/null 2>"$TMP_ROOT/help.diag")
+grep -F -x 'cargo=xtask ci local --help' "$help_capture" >/dev/null ||
+    fail "canonical local CI help did not preserve the Cargo/Clap help path"
+
+if (CDPATH='' cd -- "$root" && PATH="$worker_bin:/usr/bin:/bin" \
+    RSS_COMPILER_CACHE=off RSS_TARGET_POOL_ROOT="$worker_pool" \
+    RSS_WORKER_CARGO_CAPTURE="$worker_cargo_capture" \
+    RSS_WORKER_EXEC_CAPTURE="$worker_exec_capture" \
+    RSS_CI_LOCAL_WORKER=1 RSS_CI_LOCAL_SUPERVISED=1 \
+    RSS_CI_CALLER_WORKTREE="$linked" RSS_CI_CALLER_BRANCH=linked \
+    RSS_CI_LOCAL_HANDSHAKE_FD=0 \
+    RSS_CI_LOCAL_HANDSHAKE_TOKEN=0000000000000000000000000000000000000000000000000000000000000000 \
+    ./hack/cargo.sh __ci-local-worker --base deadbeef </dev/null >/dev/null \
+        2>"$TMP_ROOT/worker-bypass.diag"); then
+    fail "snapshot worker accepted environment-only handshake markers"
+fi
+/usr/bin/python3 - "$root" "$linked" "$worker_bin" "$worker_pool" \
+    "$worker_cargo_capture" "$worker_cargo_env_capture" "$worker_exec_capture" \
+    "$TMP_ROOT/worker.diag" <<'PY'
+import os, subprocess, sys
+root, linked, worker_bin, worker_pool, cargo_capture, cargo_env_capture, exec_capture, diag = sys.argv[1:]
+reader, writer = os.pipe()
+token = b"c" * 32
+os.write(writer, token * 3)
+os.close(writer)
+assert os.read(reader, len(token)) == token
+environment = os.environ.copy()
+environment.update({
+    "PATH": f"{worker_bin}:/usr/bin:/bin",
+    "RSS_COMPILER_CACHE": "off",
+    "RSS_TARGET_POOL_ROOT": worker_pool,
+    "RSS_WORKER_CARGO_CAPTURE": cargo_capture,
+    "RSS_WORKER_CARGO_ENV_CAPTURE": cargo_env_capture,
+    "RSS_WORKER_EXEC_CAPTURE": exec_capture,
+    "RSS_CI_LOCAL_WORKER": "1",
+    "RSS_CI_LOCAL_SUPERVISED": "1",
+    "RSS_CI_CALLER_WORKTREE": linked,
+    "RSS_CI_CALLER_BRANCH": "linked",
+    "RSS_CI_LOCAL_HANDSHAKE_FD": str(reader),
+    "RSS_CI_LOCAL_HANDSHAKE_TOKEN": token.hex(),
+})
+with open(diag, "wb") as stderr:
+    completed = subprocess.run(
+        ["./hack/cargo.sh", "__ci-local-worker", "--base", "deadbeef"],
+        cwd=root, env=environment, pass_fds=(reader,),
+        stdout=subprocess.DEVNULL, stderr=stderr, check=False,
+    )
+raise SystemExit(completed.returncode)
+PY
+[ "$(wc -l <"$worker_cargo_capture" | tr -d ' ')" = 1 ] ||
+    fail "snapshot worker invoked Cargo more than once"
+grep -F -x 'cargo=build --locked -p xtask --timings' "$worker_cargo_capture" >/dev/null ||
+    fail "snapshot worker did not use the exact xtask build command"
+grep -F -x 'handshake=absent token=absent' "$worker_cargo_env_capture" >/dev/null ||
+    fail "snapshot xtask build inherited the private local-CI handshake"
+grep -F -x "cwd=$root" "$worker_exec_capture" >/dev/null ||
+    fail "snapshot xtask did not execute from the committed snapshot root"
+grep -F -x 'args=ci local --base deadbeef' "$worker_exec_capture" >/dev/null ||
+    fail "snapshot worker did not exec the in-process local CI entry"
+worker_slot=$(wrapper_resolved_target "$TMP_ROOT/worker.diag")
+/usr/bin/python3 - "$worker_slot" "$linked" "$worker_exec_capture" <<'PY'
+import json, pathlib, sys
+slot, caller, capture = map(pathlib.Path, sys.argv[1:])
+lease = json.loads((slot / "lease.json").read_text())
+worker_pid = int(next(line.removeprefix("pid=") for line in capture.read_text().splitlines() if line.startswith("pid=")))
+assert lease["worktree"] == str(caller.resolve()), lease
+assert lease["branch"] == "linked", lease
+assert lease["pid"] == worker_pid, (lease, worker_pid)
+PY
+
 policy_root="$TMP_ROOT/compiler cache policy"
 mkdir -p "$policy_root/exact" "$policy_root/missing" "$policy_root/nonexec" \
     "$policy_root/wrong" "$policy_root/symlink"

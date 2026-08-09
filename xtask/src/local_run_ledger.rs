@@ -36,7 +36,6 @@ impl StoredLedger {
 #[derive(Debug)]
 pub(crate) struct LocalRunLedger {
     path: PathBuf,
-    path_text: String,
     state: StoredLedger,
 }
 
@@ -56,8 +55,8 @@ impl LocalRunLedger {
         Self::open(path, branch).map(Some)
     }
 
-    /// Snapshot verify receives the launcher ledger explicitly through private environment.
-    pub(crate) fn for_verify(root: &Path, direct_fast: bool) -> Result<Option<Self>> {
+    /// The provenance-checked snapshot worker receives the attached caller ledger explicitly.
+    pub(crate) fn for_local_worker() -> Result<Option<Self>> {
         match (std::env::var_os(PATH_ENV), std::env::var_os(BRANCH_ENV)) {
             (Some(path), Some(branch)) => {
                 let branch = branch
@@ -65,17 +64,21 @@ impl LocalRunLedger {
                     .map_err(|_| anyhow::anyhow!("{BRANCH_ENV} 不是 UTF-8"))?;
                 Self::open(PathBuf::from(path), branch).map(Some)
             }
-            (None, None) if direct_fast => Self::for_worktree(root),
             (None, None) => Ok(None),
             _ => bail!("{PATH_ENV} 与 {BRANCH_ENV} 必须同时设置"),
         }
     }
 
+    /// Direct `verify --fast` uses the current attached worktree; full verify has no ledger.
+    pub(crate) fn for_verify(root: &Path, direct_fast: bool) -> Result<Option<Self>> {
+        if direct_fast {
+            Self::for_worktree(root)
+        } else {
+            Ok(None)
+        }
+    }
+
     fn open(path: PathBuf, branch: String) -> Result<Self> {
-        let path_text = path
-            .to_str()
-            .context("local resume checkpoint 路径不是 UTF-8")?
-            .to_owned();
         let state = match fs::read(&path) {
             Ok(bytes) => match serde_json::from_slice::<StoredLedger>(&bytes) {
                 Ok(state) if state.schema_version == SCHEMA_VERSION && state.branch == branch => {
@@ -98,19 +101,7 @@ impl LocalRunLedger {
                 StoredLedger::empty(branch)
             }
         };
-        Ok(Self {
-            path,
-            path_text,
-            state,
-        })
-    }
-
-    pub(crate) fn path_text(&self) -> &str {
-        &self.path_text
-    }
-
-    pub(crate) fn branch(&self) -> &str {
-        &self.state.branch
+        Ok(Self { path, state })
     }
 
     pub(crate) fn contains(&self, unit: &str) -> bool {
@@ -123,17 +114,6 @@ impl LocalRunLedger {
         }
         if let Err(error) = self.persist() {
             eprintln!("local resume：保存 checkpoint 失败；本次结果有效，下次将重跑：{error:#}");
-        }
-    }
-
-    /// A snapshot child writes gate results through a second handle. Refresh before the parent
-    /// records later stages so its stale in-memory set cannot overwrite those gate successes.
-    pub(crate) fn refresh(&mut self) {
-        match Self::open(self.path.clone(), self.state.branch.clone()) {
-            Ok(current) => *self = current,
-            Err(error) => {
-                eprintln!("local resume：刷新 checkpoint 失败；保留当前内存状态：{error:#}");
-            }
         }
     }
 
@@ -239,24 +219,6 @@ mod tests {
         let path = root.join("checkpoint.json");
         fs::write(&path, b"not-json")?;
         assert!(!LocalRunLedger::open(path, "feature/a".to_owned())?.contains("gate:fmt"));
-        Ok(())
-    }
-
-    #[test]
-    fn parent_refresh_preserves_snapshot_gate_results_before_stage_write() -> anyhow::Result<()> {
-        let root = crate::testutil::unique_tmp("local-run-ledger-refresh");
-        fs::create_dir_all(&root)?;
-        let path = root.join("checkpoint.json");
-        let mut parent = LocalRunLedger::open(path.clone(), "feature/a".to_owned())?;
-        let mut snapshot = LocalRunLedger::open(path.clone(), "feature/a".to_owned())?;
-        snapshot.mark_passed("gate:fmt".to_owned());
-
-        parent.refresh();
-        parent.mark_passed("stage:check:lib=false:xtask".to_owned());
-
-        let stored = LocalRunLedger::open(path, "feature/a".to_owned())?;
-        assert!(stored.contains("gate:fmt"));
-        assert!(stored.contains("stage:check:lib=false:xtask"));
         Ok(())
     }
 

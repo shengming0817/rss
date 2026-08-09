@@ -18,9 +18,12 @@ use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::env;
 use std::ffi::OsStr;
-use std::fs;
+use std::fs::{self, File};
+use std::io::Read as _;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use workspacefacts::{PackageKey, TargetKind, WorkspaceFacts};
@@ -30,8 +33,33 @@ const POLICY_SCHEMA_VERSION: u8 = 3;
 const UNKNOWN_REVISION: &str = "unknown";
 const GITHUB_EVENT_NAME_ENV: &str = "GITHUB_EVENT_NAME";
 const GITHUB_SHA_ENV: &str = "GITHUB_SHA";
+pub(crate) const LOCAL_WORKER_ENV: &str = "RSS_CI_LOCAL_WORKER";
+pub(crate) const LOCAL_SUPERVISED_ENV: &str = "RSS_CI_LOCAL_SUPERVISED";
+pub(crate) const LOCAL_HANDSHAKE_FD_ENV: &str = "RSS_CI_LOCAL_HANDSHAKE_FD";
+pub(crate) const LOCAL_HANDSHAKE_TOKEN_ENV: &str = "RSS_CI_LOCAL_HANDSHAKE_TOKEN";
+pub(crate) const LOCAL_DEADLINE_ENV: &str = "RSS_CI_LOCAL_DEADLINE";
+pub(crate) const LOCAL_CALLER_WORKTREE_ENV: &str = "RSS_CI_CALLER_WORKTREE";
+pub(crate) const LOCAL_CALLER_BRANCH_ENV: &str = "RSS_CI_CALLER_BRANCH";
+pub(crate) const LOCAL_SNAPSHOT_ROOT_ENV: &str = "RSS_CI_EXPECTED_SNAPSHOT_ROOT";
+pub(crate) const LOCAL_HEAD_ENV: &str = "RSS_CI_EXPECTED_HEAD";
+pub(crate) const LOCAL_BASE_ENV: &str = "RSS_CI_EXPECTED_BASE";
+pub(crate) const LOCAL_MERGE_BASE_ENV: &str = "RSS_CI_EXPECTED_MERGE_BASE";
+pub(crate) const LOCAL_PRIVATE_ENV: &[&str] = &[
+    LOCAL_WORKER_ENV,
+    LOCAL_SUPERVISED_ENV,
+    LOCAL_HANDSHAKE_FD_ENV,
+    LOCAL_HANDSHAKE_TOKEN_ENV,
+    LOCAL_DEADLINE_ENV,
+    LOCAL_CALLER_WORKTREE_ENV,
+    LOCAL_CALLER_BRANCH_ENV,
+    LOCAL_SNAPSHOT_ROOT_ENV,
+    LOCAL_HEAD_ENV,
+    LOCAL_BASE_ENV,
+    LOCAL_MERGE_BASE_ENV,
+];
 const DOCUMENTATION_PATHS: &[&str] = &["README.md", "contracts/README.md"];
 const DOCUMENTATION_PREFIXES: &[&str] = &["docs/", ".github/", ".codex/", "hack/"];
+#[cfg(test)]
 const LOCAL_SNAPSHOT_TARGET_SUFFIX: &str = "ci-local-snapshot";
 #[derive(Clone, Copy)]
 enum XtaskTestScope {
@@ -1764,7 +1792,10 @@ fn pull_request_projection(
 pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     let clock = SystemLocalClock;
     let run_started = clock.now();
-    let context = LocalExecutionContext::new(root, options.base_ref())?;
+    let worker = LocalWorkerProvenance::from_environment()?.context(
+        "ci local 必须通过 make ci 或 ./hack/cargo.sh xtask ci local 的 committed-snapshot supervisor 启动",
+    )?;
+    let context = LocalExecutionContext::from_worker(root, options.base_ref(), &worker)?;
     let entries = context.diff_entries()?;
     let command_facts = CommandWorkspaceFacts::new(context.root());
     let impact = context
@@ -1787,7 +1818,7 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
     let steps = scope_xtask_unit_test_steps(steps, &impact, &entries);
     let only = options.only_set();
     let steps = select_local_steps(steps, &only)?;
-    let mut ledger = crate::local_run_ledger::LocalRunLedger::for_worktree(root)?;
+    let mut ledger = crate::local_run_ledger::LocalRunLedger::for_local_worker()?;
     if options.fresh() {
         ledger
             .as_mut()
@@ -1825,7 +1856,7 @@ pub(crate) fn run_local(root: &Path, options: &LocalOptions) -> Result<()> {
             return Ok(());
         }
         let step_started = clock.now();
-        let result = run_local_step(&context, step, execution_policy, ledger.as_ref());
+        let result = run_local_step(&context, step, execution_policy, ledger.as_mut());
         let result = finalize_local_step_result(step, ledger.as_mut(), result);
         let step_elapsed = clock.elapsed(step_started, clock.now()).as_secs_f64();
         match result {
@@ -1869,13 +1900,6 @@ fn finalize_local_step_result(
     ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
     result: Result<()>,
 ) -> Result<()> {
-    let mut ledger = ledger;
-    if matches!(step, LocalStep::Meta(_))
-        && let Some(ledger) = ledger.as_deref_mut()
-    {
-        // The detached verify child records individual gates through its own handle.
-        ledger.refresh();
-    }
     if result.is_ok()
         && let Some(unit) = step.checkpoint_key()
         && let Some(ledger) = ledger
@@ -1923,18 +1947,133 @@ fn local_impact(root: &Path, base: &str) -> ImpactSet {
     )
 }
 
-/// Immutable source identity shared by local impact analysis and every selected gate. The
-/// private constructor resolves all revisions before creating a detached committed checkout, so
-/// no executor can observe the caller's index, untracked files, or dirty worktree.
+#[derive(Debug)]
+struct LocalWorkerProvenance {
+    caller_worktree: PathBuf,
+    snapshot_root: PathBuf,
+    head: String,
+    base: String,
+    merge_base: String,
+}
+
+impl LocalWorkerProvenance {
+    fn from_environment() -> Result<Option<Self>> {
+        let values = LOCAL_PRIVATE_ENV
+            .iter()
+            .map(|name| (*name, env::var_os(name)))
+            .collect::<BTreeMap<_, _>>();
+        if values.values().all(Option::is_none) {
+            return Ok(None);
+        }
+        let required = |name: &'static str| -> Result<String> {
+            values
+                .get(name)
+                .and_then(Option::as_ref)
+                .context(format!("local CI provenance is partial: {name}"))?
+                .clone()
+                .into_string()
+                .map_err(|_| anyhow::anyhow!("local CI provenance is not UTF-8: {name}"))
+        };
+        if required(LOCAL_WORKER_ENV)? != "1" || required(LOCAL_SUPERVISED_ENV)? != "1" {
+            bail!("local CI worker and supervision markers must both equal 1");
+        }
+        validate_local_handshake(
+            &required(LOCAL_HANDSHAKE_FD_ENV)?,
+            &required(LOCAL_HANDSHAKE_TOKEN_ENV)?,
+        )?;
+        required(LOCAL_DEADLINE_ENV)?
+            .parse::<f64>()
+            .context("local CI deadline is malformed")?;
+        let caller_branch = required(LOCAL_CALLER_BRANCH_ENV)?;
+        let ledger_pair = (
+            env::var_os(crate::local_run_ledger::PATH_ENV),
+            env::var_os(crate::local_run_ledger::BRANCH_ENV),
+        );
+        match (&*caller_branch, &ledger_pair) {
+            ("", (None, None)) => {}
+            ("", _) => bail!("detached local CI caller must not provide a resume ledger"),
+            (_, (Some(_), Some(branch))) if branch.to_str() == Some(caller_branch.as_str()) => {}
+            (_, (Some(_), Some(_))) => bail!("local CI ledger branch does not match caller branch"),
+            (_, _) => bail!("attached local CI caller requires a complete resume ledger"),
+        }
+        let head = required(LOCAL_HEAD_ENV)?;
+        let base = required(LOCAL_BASE_ENV)?;
+        let merge_base = required(LOCAL_MERGE_BASE_ENV)?;
+        validate_revision(&head, "local worker HEAD")?;
+        validate_revision(&base, "local worker base")?;
+        validate_revision(&merge_base, "local worker merge-base")?;
+        if env::var(crate::runtime_root_guard::BASE_ENV)
+            .ok()
+            .as_deref()
+            != Some(merge_base.as_str())
+        {
+            bail!("local worker runtime-root base does not match captured merge-base");
+        }
+        Ok(Some(Self {
+            caller_worktree: PathBuf::from(required(LOCAL_CALLER_WORKTREE_ENV)?),
+            snapshot_root: PathBuf::from(required(LOCAL_SNAPSHOT_ROOT_ENV)?),
+            head,
+            base,
+            merge_base,
+        }))
+    }
+}
+
+fn validate_local_handshake(descriptor: &str, token: &str) -> Result<()> {
+    let descriptor = descriptor
+        .parse::<i32>()
+        .context("local CI handshake descriptor is malformed")?;
+    if descriptor < 0 || token.len() != 64 || !token.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("local CI handshake is malformed");
+    }
+    let expected = token
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let text =
+                std::str::from_utf8(pair).context("local CI handshake token is not UTF-8")?;
+            u8::from_str_radix(text, 16).context("local CI handshake token is not hexadecimal")
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let handshake = File::open(format!("/dev/fd/{descriptor}"))
+        .context("open inherited local CI handshake descriptor")?;
+    let mut observed = [0_u8; 32];
+    (&handshake)
+        .read_exact(&mut observed)
+        .context("read inherited local CI handshake")?;
+    if observed.as_slice() != expected.as_slice() {
+        bail!("local CI handshake token does not match inherited descriptor");
+    }
+    Ok(())
+}
+
+enum LocalSource {
+    #[cfg(test)]
+    Committed(CommittedSnapshot),
+    Worker(PathBuf),
+}
+
+impl LocalSource {
+    fn root(&self) -> &Path {
+        match self {
+            #[cfg(test)]
+            Self::Committed(snapshot) => snapshot.root(),
+            Self::Worker(root) => root,
+        }
+    }
+}
+
+/// Immutable source identity shared by local impact analysis and every selected gate.
 struct LocalExecutionContext {
     base: String,
     head: String,
     merge_base: String,
     cargo_target: PathBuf,
-    snapshot: CommittedSnapshot,
+    source: LocalSource,
 }
 
 impl LocalExecutionContext {
+    #[cfg(test)]
     fn new(repository: &Path, base: &str) -> Result<Self> {
         let base = resolve_commit(repository, base)?;
         let head = resolve_commit(repository, "HEAD")?;
@@ -1950,12 +2089,72 @@ impl LocalExecutionContext {
             head,
             merge_base: merge_base.to_owned(),
             cargo_target,
-            snapshot,
+            source: LocalSource::Committed(snapshot),
+        })
+    }
+
+    fn from_worker(repository: &Path, base: &str, worker: &LocalWorkerProvenance) -> Result<Self> {
+        let root = fs::canonicalize(repository).context("canonicalize local worker root")?;
+        let expected_root = fs::canonicalize(&worker.snapshot_root)
+            .context("canonicalize expected local worker snapshot root")?;
+        if root != expected_root {
+            bail!("local worker workspace root does not match committed snapshot root");
+        }
+        let current = env::current_dir()
+            .context("read local worker current directory")?
+            .canonicalize()
+            .context("canonicalize local worker current directory")?;
+        if current != root {
+            bail!("local worker current directory does not match compiled workspace root");
+        }
+        if base != worker.base {
+            bail!("local worker --base does not match captured base revision");
+        }
+        let observed_head = git_stdout(&root, ["rev-parse", "--verify", "HEAD"])?;
+        if observed_head.trim() != worker.head {
+            bail!("local worker HEAD does not match captured committed HEAD");
+        }
+        let symbolic = external_cmd(
+            ExternalProgram::SystemGit,
+            &["symbolic-ref", "--quiet", "HEAD"],
+            &[],
+            Some(&root),
+        )
+        .status()
+        .context("inspect local worker detached HEAD")?;
+        if symbolic.success() {
+            bail!("local worker snapshot must use detached HEAD");
+        }
+        let dirty = git_stdout(&root, ["status", "--porcelain", "--untracked-files=all"])?;
+        if !dirty.is_empty() {
+            bail!("local worker committed snapshot is dirty");
+        }
+        let observed_merge = git_stdout(
+            &root,
+            ["merge-base", worker.base.as_str(), worker.head.as_str()],
+        )?;
+        if observed_merge.trim() != worker.merge_base {
+            bail!("local worker merge-base does not match captured revision identity");
+        }
+        let caller = fs::canonicalize(&worker.caller_worktree)
+            .context("canonicalize local worker caller worktree")?;
+        if caller == root {
+            bail!("local worker caller worktree must differ from committed snapshot root");
+        }
+        let cargo_target = env::var_os("CARGO_TARGET_DIR")
+            .map(PathBuf::from)
+            .context("local worker requires CARGO_TARGET_DIR from the controlled wrapper")?;
+        Ok(Self {
+            base: worker.base.clone(),
+            head: worker.head.clone(),
+            merge_base: worker.merge_base.clone(),
+            cargo_target,
+            source: LocalSource::Worker(root),
         })
     }
 
     fn root(&self) -> &Path {
-        self.snapshot.root()
+        self.source.root()
     }
 
     fn cargo_target_text(&self) -> Result<&str> {
@@ -1997,6 +2196,7 @@ impl LocalExecutionContext {
     }
 }
 
+#[cfg(test)]
 fn snapshot_target_dir(repository: &Path, ambient: Option<&OsStr>) -> Result<PathBuf> {
     let base = if let Some(ambient) = ambient {
         let ambient = PathBuf::from(ambient);
@@ -2016,6 +2216,7 @@ fn snapshot_target_dir(repository: &Path, ambient: Option<&OsStr>) -> Result<Pat
     Ok(base.join(LOCAL_SNAPSHOT_TARGET_SUFFIX))
 }
 
+#[cfg(test)]
 fn snapshot_cache_dir(repository: &Path, cargo_target: &Path) -> Result<PathBuf> {
     let repository_text = repository
         .to_str()
@@ -2028,6 +2229,7 @@ fn snapshot_cache_dir(repository: &Path, cargo_target: &Path) -> Result<PathBuf>
         .join(sha256(repository_text.as_bytes())))
 }
 
+#[cfg(test)]
 fn ensure_private_cache_dir(path: &Path) -> Result<()> {
     fs::create_dir_all(path).context("create committed CI snapshot cache")?;
     let metadata = fs::symlink_metadata(path).context("inspect committed CI snapshot cache")?;
@@ -2045,17 +2247,20 @@ fn ensure_private_cache_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 static SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// An isolated checkout of one committed revision. Local impact classification must not read
 /// manifests, contract metadata, generated files, or package topology from the caller's dirty
 /// working tree after the diff revisions have been resolved.
+#[cfg(test)]
 struct CommittedSnapshot {
     scratch: PathBuf,
     root: PathBuf,
     persistent: bool,
 }
 
+#[cfg(test)]
 impl CommittedSnapshot {
     fn checkout(repository: &Path, revision: &str, cache_root: &Path) -> Result<Self> {
         let repository_text = repository
@@ -2156,6 +2361,7 @@ impl CommittedSnapshot {
     }
 }
 
+#[cfg(test)]
 impl Drop for CommittedSnapshot {
     fn drop(&mut self) {
         if !self.persistent {
@@ -2164,6 +2370,7 @@ impl Drop for CommittedSnapshot {
     }
 }
 
+#[cfg(test)]
 fn resolve_commit(root: &Path, revision: &str) -> Result<String> {
     let commit = format!("{revision}^{{commit}}");
     let output = git_stdout(
@@ -2385,10 +2592,16 @@ fn run_local_step(
     context: &LocalExecutionContext,
     step: &LocalStep,
     execution_policy: crate::cmd::ExecutionPolicy,
-    ledger: Option<&crate::local_run_ledger::LocalRunLedger>,
+    ledger: Option<&mut crate::local_run_ledger::LocalRunLedger>,
 ) -> Result<()> {
     match step {
-        LocalStep::Meta(gates) => run_snapshot_verify(context, gates, execution_policy, ledger),
+        LocalStep::Meta(gates) => crate::verify::run_local_meta(
+            context.root(),
+            gates,
+            &context.merge_base,
+            execution_policy,
+            ledger,
+        ),
         LocalStep::PythonHooks => {
             let status = external_cmd(
                 ExternalProgram::SystemPython,
@@ -2439,54 +2652,6 @@ fn run_local_step(
             execution_policy,
         ),
     }
-}
-
-fn run_snapshot_verify(
-    context: &LocalExecutionContext,
-    gates: &[GateId],
-    execution_policy: crate::cmd::ExecutionPolicy,
-    ledger: Option<&crate::local_run_ledger::LocalRunLedger>,
-) -> Result<()> {
-    let mut args = vec!["verify"];
-    for gate in gates {
-        args.extend(["--only", gate.spec().label()]);
-    }
-    if !execution_policy.keeps_going() {
-        args.push("--fail-fast");
-    }
-    args.extend(["--against", context.merge_base.as_str()]);
-    let target = context.cargo_target_text()?;
-    let environment = snapshot_verify_environment(context, target, ledger);
-    let status = cargo_cmd(
-        CargoSubcommand::Xtask,
-        &args,
-        &environment,
-        Some(context.root()),
-    )
-    .status()?;
-    if !status.success() {
-        bail!("ci local snapshot verify failed");
-    }
-    Ok(())
-}
-
-fn snapshot_verify_environment<'a>(
-    context: &'a LocalExecutionContext,
-    cargo_target: &'a str,
-    ledger: Option<&'a crate::local_run_ledger::LocalRunLedger>,
-) -> Vec<(&'static str, &'a str)> {
-    let mut environment = vec![
-        ("CARGO_TARGET_DIR", cargo_target),
-        (
-            crate::runtime_root_guard::BASE_ENV,
-            context.merge_base.as_str(),
-        ),
-    ];
-    if let Some(ledger) = ledger {
-        environment.push((crate::local_run_ledger::PATH_ENV, ledger.path_text()));
-        environment.push((crate::local_run_ledger::BRANCH_ENV, ledger.branch()));
-    }
-    environment
 }
 
 fn run_package_operation(
@@ -5262,14 +5427,21 @@ mod tests {
                 &BTreeSet::new(),
                 &BTreeMap::new(),
             );
+            let steps = local_steps(&impact)
+                .iter()
+                .map(LocalStep::label)
+                .collect::<Vec<_>>();
             assert_eq!(
-                local_steps(&impact)
-                    .iter()
-                    .map(LocalStep::label)
-                    .collect::<Vec<_>>(),
-                vec![LocalStep::Meta(local_meta_gates(None)).label()],
-                "controlled carrier {path} must run meta"
+                steps.first(),
+                Some(&LocalStep::Meta(local_meta_gates(None)).label()),
+                "controlled carrier {path} must run meta first"
             );
+            if *path == "hack/cargo.sh" {
+                assert!(
+                    steps.contains(&LocalStep::CargoWrapperSelftest.label()),
+                    "the executable wrapper carrier must also run its selftest"
+                );
+            }
         }
     }
 
@@ -5533,27 +5705,25 @@ mod tests {
     }
 
     #[test]
-    fn meta_child_refresh_preserves_gate_successes_before_later_stage_write() -> Result<()> {
-        let root = crate::testutil::unique_tmp("ci-impact-meta-refresh");
+    fn single_worker_ledger_preserves_gate_successes_before_later_stage_write() -> Result<()> {
+        let root = crate::testutil::unique_tmp("ci-impact-single-ledger");
         fs::create_dir_all(&root)?;
         let path = root.join("checkpoint.json");
-        let mut parent =
+        let mut ledger =
             crate::local_run_ledger::LocalRunLedger::fixture(path.clone(), "feature/resume")?;
-        let mut child =
-            crate::local_run_ledger::LocalRunLedger::fixture(path.clone(), "feature/resume")?;
-        child.mark_passed("gate:fmt".to_owned());
+        ledger.mark_passed("gate:fmt".to_owned());
 
         let meta = LocalStep::Meta(vec![GateId::Fmt]);
         assert!(
             finalize_local_step_result(
                 &meta,
-                Some(&mut parent),
+                Some(&mut ledger),
                 Err(anyhow::anyhow!("one gate failed")),
             )
             .is_err()
         );
         let later = LocalStep::CargoWrapperSelftest;
-        finalize_local_step_result(&later, Some(&mut parent), Ok(()))?;
+        finalize_local_step_result(&later, Some(&mut ledger), Ok(()))?;
 
         let stored = crate::local_run_ledger::LocalRunLedger::fixture(path, "feature/resume")?;
         assert!(stored.contains("gate:fmt"));
@@ -6029,20 +6199,6 @@ mod tests {
         assert_eq!(context.base, base);
         assert_eq!(context.head, head);
         assert_eq!(context.merge_base, context.base);
-        assert_eq!(
-            snapshot_verify_environment(&context, "/tmp/isolated-target", None),
-            vec![
-                ("CARGO_TARGET_DIR", "/tmp/isolated-target"),
-                (crate::runtime_root_guard::BASE_ENV, base.as_str()),
-            ],
-            "snapshot verify must bind the root ratchet to the same resolved base commit as --against"
-        );
-        let ledger = crate::local_run_ledger::LocalRunLedger::for_worktree(&root)?
-            .context("attached fixture must have a local resume ledger")?;
-        let handed_off =
-            snapshot_verify_environment(&context, "/tmp/isolated-target", Some(&ledger));
-        assert!(handed_off.contains(&(crate::local_run_ledger::PATH_ENV, ledger.path_text())));
-        assert!(handed_off.contains(&(crate::local_run_ledger::BRANCH_ENV, ledger.branch())));
         assert_ne!(context.root(), root);
         assert_eq!(
             git_stdout(context.root(), ["rev-parse", "HEAD"])?.trim(),
@@ -6107,14 +6263,6 @@ mod tests {
         assert_eq!(context.base, advanced_base);
         assert_eq!(context.head, local_head);
         assert_eq!(context.merge_base, common);
-        assert_eq!(
-            snapshot_verify_environment(&context, "/tmp/isolated-target", None),
-            vec![
-                ("CARGO_TARGET_DIR", "/tmp/isolated-target"),
-                (crate::runtime_root_guard::BASE_ENV, common.as_str()),
-            ],
-            "local gates must compare against the shared merge base, not a newer sibling base"
-        );
         drop(context);
         fs::remove_dir_all(root)?;
         Ok(())

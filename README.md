@@ -54,16 +54,20 @@ make ci-full                             # 显式执行 release-check（workspac
 ./hack/cargo.sh xtask ci full
 ```
 
-Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap。直接运行 `cargo xtask ...`
-仍执行相同 typed gate plan，并与 wrapper 共用 worktree-local target 默认值；但启动 xtask 的外层 Cargo
-不会获得 wrapper 的 build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，因此不是等价入口。
+Make 通过 `hack/cargo.sh` 启动治理命令。`ci local` 是特殊的 snapshot-first 入口：wrapper 在任何 Cargo
+启动前转交 Python supervisor，supervisor 固定 base/HEAD/merge-base 并物化 detached committed snapshot，
+随后只从 snapshot 的 wrapper 构建一次 xtask；impact planning、gate selection 和 gate execution 均由该唯一
+snapshot worker 完成。直接 `cargo xtask ci local` 缺少这一来源边界，因而 fail-closed；使用 `make ci` 或
+`./hack/cargo.sh xtask ci local --base ...`。其他 `cargo xtask ...` 仍可直接运行，但不会获得 wrapper 的
+build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，因此不是等价入口。
 
 `ci local` 只读取 `<base>...HEAD` 的已提交项目差异，不扫描 untracked、本地工具或额外工作区文件。
 无差异直接成功；docs-only 和 unknown-only 只运行 `verify --fast` 门集对应的 `meta`（真源
 `xtask/src/verify.rs`）；Rust、contract 与 generated 影响运行反向依赖 check 和直接
 影响包 test/clippy。未知路径本地忽略并留痕，但不会抹掉同一 diff 中已知包的定向测试；rename/copy 运行
 affected 域 `meta`（域集由 CI/verify 投影派生，不在此维护数量），影响分析失败直接报错。本地
-preflight 的 worker 进程组受 600 秒 wall-clock deadline 约束，且不运行
+preflight 的 snapshot checkout、xtask build 与全部 gate 共用一个受 600 秒 wall-clock deadline 约束的
+worker 进程组，且不运行
 coverage、audit 或真实后端 integration；需要人工诊断无条件全量门时使用 `make ci-full`。
 
 本地 `verify`、`ci local` 与 `ci full` 默认 keep-going：聚合层继续执行后续 gate/stage，Cargo
