@@ -36,6 +36,11 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 > 同批新增序号唯一性机器门（见 §命名；#1998 起由 inventory Hard SoT 承载，原 `cargo xtask migrations` Medium 门已退役）。ADR 见
 > `docs/architecture/202606271500-011-migration-serial-renumber.md`。
 >
+> **窄例外（#2060，pre-GA Projection source SQL 归位）**：项目仍无已部署 DB，因而不存在持有旧
+> `0088`/`0093` checksum 的 `_sqlx_migrations`。本次仅把误放在 `0093` 的 scoped read 定义归还给其唯一
+> owner `0088`，并删除 `0093` 对 scoped read/high-water 的后置覆盖；不建立历史 migration 语义改写的通用许可。
+> 依据与失效边界见 ADR-011 §2.5。
+>
 > **例外扩展（#1255，pre-GA residual duplicate carve-out）**：PR329 后 `develop` 再次残留两个 `0020`
 >（`0020_add_inbox_dedup_sweep_index.sql` / `0020_harden_dead_letter_rls.sql`）。本 PR 仅重编号后者及其后续
 > dead-letter sweep migration（`0021`/`0022`），不改 SQL 语义；RLS predicate 修复改用新的 `0024` 前向迁移。
@@ -1610,8 +1615,13 @@ digest 与 generated input generation；read/high-water 还必须提交 issuer �
 空 source；它以 SQLSTATE `22023` 表示 permanent/invariant identity drift，不可自动重试。scope 有效但尚无已提交
 event 时返回 `NULL`（typed `None`）。一个函数调用只对该 scope 的每个静态 binding 执行一次 indexed tail seek，
 再合并 committed LSN；相同静态 binding 集的 SQL 次数不随 `projection_events` 历史长度增长。真实 PostgreSQL
-conformance 以 100,000 行无关历史、非空 relation block 前置条件与 shared-buffer 上限锁定该 T2 seam，不能外推为
-T3 production acceptance。
+conformance 以 100,000 行无关历史、非空 relation block 前置条件、shared-buffer 小于 ledger relation pages 且不超过
+128 blocks 的 ledger-independent 固定预算锁定该 T2 seam，不能外推为 T3 production acceptance。
+
+scoped read 对 known domain/contract/topic 的 version/schema drift 保留 metadata identity、返回空 payload，令 sealed
+target 产生 typed Invariant poison；只有完整 identity 精确命中的 binding 才释放 payload。该 source 行为与 high-water、
+capability、复合尾查索引均只由 `0088` 定义。尾查以 `id DESC NULLS LAST` 明确匹配同定义索引；`id` 为 NOT NULL，
+所以不改变结果，只防止 planner 将等值前缀折叠后误选全 ledger 的主键倒扫。
 
 `0088` 不替换 `rss_append_projection_event` 的全局
 `pg_advisory_xact_lock(hashtextextended('rss.projection_events.append', 0))`。该 transaction advisory lock 仍在
@@ -1732,7 +1742,7 @@ wait、tenant fairness、throughput、业务事务延迟与 X01 替换阈值。
      FROM public._sqlx_migrations;
 
    SELECT pg_catalog.pg_get_indexdef(index_rel.oid, 0, false) =
-              'CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events USING btree (domain, contract_id, contract_version, schema_hash, event_type, ((metadata ->> ''tenantId''::text)), id DESC)'
+              'CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events USING btree (domain, contract_id, contract_version, schema_hash, event_type, ((metadata ->> ''tenantId''::text)), id DESC NULLS LAST)'
               AS exact_definition,
           index_status.indisvalid,
           index_status.indisready
@@ -1870,8 +1880,7 @@ persistent LSN order、current row、receipt 与 high-water 在同一 statement 
    serving/operator，也禁止手工补 grant 或直接执行函数 DDL。
 3. **Postflight**：确认 ledger=93；函数 owner 属性与 `search_path` 精确；app/operator 只有函数 EXECUTE、三张表
    无 raw write；reader/PUBLIC 无 EXECUTE。分别以 app/operator 在回滚事务中验证 unset/mismatch 均 `P1902`、match
-   可 `applied`。同时验证 scoped source 对同 tenant、known binding 的 version/schema drift 返回 metadata-only poison
-   （payload 长度为 0），而非静默过滤或释放 raw payload。
+   可 `applied`。
 4. **恢复边界**：若 ledger 仍为 92 且 catalog 确认 0093 全部回滚，才可恢复旧 binary；若 ledger 已为 93，严禁
    恢复旧 binary，只能修正新镜像/凭据并重做 postflight 后逐步启动同一新版本。正式 shadow worker 激活仍由 #1920
    负责，serving promotion 仍由 #1921 负责。

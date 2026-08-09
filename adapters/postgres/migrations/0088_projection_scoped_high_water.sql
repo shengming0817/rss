@@ -24,7 +24,7 @@ ON public.projection_events (
     schema_hash,
     event_type,
     (metadata ->> 'tenantId'),
-    id DESC
+    id DESC NULLS LAST
 );
 
 CREATE TABLE public.projection_source_capabilities (
@@ -303,7 +303,19 @@ BEGIN
            event.domain,
            event.aggregate_id,
            event.event_type,
-           event.payload,
+           CASE WHEN EXISTS (
+               SELECT 1
+               FROM public.projection_input_bindings AS exact_binding
+               WHERE exact_binding.generation = p_input_generation
+                 AND exact_binding.projection_id = p_projection_id
+                 AND exact_binding.projection_definition_version = p_definition_version
+                 AND exact_binding.projection_definition_schema_digest = p_definition_schema_digest
+                 AND exact_binding.source_domain = event.domain
+                 AND exact_binding.contract_id = event.contract_id
+                 AND exact_binding.contract_version = event.contract_version
+                 AND exact_binding.schema_hash = event.schema_hash
+                 AND exact_binding.topic = event.event_type
+           ) THEN event.payload ELSE ''::bytea END,
            event.contract_id,
            event.contract_version,
            event.schema_hash,
@@ -315,16 +327,14 @@ BEGIN
       AND event.metadata ->> 'tenantId' = p_tenant_id::text
       AND EXISTS (
           SELECT 1
-          FROM public.projection_input_bindings AS binding
-          WHERE binding.generation = p_input_generation
-            AND binding.projection_id = p_projection_id
-            AND binding.projection_definition_version = p_definition_version
-            AND binding.projection_definition_schema_digest = p_definition_schema_digest
-            AND binding.source_domain = event.domain
-            AND binding.contract_id = event.contract_id
-            AND binding.contract_version = event.contract_version
-            AND binding.schema_hash = event.schema_hash
-            AND binding.topic = event.event_type
+          FROM public.projection_input_bindings AS candidate_binding
+          WHERE candidate_binding.generation = p_input_generation
+            AND candidate_binding.projection_id = p_projection_id
+            AND candidate_binding.projection_definition_version = p_definition_version
+            AND candidate_binding.projection_definition_schema_digest = p_definition_schema_digest
+            AND candidate_binding.source_domain = event.domain
+            AND candidate_binding.contract_id = event.contract_id
+            AND candidate_binding.topic = event.event_type
       )
     ORDER BY event.id ASC
     LIMIT p_limit;
@@ -378,13 +388,7 @@ BEGIN
           AND event.contract_version = binding_row.contract_version
           AND event.schema_hash = binding_row.schema_hash
           AND event.event_type = binding_row.topic
-        ORDER BY event.domain,
-                 event.contract_id,
-                 event.contract_version,
-                 event.schema_hash,
-                 event.event_type,
-                 event.metadata ->> 'tenantId',
-                 event.id DESC
+        ORDER BY event.id DESC NULLS LAST
         LIMIT 1;
 
         IF binding_high_water IS NOT NULL

@@ -1070,7 +1070,7 @@ const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
     "sha256:cad2f8308d618a8228b4eda3aea2404a888ff8f131a8ee5fe7671ce4729bd8cf";
 const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
-    "sha256:bcd85f1793dbd7b52b3b1cf92ed835db90b9866e5f29520520878a061fa3c6d8";
+    "sha256:418e6a58c9bc4c5fbcf9513b0beadbd3ece9b80acd617d56e9489fac5477c696";
 const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
     "sha256:630d472191ed562717aec601d5f32d248e06c23c1b7bd1aa75d7707f4e7bfed7";
 const EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT: &str =
@@ -1986,7 +1986,7 @@ impl PgStore {
                            AND index_row.indisvalid
                            AND index_row.indisready
                            AND pg_catalog.pg_get_indexdef(index_row.indexrelid) =
-                               'CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events USING btree (domain, contract_id, contract_version, schema_hash, event_type, ((metadata ->> ''tenantId''::text)), id DESC)'
+                               'CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events USING btree (domain, contract_id, contract_version, schema_hash, event_type, ((metadata ->> ''tenantId''::text)), id DESC NULLS LAST)'
                        )
                     FROM pg_catalog.pg_index AS index_row
                     JOIN pg_catalog.pg_class AS index_relation

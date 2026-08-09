@@ -340,9 +340,6 @@ fn settings_projection_apply_is_one_metadata_only_function_with_exact_acl() {
         "REVOKE INSERT, UPDATE, DELETE, TRUNCATE ON TABLE public.settings_projection_generations, public.settings_config_projection_rows, public.settings_projection_dedupe_receipts FROM rss_app, rss_app_read, rss_projection_operator",
         ") FROM PUBLIC, rss_app_read, rss_projection_reader, rss_projection_operator, rss_app",
         ") TO rss_app, rss_projection_operator",
-        "CASE WHEN EXISTS",
-        "THEN event.payload ELSE ''::bytea END",
-        "candidate_binding.contract_id = event.contract_id",
     ] {
         assert!(
             normalized.contains(required),
@@ -363,6 +360,8 @@ fn settings_projection_apply_is_one_metadata_only_function_with_exact_acl() {
         "GRANT INSERT ON TABLE public.settings_projection_generations TO rss_app",
         "GRANT UPDATE ON TABLE public.settings_config_projection_rows TO rss_app",
         "GRANT EXECUTE ON FUNCTION public.rss_settings_projection_apply( uuid, text, text, text, text, text, text, bigint, text, text, bigint, bigint, bytea ) TO PUBLIC",
+        "rss_read_projection_events_scoped",
+        "rss_projection_source_high_water_scoped",
     ] {
         assert!(
             !normalized.contains(forbidden),
@@ -555,7 +554,7 @@ fn projection_scoped_high_water_is_exact_indexed_and_function_only() {
         "SET LOCAL statement_timeout = '5min'",
         "ALTER ROLE rss_projection_reader RESET default_transaction_read_only",
         "DROP FUNCTION public.rss_read_projection_events_scoped( uuid, text, text, text, text, bigint, integer )",
-        "CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events ( domain, contract_id, contract_version, schema_hash, event_type, (metadata ->> 'tenantId'), id DESC )",
+        "CREATE INDEX idx_projection_events_scoped_tail ON public.projection_events ( domain, contract_id, contract_version, schema_hash, event_type, (metadata ->> 'tenantId'), id DESC NULLS LAST )",
         "CREATE TABLE public.projection_source_capabilities",
         "capability_digest bytea PRIMARY KEY",
         "scope_tenant_id uuid NOT NULL",
@@ -590,10 +589,13 @@ fn projection_scoped_high_water_is_exact_indexed_and_function_only() {
         "INSERT INTO public.projection_source_capabilities",
         "pg_catalog.clock_timestamp() + interval '30 seconds'",
         "PERFORM public.rss_assert_projection_source_scope( true, p_capability_first, p_capability_second, p_tenant_id, p_projection_id, p_definition_version, p_definition_schema_digest, p_input_generation )",
+        "CASE WHEN EXISTS",
+        "THEN event.payload ELSE ''::bytea END",
+        "candidate_binding.contract_id = event.contract_id",
         "WHERE binding.generation = p_input_generation AND binding.projection_id = p_projection_id AND binding.projection_definition_version = p_definition_version AND binding.projection_definition_schema_digest = p_definition_schema_digest",
         "FOR binding_row IN SELECT binding.source_domain, binding.contract_id, binding.contract_version, binding.schema_hash, binding.topic FROM public.projection_input_bindings AS binding",
         "SELECT event.id INTO binding_high_water FROM public.projection_events AS event WHERE event.metadata ->> 'tenantId' = p_tenant_id::text AND event.domain = binding_row.source_domain AND event.contract_id = binding_row.contract_id AND event.contract_version = binding_row.contract_version AND event.schema_hash = binding_row.schema_hash AND event.event_type = binding_row.topic",
-        "ORDER BY event.domain, event.contract_id, event.contract_version, event.schema_hash, event.event_type, event.metadata ->> 'tenantId', event.id DESC LIMIT 1",
+        "ORDER BY event.id DESC NULLS LAST LIMIT 1",
         "binding_high_water IS NOT NULL AND (high_water IS NULL OR binding_high_water > high_water)",
         "ALTER FUNCTION public.rss_projection_source_high_water_scoped( uuid, uuid, uuid, text, text, text, text ) OWNER TO rss_projection_source_reader_owner",
         "REVOKE ALL ON FUNCTION public.rss_assert_projection_source_scope( boolean, uuid, uuid, uuid, text, text, text, text ) FROM PUBLIC, rss_projection_reader, rss_projection_operator",
@@ -727,10 +729,8 @@ fn assert_projection_high_water_uses_static_composite_tail(high_water_body: &str
         .split_once("END LOOP")
         .map_or("", |(body, _)| body);
     assert!(
-        tail_seek.contains(
-            "ORDER BY event.domain, event.contract_id, event.contract_version, event.schema_hash, event.event_type, event.metadata ->> 'tenantId', event.id DESC LIMIT 1"
-        ),
-        "0088 must align each static binding tail seek with the complete composite index order"
+        tail_seek.contains("ORDER BY event.id DESC NULLS LAST LIMIT 1"),
+        "0088 must use the scoped-tail index's explicit null ordering"
     );
     assert!(
         !tail_seek.contains("EXECUTE")

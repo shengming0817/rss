@@ -2,7 +2,7 @@
 
 - **状态**：Accepted（#1998 修订：连续性 / 固定四位假门退役；唯一性上移 inventory Hard SoT；`MIGRATION-SERIAL-UNIQUE-01` Medium 门删除）
 - **日期**：2026-06-27
-- **关联**：issue #1134 [infra-deploy]（容器化交付时 E2E 首次对真实 PG 跑 `run_migrations` 暴露本 bug）；issue #1998（假连续性门清理 + Migrator 同源 inventory）
+- **关联**：issue #1134 [infra-deploy]（容器化交付时 E2E 首次对真实 PG 跑 `run_migrations` 暴露本 bug）；issue #1998（假连续性门清理 + Migrator 同源 inventory）；issue #2060（未部署 migration 中 Projection source SQL 归位）
 - **归属**：framework（持久化基座 / 迁移治理，provider-agnostic）
 - **AI-robust 评级**：序号唯一性 + version/checksum 同源 = **Hard**（`postgres-migration-inventory` build.rs 调用 `sqlx_core::migrate::resolve_blocking`，INVARIANT `POSTGRES-MIGRATION-INVENTORY-01`）
 
@@ -67,6 +67,16 @@ SQLx 真正关心 version 唯一、排序、checksum 与成功/失败状态，**
 3. 删除 Medium `migrations-serial` / `MIGRATION-SERIAL-UNIQUE-01` 整扇门（含 `cargo xtask migrations`），避免双 parser。
 4. 保留 serving SQL-text-free（sqlx-core 仅 build-dep）与 ledger dirty/failed/checksum 匹配。
 5. **不重编号**任何已存在 migration 文件。
+
+### 2.5 #2060 窄例外：未部署 Projection source SQL 归位
+
+用户已确认项目仍为 pre-GA 且从未部署，不存在持有旧 `0088`/`0093` checksum 的数据库。`0093` 曾在 Settings
+Projection apply funnel 之外后置覆盖 `0088` 的 scoped read 与 high-water，其中 high-water 放宽 binding identity
+并退化为 ledger 宽扫描。#2060 原地整理这段尚未部署的 migration history：metadata-only poison read 归还 `0088`，
+`0093` 只保留 Settings apply funnel，错误 high-water 定义直接删除。
+
+该决定不建立历史 migration 内容可任意改写的通用许可，只覆盖这次 owner 归位与错误覆盖删除；一旦出现部署 DB、
+旧 checksum 或 GA 发布，本例外立即失效，后续修正必须恢复严格 forward-only。
 
 ## 3. 备选与否决
 
