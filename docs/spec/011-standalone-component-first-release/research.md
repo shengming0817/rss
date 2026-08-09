@@ -11,6 +11,19 @@
 
 本规格不复制 package inventory、代码行数或 API 符号快照。实现 PBI 必须重新从当前 Cargo metadata 与源码读取事实。
 
+## NW-003 设计依据
+
+- 当前 `diagctx` 同时公开 `ctx/local` 模块与根级 re-export，internal public-api snapshot 因而有双路径；这不是
+  候选应继承的 SemVer 面。其 parse、ambient `Option` 与 opaque future 已证明输入拒绝和传播 fail-open 可行。
+- 当前 `tracewire` 已隐藏 OTel SDK 类型，但 restore 仍接受裸 `&str` 并返回 `()`；无法区分 malformed、
+  oversized、unsupported 与 attach unavailable。HTTP adapter 另有 validator，说明验证 owner 尚未收口。
+- 两个 package 目前均 `publish = false`、未被 Release Surface 选中；现有 `public-api/*.txt` 是 internal snapshot，
+  不能冒充 Release API proof。#2047/#2048 分别拥有 baseline 分离与 release-selected leakage gate。
+- Tokio task-local 采用 `try_with` 而非缺值 panic 的 `with`；RSS 将缺诊断稳定为 `None`。OTel 0.32 propagator的
+  SDK parser/error/context 在私有 adapter 层结束；候选只承诺 W3C 1.1 线语义和无原始输入的闭值分类。
+- #1400 已由 `rss_diagctx_auth_source` 吸收：授权 owner 的真实 `diagctx` path 由 HIR `DefId` 门约束，HTTP audit
+  enrichment 物理移出决策模块。精确 API 与预算只以 [`spec.md`](spec.md#nw-003-规范性窄腰契约) 为准。
+
 ## 候选选择
 
 首批只选择两个低依赖、框架中立的候选，以验证两类独立价值：
@@ -58,7 +71,7 @@ revision 生成 `.crate` 并在 workspace 外完成 canonical proof；真实 con
 | 候选依赖 internal crate | Cargo dependency/publish closure | Hard graph + Medium package check |
 | SDK/test-util 泄漏 | visibility、public signature、release API baseline | Hard/Medium T1 |
 | malformed trace 静默丢失 | 闭值诊断 outcome + tarball consumer | Medium T1 |
-| 诊断输入影响授权 | 类型/模块隔离与真实 consumer test | Hard 优先，补充 T1 |
+| 诊断输入影响授权 | 独立 crate/type/task-local + `rss_diagctx_auth_source` | 类型/crate 隔离 Hard + resolved-`DefId` 模块/path Dylint Medium |
 | workspace build 掩盖 tarball 缺陷 | actual `.crate` + external Cargo invocation | Medium T1/T2 接缝 |
 | 未经批准宣称发布 | human-owned closeout + release documentation | 人工决策；不伪装为代码 gate |
 

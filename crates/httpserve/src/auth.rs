@@ -52,6 +52,7 @@ use tower::Layer;
 use tower::Service;
 use vocab::{PrincipalKind, ProjectionField, RoutePermissionId, TenantId};
 
+use crate::auth_audit::record_auth_audit;
 use crate::middleware::RequestId;
 use crate::{PrimaryRouteAuthz, RoutePermission, RouteResourceScope, RouteTenantBinding};
 
@@ -963,6 +964,14 @@ impl AuthAudit {
     pub(crate) fn new(sink: AuditSinkHandle, clock: Arc<dyn diport::Clock>) -> Self {
         Self { sink, clock }
     }
+
+    pub(crate) fn now(&self) -> std::time::SystemTime {
+        self.clock.now()
+    }
+
+    pub(crate) async fn record(&self, event: AuditEvent) -> Result<(), AuditSinkError> {
+        self.sink.record(event).await
+    }
 }
 
 // ── PendingScopeCtx ──────────────────────────────────────────────────────────
@@ -1056,7 +1065,7 @@ type DenyFuture<E> = Pin<Box<dyn Future<Output = Result<Response, E>> + Send>>;
 const MTLS_ROUTE_PERMISSION: RoutePermissionId = RoutePermissionId::MtlsInvoke;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum AuthDecision {
+pub(crate) enum AuthDecision {
     Allow,
     Require,
     Deny,
@@ -1071,7 +1080,7 @@ impl AuthDecision {
         }
     }
 
-    fn audit_outcome(self) -> AuditOutcome {
+    pub(crate) fn audit_outcome(self) -> AuditOutcome {
         match self {
             AuthDecision::Allow => AuditOutcome::Success,
             AuthDecision::Require => AuditOutcome::Failure {
@@ -1183,42 +1192,6 @@ fn log_auth_decision(
             ),
         },
     }
-}
-
-fn auth_audit_event(
-    audit: &AuthAudit,
-    decision: AuthDecision,
-    contract_id: &'static str,
-    rid: &str,
-    evidence: &Authenticated,
-) -> AuditEvent {
-    evidence.audit_event(AuthenticatedAuditEvent {
-        occurred_at: audit.clock.now(),
-        tenant_id: evidence.tenant_id(),
-        resource_kind: "http_route",
-        resource_id: contract_id.to_string(),
-        action: "httpserve:authz",
-        outcome: decision.audit_outcome(),
-        request_id: (!rid.is_empty()).then(|| rid.to_string()),
-        correlation_id: diagctx::correlation().map(|c| c.as_str().to_string()),
-    })
-}
-
-async fn record_auth_audit(
-    audit: Option<AuthAudit>,
-    decision: AuthDecision,
-    contract_id: &'static str,
-    rid: String,
-    evidence: Option<Authenticated>,
-) -> Result<(), AuditSinkError> {
-    let Some(audit) = audit else {
-        return Ok(());
-    };
-    let Some(evidence) = evidence else {
-        return Ok(());
-    };
-    let event = auth_audit_event(&audit, decision, contract_id, &rid, &evidence);
-    audit.sink.record(event).await
 }
 
 fn reject_response<E>(decision: AuthDecision, rid: &str) -> DenyFuture<E> {

@@ -1,0 +1,27 @@
+warning: 认证/授权决策边界不得读取 `diagctx` 诊断信道
+  --> $DIR/authn.rs:3:5
+   |
+LL | use diagctx::correlation as ambient_correlation;
+   |     ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 授权只消费 typed auth evidence / runctx / RouteAuthorizationRequest；correlation 仅在决策完成后的独立 audit/observability 模块盖章
+   = note: `#[warn(rss_diagctx_auth_source)]` on by default
+
+warning: 认证/授权决策边界不得读取 `diagctx` 诊断信道
+  --> $DIR/authn.rs:6:13
+   |
+LL |     let _ = ambient_correlation();
+   |             ^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 授权只消费 typed auth evidence / runctx / RouteAuthorizationRequest；correlation 仅在决策完成后的独立 audit/observability 模块盖章
+
+warning: 认证/授权决策边界不得读取 `diagctx` 诊断信道
+  --> $DIR/authn.rs:7:19
+   |
+LL |     let current = diagctx::current;
+   |                   ^^^^^^^^^^^^^^^^
+   |
+   = help: 授权只消费 typed auth evidence / runctx / RouteAuthorizationRequest；correlation 仅在决策完成后的独立 audit/observability 模块盖章
+
+warning: 3 warnings emitted
+

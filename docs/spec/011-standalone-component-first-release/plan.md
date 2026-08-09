@@ -34,10 +34,13 @@
 
 ### Phase C — Candidate APIs（#2053、#2054）
 
+- #2044 先按 [`spec.md` 的 NW-003 契约](spec.md#nw-003-规范性窄腰契约) 冻结唯一 allowlist，并以
+  `DIAGCTX-NOT-AUTH-SOURCE-01` 提供当前最低充分静态边界；不提前修改 publish/selection 或实现候选 façade。
 - 两个 PBI 在 #2044 与 #2051 完成后并行，各自拥有独立 crate/API/test 文件，并从完成后的同一 revision 生成 `.crate`
   与执行 workspace 外 canonical proof；API 改动会使先前 artifact proof 失效。
 - diag candidate 固化诊断 context 的 fail-open、非授权边界。
 - trace candidate 固化验证后的 TraceParent、SDK 隐藏、闭值诊断 outcome 和 malformed/roundtrip 行为。
+- 两项均直接删除 internal 旧路径/签名，不保留兼容 shim；trace test helpers 迁到 publish=false dev-only 内部载体。
 
 ### Phase D — Consumer 与 closeout（#2055、#2056）
 

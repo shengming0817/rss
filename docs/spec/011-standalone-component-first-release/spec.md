@@ -68,6 +68,65 @@ unsupported 输入产生不包含原始输入的闭值诊断 outcome；传播仍
 - **FR-010**：所有发布证明必须复用 [`Spec 010`](../010-release-surface-convergence/spec.md) 指定的 canonical
   release owner，不得建立发布服务器、第二 runner 或 receipt registry。
 
+## NW-003 规范性窄腰契约
+
+本节是 #2044 的唯一规范性 allowlist。其它研究、计划、tracker 与 public-api snapshot 只能引用本节；未进入
+allowlist 的当前 internal `pub` item、feature 或依赖不构成未来 Release API。#2053/#2054 必须直接破坏式迁移，
+不得保留旧模块路径、别名、deprecated shim 或双入口。
+
+### diag-context
+
+| 类别 | 唯一允许面 |
+|---|---|
+| 根级类型 | `CorrelationId`、`CorrelationIdError`、`DiagnosticCtx` |
+| `CorrelationId` | `MAX_LEN = 128`、`parse(&str) -> Result<Self, CorrelationIdError>`、`as_str(&self) -> &str` |
+| parse error | 闭枚举 `Empty | TooLong | InvalidChar`；不携原始输入 |
+| `DiagnosticCtx` | `new(CorrelationId) -> Self`、`correlation(&self) -> &CorrelationId` |
+| ambient | `scope(DiagnosticCtx, Future) -> impl Future`、`current() -> Option<DiagnosticCtx>`、`correlation() -> Option<CorrelationId>` |
+
+`ctx`/`local` 模块、`MAX_CORRELATION_ID_LEN` 全局常量以及 Tokio `TaskLocalFuture`/`AccessError` 均不允许公开。
+入站构造 fail-closed 拒绝空值、超过 128 bytes 或 ASCII `[A-Za-z0-9._-]` 之外字符；ambient 缺失与传播失败
+fail-open 为 `None`，不得 panic、mint Principal/Tenant/receipt 或改变认证授权结果。
+
+### trace-context
+
+| 类别 | 唯一允许面 |
+|---|---|
+| 根级类型 | `TraceParent`、`TraceParentError`、`W3cTraceContext`、`RestoreOutcome` |
+| `TraceParent` | 私有字段；`parse(&str) -> Result<Self, TraceParentError>`、`as_str(&self) -> &str` |
+| parse error | 闭枚举 `Malformed | Oversized | UnsupportedVersion`；不携原始输入 |
+| carrier | `traceparent(&self) -> &TraceParent`、`tracestate(&self) -> Option<&str>`、`into_traceparent(self) -> TraceParent` |
+| capture/restore | `capture_current() -> Option<W3cTraceContext>`；`restore_remote_parent(&tracing::Span, &TraceParent, Option<&str>) -> RestoreOutcome` |
+| restore outcome | 闭枚举 `Restored | Unavailable`；`#[must_use]`，不携 SDK error 或原始输入 |
+
+`TraceParent` 上限 512 bytes；version `00` 按 W3C Trace Context 1.1 严格四字段、lowercase hex、非全零
+trace/span id 校验，`01..fe` 按 future-version 扩展规则，`ff` 为 `UnsupportedVersion`，其余非法形状为
+`Malformed`。`capture_current` 无有效 layer/context 时返回 `None`；restore 只接受已验证 parent，无法 attach 时
+返回 `Unavailable` 并保持 root。非法/超长 tracestate 只丢 state，不使合法 parent 失败。`TraceParent` 与 carrier
+不得实现 `Debug`、`Display`、serde；raw-string restore 与 `String` carrier return 不允许保留。
+
+### MSRV、feature 与依赖预算
+
+两个候选的 MSRV 固定为 `1.96`，manifest 必须显式 `default = []`。预算分三轴判断，任一超出都不合格：
+
+| 候选 | normal direct exact-set | default closure | 公共签名外部类型 |
+|---|---|---|---|
+| diag-context | `tokio`（仅 task-local 所需 `rt`）+ `thiserror` | 无可选 feature | 0；仅 core/std 与自身 owned types/opaque future |
+| trace-context | `tracing`、`tracing-opentelemetry`、`opentelemetry(trace)`、`opentelemetry_sdk(trace)`，全部 `default-features = false` | 禁 metrics/logs/internal-logs/test helpers | 仅 `tracing::Span` |
+
+两者 normal/default graph 的 RSS internal crate 为 0；trace 公共签名中的 `opentelemetry*` 与
+`tracing_opentelemetry` 类型为 0。现有 `test-util` helpers 不属于候选 manifest 或 Release API；#2054 必须将
+多 consumer 测试脚手架迁入 `publish = false`、dev-only 的内部载体。当前两个 package 仍 `publish = false` 且未进入
+Release Surface；本契约不授予 candidate artifact、RC 或 published 身份。
+
+### 非授权机器边界
+
+`DIAGCTX-NOT-AUTH-SOURCE-01` 由 `rss_diagctx_auth_source` Dylint 承载：真实 `diagctx` item 不得在 `authn`、
+任何包含 production `diport::Pdp/PdpLocal` 或 `httpserve::RouteAuthorizer` impl 的 crate，以及
+`httpserve::auth` 决策核心中出现。crate-wide owner 边界同时覆盖 impl 的父模块与 sibling helper；HTTP correlation
+只在独立 `auth_audit` 模块对已完成的闭值 decision 盖章。
+类型/crate 隔离是 Hard 上游，模块/路径约束是接 `cargo dylint --all` 的最强可用 Medium 下游；Markdown 不计作门。
+
 ## 非目标
 
 - 不切换全 workspace 版本，不发布 internal crate，不上传 registry。

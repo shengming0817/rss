@@ -197,6 +197,8 @@ fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留�
     relay 以物理列覆盖 metadata header，缺失或非法时 DB 约束与 typed header 转换 fail-closed。
   - `correlation` 走独立可读诊断信道（非授权信道）fail-open 读回。跨服务贯通要求调用方携带
     `X-Correlation-ID`（受限字符集、有长度上限）；缺失时服务生成 UUID 保底，但链路不贯通。
+    `rss_diagctx_auth_source` 禁止认证/PDP/route authorization owner 读取该 ambient；HTTP auth audit 仅在
+    决策完成后于独立 `auth_audit` 模块盖章（DIAGCTX-NOT-AUTH-SOURCE-01，Medium）。
   - `trace` 从当前 span 导出 W3C traceparent，consumer 侧还原 remote parent。fail-open：
     无有效 otel context 或畸形 traceparent 时省略；有效未采样 context 仍以 flags `00` 传播，绝不阻投递。
 - `subjectId` / `principal` / `actor` / `causation_id` 是 persisted-only。完整 `Principal`、email、姓名、

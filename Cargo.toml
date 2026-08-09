@@ -121,6 +121,7 @@ libraries = [
   { path = "lints/rss_adapter_no_business_fsm" },
   { path = "lints/rss_test_no_bare_sleep" },
   { path = "lints/rss_instrument_err_level" },
+  { path = "lints/rss_diagctx_auth_source" },
 ]
 
 [workspace.package]

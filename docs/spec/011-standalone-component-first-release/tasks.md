@@ -4,6 +4,7 @@
 
 | Logical ID | PBI | Outcome | Blocked-by | Canonical proof |
 |---|---:|---|---|---|
+| RSS-NW-003 | #2044 | 两候选唯一 API/失败语义/MSRV/feature/依赖预算契约；诊断非授权机器边界 | #2042 | Spec 011 normative allowlist + `DIAGCTX-NOT-AUTH-SOURCE-01` UI/production gate + focused current-state checks |
 | RSS-NW-007 | #2043 | 许可证、安全、维护和发布治理基线 | — | owner-approved governance + package inclusion evidence |
 | RSS-NW-008 | #2046 | 公开品牌、前缀与两个候选名称 | #2043 | registry conflict/ownership review |
 | RSS-NW-009 | #2050 | 候选 Cargo metadata 与最小 publish closure | #2048, #2046 | Cargo metadata + closure exact-set |
@@ -26,5 +27,7 @@
 - 每个 PBI 开始前从当前 Cargo metadata、源码和 tracker 回读事实，不使用历史数量或路径假设。
 - candidate、Release Candidate 与 published 必须保持不同语义；任何 registry 上传都需要人工批准。
 - 公开依赖、默认 feature、MSRV 和失败语义必须由实际 package 与 consumer 共同证明。
+- #2053/#2054 只消费 [`spec.md` 的 NW-003 契约](spec.md#nw-003-规范性窄腰契约)，不得从 research、internal
+  public-api snapshot 或旧 `pub` 形状推导额外 Release API。
 - 新 proof 接入既有 release-check，不创建通用 CI/release 平台。
 - mechanics 结果不得跨 API revision 复用；#2055/#2056 只回读 #2053/#2054 同一 revision 的 final artifact evidence。

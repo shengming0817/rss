@@ -37,6 +37,7 @@
 
 - 两个 PBI 可并行，但分别只拥有 Standalone 与 Platform API。
 - Standalone 约束公共依赖、默认 feature、MSRV 和失败语义。
+- Standalone 的唯一 allowlist 位于 Spec 011；诊断信道非授权边界由 HIR Dylint 承载，不由 Markdown enforcement。
 - Platform 约束应用入口、可信只读 context、生命周期观察面与 internal 泄漏边界。
 - 两者只做设计和最低充分编译边界证明，不发布 artifact。
 

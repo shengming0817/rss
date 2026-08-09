@@ -8,6 +8,7 @@
 //! ref: tokio-rs/axum axum/src/routing/mod.rs@main（`Router<S>` 状态类型表达「缺状态不可 serve」）
 
 mod auth;
+mod auth_audit;
 mod budget;
 pub mod error;
 pub mod health;

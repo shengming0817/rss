@@ -636,6 +636,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "vocab",
 ]
 
@@ -2029,6 +2030,18 @@ dependencies = [
  "dylint_linting",
  "dylint_testing",
  "vocab",
+]
+
+[[package]]
+name = "rss_diagctx_auth_source"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "diagctx",
+ "diport",
+ "dylint_linting",
+ "dylint_testing",
+ "httpserve",
 ]
 
 [[package]]

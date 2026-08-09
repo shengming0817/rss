@@ -1,0 +1,11 @@
+warning: 认证/授权决策边界不得读取 `diagctx` 诊断信道
+  --> $DIR/httpserve.rs:5:17
+   |
+LL |         let _ = diagctx::correlation();
+   |                 ^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 授权只消费 typed auth evidence / runctx / RouteAuthorizationRequest；correlation 仅在决策完成后的独立 audit/observability 模块盖章
+   = note: `#[warn(rss_diagctx_auth_source)]` on by default
+
+warning: 1 warning emitted
+
