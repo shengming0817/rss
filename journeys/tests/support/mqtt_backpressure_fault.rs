@@ -4,32 +4,30 @@
 //! exactly one canonical committed receipt/outcome. Does not re-prove TLS/ACL/cert/sequence/
 //! redaction or #1906 convergence.
 
-use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 use anyhow::Context as _;
-use diport::{Clock, ManagedResource as _, SecretMaterial};
+use diport::{Clock, ManagedResource as _};
+use eventexec::RelayConfig;
 use eventexec::command::{CommandAliasKey, CommandIdempotencyKeyring};
 use eventexec::reconcile::{
     BackoffPolicy, DeviceCertificateSystemProducer, ReconcileMaxInFlight, Tenancy, Trigger,
 };
-use eventexec::{RelayBudget, RelayConfig, WorkflowRuntimePlan};
 use identity::ports::device_certificate::{
     AcceptDesiredPolicy, DesiredPolicyAcceptOutcome, DeviceCertificateRepository as _,
     DeviceCertificateScope, DevicePolicyIdempotencyKey, DraftEligibility, ExpectedGeneration,
 };
 use iotdevice::{
-    DraftCommand, DraftCommandCoordinate, DraftDeviceSimulator, DraftSimulatorConfig,
-    DraftTlsMaterial, DraftTopics, PendingDraftAck, SameEnvelopeReplayAttempts,
+    DraftCommand, DraftCommandCoordinate, DraftDeviceSimulator, PendingDraftAck,
+    SameEnvelopeReplayAttempts,
 };
-use mqtt::{
-    BrokerAssertionVerifier, CredentialGeneration, CredentialRevision, DeviceScope, MqttReadiness,
-    MqttSession, MqttSessionConfig, MqttTlsMaterial, MqttTopicPolicy, MqttsEndpoint, SessionExpiry,
-};
-use postgres::{PgConfig, PgPassword, PgSslMode, PgTenantReadConfig, PoolReadiness};
-use testkit::{MqttCredential, MqttMtlsFixture, PgAppRoleSpec, PgConnParams};
-use tokio_util::sync::CancellationToken;
+use mqtt::{MqttReadiness, MqttSession};
+use testkit::{MqttMtlsFixture, PgAppRoleSpec, PgConnParams};
+
+#[path = "device_mtls_pg_harness.rs"]
+mod device_mtls_pg_harness;
+use device_mtls_pg_harness as harness;
 
 const TENANT: &str = "11111111-1111-4111-8111-111111111111";
 const DEVICE: &str = "22222222-2222-4222-8222-222222222222";
@@ -43,6 +41,10 @@ const CONTRACT_APPLY_DEVICE_CERTIFICATE: &str = "identity.apply-device-certifica
 const CONTRACT_DEVICE_INGRESS_RECEIPTED: &str = "identity.device-ingress-receipted";
 const OUTBOX_STATUS_PUBLISHED: &str = "published";
 const COMMAND_STATE_PUBLISHED: &str = "published";
+
+fn coordinate() -> anyhow::Result<harness::DeviceJourneyCoordinate> {
+    harness::DeviceJourneyCoordinate::parse(TENANT, DEVICE)
+}
 
 struct ProcessClock;
 
@@ -130,48 +132,6 @@ struct IngressCounts {
     outbox_count: i64,
 }
 
-fn pg_config(params: &PgConnParams, role: &str, password: &str) -> PgConfig {
-    PgConfig::new(
-        params.host.clone(),
-        params.port,
-        params.database.clone(),
-        role,
-        PgPassword::new(password),
-    )
-    .with_ssl_mode(PgSslMode::Prefer)
-    .with_acquire_timeout(Duration::from_secs(5))
-}
-
-async fn admin_pool(params: &PgConnParams) -> anyhow::Result<sqlx::PgPool> {
-    let options = sqlx::postgres::PgConnectOptions::new()
-        .host(&params.host)
-        .port(params.port)
-        .database(&params.database)
-        .username(&params.username)
-        .password(&params.password)
-        .ssl_mode(sqlx::postgres::PgSslMode::Prefer);
-    Ok(sqlx::postgres::PgPoolOptions::new()
-        .max_connections(5)
-        .acquire_timeout(Duration::from_secs(10))
-        .connect_with(options)
-        .await?)
-}
-
-fn migrator_through(embedded: &sqlx::migrate::Migrator, version: i64) -> sqlx::migrate::Migrator {
-    sqlx::migrate::Migrator {
-        migrations: Cow::Owned(
-            embedded
-                .iter()
-                .filter(|migration| migration.version <= version)
-                .cloned()
-                .collect(),
-        ),
-        ignore_missing: false,
-        locking: true,
-        no_tx: embedded.no_tx,
-    }
-}
-
 async fn migrate_verified_boundary(
     fixture: &testkit::OwnedPgFixture,
 ) -> anyhow::Result<(sqlx::PgPool, testkit::PgAppRole, testkit::PgAppRole)> {
@@ -182,111 +142,16 @@ async fn migrate_verified_boundary(
         ])
         .await?;
     let params = fixture.owner_params();
-    let pool = admin_pool(params).await?;
+    let pool = harness::admin_pool(
+        params,
+        harness::PgAdminPoolBudget::new(5, Duration::from_secs(10)),
+    )
+    .await?;
     let embedded = sqlx::migrate!("../adapters/postgres/migrations");
-    migrator_through(&embedded, 94).run(&pool).await?;
-    migrator_through(&embedded, 95).run(&pool).await?;
+    harness::migrator_through(&embedded, 94).run(&pool).await?;
+    harness::migrator_through(&embedded, 95).run(&pool).await?;
     embedded.run(&pool).await?;
     Ok((pool, app, reader))
-}
-
-fn mqtt_scope(credential: &MqttCredential) -> anyhow::Result<DeviceScope> {
-    Ok(DeviceScope::new(
-        vocab::TenantId::parse(TENANT)?,
-        ids::DeviceId::parse(DEVICE)?,
-        CredentialGeneration::new(credential.revision())?,
-    ))
-}
-
-fn mqtt_material(credential: &MqttCredential) -> anyhow::Result<MqttTlsMaterial> {
-    let tls = credential.tls();
-    Ok(MqttTlsMaterial::new(
-        SecretMaterial::new(tls.ca_pem().as_bytes().to_vec()),
-        SecretMaterial::new(
-            tls.certificate_pem()
-                .context("fixture credential certificate")?
-                .as_bytes()
-                .to_vec(),
-        ),
-        SecretMaterial::new(
-            tls.private_key_pem()
-                .context("fixture credential private key")?
-                .as_bytes()
-                .to_vec(),
-        ),
-    ))
-}
-
-fn mqtt_session_config(
-    fixture: &MqttMtlsFixture,
-    credential: &MqttCredential,
-) -> anyhow::Result<MqttSessionConfig> {
-    // Authenticate as the RSS broker client, but route with the device credential generation so
-    // downlink topics match the draft peer subscriptions (rss_a.revision is a cert revision, not
-    // the device topic generation).
-    Ok(MqttSessionConfig::new(
-        MqttsEndpoint::parse(fixture.url())?,
-        credential.stable_client_id(),
-        mqtt_material(credential)?,
-        BrokerAssertionVerifier::new(*fixture.broker_assertion_public_key())?,
-        MqttTopicPolicy::new(vec![mqtt_scope(fixture.device_current())?])?,
-        SessionExpiry::new(Duration::from_secs(3_600))?,
-        CredentialRevision::new(credential.revision())?,
-    )?)
-}
-
-fn draft_device_config(fixture: &MqttMtlsFixture) -> anyhow::Result<DraftSimulatorConfig> {
-    let credential = fixture.device_current();
-    let tls = credential.tls();
-    let scope = mqtt_scope(credential)?;
-    let policy = MqttTopicPolicy::new(vec![mqtt_scope(credential)?])?;
-    let topics = DraftTopics::new(
-        policy
-            .command_topic(&scope)
-            .context("configured command topic")?
-            .as_str()
-            .to_owned(),
-        policy
-            .command_acked_topic(&scope)
-            .context("configured ACK topic")?
-            .as_str()
-            .to_owned(),
-        policy
-            .certificate_reported_topic(&scope)
-            .context("configured report topic")?
-            .as_str()
-            .to_owned(),
-        policy
-            .application_receipt_topic(&scope)
-            .context("configured receipt topic")?
-            .as_str()
-            .to_owned(),
-    )?;
-    Ok(DraftSimulatorConfig::new(
-        url::Url::parse(fixture.url())?,
-        credential.stable_client_id().to_owned(),
-        credential.revision(),
-        DraftTlsMaterial::new(
-            tls.ca_pem().to_owned(),
-            tls.certificate_pem()
-                .context("fixture device certificate")?
-                .to_owned(),
-            tls.private_key_pem()
-                .context("fixture device private key")?
-                .to_owned(),
-        )?,
-        topics,
-        WAIT,
-    )?)
-}
-
-fn relay_budget() -> anyhow::Result<RelayBudget> {
-    Ok(RelayBudget::new(
-        Duration::from_secs(60),
-        Duration::from_secs(40),
-        Duration::from_secs(5),
-        Duration::from_secs(5),
-    )?)
 }
 
 fn command_keyring() -> anyhow::Result<Arc<CommandIdempotencyKeyring>> {
@@ -297,10 +162,7 @@ fn command_keyring() -> anyhow::Result<Arc<CommandIdempotencyKeyring>> {
 }
 
 fn certificate_scope() -> anyhow::Result<DeviceCertificateScope> {
-    Ok(DeviceCertificateScope::for_test(
-        vocab::TenantId::parse(TENANT)?,
-        ids::DeviceId::parse(DEVICE)?,
-    ))
+    Ok(coordinate()?.certificate_scope())
 }
 
 async fn accept_generation(
@@ -344,7 +206,7 @@ async fn seed_generation_two(
 }
 
 fn pilot_config() -> anyhow::Result<identity_composition::DeviceIdentityPilotConfig> {
-    let budget = relay_budget()?;
+    let budget = harness::relay_budget()?;
     Ok(identity_composition::DeviceIdentityPilotConfig::new(
         identity_composition::DeviceIdentitySchedulerConfig::new(
             Arc::new(ProcessClock),
@@ -382,62 +244,14 @@ fn draft_simulator() -> anyhow::Result<identity_composition::DraftArtifactSimula
     ))
 }
 
-struct ConnectedRuntime {
-    handle: postgres::PgRuntimeHandle,
-    resources: Vec<Box<diport::DynManagedResource<'static>>>,
-    sampler: postgres::PgReadinessSampler,
-}
-
-async fn connect_runtime(
-    app: &PgConnParams,
-    reader_role: &PgConnParams,
-) -> anyhow::Result<ConnectedRuntime> {
-    let serving = pg_config(app, &app.username, &app.password);
-    let reader = PgTenantReadConfig::new(pg_config(
-        reader_role,
-        &reader_role.username,
-        &reader_role.password,
-    ));
-    let workflow = WorkflowRuntimePlan::disabled_fixture();
-    let owner = postgres::PgRuntimeDeps::connect_serving(
-        &serving,
-        &reader,
-        None,
-        workflow.projection_capture(),
-    )
-    .await?;
-    let handle = owner.handle();
-    let budget = relay_budget()?;
-    handle.validate_relay_budget(budget)?;
-    let (resources, sampler_factory) = owner.into_runtime_parts(Duration::from_millis(100));
-    let sampler = sampler_factory.spawn(CancellationToken::new());
-    let readiness = handle.readiness_handle();
-    testkit::await_map(Duration::from_secs(10), async || {
-        (readiness.snapshot() == PoolReadiness::Ready).then_some(())
-    })
-    .await
-    .context("postgres pool readiness")?;
-    Ok(ConnectedRuntime {
-        handle,
-        resources,
-        sampler,
-    })
-}
-
 async fn launch_pilot_on_runtime(
-    runtime: ConnectedRuntime,
+    runtime: harness::ConnectedPgRuntime,
     mqtt_fixture: &MqttMtlsFixture,
     expect_session_present: bool,
 ) -> anyhow::Result<RunningPilot> {
-    let ConnectedRuntime {
-        handle,
-        resources,
-        sampler,
-    } = runtime;
+    let (handle, resources, sampler) = runtime.into_parts();
     let assembly_postgres = handle.device_identity_draft_runtime();
-    let session = Arc::new(
-        MqttSession::connect(mqtt_session_config(mqtt_fixture, mqtt_fixture.rss_a())?).await?,
-    );
+    let session = harness::mqtt_session(&coordinate()?, mqtt_fixture).await?;
     let assembly = deviceidentity::DeviceIdentityAssembly::start(
         assembly_postgres,
         draft_simulator()?,
@@ -462,8 +276,8 @@ async fn start_pilot_seeded(
     reader: &PgConnParams,
     mqtt_fixture: &MqttMtlsFixture,
 ) -> anyhow::Result<RunningPilot> {
-    let runtime = connect_runtime(app, reader).await?;
-    let identity = runtime.handle.for_domain::<postgres::caps::Identity>();
+    let runtime = harness::ConnectedPgRuntime::connect(app, reader).await?;
+    let identity = runtime.handle().for_domain::<postgres::caps::Identity>();
     let repository = identity.device_certificate_repository::<DraftEligibility>();
     seed_generation_two(&repository).await?;
     launch_pilot_on_runtime(runtime, mqtt_fixture, false).await
@@ -478,7 +292,7 @@ async fn restart_pilot_runtime(
     reader: &PgConnParams,
     mqtt_fixture: &MqttMtlsFixture,
 ) -> anyhow::Result<RunningPilot> {
-    let runtime = connect_runtime(app, reader).await?;
+    let runtime = harness::ConnectedPgRuntime::connect(app, reader).await?;
     launch_pilot_on_runtime(runtime, mqtt_fixture, true).await
 }
 
@@ -635,10 +449,11 @@ async fn pause_ingress(
 
 async fn open_harness() -> anyhow::Result<(JoinHarness, DraftCommand)> {
     let mqtt = testkit::mosquitto_mtls().await?;
-    let offline = DraftDeviceSimulator::prime(draft_device_config(&mqtt)?)
-        .await?
-        .go_offline()
-        .await?;
+    let offline =
+        DraftDeviceSimulator::prime(harness::draft_device_config(&coordinate()?, &mqtt, WAIT)?)
+            .await?
+            .go_offline()
+            .await?;
     let postgres = testkit::owned_postgres().await?;
     let (evidence, app, reader) = migrate_verified_boundary(&postgres).await?;
     let pilot = start_pilot_seeded(app.params(), reader.params(), &mqtt).await?;

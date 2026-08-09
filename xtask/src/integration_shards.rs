@@ -672,6 +672,7 @@ pub(crate) enum ChangedIntegrationSource {
 enum SharedJourneySource {
     Common,
     DeviceCertificateConvergence,
+    DeviceMtlsPgHarness,
     LocalTxValidation,
     IdentityAuditFixture,
     MqttBackpressureFault,
@@ -679,10 +680,17 @@ enum SharedJourneySource {
     SettingsOnlyProductionArtifact,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SharedJourneyRelation {
+    critical_carriers: &'static [IntegrationUnitId],
+    has_release_consumer: bool,
+}
+
 impl SharedJourneySource {
-    const ALL: [Self; 7] = [
+    const ALL: [Self; 8] = [
         Self::Common,
         Self::DeviceCertificateConvergence,
+        Self::DeviceMtlsPgHarness,
         Self::LocalTxValidation,
         Self::IdentityAuditFixture,
         Self::MqttBackpressureFault,
@@ -696,6 +704,7 @@ impl SharedJourneySource {
             Self::DeviceCertificateConvergence => {
                 "journeys/tests/support/device_certificate_convergence.rs"
             }
+            Self::DeviceMtlsPgHarness => "journeys/tests/support/device_mtls_pg_harness.rs",
             Self::LocalTxValidation => "journeys/tests/support/localtx_validation.rs",
             Self::IdentityAuditFixture => "journeys/tests/support/identityaudit_fixture.rs",
             Self::MqttBackpressureFault => "journeys/tests/support/mqtt_backpressure_fault.rs",
@@ -706,23 +715,41 @@ impl SharedJourneySource {
         }
     }
 
-    const fn carriers(self) -> &'static [IntegrationUnitId] {
+    /// One typed source→consumer/profile relation. Selector projection and graph-drift validation
+    /// must consume these two dimensions together.
+    const fn relation(self) -> SharedJourneyRelation {
         match self {
-            Self::Common => &[
-                IntegrationUnitId::AmqpConsumerAtLeastOnceJourney,
-                IntegrationUnitId::IdentityLoginAuditDurableJourney,
-            ],
-            Self::DeviceCertificateConvergence => {
-                &[IntegrationUnitId::DeviceCertificateConvergenceJourney]
-            }
-            Self::LocalTxValidation => &[
-                IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
-                IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
-            ],
+            Self::Common => SharedJourneyRelation {
+                critical_carriers: &[
+                    IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
+                    IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
+                    IntegrationUnitId::AmqpConsumerAtLeastOnceJourney,
+                    IntegrationUnitId::IdentityLoginAuditDurableJourney,
+                ],
+                has_release_consumer: true,
+            },
+            Self::DeviceCertificateConvergence => SharedJourneyRelation {
+                critical_carriers: &[IntegrationUnitId::DeviceCertificateConvergenceJourney],
+                has_release_consumer: false,
+            },
+            Self::LocalTxValidation => SharedJourneyRelation {
+                critical_carriers: &[
+                    IntegrationUnitId::AuditListTenantEntriesLocalTxJourney,
+                    IntegrationUnitId::SettingsSecretPublishLocalTxJourney,
+                ],
+                has_release_consumer: false,
+            },
+            Self::DeviceMtlsPgHarness => SharedJourneyRelation {
+                critical_carriers: &[IntegrationUnitId::DeviceCertificateConvergenceJourney],
+                has_release_consumer: true,
+            },
             Self::IdentityAuditFixture
             | Self::MqttBackpressureFault
             | Self::RuntimeComposeFixture
-            | Self::SettingsOnlyProductionArtifact => &[],
+            | Self::SettingsOnlyProductionArtifact => SharedJourneyRelation {
+                critical_carriers: &[],
+                has_release_consumer: true,
+            },
         }
     }
 
@@ -745,8 +772,13 @@ pub(crate) fn changed_integration_source(path: &str) -> Option<ChangedIntegratio
         return Some(ChangedIntegrationSource::Exact(units));
     }
     if let Some(source) = SharedJourneySource::for_path(path) {
-        let units = source.carriers().iter().copied().collect::<BTreeSet<_>>();
-        return Some(if units.is_empty() {
+        let relation = source.relation();
+        let units = relation
+            .critical_carriers
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        return Some(if relation.has_release_consumer {
             ChangedIntegrationSource::ReleaseCheck
         } else {
             ChangedIntegrationSource::Exact(units)
@@ -782,8 +814,10 @@ pub(crate) fn shared_source_relation_semantics() -> Vec<String> {
     SharedJourneySource::ALL
         .into_iter()
         .map(|source| {
+            let relation = source.relation();
             let carriers = source
-                .carriers()
+                .relation()
+                .critical_carriers
                 .iter()
                 .map(|id| id.as_str())
                 .collect::<Vec<_>>()
@@ -791,10 +825,14 @@ pub(crate) fn shared_source_relation_semantics() -> Vec<String> {
             format!(
                 "integration-shared-source={}:{}",
                 source.path(),
-                if carriers.is_empty() {
-                    "release-check"
+                if relation.has_release_consumer {
+                    if carriers.is_empty() {
+                        "release-check".to_owned()
+                    } else {
+                        format!("release-check+{carriers}")
+                    }
                 } else {
-                    &carriers
+                    carriers
                 }
             )
         })
@@ -1119,7 +1157,7 @@ fn validate_source_and_provider_relations(specs: &[IntegrationUnitSpec]) -> Resu
             );
         }
         let mut carriers = BTreeSet::new();
-        for carrier in source.carriers() {
+        for carrier in source.relation().critical_carriers {
             if !carriers.insert(*carrier) {
                 bail!("shared journey source repeats carrier {carrier:?}");
             }
@@ -2271,10 +2309,8 @@ mod tests {
         use IntegrationUnitId as Id;
         assert_eq!(
             changed_integration_source("journeys/tests/common/mod.rs"),
-            Some(ChangedIntegrationSource::Exact(BTreeSet::from([
-                Id::AmqpConsumerAtLeastOnceJourney,
-                Id::IdentityLoginAuditDurableJourney,
-            ])))
+            Some(ChangedIntegrationSource::ReleaseCheck),
+            "a common source with any release-only consumer must fail closed to ReleaseCheck"
         );
         assert_eq!(
             changed_integration_source("journeys/tests/support/localtx_validation.rs"),
@@ -2333,8 +2369,66 @@ mod tests {
         let tests = root.join("journeys/tests");
         let mut discovered = SharedJourneySource::ALL
             .into_iter()
-            .map(|source| (source.path().to_owned(), BTreeSet::new()))
+            .map(|source| (source.path().to_owned(), (BTreeSet::new(), false)))
             .collect::<BTreeMap<_, _>>();
+
+        fn discover_sources(
+            path: &std::path::Path,
+            root: &std::path::Path,
+            tests: &std::path::Path,
+            carrier: Option<IntegrationUnitId>,
+            release_consumer: bool,
+            discovered: &mut BTreeMap<String, (BTreeSet<IntegrationUnitId>, bool)>,
+            visited: &mut BTreeSet<std::path::PathBuf>,
+        ) -> Result<()> {
+            if !visited.insert(path.to_owned()) {
+                return Ok(());
+            }
+            let source = std::fs::read_to_string(path)?;
+            let mut children = Vec::new();
+            if source.lines().any(|line| line.trim() == "mod common;") {
+                children.push(tests.join("common/mod.rs"));
+            }
+            for line in source.lines() {
+                let line = line.trim();
+                let Some(relative) = line
+                    .strip_prefix("#[path = \"")
+                    .and_then(|line| line.strip_suffix("\"]"))
+                else {
+                    continue;
+                };
+                children.push(
+                    path.parent()
+                        .context("journey module path has no parent")?
+                        .join(relative),
+                );
+            }
+            for child in children {
+                let relative = child
+                    .strip_prefix(&root)
+                    .context("journey module escaped workspace")?
+                    .to_string_lossy()
+                    .into_owned();
+                if let Some((carriers, has_release_consumer)) = discovered.get_mut(&relative) {
+                    if let Some(carrier) = carrier {
+                        carriers.insert(carrier);
+                    }
+                    *has_release_consumer |= release_consumer;
+                }
+                if child.starts_with(tests) {
+                    discover_sources(
+                        &child,
+                        root,
+                        tests,
+                        carrier,
+                        release_consumer,
+                        discovered,
+                        visited,
+                    )?;
+                }
+            }
+            Ok(())
+        }
 
         for entry in std::fs::read_dir(&tests)? {
             let path = entry?.path();
@@ -2345,35 +2439,25 @@ mod tests {
                 .file_stem()
                 .and_then(|value| value.to_str())
                 .context("journey target path is not UTF-8")?;
-            let carrier = IntegrationUnitId::ALL.into_iter().find(|id| {
+            let consumer = IntegrationUnitId::ALL.into_iter().find(|id| {
                 let spec = id.spec();
-                spec.package == "journeys"
-                    && spec.target == target
-                    && spec.primary_owner == ExecutionProfile::IntegrationCritical
+                spec.package == "journeys" && spec.target == target
             });
-            let Some(carrier) = carrier else {
+            let Some(consumer) = consumer else {
                 continue;
             };
-            let source = std::fs::read_to_string(&path)?;
-            if source.lines().any(|line| line.trim() == "mod common;") {
-                discovered
-                    .entry("journeys/tests/common/mod.rs".to_owned())
-                    .or_default()
-                    .insert(carrier);
-            }
-            for line in source.lines() {
-                let line = line.trim();
-                let Some(relative) = line
-                    .strip_prefix("#[path = \"")
-                    .and_then(|line| line.strip_suffix("\"]"))
-                else {
-                    continue;
-                };
-                discovered
-                    .entry(format!("journeys/tests/{relative}"))
-                    .or_default()
-                    .insert(carrier);
-            }
+            let critical = (consumer.spec().primary_owner == ExecutionProfile::IntegrationCritical)
+                .then_some(consumer);
+            let release_consumer = consumer.spec().primary_owner == ExecutionProfile::ReleaseCheck;
+            discover_sources(
+                &path,
+                &root,
+                &tests,
+                critical,
+                release_consumer,
+                &mut discovered,
+                &mut BTreeSet::new(),
+            )?;
         }
 
         let declared = SharedJourneySource::ALL
@@ -2381,11 +2465,47 @@ mod tests {
             .map(|source| {
                 (
                     source.path().to_owned(),
-                    source.carriers().iter().copied().collect::<BTreeSet<_>>(),
+                    (
+                        source
+                            .relation()
+                            .critical_carriers
+                            .iter()
+                            .copied()
+                            .collect::<BTreeSet<_>>(),
+                        source.relation().has_release_consumer,
+                    ),
                 )
             })
             .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            discovered["journeys/tests/support/device_mtls_pg_harness.rs"],
+            (
+                BTreeSet::from([IntegrationUnitId::DeviceCertificateConvergenceJourney]),
+                true,
+            ),
+            "nested support edges must discover both critical and release consumers"
+        );
         assert_eq!(discovered, declared);
+
+        let mut missing_nested_edge = declared.clone();
+        missing_nested_edge
+            .get_mut("journeys/tests/support/device_mtls_pg_harness.rs")
+            .expect("registered nested harness")
+            .0
+            .clear();
+        assert_ne!(
+            discovered, missing_nested_edge,
+            "removing the nested critical edge must be a synthetic red"
+        );
+        let mut missing_release_edge = declared.clone();
+        missing_release_edge
+            .get_mut("journeys/tests/support/device_mtls_pg_harness.rs")
+            .expect("registered nested harness")
+            .1 = false;
+        assert_ne!(
+            discovered, missing_release_edge,
+            "removing the nested release-only edge must be a synthetic red"
+        );
 
         let support_files = std::fs::read_dir(tests.join("support"))?
             .filter_map(|entry| match entry {
