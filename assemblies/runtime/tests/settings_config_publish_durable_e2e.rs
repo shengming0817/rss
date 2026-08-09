@@ -41,7 +41,7 @@ use postgres::{
 use postgres::{PgSslMode, caps};
 use primitives::healthz::{HealthCheck, ProbeName};
 use secure::{DerivedAad, Plaintext};
-use settings::{SettingsService, empty_flag_store};
+use settings::SettingsService;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
@@ -475,7 +475,6 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
     let service = SettingsService::with_postgres(
         configs,
         writer,
-        empty_flag_store(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     );
 

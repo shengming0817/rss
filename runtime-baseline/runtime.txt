@@ -55,7 +55,7 @@ sagaauthmint = path=../../crates/sagaauthmint
 secure = path=../../crates/secure
 serde = workspace=true; features=[derive]
 serde_json = workspace=true
-settings = path=../../crates/settings; features=[seed-data]
+settings = path=../../crates/settings
 settings-composition = path=../../composition/settings
 settingsonly = path=../settingsonly
 thiserror = workspace=true

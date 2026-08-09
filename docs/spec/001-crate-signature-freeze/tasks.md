@@ -113,7 +113,7 @@ description: "Task list — 全 crate 签名冻结 (#997 / RW-G0.2)"
 ### PR-4 域层（门: T021；软门 #998 generated；同层 5 crate 并行，与 PR-5 并行）
 
 - [x] T022 [P] [US3] 冻结 `identity` 于 `crates/identity/src/`：身份/会话/RBAC/ABAC 域内 DTO + 值对象 + 非 DI 域逻辑。domain 类型不 derive Serialize（ADR-004 C6）。**repo/领域服务 DI port → diport**（dynosaur，PR-diport）。软门: #998(wire 类型)。测试: build smoke + 域内类型编译
-- [x] T023 [P] [US3] 冻结 `settings` 于 `crates/settings/src/`：版本化配置/flag **域内值对象 + 非 DI 纯逻辑**（ConfigEntry/ConfigVersion/FlagState/RolloutRule + evaluate_flag/diff）。**repo/服务 DI port → diport（归属待决 #1083，本轮 Scope A 不含）**。测试: build smoke（显式 `fn(..)->..` 签名断言）
+- [x] T023 [P] [US3] 冻结 `settings` 于 `crates/settings/src/`：版本化配置 **域内值对象 + 非 DI 纯逻辑**（ConfigEntry/ConfigVersion + diff）。feature flag 占位产品面已移除并 deferred 至 #2070。**repo/服务 DI port → diport（归属待决 #1083，本轮 Scope A 不含）**。测试: build smoke（显式 `fn(..)->..` 签名断言）
 - [x] T024 [P] [US3] 冻结 `audit` 于 `crates/audit/src/`：审计链 **域内值对象 + 非 DI 纯逻辑**（AuditEntry/EntryHash/AuditChainLink + link_hash/verify_chain）。**repo/append 服务 DI port → diport（归属待决 #1083，本轮不含）**。测试: build smoke（显式签名断言）
 - [x] T025 [P] [US3] 冻结 `contractreg` 于 `crates/contractreg/src/`：运行时契约 **域内值对象 + 非 DI 纯逻辑**（ContractRecord/Kind/Status/ConsistencyLevel + can_transition/validate_metadata）。**submit/list repo+服务 DI port → diport（归属待决 #1083，本轮不含）**。测试: build smoke（显式签名断言）
 - [x] T026 [P] [US3] 冻结 `syshealth` 于 `crates/syshealth/src/`：健康聚合 **域内值对象 + 非 DI 纯逻辑**（复用 primitives::healthz + ProbeRegistry/ProbeDescriptor + aggregate_with_criticality）。**聚合服务 DI port → diport（归属待决 #1083，本轮不含）**。测试: build smoke（显式签名断言）

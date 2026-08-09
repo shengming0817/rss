@@ -61,7 +61,7 @@ schemars = { workspace = true }
 secure = { path = "../../crates/secure" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-settings = { path = "../../crates/settings", features = ["seed-data"] }
+settings = { path = "../../crates/settings" }
 settings-composition = { path = "../../composition/settings" }
 s3 = { path = "../../adapters/s3", features = ["backend"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }

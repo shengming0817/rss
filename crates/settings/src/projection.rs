@@ -1088,7 +1088,6 @@ mod tests {
         let authoritative = crate::SettingsService::with_postgres(
             crate::ports::DynConfigRepo::new_box(EmptyAuthoritativeConfigRepo),
             crate::ports::DynConfigUnitOfWork::new_box(UnusedAuthoritativeConfigWriter),
-            crate::empty_flag_store(),
             Box::new(FixedClock),
         );
 

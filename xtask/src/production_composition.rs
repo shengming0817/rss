@@ -2534,7 +2534,6 @@ mod tests {
                 let config_svc = SettingsService::with_postgres(
                     configs,
                     {writer},
-                    empty_flag_store(),
                     service_clock,
                 );
                 let domain = SettingsDomain::new(

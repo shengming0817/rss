@@ -61,7 +61,7 @@ rss/
 │   ├── observ/           # metrics / logging / grpc interceptor / audit / websocket
 │   ├── distributed/      # distlock / cas / transport
 │   ├── identity/         # 域：身份 / 凭据与账户安全编排 / RBAC / ABAC（原 accesscore）
-│   ├── settings/         # 域：版本化配置 / flag（原 configcore，避开 config 重名）
+│   ├── settings/         # 域：版本化配置 / secret 引用（原 configcore，避开 config 重名）
 │   ├── audit/            # 域：审计链（原 auditcore）
 │   ├── contractreg/      # 域：运行时契约 submit / list（原 registrycore）
 │   └── syshealth/        # 域：健康聚合（原 syscore）

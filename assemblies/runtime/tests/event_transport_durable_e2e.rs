@@ -66,7 +66,7 @@ use runtime::test_support::{
     build_shared_runtime_deps, build_vault_runtime_from_values, wire_distributed,
     wire_event_transport,
 };
-use settings::{SecretResolveService, SettingsDomain, SettingsService, empty_flag_store};
+use settings::{SecretResolveService, SettingsDomain, SettingsService};
 
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
 
@@ -676,7 +676,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let subscriber_settings_service = Arc::new(SettingsService::with_postgres(
         settings_configs,
         settings_writer,
-        empty_flag_store(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
     let settings_secrets = Arc::from(settings_secrets);
@@ -705,7 +704,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let publisher_settings_service = Arc::new(SettingsService::with_postgres(
         publisher_settings_configs,
         publisher_settings_writer,
-        empty_flag_store(),
         Box::new(FixedClock::at_unix_secs(NOW_SECS)),
     ));
 

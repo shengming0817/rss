@@ -233,7 +233,11 @@ async fn run_main() -> anyhow::Result<()> {
     runtime::operator::combine_command_and_cleanup(operator_result, cleanup_result)
 }
 
-fn process_exit(result: anyhow::Result<()>) -> std::process::ExitCode {
+fn install_process_hooks() {
+    runtimeexec::install_redacted_panic_hook();
+}
+
+fn process_exit(_hooks: (), result: anyhow::Result<()>) -> std::process::ExitCode {
     match result {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(error) => {
@@ -244,8 +248,7 @@ fn process_exit(result: anyhow::Result<()>) -> std::process::ExitCode {
 }
 
 fn main() -> std::process::ExitCode {
-    runtimeexec::install_redacted_panic_hook();
-    process_exit(run_main())
+    process_exit(install_process_hooks(), run_main())
 }
 
 #[cfg(test)]
@@ -420,9 +423,9 @@ mod tests {
 
     #[test]
     fn process_exit_never_delegates_errors_to_rust_text_termination() {
-        assert_eq!(process_exit(Ok(())), std::process::ExitCode::SUCCESS);
+        assert_eq!(process_exit((), Ok(())), std::process::ExitCode::SUCCESS);
         assert_eq!(
-            process_exit(Err(anyhow::anyhow!("safe failure"))),
+            process_exit((), Err(anyhow::anyhow!("safe failure"))),
             std::process::ExitCode::FAILURE
         );
     }

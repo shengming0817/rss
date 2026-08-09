@@ -102,10 +102,8 @@ consistency = { path = "../../crates/consistency" }
 # 生产验签 provider（真 RustCrypto ES256/HS256；backend feature 开 impl diport::Pdp）。安全同批门：依赖图引真
 # verifier、不引 stub（memory adapter 经 deny.toml 禁 server/rss；runtime 同策）。
 oidc = { path = "../../adapters/oidc", features = ["backend"] }
-# settings 域（SecretService + SettingsService + empty_flag_store 工厂）。
-# seed-data feature 开：empty_flag_store（in-mem 空 flag store）可用——生产 flag store 待 #1120，
-# 当前空 store 满足 fail-closed 语义（未知 flag 返回 false）。
-settings = { path = "../../crates/settings", features = ["seed-data"] }
+# settings 域（SecretService + SettingsService）；生产图只接真实持久化 provider。
+settings = { path = "../../crates/settings" }
 # audit 域（AuditDomain + AuditChainHasher/read-write ports；#1230 wire_audit）。
 audit = { path = "../../crates/audit" }
 # identity 域（LoginService + IdentityDomain；identity.login active serving）。

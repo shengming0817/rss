@@ -1,8 +1,9 @@
 //! Actual shipped feature-graph guard for production binaries.
 //!
 //! `httpserve` intentionally exposes raw route helpers behind `test-util`, `runtime` exposes
-//! integration-only construction seams behind `integration`, and `identity` exposes plaintext
-//! seed-login constructors behind `seed-login`. Isolated consumers prove default crate surfaces,
+//! integration-only construction seams behind `integration`, `identity` exposes plaintext
+//! seed-login constructors behind `seed-login`, and `settings` exposes in-memory fixtures behind
+//! `seed-data`. Isolated consumers prove default crate surfaces,
 //! but only Cargo's root-specific resolved graph can prove that feature unification did not
 //! re-enable any of those surfaces in a shipped binary. This guard consumes the owned
 //! `WorkspaceFacts` CargoSet façade for both production package roots and reports the selected
@@ -18,9 +19,10 @@ use workspacefacts::{
     ResolverVersion, WorkspaceFacts,
 };
 
+use crate::assembly_governance::{DeclaredLifecycle, load_artifact_declaration};
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
 
-const SHIPPED_PACKAGES: &[&str] = &["server", "rss"];
+const OPERATOR_PACKAGE: &str = "rss";
 const GUARDED_FEATURES: &[GuardedFeature] = &[
     GuardedFeature {
         crate_name: "httpserve",
@@ -37,12 +39,16 @@ const GUARDED_FEATURES: &[GuardedFeature] = &[
         feature: "seed-login",
         rule: Rule::IdentitySeedLogin,
     },
+    GuardedFeature {
+        crate_name: "settings",
+        feature: "seed-data",
+        rule: Rule::SettingsSeedData,
+    },
 ];
 const OPERATOR_CLI_CRATE: &str = "runtime";
 const OPERATOR_CLI_FEATURE: &str = "operator-cli";
 const CLAP_PACKAGE: &str = "clap";
 const SERVING_PACKAGE: &str = "server";
-const OPERATOR_PACKAGE: &str = "rss";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -50,6 +56,8 @@ pub(crate) enum Rule {
     RuntimeIntegrationLeak,
     /// Production graph enabled `identity/seed-login` (name avoids shared `Leak` postfix for clippy).
     IdentitySeedLogin,
+    /// Production graph enabled in-memory settings fixtures.
+    SettingsSeedData,
     /// Serving binary enabled `runtime/operator-cli` (pulls clap).
     ServerOperatorCli,
     /// Serving binary selected the external `clap` package (direct or transitive).
@@ -84,11 +92,36 @@ impl GovernanceCheck for ShippedFeatureGuard<'_> {
     }
 
     fn check(&self) -> Result<(String, Vec<Finding<Rule>>)> {
-        findings_for_builds(self.facts)
+        let roots = production_root_packages(&crate::workspace_root()?)?;
+        findings_for_builds(self.facts, &roots)
     }
 }
 
-fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Rule>>)> {
+fn production_root_packages(root: &std::path::Path) -> Result<Vec<String>> {
+    let declaration = load_artifact_declaration(root)?;
+    let mut packages = declaration
+        .assemblies
+        .into_iter()
+        .filter(|artifact| matches!(artifact.lifecycle, DeclaredLifecycle::Supported))
+        .map(|artifact| {
+            let binary = artifact.binary.with_context(|| {
+                format!(
+                    "shipped-feature-guard: supported artifact `{}` has no binary declaration",
+                    artifact.name
+                )
+            })?;
+            Ok(binary.package)
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    // `rss` is the shipped operator CLI, not a deployable assembly artifact.
+    packages.insert(OPERATOR_PACKAGE.to_owned());
+    Ok(packages.into_iter().collect())
+}
+
+fn findings_for_builds(
+    facts: &WorkspaceFacts,
+    shipped_packages: &[String],
+) -> Result<(String, Vec<Finding<Rule>>)> {
     let guarded_keys = GUARDED_FEATURES
         .iter()
         .map(|guarded| {
@@ -130,7 +163,7 @@ fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Ru
     let platforms = BuildPlatforms::new(platform.clone(), platform);
 
     let mut findings = Vec::new();
-    for package in SHIPPED_PACKAGES {
+    for package in shipped_packages {
         let root_package = facts.package_key(package).with_context(|| {
             format!("shipped-feature-guard: shipped package `{package}` missing from workspace")
         })?;
@@ -165,7 +198,7 @@ fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Ru
                 ));
             }
             let operator_cli_enabled = build.is_feature_enabled(side, &operator_cli_feature);
-            if *package == SERVING_PACKAGE && operator_cli_enabled {
+            if package == SERVING_PACKAGE && operator_cli_enabled {
                 let path = required_activation_path(&build, side, &operator_cli_feature)?;
                 findings.push(finding(
                     Rule::ServerOperatorCli,
@@ -177,7 +210,7 @@ fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Ru
                     ),
                 ));
             }
-            if *package == SERVING_PACKAGE
+            if package == SERVING_PACKAGE
                 && side == BuildSide::Target
                 && build.is_package_selected(side, CLAP_PACKAGE)
             {
@@ -191,7 +224,7 @@ fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Ru
                 ));
             }
             // Anti-vacuity only on Target: normal deps do not activate on Host.
-            if *package == OPERATOR_PACKAGE && side == BuildSide::Target && !operator_cli_enabled {
+            if package == OPERATOR_PACKAGE && side == BuildSide::Target && !operator_cli_enabled {
                 findings.push(finding(
                     Rule::RssOperatorCliAbsent,
                     format!("bins/{package}"),
@@ -207,7 +240,7 @@ fn findings_for_builds(facts: &WorkspaceFacts) -> Result<(String, Vec<Finding<Ru
     Ok((
         format!(
             "{} shipped binaries 的 production feature graph 未启用 {} 个登记的非生产 feature，且 server 未启用 operator-cli / 未选中 clap / rss 已启用",
-            SHIPPED_PACKAGES.len(),
+            shipped_packages.len(),
             GUARDED_FEATURES.len()
         ),
         findings,
@@ -240,8 +273,12 @@ mod tests {
     };
 
     #[test]
-    fn shipped_package_roots_are_server_and_rss() {
-        assert_eq!(SHIPPED_PACKAGES, &["server", "rss"]);
+    fn shipped_package_roots_follow_supported_artifacts_and_operator() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        assert_eq!(
+            production_root_packages(&root)?,
+            ["identityaudit", "rss", "server", "settingsonly"]
+        );
         assert_eq!(
             GUARDED_FEATURES,
             &[
@@ -260,19 +297,26 @@ mod tests {
                     feature: "seed-login",
                     rule: Rule::IdentitySeedLogin,
                 },
+                GuardedFeature {
+                    crate_name: "settings",
+                    feature: "seed-data",
+                    rule: Rule::SettingsSeedData,
+                },
             ]
         );
+        Ok(())
     }
 
     #[test]
     fn every_guarded_feature_leak_reports_owned_activation_path() -> anyhow::Result<()> {
-        for shipped_package in SHIPPED_PACKAGES {
+        let shipped_packages = synthetic_shipped_packages();
+        for shipped_package in &shipped_packages {
             for guarded in GUARDED_FEATURES {
                 let facts = WorkspaceFacts::from_metadata_json(
                     Path::new("/workspace"),
                     &metadata_with_leak(shipped_package, *guarded),
                 )?;
-                let (_, findings) = findings_for_builds(&facts)?;
+                let (_, findings) = findings_for_builds(&facts, &shipped_packages)?;
                 assert_eq!(
                     findings.len(),
                     1,
@@ -377,7 +421,7 @@ mod tests {
             Path::new("/workspace"),
             &serde_json::to_string(&metadata)?,
         )?;
-        let (_, findings) = findings_for_builds(&facts)?;
+        let (_, findings) = findings_for_builds(&facts, &synthetic_shipped_packages())?;
         assert_eq!(findings.len(), 1, "host leak must fail: {findings:?}");
         assert!(findings[0].detail.contains("target:server"));
         assert!(findings[0].detail.contains("host:bridge"));
@@ -402,7 +446,7 @@ mod tests {
             Path::new("/workspace"),
             &serde_json::to_string(&metadata)?,
         )?;
-        assert!(findings_for_builds(&facts).is_err());
+        assert!(findings_for_builds(&facts, &synthetic_shipped_packages()).is_err());
         Ok(())
     }
 
@@ -413,10 +457,10 @@ mod tests {
         let (summary, findings) = ShippedFeatureGuard::new(command_facts.get()?).check()?;
         assert!(
             findings.is_empty(),
-            "server/rss shipped graphs must stay clean: {findings:?}"
+            "artifact/operator production graphs must stay clean: {findings:?}"
         );
-        assert!(summary.contains("2 shipped binaries"));
-        assert!(summary.contains("3 个登记的非生产 feature"));
+        assert!(summary.contains("4 shipped binaries"));
+        assert!(summary.contains("4 个登记的非生产 feature"));
         assert!(summary.contains("server 未启用 operator-cli"));
         assert!(summary.contains("未选中 clap"));
         Ok(())
@@ -428,7 +472,7 @@ mod tests {
             Path::new("/workspace"),
             &metadata_with_operator_cli_on("server"),
         )?;
-        let (_, findings) = findings_for_builds(&facts)?;
+        let (_, findings) = findings_for_builds(&facts, &synthetic_shipped_packages())?;
         assert!(
             findings
                 .iter()
@@ -444,7 +488,7 @@ mod tests {
             Path::new("/workspace"),
             &metadata_with_direct_clap_on_server(),
         )?;
-        let (_, findings) = findings_for_builds(&facts)?;
+        let (_, findings) = findings_for_builds(&facts, &synthetic_shipped_packages())?;
         assert!(
             findings
                 .iter()
@@ -460,7 +504,7 @@ mod tests {
             Path::new("/workspace"),
             &metadata_with_operator_cli_on("none"),
         )?;
-        let (_, findings) = findings_for_builds(&facts)?;
+        let (_, findings) = findings_for_builds(&facts, &synthetic_shipped_packages())?;
         assert!(
             findings
                 .iter()
@@ -473,6 +517,13 @@ mod tests {
     fn metadata_with_leak(shipped_package: &str, leak: GuardedFeature) -> String {
         // Leak fixtures keep rss as the sole operator-cli consumer so anti-vacuity stays green.
         metadata_graph(shipped_package, Some(leak), "rss")
+    }
+
+    fn synthetic_shipped_packages() -> Vec<String> {
+        ["identityaudit", "rss", "server", "settingsonly"]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
     }
 
     fn metadata_with_operator_cli_on(operator_cli_root: &str) -> String {
@@ -556,12 +607,15 @@ mod tests {
         operator_cli_root: &str,
     ) -> String {
         let package_paths = [
+            ("identityaudit", package_path("identityaudit")),
             ("server", package_path("server")),
             ("rss", package_path("rss")),
+            ("settingsonly", package_path("settingsonly")),
             ("bridge", package_path("bridge")),
             ("httpserve", package_path("httpserve")),
             ("runtime", package_path("runtime")),
             ("identity", package_path("identity")),
+            ("settings", package_path("settings")),
         ];
         let ids = package_paths
             .iter()
@@ -676,12 +730,15 @@ mod tests {
 
     fn package_path(package: &str) -> &'static str {
         match package {
+            "identityaudit" => "/workspace/assemblies/identityaudit",
             "server" => "/workspace/bins/server",
             "rss" => "/workspace/bins/rss",
+            "settingsonly" => "/workspace/assemblies/settingsonly",
             "bridge" => "/workspace/crates/bridge",
             "httpserve" => "/workspace/crates/httpserve",
             "runtime" => "/workspace/assemblies/runtime",
             "identity" => "/workspace/crates/identity",
+            "settings" => "/workspace/crates/settings",
             _ => "/workspace/invalid",
         }
     }

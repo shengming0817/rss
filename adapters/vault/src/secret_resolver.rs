@@ -106,8 +106,9 @@ impl SecretResolverReadinessTarget {
 /// 只能由 [`TenantStoreAllowlist::new`] 构造，且始终非空、没有重复 `(tenant, store)` 授权，
 /// 不同 tenant 的规范化 Vault 物理命名空间互不重叠。同 tenant 可用多个显式 store alias
 /// 指向同一命名空间。
-#[derive(Debug)]
+#[derive(secure::Redact)]
 pub struct TenantStoreAllowlist {
+    #[redact(sensitivity = internal)]
     entries: HashMap<(TenantId, String), StoreBinding>,
 }
 
@@ -118,11 +119,13 @@ pub struct TenantStoreAllowlist {
 /// 见 [`kv_resolve_impl`]）；`kv_path_prefix` 是 key 路径前缀（如 `"tenant-a/"`），后接
 /// `coord.key()` 的逐段路径。前缀可空字符串（无前缀直挂 key）。两者的穿越段均在
 /// [`TenantStoreAllowlist::new`] 构造期拒。
-#[derive(Clone, Debug)]
+#[derive(Clone, secure::Redact)]
 pub struct StoreBinding {
     /// Vault KV v2 mount 点（如 `"secret"` / `"team/secrets"`）；非空、各段非 `.` / `..`。
+    #[redact(sensitivity = internal)]
     pub mount: String,
     /// key 路径前缀（如 `"tenant-a/"` 或空字符串）。
+    #[redact(sensitivity = internal)]
     pub kv_path_prefix: String,
 }
 
@@ -752,6 +755,45 @@ mod backend_tests {
             },
         )])
         .expect("valid simple allowlist")
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn authorization_coordinates_debug_are_redacted() {
+        fn assert_redact<T: secure::Redact>() {}
+        assert_redact::<StoreBinding>();
+        assert_redact::<TenantStoreAllowlist>();
+        const TENANT: &str = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        const STORE: &str = "store-debug-marker";
+        const MOUNT: &str = "mount-debug-marker";
+        const PREFIX: &str = "prefix-debug-marker";
+        let tenant = tenant_a();
+        let allowlist = TenantStoreAllowlist::new([(
+            (tenant, STORE.to_string()),
+            StoreBinding {
+                mount: MOUNT.to_string(),
+                kv_path_prefix: PREFIX.to_string(),
+            },
+        )])
+        .expect("valid allowlist");
+        let binding = allowlist.lookup(tenant, STORE).expect("binding exists");
+        assert_eq!(binding.mount, MOUNT);
+        assert_eq!(binding.kv_path_prefix, PREFIX);
+
+        let binding_debug = format!("{binding:?}");
+        assert_eq!(
+            binding_debug,
+            "StoreBinding { mount: <redacted>, kv_path_prefix: <redacted> }"
+        );
+        let allowlist_debug = format!("{allowlist:?}");
+        assert_eq!(
+            allowlist_debug,
+            "TenantStoreAllowlist { entries: <redacted> }"
+        );
+        for marker in [TENANT, STORE, MOUNT, PREFIX] {
+            assert!(!binding_debug.contains(marker));
+            assert!(!allowlist_debug.contains(marker));
+        }
     }
 
     /// 指向被拒端口的 base URL（用于 StoreUnreachable 测试，镜像 transit.rs refused_base）。

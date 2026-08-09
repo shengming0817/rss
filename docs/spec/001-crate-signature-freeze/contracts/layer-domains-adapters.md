@@ -11,7 +11,7 @@
 | crate | 冻结接缝（域内，非 DI） | 软门 |
 |---|---|---|
 | **identity** | 身份/会话/RBAC/ABAC 域内 DTO + 值对象 + 非 DI 域逻辑 | #998（会话/身份 wire 类型） |
-| **settings** | 版本化配置/flag 域类型 | #998 |
+| **settings** | 版本化配置/secret reference 域类型 | #998 |
 | **audit** | 审计链域类型 | #998 |
 | **contractreg** | 运行时契约域类型 | #998 |
 | **syshealth** | 健康聚合域类型 | #998 |

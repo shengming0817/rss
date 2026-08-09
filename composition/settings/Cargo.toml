@@ -19,7 +19,7 @@ diport = { path = "../../crates/diport" }
 postgres = { path = "../../adapters/postgres", features = ["domain-settings"] }
 primitives = { path = "../../crates/primitives" }
 secure = { path = "../../crates/secure" }
-settings = { path = "../../crates/settings", features = ["seed-data"] }
+settings = { path = "../../crates/settings" }
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

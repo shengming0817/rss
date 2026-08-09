@@ -1,11 +1,10 @@
-//! settings 应用层：版本化配置 CRUD/CAS + 发布/回滚（L2 OutboxFact）+ feature flag 求值编排。
+//! settings 应用层：版本化配置 CRUD/CAS + 发布/回滚（L2 OutboxFact）。
 //!
 //! 配置写入路径证明 L2 接缝：CAS upsert 新版本 + outbox append 经 [`crate::ports::ConfigUnitOfWork`]
 //! **同事务**原子落库（both-or-neither，消除 emit-after-save 的 write-without-event 窗口，#1232；in-mem 共享
 //! store 替身 / 生产 postgres `PgConfigUnitOfWork`）→ 返回新版本。读路径（next_version / get_config /
 //! rollback 源值）经 [`crate::ports::ConfigRepo`]。发布与回滚复用同一 fact，`changeKind` 判别（published /
-//! rolledBack）。flag 求值经域内
-//! [`crate::internal::ports::FlagStore`] 取快照 + `domain::evaluate_flag`（L0 纯计算）。
+//! rolledBack）。
 //!
 //! HTTP 接缝（#1430 PERSIST-009 settings 首条 durable module 闭环）：[`SettingsDomain`] 持 config + secret
 //! 应用服务，`init` 经 typed `route_group::<Primary>` + `GeneratedPrimaryEndpoint`（#1690
@@ -14,7 +13,6 @@
 //! [`httpserve::AuthorizedSubject`]、非 pre-auth header）。
 //! 域错误经 `vocab::CoreErrorKind` 映射状态码；CAS 与 outbox 事实冲突分别具有可重试/终止 wire 分类。
 //!
-//! ref: Unleash/unleash-types-rs src/client_features.rs@main（flag 求值语义）
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main（CAS 版本模型）
 //! ref: crates/identity/src/application.rs（generated ReviewedEvent + domain UoW 范式）
 
@@ -80,13 +78,10 @@ use crate::secret_application::{
 
 use crate::domain::{
     ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, ConfigTombstone, ConfigValue,
-    ConfigVersion, EvalContext, FlagDecision, FlagKey, SettingKey, SettingsError, evaluate_flag,
+    ConfigVersion, SettingKey, SettingsError,
 };
 #[cfg(any(test, feature = "seed-data"))]
-use crate::internal::mem::{
-    InMemConfigRepo, InMemConfigUnitOfWork, InMemFlagStore, new_config_store,
-};
-use crate::internal::ports::FlagStore;
+use crate::internal::mem::{InMemConfigRepo, InMemConfigUnitOfWork, new_config_store};
 use crate::ports::{
     ConfigDeleteReceipt, ConfigPublishReceipt, ConfigRepo, ConfigRollbackReceipt, ConfigUnitOfWork,
     DynConfigRepo, DynConfigUnitOfWork, DynSecretRepo, DynSecretUnitOfWork, TenantRepoScope,
@@ -124,7 +119,7 @@ impl ConfigCache {
 /// Read-only state for `settings.config-get`.
 ///
 /// The state owns only the tenant-scoped read repository and its correctness-preserving cache. It
-/// cannot reach the config UoW, outbox append, flag mutation, clock, or secret write capability.
+/// cannot reach the config UoW, outbox append, clock, or secret write capability.
 #[derive(Clone)]
 pub struct ConfigQueryService {
     configs: Arc<DynConfigRepo<'static>>,
@@ -193,7 +188,7 @@ impl ConfigQueryService {
     /// Rebuild the local config cache from the authoritative read repository.
     ///
     /// This method deliberately lives on the read-only query capability: a reconcile subscriber
-    /// cannot reach the settings write UoW, outbox emitter, flag store, clock, or secret ports.
+    /// cannot reach the settings write UoW, outbox emitter, clock, or secret ports.
     async fn handle_config_version_changed_event(
         &self,
         event: ConfigVersionChangedEvent,
@@ -272,7 +267,7 @@ impl httpserve::ClassifiedRouteState for ConfigQueryService {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SettingsServiceError {
-    /// 配置 / flag 键格式非法。
+    /// 配置键格式非法。
     #[error("setting key is invalid")]
     InvalidKey,
     /// 乐观并发写冲突（读后被并发版本超前）。
@@ -287,9 +282,6 @@ pub enum SettingsServiceError {
     /// 权威 active head 与读取条目的 tenant / key / version 不一致，或条目缺失。
     #[error("config read integrity check failed")]
     ConfigReadIntegrity,
-    /// 灰度百分比超出 0..=100 范围。
-    #[error("percentage out of range; must be 0..=100")]
-    PercentageOutOfRange,
     /// config-version-changed payload 编码失败（原始错误进 source，不进 Display）。
     #[error("config-version-changed payload encode failed")]
     PayloadEncode(#[source] EventEncodeError),
@@ -315,7 +307,6 @@ impl From<SettingsError> for SettingsServiceError {
         match error {
             // 敏感 key 拒绝与格式非法同属 4xx 客户端键错误（域层保留 SensitiveKey 具体语义供日志/诊断）。
             SettingsError::KeyInvalid | SettingsError::SensitiveKey => Self::InvalidKey,
-            SettingsError::PercentageOutOfRange => Self::PercentageOutOfRange,
             // secret 键 / 引用格式错误：同属 4xx 客户端输入错误（secret path 不走 config service 处理路径，
             // 此分支为 From impl 穷举完整性守卫，不应在 config 发布流程中命中）。
             SettingsError::SecretKeyInvalid | SettingsError::SecretRefInvalid => Self::InvalidKey,
@@ -349,12 +340,6 @@ fn unix_secs(t: SystemTime) -> i64 {
 pub(crate) fn wire_version(version: u64) -> i64 {
     i64::try_from(version).unwrap_or(i64::MAX)
 }
-
-/// 不透明 flag 仓储封装（newtype funnel，Hard）。
-///
-/// `FlagStore` trait 保持 `pub(crate)`；外部组合根经 [`crate::empty_flag_store`] 构造此 box，
-/// 再传给 [`SettingsService::with_postgres`]——无需在外部 crate 命名 `FlagStore` trait。
-pub struct FlagStoreBox(pub(crate) Box<dyn FlagStore>);
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigVersionChangedEventError {
@@ -459,21 +444,16 @@ pub(crate) fn config_version_changed_event_from_payload(
 pub struct SettingsService {
     query: ConfigQueryService,
     writer: Box<DynConfigUnitOfWork<'static>>,
-    flags: Box<dyn FlagStore>,
     clock: Box<dyn Clock>,
 }
 
 impl SettingsService {
     /// 生产构造器（非门控 `pub`，组合根注入真实 postgres provider）。
     ///
-    /// `flags` 为域内 `FlagStore` newtype，经 [`crate::empty_flag_store`] 构造后传入；
-    /// `clock` 是构造器位置参（rust-standards §Clock 构造器位置参），生产传 `SystemClock`。
-    ///
-    /// `flags` 类型使用不透明封装 [`FlagStoreBox`]——调用方无需知道 `FlagStore` trait（`pub(crate)`）。
+    /// 时钟是构造器位置参；生产传 SystemClock。
     pub fn with_postgres(
         configs: Box<DynConfigRepo<'static>>,
         writer: Box<DynConfigUnitOfWork<'static>>,
-        flags: FlagStoreBox,
         clock: Box<dyn Clock>,
     ) -> Self {
         let configs = Arc::from(configs);
@@ -481,12 +461,11 @@ impl SettingsService {
         Self {
             query: ConfigQueryService::new(configs, cache),
             writer,
-            flags: flags.0,
             clock,
         }
     }
 
-    /// 组合根构造：注入 outbox emitter + clock，以空 in-mem 配置 / flag 仓储初始化（追踪弹 / demo）。
+    /// 组合根构造：注入 outbox emitter + clock，以空 in-mem 配置仓储初始化（追踪弹 / demo）。
     ///
     /// 门控于 `test` / `seed-data` feature（编译期边界，对标 identity seed-login）：生产组合根不启用即无
     /// in-mem provider 路径。组合根（journeys）经 `settings = { features = ["seed-data"] }` 启用 + 注入
@@ -505,7 +484,6 @@ impl SettingsService {
         Self::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, emitter)),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             clock,
         )
     }
@@ -718,36 +696,6 @@ impl SettingsService {
         }
         self.query.cache.remove(tenant, &key);
         Ok(())
-    }
-
-    /// 求值 flag 对给定上下文的结构化决策（L0 纯计算；detailed evaluation）。
-    ///
-    /// - 未知 flag → [`crate::FlagDecisionReason::Unknown`]（`enabled=false`, `stale=false`，fail-closed）。
-    /// - 已知 flag → 返回 [`crate::FlagDecision`]（`enabled` / `reason` / `stale`）。
-    /// - 非法 `flag_key` → [`SettingsServiceError::InvalidKey`]。
-    ///
-    /// 命名刻意不用 `is_*`：本方法返回决策详情，而非裸 bool（对标 OpenFeature detailed
-    /// evaluation；Unleash `is_enabled` 仍为 bool 门闩）。
-    ///
-    /// `variant` 尚未暴露（`FlagState` 无 variants 模型；follow-up）。
-    ///
-    /// ref: Unleash/unleash-types-rs src/client_features.rs@main
-    /// ref: OpenFeature flag-evaluation §1.4 detailed flag evaluation
-    pub fn flag_decision(
-        &self,
-        tenant: TenantId,
-        flag_key: &str,
-        attrs: &[(&str, &str)],
-    ) -> Result<FlagDecision, SettingsServiceError> {
-        let key = FlagKey::parse(flag_key)?;
-        let Some(state) = self.flags.find(tenant, &key) else {
-            return Ok(FlagDecision::unknown());
-        };
-        let owned: Vec<(String, String)> = attrs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        Ok(evaluate_flag(&state, &EvalContext::new(&owned)))
     }
 }
 
@@ -1021,9 +969,7 @@ fn config_error_response(
     operation: &'static str,
 ) -> Response {
     let kind = match err {
-        SettingsServiceError::InvalidKey | SettingsServiceError::PercentageOutOfRange => {
-            CoreErrorKind::Validation
-        }
+        SettingsServiceError::InvalidKey => CoreErrorKind::Validation,
         SettingsServiceError::VersionConflict => CoreErrorKind::VersionConflict,
         SettingsServiceError::OutboxFactConflict(_) => CoreErrorKind::OutboxFactConflict,
         SettingsServiceError::NotFound => CoreErrorKind::NotFound,
@@ -1160,7 +1106,7 @@ fn log_config_version_tenant_mismatch(
 /// Narrow, read-only reconciler for `settings.config-version-changed`.
 ///
 /// Its only state is [`ConfigQueryService`], whose fields are the owner-defined config read port
-/// and cache. It cannot reach [`SettingsService`]'s writer, flag store, clock, or any outbox path.
+/// and cache. It cannot reach [`SettingsService`]'s writer, clock, or any outbox path.
 pub struct ConfigVersionReconciler {
     state: ConfigVersionReconcilerState,
 }
@@ -1328,8 +1274,6 @@ mod tests {
         SecretResolver, SecretResolverError,
     };
 
-    use crate::domain::{FlagState, RolloutPercentage, RolloutRule};
-
     fn assert_local_read_state<T>()
     where
         T: httpserve::ClassifiedRouteState<
@@ -1405,14 +1349,13 @@ mod tests {
         }
     }
 
-    fn service_with(capture: &CapturingEmitter, flags: InMemFlagStore) -> SettingsService {
+    fn service_with(capture: &CapturingEmitter) -> SettingsService {
         // 读端口与写 UoW 共享同一 store（与 with_seed / postgres 同源一致性）；emitter 取具体
         // `CapturingEmitter`（`Arc` 底座 Sync）满足 co-tx UoW 的 Send/Sync 约束。
         let store = new_config_store();
         SettingsService::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
-            FlagStoreBox(Box::new(flags)),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),
@@ -1462,7 +1405,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn publish_config_creates_v1_and_emits() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
 
         let resp = svc
             .publish_config(
@@ -1504,7 +1447,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn publish_config_increments_version() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
 
         svc.publish_config(
             publish_receipt(),
@@ -1538,7 +1481,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn publish_config_rejects_invalid_key() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         let err = svc
             .publish_config(
                 publish_receipt(),
@@ -1556,7 +1499,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rollback_restores_value_and_emits_rolled_back() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         svc.publish_config(
             publish_receipt(),
             tenant(),
@@ -1604,7 +1547,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rollback_missing_version_is_not_found() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         svc.publish_config(
             publish_receipt(),
             tenant(),
@@ -1624,7 +1567,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn delete_removes_config() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         svc.publish_config(
             publish_receipt(),
             tenant(),
@@ -1643,76 +1586,6 @@ mod tests {
                 .expect("get")
                 .is_none()
         );
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn flag_decision_evaluates_seeded_flag() {
-        let capture = CapturingEmitter::default();
-        let rule = RolloutRule::new(
-            "region",
-            crate::domain::RolloutOperator::In,
-            vec!["us".to_string()],
-        );
-        let flag = FlagState::new(
-            FlagKey::parse("checkout").expect("flag key"),
-            true,
-            false,
-            vec![rule],
-            Some(RolloutPercentage::new(100).expect("pct")),
-        );
-        let svc = service_with(&capture, InMemFlagStore::new().with_flag(tenant(), flag));
-
-        let hit = svc
-            .flag_decision(tenant(), "checkout", &[("region", "us")])
-            .expect("eval");
-        assert!(hit.enabled());
-        assert_eq!(hit.reason(), crate::domain::FlagDecisionReason::Enabled);
-        assert!(!hit.stale());
-
-        let miss = svc
-            .flag_decision(tenant(), "checkout", &[("region", "eu")])
-            .expect("eval");
-        assert!(!miss.enabled());
-        assert_eq!(
-            miss.reason(),
-            crate::domain::FlagDecisionReason::RuleMismatch
-        );
-
-        // 未知 flag → fail-closed Unknown。
-        let unknown = svc.flag_decision(tenant(), "unknown", &[]).expect("eval");
-        assert!(!unknown.enabled());
-        assert_eq!(unknown.reason(), crate::domain::FlagDecisionReason::Unknown);
-        assert!(!unknown.stale());
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn flag_decision_surfaces_stale() {
-        let capture = CapturingEmitter::default();
-        let flag = FlagState::new(
-            FlagKey::parse("checkout").expect("flag key"),
-            true,
-            true,
-            vec![],
-            None,
-        );
-        let svc = service_with(&capture, InMemFlagStore::new().with_flag(tenant(), flag));
-        let d = svc.flag_decision(tenant(), "checkout", &[]).expect("eval");
-        assert!(d.enabled());
-        assert_eq!(d.reason(), crate::domain::FlagDecisionReason::Enabled);
-        assert!(d.stale());
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn flag_decision_rejects_invalid_flag_key() {
-        let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
-        let err = svc
-            .flag_decision(tenant(), "bad key", &[])
-            .expect_err("invalid");
-        assert!(matches!(err, SettingsServiceError::InvalidKey));
     }
 
     // ── #1430 settings durable module：HTTP handler / route 装配测试 ──────────────────
@@ -1987,7 +1860,6 @@ mod tests {
                 writer_store,
                 CapturingEmitter::default(),
             )),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         ))
     }
@@ -2127,7 +1999,6 @@ mod tests {
                 writer_store,
                 CapturingEmitter::default(),
             )),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         ));
         let secret_service = secret_resolve_service_for(Arc::clone(&secret_repo));
@@ -2366,7 +2237,6 @@ mod tests {
                     store.clone(),
                     capture.clone(),
                 )),
-                FlagStoreBox(Box::new(InMemFlagStore::new())),
                 Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
             );
             writer
@@ -2388,7 +2258,6 @@ mod tests {
                     mutation_committed: Arc::clone(&mutation_committed),
                 }),
                 DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
-                FlagStoreBox(Box::new(InMemFlagStore::new())),
                 Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
             );
             let query = reader.config_query_service();
@@ -3205,7 +3074,7 @@ mod tests {
         let (secret_repo, secret_uow) = secret_ports_arc();
         let secret_service = secret_resolve_service_for(Arc::clone(&secret_repo));
         SettingsDomain::new(
-            Arc::new(service_with(&capture, InMemFlagStore::new())),
+            Arc::new(service_with(&capture)),
             secret_repo,
             secret_uow,
             secret_service,
@@ -3460,7 +3329,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_version_deleted_durable_handler_removes_cache() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         service
             .publish_config(
                 publish_receipt(),
@@ -3499,7 +3368,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_version_changed_durable_handler_refreshes_config_cache() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         service
             .publish_config(
                 publish_receipt(),
@@ -3535,7 +3404,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_version_changed_handle_result_refreshes_config_cache() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         service
             .publish_config(
                 publish_receipt(),
@@ -3568,7 +3437,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn subscriber_effect_refreshes_the_route_service_cache_instance() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         service
             .publish_config(
                 publish_receipt(),
@@ -3605,7 +3474,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn subscriber_effect_rejects_invalid_payload_and_tenant_mismatch() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         let effect = subscriber_effect_for(service);
         let other_tenant = TenantId::parse("11111111-2222-4333-8444-555555555555")
             .expect("canonical other tenant");
@@ -3732,7 +3601,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn subscriber_effect_preserves_transient_refresh_as_requeue() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         let effect = subscriber_effect_for(service);
 
         let result = effect
@@ -3758,7 +3627,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_version_changed_durable_handler_ignores_stale_event_version() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         service
             .publish_config(
                 publish_receipt(),
@@ -3984,7 +3853,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_publish_handler_authed_returns_201_and_emits_fact() {
         let capture = CapturingEmitter::default();
-        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let svc = Arc::new(service_with(&capture));
         let router = config_router(svc, Some(user_evidence(tenant())));
         let resp = testkit::call(
             router,
@@ -4003,7 +3872,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_publish_handler_missing_auth_returns_401() {
         let capture = CapturingEmitter::default();
-        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let svc = Arc::new(service_with(&capture));
         let router = config_router(svc, None);
         let resp = testkit::call(
             router,
@@ -4035,7 +3904,7 @@ mod tests {
             ),
         ] {
             let capture = CapturingEmitter::default();
-            let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+            let service = Arc::new(service_with(&capture));
             let response = config_router(service, Some(user_evidence(tenant())))
                 .oneshot(
                     Request::builder()
@@ -4059,7 +3928,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_get_delete_and_rollback_handlers_serve_typed_contracts() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         service
             .publish_config(
                 publish_receipt(),
@@ -4155,7 +4024,7 @@ mod tests {
             ),
         ] {
             let capture = CapturingEmitter::default();
-            let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+            let service = Arc::new(service_with(&capture));
             service
                 .publish_config(
                     publish_receipt(),
@@ -4200,7 +4069,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_resource_handlers_reject_bad_input_missing_source_and_missing_auth() {
         let capture = CapturingEmitter::default();
-        let service = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let service = Arc::new(service_with(&capture));
         service
             .publish_config(
                 publish_receipt(),
@@ -4305,7 +4174,6 @@ mod tests {
         let writer = SettingsService::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store.clone(), capture)),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         );
         writer
@@ -4321,7 +4189,6 @@ mod tests {
         let conflict_service = Arc::new(SettingsService::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store)),
             DynConfigUnitOfWork::new_box(ConflictUnitOfWork),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         ));
         let tenant_b_router = config_resource_router(
@@ -4356,7 +4223,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_publish_handler_actor_id_overflow_returns_500_not_forbidden() {
         let capture = CapturingEmitter::default();
-        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let svc = Arc::new(service_with(&capture));
         let router = config_router(
             svc,
             Some(user_evidence_with_subject(tenant(), "x".repeat(257))),
@@ -4376,7 +4243,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_publish_bytes_invalid_json_returns_400() {
         let capture = CapturingEmitter::default();
-        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let svc = Arc::new(service_with(&capture));
         let resp = config_publish_handler_bytes(
             svc,
             publish_receipt(),
@@ -4393,7 +4260,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn config_publish_bytes_invalid_key_returns_400() {
         let capture = CapturingEmitter::default();
-        let svc = Arc::new(service_with(&capture, InMemFlagStore::new()));
+        let svc = Arc::new(service_with(&capture));
         let body = serde_json::to_vec(&publish_req("bad key", "v")).expect("serialize");
         let resp = config_publish_handler_bytes(
             svc,
@@ -4416,10 +4283,6 @@ mod tests {
     async fn config_error_response_maps_status_codes() {
         let cases = [
             (SettingsServiceError::InvalidKey, StatusCode::BAD_REQUEST),
-            (
-                SettingsServiceError::PercentageOutOfRange,
-                StatusCode::BAD_REQUEST,
-            ),
             (SettingsServiceError::VersionConflict, StatusCode::CONFLICT),
             (
                 SettingsServiceError::OutboxFactConflict(consistency::OutboxFactConflict),
@@ -4483,7 +4346,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn cross_tenant_isolation() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         svc.publish_config(
             publish_receipt(),
             tenant(),
@@ -4506,9 +4369,9 @@ mod tests {
     async fn event_id_derivation_is_stable() {
         // 两个独立 service 实例对同 tenant+key publish v1，idem-key 应相同（内容派生）。
         let cap1 = CapturingEmitter::default();
-        let svc1 = service_with(&cap1, InMemFlagStore::new());
+        let svc1 = service_with(&cap1);
         let cap2 = CapturingEmitter::default();
-        let svc2 = service_with(&cap2, InMemFlagStore::new());
+        let svc2 = service_with(&cap2);
 
         svc1.publish_config(
             publish_receipt(),
@@ -4559,7 +4422,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rollback_invalid_key_returns_invalid_key() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         let err = svc
             .rollback(rollback_receipt(), tenant(), actor(), "nodot", 1)
             .await
@@ -4572,7 +4435,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn get_config_invalid_key_returns_invalid_key() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         let err = svc
             .config_query_service()
             .get_config(tenant(), "nodot")
@@ -4640,7 +4503,7 @@ mod tests {
         });
 
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         let err = svc
             .config_query_service()
             .get_config(tenant(), "nodot")
@@ -4668,7 +4531,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn delete_invalid_key_returns_invalid_key() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         let err = svc
             .delete(delete_receipt(), tenant(), actor(), "nodot")
             .await
@@ -4681,7 +4544,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn delete_hides_value_and_is_idempotent() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
         svc.publish_config(
             publish_receipt(),
             tenant(),
@@ -4723,7 +4586,6 @@ mod tests {
                     store.clone(),
                     capture.clone(),
                 )),
-                FlagStoreBox(Box::new(InMemFlagStore::new())),
                 Box::new(FixedClock(
                     SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
                 )),
@@ -4782,7 +4644,6 @@ mod tests {
                     store.clone(),
                     capture.clone(),
                 )),
-                FlagStoreBox(Box::new(InMemFlagStore::new())),
                 Box::new(FixedClock(
                     SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
                 )),
@@ -4909,7 +4770,6 @@ mod tests {
                 store.clone(),
                 capture.clone(),
             )),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         );
         let fail_head = Arc::new(AtomicBool::new(false));
@@ -4919,7 +4779,6 @@ mod tests {
                 fail_head: Arc::clone(&fail_head),
             }),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture)),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(SystemTime::UNIX_EPOCH)),
         );
 
@@ -5002,7 +4861,6 @@ mod tests {
                 head_reads: AtomicUsize::new(0),
             }),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),
@@ -5042,7 +4900,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn delete_then_republish_continues_version_not_reset() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
 
         let v1 = svc
             .publish_config(
@@ -5111,7 +4969,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn multiple_keys_have_independent_versions() {
         let capture = CapturingEmitter::default();
-        let svc = service_with(&capture, InMemFlagStore::new());
+        let svc = service_with(&capture);
 
         let resp_a = svc
             .publish_config(
@@ -5189,7 +5047,6 @@ mod tests {
                 version_reads: AtomicUsize::new(0),
             }),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),
@@ -5249,7 +5106,6 @@ mod tests {
         let svc = SettingsService::with_postgres(
             DynConfigRepo::new_box(InMemConfigRepo::from_shared(store.clone())),
             DynConfigUnitOfWork::new_box(InMemConfigUnitOfWork::new(store, capture.clone())),
-            FlagStoreBox(Box::new(InMemFlagStore::new())),
             Box::new(FixedClock(
                 SystemTime::UNIX_EPOCH + Duration::from_secs(1_000),
             )),

@@ -302,11 +302,8 @@ x509-parser = "0.18"
 # ref: metrics-rs/metrics metrics-exporter-prometheus/src/exporter/builder.rs@metrics-exporter-prometheus-v0.18.3
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false }
-# settings 域 feature-flag 求值（#1013）：SemVer / 日期 rollout operator 的解析比较。均 MIT OR Apache-2.0
-# （deny.toml allow-list 内），已在 Cargo.lock 传递树中——升为直接依赖不引入新供应链面。time 仅取 parsing
-# feature（Rfc3339），不拉 std clock（求值无系统时钟，clippy disallowed-methods 不触）。
-# semver 亦供 xtask wsdeps-drift 治理（#1185，解析 [workspace.dependencies] pin↔Cargo.lock resolved 版本）。
-# ref: Unleash/unleash-types-rs src/client_features.rs@main（SEMVER_*/DATE_* constraint 语义）
+# SemVer 由 xtask release-surface/wsdeps 与 workspacefacts 消费；time parsing 由 secure 的 typed redaction
+# 字段支持消费。两者均 MIT OR Apache-2.0（deny.toml allow-list 内），统一在 workspace 钉版本。
 semver = "1"
 time = { version = "0.3", default-features = false, features = ["parsing"] }
 # 契约 codegen（xtask 专用；generated crate 不引入这些——见 docs/rules/architecture.md §83/§126）

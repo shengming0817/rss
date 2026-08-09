@@ -286,7 +286,7 @@ F5 走 security incident 告警（见 §3 `CONFIGENC-ERR-SPLIT-01`）。
 |--------|----|----------------|----------|------|----------|
 | **普通 config 值** | 明文 `value text` + 脱敏 Debug + 敏感 key 拒写 | 可选 at-rest AEAD envelope；**敏感 key 拒写保留** | 注入 `ValueTransformer`/`KeyProvider` 的 `secure::Envelope`（AES-GCM 随机 nonce）；`AADForConfig` 绑四维 | `config_entries`（D5 新增列） | **是**：tenant / config_key / `settings.config.value` / scheme |
 | **secret refs** | 坐标-only、材料从不落库（**已正确**） | 不变 | `SecretResolver` 在调用栈把坐标解析成 `SecretMaterial`（ZeroizeOnDrop、无 Clone） | `secret_refs`（仅坐标） | **N/A**：无材料落库，保护委托外部 store + transit auth |
-| **feature-flag 值** | 未持久化（in-mem `FlagState`） | 明文（非 secret 运维数据） | 无（非 secret） | 未来 flag store | **N/A**：但保留 `MAGIC` 域分隔，未来若需 flag AAD 不会与 config AAD 撞 |
+| **feature-flag 值** | settings 不提供该产品面（#2070 deferred） | 出现真实 consumer/provider 后重新设计 | 未定 | 未定 | **N/A**：`MAGIC` 域分隔仍为未来其它 AAD 用途预留 |
 
 **`SettingKey` 敏感 key 拒写保留**（即使加密上线）：config 加密是「偶发敏感 config 的纵深防御」（如连接串恰含主机名），
 **不是**受认可的 secret store——真 secret 走 `SecretRef` 路径（外部 store、轮换、从不 at-rest，`SecretKey::parse` 本就豁免子串守卫）。

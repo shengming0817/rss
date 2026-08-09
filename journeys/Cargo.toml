@@ -113,7 +113,7 @@ httpserve = { path = "../crates/httpserve", features = ["test-util"] }
 runtime = { path = "../assemblies/runtime", features = ["integration"] }
 settingsonly = { path = "../assemblies/settingsonly", features = ["test-support"] }
 identityaudit = { path = "../assemblies/identityaudit", features = ["test-support"] }
-# seed-data：启用 settings 的 in-mem 配置 / flag 仓储构造器（仅 journeys/demo；生产组合根不启用）。
+# seed-data：启用 settings 的 in-mem 配置 / secret fixtures（仅 journeys/demo；生产组合根不启用）。
 # test-support：journey 测试显式构造 TenantRepoScope，证明外部测试只能走测试入口而非裸 TenantId。
 settings = { path = "../crates/settings", features = ["seed-data", "test-support"] }
 bootstrap = { path = "../crates/bootstrap" }

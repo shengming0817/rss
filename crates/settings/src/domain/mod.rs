@@ -7,18 +7,14 @@
 //!
 //! # 实现状态
 //!
-//! 域行为已写实（issue #1013）：newtype 校验 funnel、CAS 版本号、`diff` /
-//! `evaluate_flag`（全 11 RolloutOperator + 百分比一致性哈希分桶）。`SettingKey` / `ConfigEntry` /
+//! 域行为已写实（issue #1013）：newtype 校验 funnel、CAS 版本号与 `diff`。`SettingKey` / `ConfigEntry` /
 //! `SettingsError` 为 `pub`——出现在公开 [`crate::ports::ConfigRepo`] 签名（域形 port，
-//! ADR-005 Option 2）；字段仍私有、构造仍经 `pub(crate)` funnel（外部可命名/收发、不可伪造）。其余类型
-//! （Flag* / Rollout* / ConfigValue / ConfigVersion）仅域内 + 内部 `FlagStore` 消费，保持 `pub(crate)`。
+//! ADR-005 Option 2）；字段仍私有、构造仍经 `pub(crate)` funnel（外部可命名/收发、不可伪造）。
 //!
 //! # 对标
 //!
-//! ref: Unleash/unleash-types-rs src/client_features.rs@main
-//! 采纳：`RolloutOperator::Unknown` 前向兼容、Constraint operator 集、Strategy 全约束 AND + 百分比分桶。
-//! 偏离：unleash 裸 String + derive Serialize → RSS 强类型 newtype + 域类型不 derive Serialize；
-//! 缺属性 fail-closed（不匹配），weight 0–1000 → 百分比 0–100。
+//! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main
+//! 采纳版本化配置的强类型 CAS 模型；域类型不派生 wire 序列化。
 
 // ---------------------------------------------------------------------------
 // SettingKey
@@ -324,8 +320,8 @@ pub(crate) enum ConfigDelta {
 /// secret store 标识 newtype（单段非空 + `[a-zA-Z0-9_-]` 字符集 + 长度 ≤ `MAX_KEY_LEN`）。
 ///
 /// 对标配置键的 `SettingKey` newtype funnel：单一构造入口 `parse`，非法值不可表达（ADR-004）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct StoreId(String);
+#[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
+pub struct StoreId(#[redact(sensitivity = internal)] String);
 
 impl StoreId {
     /// 解析 store 标识（单段：非空 + `[a-zA-Z0-9_-]` + `len <= MAX_KEY_LEN`）。
@@ -347,8 +343,8 @@ impl StoreId {
 /// 注意：secret 路径是敏感命名 key 的合法归宿——`settings.config_entries` 明文落库不承载 secret，
 /// 但 `secret_entries` 只存坐标引用（材料在 diport seam 解析）；故 secret key 命名不拒敏感词，
 /// 与 [`SettingKey::parse`] 分叉。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct SecretKey(String);
+#[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
+pub struct SecretKey(#[redact(sensitivity = internal)] String);
 
 impl SecretKey {
     /// 解析 secret 路径（两段 `<namespace>.<key>`，各段非空 + `[a-zA-Z0-9_-]`；**不**拒敏感词）。
@@ -555,535 +551,6 @@ pub enum SecretRepoError {
     Storage(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
-// ---------------------------------------------------------------------------
-// FlagKey
-// ---------------------------------------------------------------------------
-
-/// feature flag 键 newtype（私有字段；构造经 `parse` funnel）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct FlagKey(String);
-
-impl FlagKey {
-    /// 解析 flag 键（非空，字符集 `[a-zA-Z0-9_.-]`）。
-    pub(crate) fn parse(raw: &str) -> Result<Self, SettingsError> {
-        if raw.len() > MAX_KEY_LEN {
-            return Err(SettingsError::KeyInvalid);
-        }
-        let valid = !raw.is_empty()
-            && raw
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
-        if valid {
-            Ok(Self(raw.to_string()))
-        } else {
-            Err(SettingsError::KeyInvalid)
-        }
-    }
-
-    /// 取键字符串引用。
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RolloutOperator
-// ---------------------------------------------------------------------------
-
-/// 灰度规则运算符（`#[non_exhaustive]` + `Unknown` 前向兼容变体；ref: unleash-types-rs client_features.rs）。
-// reason: evaluate_flag 仅 match 读取各变体（L0 求值已交付）；变体**构造**由订阅缓存 consumer（#1120，
-// 消费 flag.updated 事件填充 FlagState）/ 测试承担——本 PR 不落地 flag 写入路径，非 test lib 无构造路径。
-#[allow(dead_code)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub(crate) enum RolloutOperator {
-    /// 属性值在给定集合中。
-    In,
-    /// 属性值不在给定集合中。
-    NotIn,
-    /// 字符串前缀匹配。
-    StrStartsWith,
-    /// 字符串后缀匹配。
-    StrEndsWith,
-    /// 字符串包含。
-    StrContains,
-    /// 数值范围（`[min, max]`）。
-    NumInRange,
-    /// 语义版本大于等于。
-    SemVerGte,
-    /// 语义版本小于等于。
-    SemVerLte,
-    /// 日期时间在某时间点之后。
-    DateAfter,
-    /// 日期时间在某时间点之前。
-    DateBefore,
-    /// 未知运算符（前向兼容；ref: unleash-types-rs Unknown 变体）。求值恒不匹配（fail-closed）。
-    Unknown,
-}
-
-// ---------------------------------------------------------------------------
-// RolloutPercentage
-// ---------------------------------------------------------------------------
-
-/// 灰度百分比 newtype（`u16`，validate 0..=100；超界返 `SettingsError::PercentageOutOfRange`）。
-///
-/// ref: unleash-types-rs weight 整数范围（0–1000）→ RSS 用 0–100 更直观。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct RolloutPercentage(u16);
-
-impl RolloutPercentage {
-    /// 构造（0..=100，超界返错误）。
-    // reason: 百分比构造由 flag 写入路径（订阅缓存 consumer #1120 / 测试）承担；本 PR 求值侧只读 `get`，
-    // 非 test lib 无构造路径（同 [`RolloutOperator`] 理由）。
-    #[allow(dead_code)]
-    pub(crate) fn new(pct: u16) -> Result<Self, SettingsError> {
-        if pct <= 100 {
-            Ok(Self(pct))
-        } else {
-            Err(SettingsError::PercentageOutOfRange)
-        }
-    }
-
-    /// 解析字符串（等同于 `parse::<u16>()` + `new`；非数值 / 超界均返 `PercentageOutOfRange`）。
-    // reason: 同 `new`——flag 写入路径构造，本 PR 求值侧不消费。
-    #[allow(dead_code)]
-    pub(crate) fn parse(raw: &str) -> Result<Self, SettingsError> {
-        let pct = raw
-            .parse::<u16>()
-            .map_err(|_| SettingsError::PercentageOutOfRange)?;
-        Self::new(pct)
-    }
-
-    /// 取底层值（0..=100）。
-    pub(crate) fn get(&self) -> u16 {
-        self.0
-    }
-}
-
-// ---------------------------------------------------------------------------
-// RolloutRule
-// ---------------------------------------------------------------------------
-
-/// 单条灰度规则（constraint；ref: unleash-types-rs Constraint 形态）。
-///
-/// 字段私有，构造经位置参 funnel。
-///
-/// **`Debug` 已手动实现**——`values` 列表可能含用户/设备敏感属性值，只输出 `value_count`
-/// 等非敏感摘要，不输出原始 values（F5 安全修复）。
-#[derive(Clone)]
-pub(crate) struct RolloutRule {
-    /// 求值上下文属性名。
-    context_field: String,
-    operator: RolloutOperator,
-    /// 参数值列表（string 形态；运算符语义决定解码方式）。
-    values: Vec<String>,
-}
-
-impl std::fmt::Debug for RolloutRule {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("RolloutRule")
-            .field("context_field", &self.context_field)
-            .field("operator", &self.operator)
-            .field("value_count", &self.values.len())
-            .finish()
-    }
-}
-
-impl RolloutRule {
-    /// 构造灰度规则（必填参数；缺失即编译错误）。
-    // reason: 规则构造由 flag 写入路径（订阅缓存 consumer #1120 / 测试）承担；本 PR matches_rule 只读
-    // accessor，非 test lib 无构造路径（同 [`RolloutOperator`] 理由）。
-    #[allow(dead_code)]
-    pub(crate) fn new(
-        context_field: impl Into<String>,
-        operator: RolloutOperator,
-        values: Vec<String>,
-    ) -> Self {
-        Self {
-            context_field: context_field.into(),
-            operator,
-            values,
-        }
-    }
-
-    /// 取上下文属性名。
-    pub(crate) fn context_field(&self) -> &str {
-        &self.context_field
-    }
-
-    /// 取运算符。
-    pub(crate) fn operator(&self) -> RolloutOperator {
-        self.operator
-    }
-
-    /// 取参数值切片。
-    pub(crate) fn values(&self) -> &[String] {
-        &self.values
-    }
-}
-
-// ---------------------------------------------------------------------------
-// EvalContext
-// ---------------------------------------------------------------------------
-
-/// feature flag 求值上下文（携带调用方属性 kv 对）。
-///
-/// 字段私有，构造经位置参 funnel；属性 map 用 `Vec<(String, String)>` 保序、
-/// 允许重复键（行为 PR 再决策是否改 HashMap）。
-///
-/// **`Debug` 已手动实现**——`attrs` 含 user/device/tenant/email 等 PII，只输出
-/// `attr_count` 摘要，不输出原始键值（F5 安全修复）。
-#[derive(Clone)]
-pub(crate) struct EvalContext {
-    /// 属性键值对（保序）。
-    attrs: Vec<(String, String)>,
-}
-
-impl std::fmt::Debug for EvalContext {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EvalContext")
-            .field("attr_count", &self.attrs.len())
-            .finish()
-    }
-}
-
-impl EvalContext {
-    /// 构造求值上下文（从属性切片）。
-    pub(crate) fn new(attrs: &[(String, String)]) -> Self {
-        Self {
-            attrs: attrs.to_vec(),
-        }
-    }
-
-    /// 按键取第一个匹配属性值（不存在返回 `None`）。
-    pub(crate) fn get(&self, key: &str) -> Option<&str> {
-        self.attrs
-            .iter()
-            .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
-    }
-
-    /// 返回属性切片。
-    // reason: 公开求值上下文 accessor，当前仅 #[cfg(test)] 断言消费；W 投影 / handler 绑定接入待后续单元。
-    #[allow(dead_code)]
-    pub(crate) fn attrs(&self) -> &[(String, String)] {
-        &self.attrs
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FlagDecision
-// ---------------------------------------------------------------------------
-
-/// feature flag 求值决策原因（`#[non_exhaustive]`）。
-///
-/// 闭值集区分 unknown / 全局禁用 / 规则未命中 / 百分比未命中 / 启用，供审计与调试。
-/// `stale` 是快照侧信道（见 [`FlagDecision::stale`]），不编入本枚举。
-///
-/// `variant` 载荷尚未建模（`FlagState` 无 variants），GA 前 follow-up。
-///
-/// ref: Unleash/unleash-types-rs src/client_features.rs@main（enabled/stale 快照语义；
-/// reason 闭集为 RSS 自研，Unleash SDK `isEnabled` 无对等细分）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum FlagDecisionReason {
-    /// store 未找到该 flag（application 层 fail-closed）。
-    Unknown,
-    /// flag 全局 `enabled=false`。
-    Disabled,
-    /// 规则列表未全部满足（缺属性 / op 不匹配 / `Unknown` 运算符等）。
-    RuleMismatch,
-    /// 规则通过但百分比分桶未命中。
-    PercentageMiss,
-    /// 全部条件通过，对该上下文启用。
-    Enabled,
-}
-
-/// feature flag 结构化求值决策（字段私有；经构造 funnel / accessor）。
-///
-/// - `enabled`：调用方可作 bool 门闩（等同旧 interim 布尔求值语义）。
-/// - `reason`：区分 unknown / disabled / rule-mismatch / percentage-miss / enabled。
-/// - `stale`：透传快照陈旧标记；求值不因 stale fail-closed。
-///
-/// `variant` 暂未暴露（数据模型未就绪）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FlagDecision {
-    enabled: bool,
-    reason: FlagDecisionReason,
-    stale: bool,
-}
-
-impl FlagDecision {
-    /// 对该上下文是否启用。
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// 求值原因（闭集）。
-    pub fn reason(&self) -> FlagDecisionReason {
-        self.reason
-    }
-
-    /// 快照是否陈旧（上游同步延迟）；与 `enabled`/`reason` 正交。
-    pub fn stale(&self) -> bool {
-        self.stale
-    }
-
-    /// 全部条件通过。
-    pub(crate) fn enabled_decision(stale: bool) -> Self {
-        Self {
-            enabled: true,
-            reason: FlagDecisionReason::Enabled,
-            stale,
-        }
-    }
-
-    /// 全局禁用。
-    pub(crate) fn disabled(stale: bool) -> Self {
-        Self {
-            enabled: false,
-            reason: FlagDecisionReason::Disabled,
-            stale,
-        }
-    }
-
-    /// 规则未命中。
-    pub(crate) fn rule_mismatch(stale: bool) -> Self {
-        Self {
-            enabled: false,
-            reason: FlagDecisionReason::RuleMismatch,
-            stale,
-        }
-    }
-
-    /// 百分比分桶未命中。
-    pub(crate) fn percentage_miss(stale: bool) -> Self {
-        Self {
-            enabled: false,
-            reason: FlagDecisionReason::PercentageMiss,
-            stale,
-        }
-    }
-
-    /// store miss（未知 flag）；`stale=false`。
-    pub(crate) fn unknown() -> Self {
-        Self {
-            enabled: false,
-            reason: FlagDecisionReason::Unknown,
-            stale: false,
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// FlagState
-// ---------------------------------------------------------------------------
-
-/// feature flag 完整状态快照（私有字段；不 derive Serialize）。
-///
-/// 字段私有，构造经位置参 funnel；`evaluate_flag` 消费此类型做决策。
-#[derive(Debug, Clone)]
-pub(crate) struct FlagState {
-    key: FlagKey,
-    /// flag 是否全局启用（优先于 rules）。
-    enabled: bool,
-    /// flag 数据是否陈旧（上游同步延迟时置 true）。
-    stale: bool,
-    /// 灰度规则列表（全部满足时生效；ref: unleash-types-rs Constraint 列表语义）。
-    rules: Vec<RolloutRule>,
-    /// 百分比灰度（`None` 表示不限制百分比）。
-    percentage: Option<RolloutPercentage>,
-}
-
-impl FlagState {
-    /// 构造 flag 状态快照（必填参数；缺失即编译错误）。
-    // reason: flag 快照构造由订阅缓存 consumer（#1120，消费 flag.updated 事件填充）/ 测试承担；本 PR
-    // evaluate_flag 只读 accessor 求值，非 test lib 无构造路径（同 [`RolloutOperator`] 理由）。
-    #[allow(dead_code)]
-    pub(crate) fn new(
-        key: FlagKey,
-        enabled: bool,
-        stale: bool,
-        rules: Vec<RolloutRule>,
-        percentage: Option<RolloutPercentage>,
-    ) -> Self {
-        Self {
-            key,
-            enabled,
-            stale,
-            rules,
-            percentage,
-        }
-    }
-
-    /// 取 flag 键引用。
-    pub(crate) fn key(&self) -> &FlagKey {
-        &self.key
-    }
-
-    /// flag 是否全局启用。
-    pub(crate) fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// flag 数据是否陈旧。
-    ///
-    /// stale=true 时 evaluate_flag 仍返回确定性结果（不 fail-closed），并经 [`FlagDecision::stale`]
-    /// 透出；调用方如需陈旧降级须自行检查。
-    pub(crate) fn stale(&self) -> bool {
-        self.stale
-    }
-
-    /// 取规则切片。
-    pub(crate) fn rules(&self) -> &[RolloutRule] {
-        &self.rules
-    }
-
-    /// 取百分比灰度（`None` 表示不限制）。
-    pub(crate) fn percentage(&self) -> Option<&RolloutPercentage> {
-        self.percentage.as_ref()
-    }
-}
-
-// ---------------------------------------------------------------------------
-// 纯逻辑函数（L0 本地计算）
-// ---------------------------------------------------------------------------
-
-/// 对 flag 状态与求值上下文计算决策（纯函数，L0）。
-///
-/// - `enabled=false` → [`FlagDecisionReason::Disabled`]（透传 `stale`）。
-/// - 规则列表未全部满足（AND；缺属性 / 解析失败 / `Unknown` 运算符 fail-closed）→
-///   [`FlagDecisionReason::RuleMismatch`]。
-/// - 百分比分桶未命中 → [`FlagDecisionReason::PercentageMiss`]。
-/// - 全部通过 → [`FlagDecisionReason::Enabled`]。
-///
-/// 未知 flag（store miss）不进入本函数；由 application 构造 [`FlagDecision::unknown`]。
-pub(crate) fn evaluate_flag(flag: &FlagState, ctx: &EvalContext) -> FlagDecision {
-    let stale = flag.stale();
-    if !flag.enabled() {
-        return FlagDecision::disabled(stale);
-    }
-    if !flag.rules().iter().all(|rule| matches_rule(rule, ctx)) {
-        return FlagDecision::rule_mismatch(stale);
-    }
-    if let Some(pct) = flag.percentage()
-        && !passes_percentage(flag.key(), ctx, pct.get())
-    {
-        return FlagDecision::percentage_miss(stale);
-    }
-    FlagDecision::enabled_decision(stale)
-}
-
-/// 单条规则求值：缺属性即不匹配（fail-closed），否则按运算符语义比较。
-fn matches_rule(rule: &RolloutRule, ctx: &EvalContext) -> bool {
-    let Some(actual) = ctx.get(rule.context_field()) else {
-        return false;
-    };
-    let values = rule.values();
-    match rule.operator() {
-        RolloutOperator::In => values.iter().any(|v| v == actual),
-        RolloutOperator::NotIn => !values.iter().any(|v| v == actual),
-        RolloutOperator::StrStartsWith => values.iter().any(|v| actual.starts_with(v.as_str())),
-        RolloutOperator::StrEndsWith => values.iter().any(|v| actual.ends_with(v.as_str())),
-        RolloutOperator::StrContains => values.iter().any(|v| actual.contains(v.as_str())),
-        RolloutOperator::NumInRange => num_in_range(actual, values),
-        RolloutOperator::SemVerGte => cmp_semver(actual, values, true),
-        RolloutOperator::SemVerLte => cmp_semver(actual, values, false),
-        RolloutOperator::DateAfter => cmp_date(actual, values, true),
-        RolloutOperator::DateBefore => cmp_date(actual, values, false),
-        RolloutOperator::Unknown => false,
-    }
-}
-
-/// `[min, max]` 闭区间数值匹配；values 非 2 元或任一解析失败 → false（fail-closed）。
-fn num_in_range(actual: &str, values: &[String]) -> bool {
-    let [min, max] = values else {
-        return false;
-    };
-    let (Ok(actual), Ok(min), Ok(max)) = (
-        actual.parse::<f64>(),
-        min.parse::<f64>(),
-        max.parse::<f64>(),
-    ) else {
-        return false;
-    };
-    min <= actual && actual <= max
-}
-
-/// 语义版本比较（`gte=true` → `actual >= values[0]`，否则 `<=`）；解析失败 / values 空 → false。
-fn cmp_semver(actual: &str, values: &[String], gte: bool) -> bool {
-    let Some(target) = values.first() else {
-        return false;
-    };
-    let (Ok(actual), Ok(target)) = (
-        semver::Version::parse(actual),
-        semver::Version::parse(target),
-    ) else {
-        return false;
-    };
-    if gte {
-        actual >= target
-    } else {
-        actual <= target
-    }
-}
-
-/// RFC3339 日期比较（`after=true` → `actual > values[0]`，否则 `<`）；解析失败 / values 空 → false。
-fn cmp_date(actual: &str, values: &[String], after: bool) -> bool {
-    use time::OffsetDateTime;
-    use time::format_description::well_known::Rfc3339;
-    let Some(target) = values.first() else {
-        return false;
-    };
-    let (Ok(actual), Ok(target)) = (
-        OffsetDateTime::parse(actual, &Rfc3339),
-        OffsetDateTime::parse(target, &Rfc3339),
-    ) else {
-        return false;
-    };
-    if after {
-        actual > target
-    } else {
-        actual < target
-    }
-}
-
-/// flag 键 + sticky 标识的稳定哈希落桶 `[0,100)`，`< pct` 通过。
-///
-/// sticky 标识取上下文中首个出现的 [`STICKY_KEYS`]（user/device/session）；缺失则用空串（分桶仅由
-/// flag 键决定）。确定性：同一 (flag, sticky) 在多次求值 / 多 flag 间稳定（一致性灰度体验）。
-/// 哈希 = FNV-1a 64-bit（dep-free，确定性，golden 表测锁定），非加密用途。
-fn passes_percentage(key: &FlagKey, ctx: &EvalContext, pct: u16) -> bool {
-    let sticky = STICKY_KEYS.iter().find_map(|k| ctx.get(k)).unwrap_or("");
-    let bucket = (fnv1a64(&format!("{}:{}", key.as_str(), sticky)) % 100) as u16;
-    bucket < pct
-}
-
-/// 百分比分桶 sticky 标识优先级（首个出现者胜）。
-const STICKY_KEYS: &[&str] = &[
-    "userId",
-    "user_id",
-    "deviceId",
-    "device_id",
-    "sessionId",
-    "session_id",
-];
-
-/// FNV-1a 64-bit offset basis。
-const FNV1A64_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a 64-bit prime。
-const FNV1A64_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-/// FNV-1a 64-bit 非加密稳定哈希（确定性、dep-free）。
-fn fnv1a64(s: &str) -> u64 {
-    let mut hash: u64 = FNV1A64_OFFSET_BASIS;
-    for byte in s.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(FNV1A64_PRIME);
-    }
-    hash
-}
-
 /// 计算两条配置条目的差异（纯函数，L0；key 或 tenant 不同返回 `KeyMismatch`）。
 // reason: L0 纯逻辑，当前仅 #[cfg(test)] 表驱动覆盖；value-changed 投影 consumer 接入待后续单元
 // （projection #1122），非 test 编译暂无使用路径。
@@ -1119,9 +586,6 @@ pub enum SettingsError {
         "setting key uses a sensitive namespace; store secrets in a secret store, not settings"
     )]
     SensitiveKey,
-    /// 灰度百分比超出 0..=100 范围。
-    #[error("percentage out of range; must be 0..=100")]
-    PercentageOutOfRange,
     /// secret key 格式非法（必须为 `<namespace>.<key>`，两段均非空 + `[a-zA-Z0-9_-]`）。
     #[error("secret key is invalid")]
     SecretKeyInvalid,
@@ -1222,46 +686,6 @@ mod tests {
         assert!(SettingKey::parse(raw).is_ok());
     }
 
-    // --- FlagKey::parse ----------------------------------------------------
-
-    #[rstest]
-    #[case("new-checkout", true)]
-    #[case("ui.v2_beta", true)]
-    #[case("", false)]
-    #[case("has space", false)]
-    #[case("emoji😀", false)]
-    fn flag_key_parse_validates_charset(#[case] raw: &str, #[case] ok: bool) {
-        assert_eq!(FlagKey::parse(raw).is_ok(), ok, "raw={raw}");
-    }
-
-    // --- RolloutPercentage -------------------------------------------------
-
-    #[rstest]
-    #[case(0, true)]
-    #[case(50, true)]
-    #[case(100, true)]
-    #[case(101, false)]
-    #[case(1000, false)]
-    fn rollout_percentage_new_bounds(#[case] pct: u16, #[case] ok: bool) {
-        assert_eq!(RolloutPercentage::new(pct).is_ok(), ok);
-    }
-
-    #[rstest]
-    #[case("0", true)]
-    #[case("100", true)]
-    #[case("101", false)]
-    #[case("abc", false)]
-    #[case("-1", false)]
-    fn rollout_percentage_parse(#[case] raw: &str, #[case] ok: bool) {
-        assert_eq!(RolloutPercentage::parse(raw).is_ok(), ok, "raw={raw}");
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn rollout_percentage_get_roundtrips() {
-        assert_eq!(RolloutPercentage::new(42).expect("ok").get(), 42);
-    }
-
     // --- diff --------------------------------------------------------------
 
     #[allow(clippy::expect_used)]
@@ -1315,279 +739,12 @@ mod tests {
         assert!(dbg.contains("<redacted>"));
     }
 
-    // --- evaluate_flag: enabled short-circuit ------------------------------
-
-    #[allow(clippy::expect_used)]
-    fn flag(enabled: bool, rules: Vec<RolloutRule>, pct: Option<u16>) -> FlagState {
-        FlagState::new(
-            FlagKey::parse("the-flag").expect("valid"),
-            enabled,
-            false,
-            rules,
-            pct.map(|p| RolloutPercentage::new(p).expect("valid pct")),
-        )
-    }
-
-    fn ctx(pairs: &[(&str, &str)]) -> EvalContext {
-        let owned: Vec<(String, String)> = pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        EvalContext::new(&owned)
-    }
-
-    #[test]
-    fn evaluate_disabled_flag_short_circuits() {
-        let f = flag(false, vec![], None);
-        let d = evaluate_flag(&f, &ctx(&[]));
-        assert!(!d.enabled());
-        assert_eq!(d.reason(), FlagDecisionReason::Disabled);
-        assert!(!d.stale());
-    }
-
-    #[test]
-    fn evaluate_enabled_no_rules_no_pct() {
-        let f = flag(true, vec![], None);
-        let d = evaluate_flag(&f, &ctx(&[]));
-        assert!(d.enabled());
-        assert_eq!(d.reason(), FlagDecisionReason::Enabled);
-        assert!(!d.stale());
-    }
-
-    #[test]
-    fn evaluate_missing_attr_fails_closed() {
-        let rule = RolloutRule::new("region", RolloutOperator::In, vec!["us".to_string()]);
-        let f = flag(true, vec![rule], None);
-        // 缺 region 属性 ⇒ 规则不匹配 ⇒ RuleMismatch。
-        let d = evaluate_flag(&f, &ctx(&[]));
-        assert!(!d.enabled());
-        assert_eq!(d.reason(), FlagDecisionReason::RuleMismatch);
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn evaluate_stale_snapshot_exposes_stale() {
-        let fresh = flag(true, vec![], None);
-        let stale = FlagState::new(
-            FlagKey::parse("the-flag").expect("valid"),
-            true,
-            true,
-            vec![],
-            None,
-        );
-        let d_fresh = evaluate_flag(&fresh, &ctx(&[]));
-        let d_stale = evaluate_flag(&stale, &ctx(&[]));
-        assert_eq!(d_fresh.reason(), FlagDecisionReason::Enabled);
-        assert!(!d_fresh.stale());
-        assert_eq!(d_stale.reason(), FlagDecisionReason::Enabled);
-        assert!(d_stale.enabled());
-        assert!(d_stale.stale());
-    }
-
-    #[test]
-    fn evaluate_percentage_miss_reason() {
-        let f = flag(true, vec![], Some(0));
-        let d = evaluate_flag(&f, &ctx(&[("userId", "u1")]));
-        assert!(!d.enabled());
-        assert_eq!(d.reason(), FlagDecisionReason::PercentageMiss);
-    }
-
-    // --- evaluate_flag: 全 11 operator（含 Unknown）-------------------------
-
-    #[rstest]
-    // In / NotIn
-    #[case(RolloutOperator::In, vec!["us", "eu"], "region", "us", true)]
-    #[case(RolloutOperator::In, vec!["us"], "region", "eu", false)]
-    #[case(RolloutOperator::NotIn, vec!["us"], "region", "eu", true)]
-    #[case(RolloutOperator::NotIn, vec!["us"], "region", "us", false)]
-    // 字符串
-    #[case(RolloutOperator::StrStartsWith, vec!["beta-"], "build", "beta-42", true)]
-    #[case(RolloutOperator::StrStartsWith, vec!["beta-"], "build", "ga-42", false)]
-    #[case(RolloutOperator::StrEndsWith, vec!["-ios"], "platform", "mobile-ios", true)]
-    #[case(RolloutOperator::StrEndsWith, vec!["-ios"], "platform", "mobile-web", false)]
-    #[case(RolloutOperator::StrContains, vec!["dev"], "channel", "internal-dev-ring", true)]
-    #[case(RolloutOperator::StrContains, vec!["dev"], "channel", "prod", false)]
-    // 数值范围
-    #[case(RolloutOperator::NumInRange, vec!["1", "10"], "score", "5", true)]
-    #[case(RolloutOperator::NumInRange, vec!["1", "10"], "score", "11", false)]
-    #[case(RolloutOperator::NumInRange, vec!["1"], "score", "5", false)]
-    #[case(RolloutOperator::NumInRange, vec!["1", "10"], "score", "x", false)]
-    // NumInRange values=3元 false（三个元素不是 [min,max] 二元，fail-closed）
-    #[case(RolloutOperator::NumInRange, vec!["1","10","20"], "score", "5", false)]
-    // semver
-    #[case(RolloutOperator::SemVerGte, vec!["1.2.0"], "appVer", "1.3.0", true)]
-    #[case(RolloutOperator::SemVerGte, vec!["1.2.0"], "appVer", "1.1.0", false)]
-    #[case(RolloutOperator::SemVerLte, vec!["2.0.0"], "appVer", "1.9.9", true)]
-    #[case(RolloutOperator::SemVerLte, vec!["2.0.0"], "appVer", "2.0.1", false)]
-    #[case(RolloutOperator::SemVerGte, vec!["1.2.0"], "appVer", "not-semver", false)]
-    // SemVerGte/SemVerLte values=[] false case
-    #[case(RolloutOperator::SemVerGte, vec![], "appVer", "1.0.0", false)]
-    #[case(RolloutOperator::SemVerLte, vec![], "appVer", "1.0.0", false)]
-    // 日期（RFC3339）
-    #[case(RolloutOperator::DateAfter, vec!["2026-01-01T00:00:00Z"], "ts", "2026-06-01T00:00:00Z", true)]
-    #[case(RolloutOperator::DateAfter, vec!["2026-01-01T00:00:00Z"], "ts", "2025-06-01T00:00:00Z", false)]
-    #[case(RolloutOperator::DateBefore, vec!["2026-01-01T00:00:00Z"], "ts", "2025-06-01T00:00:00Z", true)]
-    #[case(RolloutOperator::DateBefore, vec!["2026-01-01T00:00:00Z"], "ts", "bad-date", false)]
-    // DateAfter/DateBefore values=[] false case
-    #[case(RolloutOperator::DateAfter, vec![], "ts", "2026-06-01T00:00:00Z", false)]
-    #[case(RolloutOperator::DateBefore, vec![], "ts", "2025-06-01T00:00:00Z", false)]
-    // Unknown 前向兼容 ⇒ 永不匹配
-    #[case(RolloutOperator::Unknown, vec!["x"], "k", "x", false)]
-    fn evaluate_single_operator(
-        #[case] op: RolloutOperator,
-        #[case] values: Vec<&str>,
-        #[case] field: &str,
-        #[case] attr: &str,
-        #[case] expect_enabled: bool,
-    ) {
-        let rule = RolloutRule::new(field, op, values.iter().map(|s| s.to_string()).collect());
-        let f = flag(true, vec![rule], None);
-        let d = evaluate_flag(&f, &ctx(&[(field, attr)]));
-        assert_eq!(d.enabled(), expect_enabled);
-        if expect_enabled {
-            assert_eq!(d.reason(), FlagDecisionReason::Enabled);
-        } else {
-            assert_eq!(d.reason(), FlagDecisionReason::RuleMismatch);
-        }
-    }
-
-    #[test]
-    fn evaluate_rules_are_anded() {
-        let r1 = RolloutRule::new("region", RolloutOperator::In, vec!["us".to_string()]);
-        let r2 = RolloutRule::new(
-            "platform",
-            RolloutOperator::StrEndsWith,
-            vec!["-ios".to_string()],
-        );
-        let f = flag(true, vec![r1, r2], None);
-        // 两规则都满足 → Enabled。
-        let hit = evaluate_flag(&f, &ctx(&[("region", "us"), ("platform", "x-ios")]));
-        assert!(hit.enabled());
-        assert_eq!(hit.reason(), FlagDecisionReason::Enabled);
-        // 仅一条满足 → RuleMismatch（AND）。
-        let miss = evaluate_flag(&f, &ctx(&[("region", "us"), ("platform", "x-web")]));
-        assert!(!miss.enabled());
-        assert_eq!(miss.reason(), FlagDecisionReason::RuleMismatch);
-    }
-
-    // --- 百分比一致性哈希分桶 ------------------------------------------------
-
-    #[test]
-    fn percentage_zero_disables_all() {
-        let f = flag(true, vec![], Some(0));
-        for user in ["u1", "u2", "u3", "u4", "u5"] {
-            let d = evaluate_flag(&f, &ctx(&[("userId", user)]));
-            assert!(!d.enabled(), "user={user}");
-            assert_eq!(
-                d.reason(),
-                FlagDecisionReason::PercentageMiss,
-                "user={user}"
-            );
-        }
-    }
-
-    #[test]
-    fn percentage_hundred_enables_all() {
-        let f = flag(true, vec![], Some(100));
-        for user in ["u1", "u2", "u3", "u4", "u5"] {
-            let d = evaluate_flag(&f, &ctx(&[("userId", user)]));
-            assert!(d.enabled(), "user={user}");
-            assert_eq!(d.reason(), FlagDecisionReason::Enabled, "user={user}");
-        }
-    }
-
-    #[test]
-    fn percentage_bucketing_is_deterministic() {
-        // 同一 (flag, userId) 多次求值结果稳定。
-        let f = flag(true, vec![], Some(50));
-        let first = evaluate_flag(&f, &ctx(&[("userId", "stable-user")]));
-        for _ in 0..10 {
-            assert_eq!(evaluate_flag(&f, &ctx(&[("userId", "stable-user")])), first);
-        }
-    }
-
-    #[test]
-    fn percentage_bucketing_distributes_roughly() {
-        // 50% 分桶对大量用户应落在 enabled 数量的合理区间（非全 0 / 全 1，证明分桶非平凡）。
-        let f = flag(true, vec![], Some(50));
-        let enabled = (0..1000)
-            .filter(|i| evaluate_flag(&f, &ctx(&[("userId", &format!("user-{i}"))])).enabled())
-            .count();
-        assert!(
-            (350..=650).contains(&enabled),
-            "50% 分桶落 {enabled}/1000，超出合理区间"
-        );
-    }
-
-    #[test]
-    fn fnv1a64_is_stable_golden() {
-        // golden：锁定 FNV-1a 实现不漂移（改算法即破，consistency 灰度体验保证）。
-        assert_eq!(fnv1a64(""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(fnv1a64("a"), 0xaf63_dc4c_8601_ec8c);
-    }
-
-    #[test]
-    fn flag_state_accessors_roundtrip() {
-        let f = flag(true, vec![], Some(30));
-        assert!(f.enabled());
-        assert!(!f.stale());
-        assert_eq!(f.key().as_str(), "the-flag");
-        assert!(f.rules().is_empty());
-        assert_eq!(f.percentage().map(RolloutPercentage::get), Some(30));
-    }
-
-    #[test]
-    fn eval_context_get_and_attrs() {
-        let c = ctx(&[("a", "1"), ("b", "2")]);
-        assert_eq!(c.get("a"), Some("1"));
-        assert_eq!(c.get("missing"), None);
-        assert_eq!(c.attrs().len(), 2);
-    }
-
-    #[test]
-    fn rollout_rule_debug_redacts_values() {
-        let rule = RolloutRule::new(
-            "email",
-            RolloutOperator::In,
-            vec!["secret@x.com".to_string()],
-        );
-        let dbg = format!("{rule:?}");
-        assert!(!dbg.contains("secret@x.com"), "values leaked: {dbg}");
-        assert!(dbg.contains("value_count"));
-    }
-
-    #[test]
-    fn eval_context_debug_redacts_attrs() {
-        let dbg = format!("{:?}", ctx(&[("email", "a@b.com")]));
-        assert!(!dbg.contains("a@b.com"), "attrs leaked: {dbg}");
-        assert!(dbg.contains("attr_count"));
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn percentage_no_sticky_attr_falls_back_to_flag_key() {
-        // 空上下文（无 sticky 属性）⇒ 分桶仅由 flag key 决定 ⇒ 两次求值结果相等（确定性）。
-        let f = flag(true, vec![], Some(50));
-        let first = evaluate_flag(&f, &ctx(&[]));
-        let second = evaluate_flag(&f, &ctx(&[]));
-        assert_eq!(first, second, "无 sticky attr 时分桶应确定性");
-    }
-
     #[test]
     fn setting_key_max_len_rejected() {
         // 超过 MAX_KEY_LEN 的 key 应被拒。
         let long = format!("{}a.{}", "a".repeat(128), "b".repeat(128));
         assert!(long.len() > MAX_KEY_LEN);
         assert!(SettingKey::parse(&long).is_err(), "超长 key 应 KeyInvalid");
-    }
-
-    #[test]
-    fn flag_key_max_len_rejected() {
-        let long = "a".repeat(MAX_KEY_LEN + 1);
-        assert!(
-            FlagKey::parse(&long).is_err(),
-            "超长 flag key 应 KeyInvalid"
-        );
     }
 
     // --- SecretKey::parse -------------------------------------------------
@@ -1831,5 +988,29 @@ mod tests {
         // anti-vacuity：明文确实在字段里（Store / key 取值存在）。
         assert_eq!(r.store_id().as_str(), "my-secret-store");
         assert_eq!(r.ref_key(), "db/super-password");
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn store_id_debug_redacts() {
+        fn assert_redact<T: secure::Redact>() {}
+        assert_redact::<StoreId>();
+        let value = StoreId::parse("store-debug-marker").expect("valid store id");
+        assert_eq!(value.as_str(), "store-debug-marker");
+        let dbg = format!("{value:?}");
+        assert_eq!(dbg, "StoreId(<redacted>)");
+        assert!(!dbg.contains("store-debug-marker"));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn secret_key_debug_redacts() {
+        fn assert_redact<T: secure::Redact>() {}
+        assert_redact::<SecretKey>();
+        let value = SecretKey::parse("debug.secret_marker").expect("valid secret key");
+        assert_eq!(value.as_str(), "debug.secret_marker");
+        let dbg = format!("{value:?}");
+        assert_eq!(dbg, "SecretKey(<redacted>)");
+        assert!(!dbg.contains("debug.secret_marker"));
     }
 }

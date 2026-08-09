@@ -19,7 +19,7 @@ use postgres::{ConfigValueProtections, PgDbReadiness, PgDomainDeps, PoolReadines
 use primitives::{HealthCheck, HealthStatus, ProbeName};
 use secure::{Plaintext, ProtectionContext};
 use settings::ports::{DynSecretRepo, DynSecretUnitOfWork};
-use settings::{SettingsDomain, SettingsService, empty_flag_store};
+use settings::{SettingsDomain, SettingsService};
 use tokio_util::sync::CancellationToken;
 use vault::{SecretResolverReadinessTarget, VaultDomainDeps, caps as vault_caps};
 
@@ -383,7 +383,6 @@ pub async fn wire(deps: SettingsModuleDeps) -> anyhow::Result<DomainBinding> {
     let config_svc = SettingsService::with_postgres(
         configs,
         writer,
-        empty_flag_store(),
         Box::new(SharedClock(Arc::clone(&service_clock))),
     );
     let secret_repo: Arc<DynSecretRepo<'static>> = Arc::from(secrets);

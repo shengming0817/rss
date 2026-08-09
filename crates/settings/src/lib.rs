@@ -1,13 +1,13 @@
-//! settings — RSS 版本化配置与 feature flag 域。
+//! settings — RSS 版本化配置与 secret 引用域。
 //!
-//! 本 crate 承载配置条目（`ConfigEntry`）与 feature flag（`FlagState`/`FlagDecision`）的核心值类型与
-//! 纯逻辑（`domain`）、版本化配置 CRUD/CAS + 发布/回滚 + flag 求值编排（`application`）、域形配置仓储
+//! 本 crate 承载配置与 secret 引用的核心值类型及纯逻辑（`domain`）、版本化配置 CRUD/CAS +
+//! 发布/回滚（`application`）、域形配置仓储
 //! DI port（`ports::ConfigRepo`，ADR-005 Option 2）与域内 in-mem 实现（`internal`）。所有域类型字段私有，
 //! 只经显式构造 funnel 创建——外部不可伪造（ADR-001）。
 //!
 //! # 实现状态
 //!
-//! `domain` newtype 校验 / `diff` / `evaluate_flag`（全 11 operator + 百分比分桶）已写实；`application`
+//! `domain` newtype 校验与配置 `diff` 已写实；`application`
 //! 经 Publisher（L2 OutboxFact）打通配置发布/回滚接缝。真实持久化（postgres adapter impl
 //! [`ports::ConfigRepo`]）+ axum 挂载（config publish/get/delete/rollback / secret publish/resolve
 //! 认证路由）已落（#1430 PERSIST-009 settings 首条 durable module 闭环）。domain / application /
@@ -15,7 +15,6 @@
 //!
 //! # 对标
 //!
-//! ref: Unleash/unleash-types-rs src/client_features.rs@main
 //! ref: etcd-io/etcd api/etcdserverpb/rpc.proto@main
 
 #![forbid(unsafe_code)]
@@ -29,11 +28,10 @@ mod secret_application;
 
 pub use application::{
     ConfigQueryService, ConfigVersionChangedEvent, ConfigVersionChangedEventError,
-    ConfigVersionReconciler, FlagStoreBox, SETTINGS_ROUTE_PREFIX, SettingsDomain,
+    ConfigVersionReconciler, SETTINGS_ROUTE_PREFIX, SettingsDomain,
     SettingsProjectionServingDomain, SettingsService, SettingsServiceError,
     config_version_changed_event_from_message,
 };
-pub use domain::{FlagDecision, FlagDecisionReason};
 pub use ports::ConfigEntry;
 pub use projection::{
     SettingsProjectionBeginError, SettingsProjectionMetadataQuery, SettingsProjectionQueryRequest,
@@ -59,27 +57,12 @@ pub fn config_rollback_receipt_for_test() -> ports::ConfigRollbackReceipt {
     httpserve::ProducerMarker::for_test(generated::http::settings_v6::PRODUCER).into_receipt()
 }
 
-/// 返回空 flag 仓储（不透明封装 [`FlagStoreBox`]）。
-///
-/// 生产 flag store 待 #1120（订阅缓存 consumer 填充快照）。当前空 store 满足 fail-closed 语义：
-/// 未知 flag → [`FlagDecisionReason::Unknown`]（`FlagStore::find` 返 `None`，
-/// [`SettingsService::flag_decision`] 返回 `enabled=false`）。
-///
-/// `FlagStore` trait 与 `InMemFlagStore` 类型保持 `pub(crate)` 封装；此工厂是唯一对外暴露的构造路径。
-/// 调用方只需持有 `FlagStoreBox` 并传给 [`SettingsService::with_postgres`]，无需命名内部 trait。
-///
-/// 仅在 `test` 或 `seed-data` feature 可用（`InMemFlagStore` 为域内 in-mem 实现，非生产 store）。
-#[cfg(any(test, feature = "seed-data"))]
-pub fn empty_flag_store() -> FlagStoreBox {
-    FlagStoreBox(Box::new(internal::mem::InMemFlagStore::new()))
-}
-
 /// 返回共享同一 in-mem store 的 secret read repo + mutation UoW，供 seed / journey 注入
 /// [`SettingsDomain::new`] 的 secret-publish 路由 State（#1430）；secret-resolve 另经
 /// [`SecretResolveService`] 只读能力注入。
 ///
-/// 与 [`empty_flag_store`] 同治理姿态：`InMemSecretRepo` 保持 `pub(crate)` 封装，此工厂是唯一对外构造路径
-/// 两个 dyn port 类型互不可换，且写入后 read slot 可立即观察同一 store。仅 `test` / `seed-data` 可用。
+/// `InMemSecretRepo` 保持 `pub(crate)` 封装，此工厂是唯一对外构造路径；两个 dyn port 类型互不可换，
+/// 且写入后 read slot 可立即观察同一 store。仅 `test` / `seed-data` 可用。
 #[cfg(any(test, feature = "seed-data"))]
 pub fn empty_secret_ports() -> (
     std::sync::Arc<ports::DynSecretRepo<'static>>,

@@ -82,7 +82,7 @@ rss 的 crate 骨架与一致性引擎（L0–L4 抽象、outbox/saga/projection
 | **新 deviceidentity 域 crate** | EST 三端点 + 三态鉴权 + PKCS#7 degenerate CMS + jti 重放（P0-1） |
 | **distributed / 新 spiffeid crate** | Lock/Locker 值语义 + 三态信号 + 续约 manager（P2-4）；spiffeid CellID/CellSet sealed + cross-cell mTLS 对等认证；cross-cell transport 二态实现（P2-4） |
 | **bootstrap** | sealed DeploymentTopology（HostedCellSet 非空 fail-closed）（P2-4）；certdeps topology-gated resolver（P2-3）；audit 重启 tail-verify 接启动序列（P0-8） |
-| **settings** | ConfigVersionSnapshot + Publish/Rollback CAS + version-published/rollback event（P1 配置版本化）；ConfigValue 加密路径 + AADForConfig（P1-9）；evaluate_flag 一致性哈希分桶不变式（P2，槽位已就绪） |
+| **settings** | ConfigVersionSnapshot + Publish/Rollback CAS + version-published/rollback event（P1 配置版本化）；ConfigValue 加密路径 + AADForConfig（P1-9）；feature flag 产品面 deferred 至 #2070 的真实 consumer/provider 触发条件 |
 | **audit** | link_hash 加 HMAC key 入参 + content-fingerprint 幂等 + tail-verify（P0-8）；per-tenant 子链 + 空-tenant→DLX appender + ActorMode（P0-8） |
 | **contractreg** | 7 态 sealed 审批状态机 + conformance port + 唯一性/ceiling 校验 + egress allowlist admission + 域形 repo port tenant 必填位置参（P0-7） |
 | **observ** | tracing Layer（redaction seal + contract_id span attr）+ 子系统 collector + sealed CellLabel/domain resolver（#1076）+ gRPC 拦截器（P2-6） |

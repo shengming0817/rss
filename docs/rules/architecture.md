@@ -98,7 +98,7 @@ rss/
 │   ├── distributed/      # distlock / cas / transport
 │   ├── testkit/          # 服务层 test-support：HTTP 契约测试 oneshot harness（经 [dev-dependencies] 被域/组合根消费，零 adapter 依赖，不进生产 shipped 图）
 │   ├── identity/         # 域：身份 / 凭据与账户安全编排 / RBAC / ABAC
-│   ├── settings/         # 域：版本化配置 / flag（避开 config 重名）
+│   ├── settings/         # 域：版本化配置 / secret 引用（避开 config 重名）
 │   ├── audit/            # 域：审计链
 │   ├── contractreg/      # 域：运行时契约 submit / list
 │   └── syshealth/        # 域：健康聚合

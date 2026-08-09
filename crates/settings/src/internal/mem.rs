@@ -1,4 +1,4 @@
-//! settings 配置 / flag / secret 仓储 in-memory 实现（RW-W 种子数据 + Join 追踪弹）。生产持久化（postgres adapter
+//! settings 配置 / secret 仓储 in-memory 实现（RW-W 种子数据 + Join 追踪弹）。生产持久化（postgres adapter
 //! impl [`crate::ports::ConfigRepo`] / [`crate::ports::ConfigUnitOfWork`] / [`crate::ports::SecretRepo`]）
 //! 见 #1249 / #1274。
 //!
@@ -21,10 +21,7 @@ use diport::OutboxEnvelopeParts;
 use eventexec::event::ReviewedEvent;
 use vocab::TenantId;
 
-use super::ports::FlagStore;
-use crate::domain::{
-    ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, FlagKey, FlagState, SettingKey,
-};
+use crate::domain::{ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, SettingKey};
 #[cfg(any(test, feature = "seed-data"))]
 use crate::domain::{SecretEntry, SecretKey, SecretRepoError};
 use crate::ports::{
@@ -529,37 +526,6 @@ impl SecretUnitOfWork for InMemSecretRepo {
             });
         }
         Ok(())
-    }
-}
-
-/// in-memory flag 仓储：(tenant, flag key) → 最新 flag 状态快照。
-pub(crate) struct InMemFlagStore {
-    flags: Mutex<HashMap<StoreKey, FlagState>>,
-}
-
-impl InMemFlagStore {
-    /// 新建空 flag 仓储。
-    pub(crate) fn new() -> Self {
-        Self {
-            flags: Mutex::new(HashMap::new()),
-        }
-    }
-
-    /// 种子一条 flag（单测）。本 PR flag 写入路径未落地（订阅缓存 consumer #1120 填充），故仅测试消费。
-    #[cfg(test)]
-    pub(crate) fn with_flag(self, tenant: TenantId, flag: FlagState) -> Self {
-        {
-            let mut flags = self.flags.lock().unwrap_or_else(|e| e.into_inner());
-            flags.insert((tenant, flag.key().as_str().to_string()), flag);
-        }
-        self
-    }
-}
-
-impl FlagStore for InMemFlagStore {
-    fn find(&self, tenant: TenantId, key: &FlagKey) -> Option<FlagState> {
-        let flags = self.flags.lock().unwrap_or_else(|e| e.into_inner());
-        flags.get(&(tenant, key.as_str().to_string())).cloned()
     }
 }
 

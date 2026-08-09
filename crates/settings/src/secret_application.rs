@@ -87,7 +87,6 @@ impl From<SettingsError> for SecretServiceError {
             SettingsError::SecretKeyInvalid | SettingsError::SecretRefInvalid => Self::InvalidKey,
             // 配置键错误同属 4xx 客户端输入（完整性守卫）。
             SettingsError::KeyInvalid | SettingsError::SensitiveKey => Self::InvalidKey,
-            SettingsError::PercentageOutOfRange => Self::InvalidKey,
         }
     }
 }

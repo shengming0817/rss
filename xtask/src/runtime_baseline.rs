@@ -3120,7 +3120,7 @@ mod tests {
             .find("#[tokio::main]\nasync fn run_main()")
             .context("canonical rss main must contain the lifecycle owner")?;
         let owner_end = canonical[owner_start..]
-            .find("\nfn process_exit(")
+            .find("\nfn install_process_hooks(")
             .map(|offset| owner_start + offset)
             .context("canonical rss main must contain the process exit adapter")?;
         let owner_source = &canonical[owner_start..owner_end];
@@ -3191,7 +3191,7 @@ mod tests {
             (
                 "lifecycle owner is unreachable",
                 canonical.replacen(
-                    "process_exit(run_main())",
+                    "process_exit(install_process_hooks(), run_main())",
                     "std::process::ExitCode::SUCCESS",
                     1,
                 ),
@@ -3200,8 +3200,8 @@ mod tests {
             (
                 "lifecycle owner is called twice",
                 canonical.replacen(
-                    "process_exit(run_main())",
-                    "{ let _duplicate = run_main(); process_exit(run_main()) }",
+                    "process_exit(install_process_hooks(), run_main())",
+                    "{ let _duplicate = run_main(); process_exit(install_process_hooks(), run_main()) }",
                     1,
                 ),
                 "must reach lifecycle owner `run_main` exactly once",
@@ -3259,8 +3259,8 @@ mod tests {
             (
                 "branching wrapper is not transparent",
                 canonical.replacen(
-                    "process_exit(run_main())",
-                    "if std::env::args().len() > 1 { process_exit(run_main()) } else { std::process::ExitCode::SUCCESS }",
+                    "process_exit(install_process_hooks(), run_main())",
+                    "if std::env::args().len() > 1 { process_exit(install_process_hooks(), run_main()) } else { std::process::ExitCode::SUCCESS }",
                     1,
                 ),
                 "must reach lifecycle owner `run_main` exactly once",
@@ -3270,7 +3270,7 @@ mod tests {
                 format!(
                     "{}\nfn lifecycle_cycle() -> std::process::ExitCode {{ lifecycle_cycle() }}",
                     canonical.replacen(
-                        "process_exit(run_main())",
+                        "process_exit(install_process_hooks(), run_main())",
                         "lifecycle_cycle()",
                         1,
                     )
@@ -3280,7 +3280,7 @@ mod tests {
             (
                 "qualified call cannot carry the lifecycle owner",
                 canonical.replacen(
-                    "process_exit(run_main())",
+                    "process_exit(install_process_hooks(), run_main())",
                     "std::mem::drop(run_main())",
                     1,
                 ),
@@ -3289,7 +3289,7 @@ mod tests {
             (
                 "closure call cannot carry the lifecycle owner",
                 canonical.replacen(
-                    "process_exit(run_main())",
+                    "process_exit(install_process_hooks(), run_main())",
                     "(|result| { drop(result); std::process::ExitCode::SUCCESS })(run_main())",
                     1,
                 ),
