@@ -24,7 +24,7 @@ pub use consumer_worker::{
 
 pub mod managed_blocking_worker;
 pub use managed_blocking_worker::{
-    ManagedBlockingWorker, spawn_on_dedicated_runtime,
+    ManagedBlockingWorker, managed_panic_scope_active, spawn_on_dedicated_runtime,
     spawn_on_dedicated_runtime_with_build_failure,
 };
 

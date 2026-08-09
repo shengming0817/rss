@@ -7,9 +7,8 @@
 //!
 //! ref: tokio-rs/tokio tokio/src/task/blocking.rs
 
-use std::cell::RefCell;
-use std::io::Write as _;
-use std::sync::{Arc, Mutex, Once};
+use std::cell::Cell;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
@@ -31,33 +30,13 @@ pub struct ManagedBlockingWorker {
 struct BlockingWorkerPanicked;
 
 thread_local! {
-    static MANAGED_WORKER_NAME: RefCell<Option<String>> = const { RefCell::new(None) };
+    static MANAGED_PANIC_SCOPE: Cell<bool> = const { Cell::new(false) };
 }
 
-static INSTALL_MANAGED_PANIC_HOOK: Once = Once::new();
-
-fn install_managed_panic_hook() {
-    INSTALL_MANAGED_PANIC_HOOK.call_once(|| {
-        let prior_hook = std::panic::take_hook();
-        std::panic::set_hook(Box::new(move |panic_info| {
-            let managed_worker = MANAGED_WORKER_NAME
-                .try_with(|name| name.borrow().clone())
-                .ok()
-                .flatten();
-            if let Some(worker) = managed_worker {
-                let _ = writeln!(
-                    std::io::stderr().lock(),
-                    "managed blocking worker `{worker}` panicked; payload redacted"
-                );
-                tracing::error!(
-                    worker,
-                    "managed blocking worker runner panicked; payload redacted"
-                );
-            } else {
-                prior_hook(panic_info);
-            }
-        }));
-    });
+/// Closed panic scope consumed by runtimeexec's single process hook dispatcher.
+#[doc(hidden)]
+pub fn managed_panic_scope_active() -> bool {
+    MANAGED_PANIC_SCOPE.try_with(Cell::get).unwrap_or(false)
 }
 
 impl ManagedBlockingWorker {
@@ -76,19 +55,18 @@ impl ManagedBlockingWorker {
         N: Into<String>,
         F: FnOnce(CancellationToken) -> Result<(), diport::ShutdownError> + Send + 'static,
     {
-        install_managed_panic_hook();
         let name = name.into();
         let thread_name = name.clone();
         let thread_token = token.clone();
         let thread_health = Arc::clone(&health);
         let (completed, completion) = tokio::sync::oneshot::channel();
         std::thread::spawn(move || {
-            MANAGED_WORKER_NAME.with(|name| *name.borrow_mut() = Some(thread_name.clone()));
+            MANAGED_PANIC_SCOPE.with(|scope| scope.set(true));
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 let _stopped = thread_health.stopped_on_exit();
                 run(thread_token)
             }));
-            MANAGED_WORKER_NAME.with(|name| *name.borrow_mut() = None);
+            MANAGED_PANIC_SCOPE.with(|scope| scope.set(false));
             let result = match result {
                 Ok(Ok(())) => Ok(()),
                 Ok(Err(error)) => {
@@ -98,7 +76,7 @@ impl ManagedBlockingWorker {
                     );
                     Err(error)
                 }
-                Err(_) => Err(diport::ShutdownError::new(BlockingWorkerPanicked)),
+                Err(_) => Err(diport::ShutdownError::task_panicked(BlockingWorkerPanicked)),
             };
             let _ = completed.send(result);
         });
@@ -275,6 +253,7 @@ mod tests {
             .shutdown()
             .await
             .expect_err("panic must fail shutdown");
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
         assert_eq!(error.to_string(), "resource shutdown failed");
         assert!(!format!("{error:?}").contains("secret panic payload"));
         assert_eq!(panic_health.status(), HealthStatus::Unhealthy);
@@ -300,11 +279,11 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used, clippy::panic)]
     // reason: the subprocess harness must fail-loud while proving panic payload redaction.
-    fn managed_worker_diagnostics_redact_payloads_and_name_worker() {
+    fn managed_worker_keeps_process_hook_owner_and_redacts_runner_errors() {
         const CHILD_ENV: &str = "RSS_MANAGED_WORKER_DIAGNOSTICS_CHILD";
         const TEST_NAME: &str = concat!(
             "managed_blocking_worker::tests::",
-            "managed_worker_diagnostics_redact_payloads_and_name_worker"
+            "managed_worker_keeps_process_hook_owner_and_redacts_runner_errors"
         );
         const ERROR_SECRET: &str = "secret runner error payload";
         const PANIC_SECRET: &str = "secret managed panic payload";
@@ -366,9 +345,11 @@ mod tests {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("managed-diagnostics-error"));
         assert!(stderr.contains("managed blocking worker runner failed"));
-        assert!(stderr.contains("managed-diagnostics-panic"));
-        assert!(stderr.contains("payload redacted"));
-        assert!(stderr.contains(PRIOR_HOOK_MARKER));
+        assert_eq!(
+            stderr.matches(PRIOR_HOOK_MARKER).count(),
+            2,
+            "managed and ordinary panics must both retain the process-owned hook: {stderr}"
+        );
         assert!(!stderr.contains(ERROR_SECRET));
         assert!(!stderr.contains(PANIC_SECRET));
     }

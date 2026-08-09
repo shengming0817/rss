@@ -225,7 +225,7 @@ impl bootstrap::HealthProbe for TransportProbe {
 struct AmqpReadinessWorker {
     name: &'static str,
     token: tokio_util::sync::CancellationToken,
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
 }
 
 impl AmqpReadinessWorker {
@@ -260,7 +260,7 @@ impl AmqpReadinessWorker {
         Self {
             name,
             token,
-            handle: tokio::sync::Mutex::new(Some(handle)),
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
         }
     }
 }
@@ -273,7 +273,10 @@ impl ManagedResource for AmqpReadinessWorker {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
         if let Some(handle) = self.handle.lock().await.take() {
-            handle.await.map_err(ShutdownError::new)?;
+            handle
+                .join()
+                .await
+                .map_err(ShutdownError::from_join_error)?;
         }
         Ok(())
     }

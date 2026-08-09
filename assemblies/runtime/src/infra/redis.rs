@@ -153,7 +153,7 @@ impl bootstrap::HealthProbe for RedisReadyProbe {
 }
 
 pub(crate) struct RedisReadinessSampler {
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
     token: CancellationToken,
 }
 
@@ -165,10 +165,11 @@ impl ManagedResource for RedisReadinessSampler {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
         let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take()
-            && let Err(err) = handle.await
-        {
-            tracing::warn!(error = %err, "redis readiness sampler join failed");
+        if let Some(handle) = handle.take() {
+            handle
+                .join()
+                .await
+                .map_err(ShutdownError::from_join_error)?;
         }
         Ok(())
     }
@@ -194,7 +195,7 @@ pub(crate) fn spawn_redis_readiness_sampler(
         }
     });
     RedisReadinessSampler {
-        handle: tokio::sync::Mutex::new(Some(handle)),
+        handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
         token: child,
     }
 }
@@ -208,6 +209,54 @@ mod tests {
 
     /// Stable self-signed CA PEM for unit tests that do not need a live matching server.
     use crate::infra::TEST_PRIVATE_CA_PEM as TEST_CA_PEM;
+
+    #[allow(clippy::expect_used)]
+    fn assert_shutdown_error_redacts(error: &ShutdownError, marker: &str) {
+        assert!(!error.to_string().contains(marker));
+        assert!(!format!("{error:?}").contains(marker));
+        let source = std::error::Error::source(error).expect("redacted source remains visible");
+        assert!(!source.to_string().contains(marker));
+        assert!(
+            source.source().is_none(),
+            "source chain stops at redaction boundary"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn readiness_sampler_propagates_redacted_join_failure() {
+        const MARKER: &str = "redis-readiness-plain-panic-secret";
+        let sampler = RedisReadinessSampler {
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
+                panic!("{MARKER}");
+            })))),
+            token: CancellationToken::new(),
+        };
+
+        let error = ManagedResource::shutdown(&sampler)
+            .await
+            .expect_err("join failure must propagate");
+        assert_shutdown_error_redacts(&error, MARKER);
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+        assert!(
+            ManagedResource::shutdown(&sampler).await.is_ok(),
+            "shutdown is idempotent"
+        );
+
+        let cancelled_handle = tokio::spawn(std::future::pending::<()>());
+        cancelled_handle.abort();
+        let cancelled = RedisReadinessSampler {
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(cancelled_handle))),
+            token: CancellationToken::new(),
+        };
+        let cancelled_error = ManagedResource::shutdown(&cancelled)
+            .await
+            .expect_err("cancelled join must propagate");
+        assert_eq!(
+            cancelled_error.kind(),
+            diport::ShutdownErrorKind::TaskCancelled
+        );
+    }
 
     #[allow(clippy::expect_used)]
     fn test_ca_pem_path() -> &'static str {

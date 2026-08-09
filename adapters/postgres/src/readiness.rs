@@ -276,7 +276,7 @@ fn worst_readiness(writer: PoolReadiness, reader: PoolReadiness) -> PoolReadines
 /// `PgReadinessSampler` 同理：dylint `rss_diport_impl_allowlist` 按 manifest
 /// 父目录 (`adapters/`) 自动放行。
 pub struct PgReadinessSampler {
-    inner: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    inner: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
     health: Arc<PgDbReadiness>,
     token: CancellationToken,
 }
@@ -292,7 +292,7 @@ impl PgReadinessSampler {
         token: CancellationToken,
     ) -> Self {
         Self {
-            inner: tokio::sync::Mutex::new(Some(handle)),
+            inner: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
             health,
             token,
         }
@@ -317,7 +317,9 @@ impl diport::ManagedResource for PgReadinessSampler {
         self.token.cancel();
         // await loop 收敛——保证 worker 在 pool 之前停（LIFO 由组合根注册顺序保证）。
         if let Some(h) = self.inner.lock().await.take() {
-            h.await.map_err(diport::ShutdownError::new)?;
+            h.join()
+                .await
+                .map_err(diport::ShutdownError::from_join_error)?;
         }
         Ok(())
     }

@@ -3,6 +3,8 @@
 //! Kept outside `#![cfg(feature = "broker-tests")]` so ArchRules enrolls `exec = "test"`
 //! against default-feature AST symbols.
 
+#![allow(clippy::expect_used)] // reason: deterministic repository-source and syntax fixtures fail loudly when the governed workspace shape is invalid.
+
 use std::path::{Path, PathBuf};
 
 /// INVARIANT: MQTT-RAW-NAMESPACE-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "raw_mqtt_namespace_detects_rogue_concat", anti_vacuity = "raw_mqtt_namespace_anti_vacuity_ignores_comment_only_bait" }

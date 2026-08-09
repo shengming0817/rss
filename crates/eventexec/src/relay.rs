@@ -814,13 +814,15 @@ fn log_sample_failed(domain: &str, e: &impl std::fmt::Display) {
 /// `let _ = h.await` 吞掉，使 panic/abort 误报成关闭成功（F6；接 `ManagedResource::shutdown` typed 语义）。
 async fn shutdown_worker(
     token: &CancellationToken,
-    inner: &tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    inner: &tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
 ) -> Result<(), diport::ShutdownError> {
     // 防御性 cancel（幂等；生产中 ShutdownStack 已先 cancel，此处兜底防 test/误用 hang）。
     token.cancel();
     // await loop 收敛——保证 worker 在 pool 之前停（LIFO 由组合根注册顺序保证）、在途写不丢。
     if let Some(h) = inner.lock().await.take() {
-        h.await.map_err(diport::ShutdownError::new)?;
+        h.join()
+            .await
+            .map_err(diport::ShutdownError::from_join_error)?;
     }
     Ok(())
 }
@@ -834,7 +836,7 @@ async fn shutdown_worker(
 /// public worker 仍是**具体类型**——relay_loop/sweeper_loop/backlog_sampler_loop 是泛型非-Send，spawn 在
 /// 具体 call site 单态化后 future 才 Send（见本文件 §设计摘要），故不能合并成单一 generic worker。
 struct AdoptedWorker {
-    inner: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    inner: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
     health: Arc<WorkerHealth>,
     token: CancellationToken,
 }
@@ -842,7 +844,7 @@ struct AdoptedWorker {
 impl AdoptedWorker {
     fn adopt(handle: JoinHandle<()>, health: Arc<WorkerHealth>, token: CancellationToken) -> Self {
         Self {
-            inner: tokio::sync::Mutex::new(Some(handle)),
+            inner: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
             health,
             token,
         }

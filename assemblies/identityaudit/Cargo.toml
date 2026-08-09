@@ -31,11 +31,11 @@ name = "identityaudit-server"
 path = "src/main.rs"
 
 [[test]]
-name = "identityaudit_artifact_acceptance"
+name = "artifact_acceptance"
 path = "tests/artifact_acceptance.rs"
 
 [[test]]
-name = "identityaudit_runtime_image_acceptance"
+name = "runtime_image_acceptance"
 path = "tests/runtime_image_acceptance.rs"
 required-features = ["artifact-acceptance"]
 

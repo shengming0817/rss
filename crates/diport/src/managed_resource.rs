@@ -17,6 +17,51 @@ use crate::redacted::RedactedSource;
 /// [`ManagedResource::shutdown_timeout`] 覆盖为更长。
 pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// Cancellation-safe owner for one Tokio task.
+///
+/// Awaiting [`join`](Self::join) consumes the owner. If the join future is cancelled, or the
+/// surrounding managed resource is dropped while shutdown is in flight, `Drop` aborts the task
+/// instead of allowing Tokio's raw [`tokio::task::JoinHandle`] drop semantics to detach it.
+#[derive(Debug)]
+#[must_use = "dropping an OwnedTask aborts its task; retain it until managed shutdown"]
+pub struct OwnedTask<T> {
+    handle: Option<tokio::task::JoinHandle<T>>,
+}
+
+impl<T> OwnedTask<T> {
+    /// Adopt a spawned task at its lifecycle ownership boundary.
+    pub const fn new(handle: tokio::task::JoinHandle<T>) -> Self {
+        Self {
+            handle: Some(handle),
+        }
+    }
+
+    /// Abort the owned task without exposing its raw handle.
+    pub fn abort(&self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+
+    /// Await task completion. Cancellation of this future aborts the still-owned task via `Drop`.
+    pub async fn join(mut self) -> Result<T, tokio::task::JoinError> {
+        let result = match self.handle.as_mut() {
+            Some(handle) => handle.await,
+            None => unreachable!("OwnedTask handle is present until join completes"),
+        };
+        self.handle.take();
+        result
+    }
+}
+
+impl<T> Drop for OwnedTask<T> {
+    fn drop(&mut self) {
+        if let Some(handle) = &self.handle {
+            handle.abort();
+        }
+    }
+}
+
 /// 进程关闭时需要按依赖逆序 await 关干净的托管资源
 /// （DB pool / outbox relay / event consumer / 后台 worker / HTTP listener 等）。
 ///
@@ -34,8 +79,11 @@ pub const DEFAULT_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(30);
 /// - **不要在 `shutdown` 内部自设超时**：per-resource 超时由驱动器外层 `tokio::time::timeout`
 ///   包裹（[`shutdown_timeout`](ManagedResource::shutdown_timeout)）；内部再设超时是双重计时。
 /// - **幂等性免费**：驱动器消费 stack 单次驱动，`shutdown` 不会被重复调用，无需自保幂等。
-/// - **需要 `&mut` 内部状态时**：因 `shutdown(&self)`，若实现需消费内部状态（drain sender /
-///   take oneshot），用 `Mutex<Option<Inner>>` 或 `tokio::sync::Mutex` 包装，在 `shutdown` 中 `take()`。
+/// - **后台 Tokio task 必须由 [`OwnedTask`] 持有**：裸 `JoinHandle` 在 shutdown future 被外层
+///   deadline 取消时会 detach。实现可用 `Mutex<Option<OwnedTask<T>>>` 包装并在 shutdown 中
+///   `take()` + [`OwnedTask::join`]；future 被取消时 guard 的 `Drop` 会 abort task。
+/// - **其它需要 `&mut` 的内部状态**：因 `shutdown(&self)`，用 `Mutex<Option<Inner>>` 或
+///   `tokio::sync::Mutex` 包装，在 `shutdown` 中 `take()`。
 #[trait_variant::make(ManagedResource: Send)]
 #[dynosaur(pub DynManagedResource = dyn(box) ManagedResource, bridge(dyn))]
 #[allow(async_fn_in_trait)]
@@ -72,8 +120,42 @@ pub trait ManagedResourceLocal {
 #[derive(Debug, thiserror::Error)]
 #[error("resource shutdown failed")]
 pub struct ShutdownError {
+    kind: ShutdownErrorKind,
     #[source]
     source: RedactedSource,
+}
+
+/// Payload-free reason carried by [`ShutdownError`] into the canonical shutdown observer.
+///
+/// The raw source remains write-only behind [`RedactedSource`]; this closed value is the only
+/// diagnostic surface available to orchestration code.
+///
+/// INVARIANT: SHUTDOWN-ERROR-KIND-CLOSED-01 { level = "Hard", exec = "native-compile", source = "code", native = "private ShutdownError fields plus exhaustive closed enum" }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ShutdownErrorKind {
+    /// The resource reported an ordinary provider/transport shutdown failure.
+    Operation,
+    /// A resource-owned background task panicked.
+    TaskPanicked,
+    /// A resource-owned background task was cancelled before joining cleanly.
+    TaskCancelled,
+    /// Tokio reported an unrecognized abnormal task termination.
+    TaskUnknown,
+    /// A nested lifecycle exhausted its own explicit shutdown deadline.
+    DeadlineExceeded,
+}
+
+impl ShutdownErrorKind {
+    /// Stable, low-cardinality observation label.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Operation => "operation",
+            Self::TaskPanicked => "task_panicked",
+            Self::TaskCancelled => "task_cancelled",
+            Self::TaskUnknown => "task_unknown",
+            Self::DeadlineExceeded => "deadline_exceeded",
+        }
+    }
 }
 
 impl ShutdownError {
@@ -83,7 +165,67 @@ impl ShutdownError {
     where
         E: std::error::Error + Send + Sync + 'static,
     {
+        Self::with_kind(ShutdownErrorKind::Operation, source)
+    }
+
+    /// Convert a Tokio task join failure at the resource ownership boundary.
+    ///
+    /// Panic payloads and task diagnostics remain confined to [`RedactedSource`]; callers can only
+    /// observe the closed [`ShutdownErrorKind`].
+    pub fn from_join_error(source: tokio::task::JoinError) -> Self {
+        let kind = if source.is_panic() {
+            ShutdownErrorKind::TaskPanicked
+        } else if source.is_cancelled() {
+            ShutdownErrorKind::TaskCancelled
+        } else {
+            ShutdownErrorKind::TaskUnknown
+        };
+        Self::with_kind(kind, source)
+    }
+
+    /// Preserve a known background-task panic without accepting its payload as diagnostics.
+    pub fn task_panicked<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::with_kind(ShutdownErrorKind::TaskPanicked, source)
+    }
+
+    /// Preserve a known background-task cancellation without exposing task diagnostics.
+    pub fn task_cancelled<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::with_kind(ShutdownErrorKind::TaskCancelled, source)
+    }
+
+    /// Preserve an unknown abnormal background-task termination.
+    pub fn task_unknown<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::with_kind(ShutdownErrorKind::TaskUnknown, source)
+    }
+
+    /// Preserve an explicit nested lifecycle deadline failure.
+    pub fn deadline_exceeded<E>(source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::with_kind(ShutdownErrorKind::DeadlineExceeded, source)
+    }
+
+    /// Return the payload-free shutdown failure category.
+    pub const fn kind(&self) -> ShutdownErrorKind {
+        self.kind
+    }
+
+    fn with_kind<E>(kind: ShutdownErrorKind, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
         Self {
+            kind,
             source: RedactedSource::new(source),
         }
     }
@@ -93,7 +235,12 @@ impl ShutdownError {
 mod smoke {
     //! build smoke：证明 ManagedResource 可 native AFIT impl + 经 `Box<DynManagedResource>`
     //! 动态注入 + move 进 `tokio::spawn`（ShutdownStack panic 隔离的真实形态：Box 仅需 Send，无需 Sync）。
-    use super::{DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, ShutdownError};
+    use super::{
+        DEFAULT_SHUTDOWN_TIMEOUT, DynManagedResource, ManagedResource, OwnedTask, ShutdownError,
+        ShutdownErrorKind,
+    };
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
 
     #[test]
     fn shutdown_error_wraps_source() {
@@ -109,6 +256,61 @@ mod smoke {
             !format!("{err:?}").contains("leak-marker-shut"),
             "wrapper Debug 泄漏 source: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn owned_task_drop_aborts_instead_of_detaching() {
+        struct DropMarker(Arc<AtomicBool>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task = OwnedTask::new(tokio::spawn({
+            let dropped = Arc::clone(&dropped);
+            let started = Arc::clone(&started);
+            async move {
+                let _marker = DropMarker(dropped);
+                started.notify_one();
+                std::future::pending::<()>().await;
+            }
+        }));
+        started.notified().await;
+
+        drop(task);
+        tokio::task::yield_now().await;
+
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn shutdown_error_classifies_join_failures_without_exposing_payloads() {
+        const MARKER: &str = "worker-join-plain-panic-secret";
+        let panic_join = tokio::spawn(async { panic!("{MARKER}") })
+            .await
+            .expect_err("task must panic");
+        assert!(panic_join.is_panic(), "anti-vacuity");
+        assert!(panic_join.to_string().contains(MARKER), "anti-vacuity");
+        let panic_error = ShutdownError::from_join_error(panic_join);
+        assert_eq!(panic_error.kind(), ShutdownErrorKind::TaskPanicked);
+        assert!(!panic_error.to_string().contains(MARKER));
+        assert!(!format!("{panic_error:?}").contains(MARKER));
+
+        let cancelled_handle = tokio::spawn(std::future::pending::<()>());
+        cancelled_handle.abort();
+        let cancelled_join = cancelled_handle.await.expect_err("task must be cancelled");
+        assert!(cancelled_join.is_cancelled(), "anti-vacuity");
+        let cancelled_error = ShutdownError::from_join_error(cancelled_join);
+        assert_eq!(cancelled_error.kind(), ShutdownErrorKind::TaskCancelled);
+
+        let deadline_error =
+            ShutdownError::deadline_exceeded(std::io::Error::other("deadline-provider-secret"));
+        assert_eq!(deadline_error.kind(), ShutdownErrorKind::DeadlineExceeded);
+        assert!(!format!("{deadline_error:?}").contains("deadline-provider-secret"));
     }
 
     struct NoopResource;

@@ -141,9 +141,10 @@ impl ManagedResource for OtelExporter {
             // tokio::time::timeout 无法在同步阻塞点取消——故 spawn_blocking 移出 executor，`.await` 提供可被
             // 外层 timeout 作用的让出点。错误（JoinError / OTelSdkError）经 diport::RedactedSource 脱敏。
             let provider = self.provider.clone();
-            tokio::task::spawn_blocking(move || provider.shutdown())
+            diport::OwnedTask::new(tokio::task::spawn_blocking(move || provider.shutdown()))
+                .join()
                 .await
-                .map_err(ShutdownError::new)?
+                .map_err(ShutdownError::from_join_error)?
                 .map_err(ShutdownError::new)?;
         }
         // reason: feature-off 空壳无 provider 可关——无 infra 句柄需释放，关闭无需动作。

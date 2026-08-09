@@ -14,6 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 runtime = { path = "../../assemblies/runtime", features = ["operator-cli"] }
+runtimeexec = { path = "../../crates/runtimeexec" }
 postgres-migration = { path = "../../adapters/postgres-migration" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 anyhow = { workspace = true }

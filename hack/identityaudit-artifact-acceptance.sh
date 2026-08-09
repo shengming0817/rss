@@ -9,5 +9,5 @@ cd "$repo_root"
 docker build --target identityaudit-runtime --tag "$image" .
 RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE="$image" \
   ./hack/cargo.sh test -p identityaudit --features artifact-acceptance \
-  --test identityaudit_runtime_image_acceptance -- \
+  --test runtime_image_acceptance -- \
   --test-threads=1

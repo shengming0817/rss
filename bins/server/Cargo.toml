@@ -16,5 +16,6 @@ path = "src/main.rs"
 # serving-only：剥离 runtime default `operator-cli`（clap）。Medium 守卫：
 # INVARIANT SERVING-OPERATOR-CLI-ABSENT-01（xtask shipped_feature_guard）。
 runtime = { path = "../../assemblies/runtime", default-features = false }
+runtimeexec = { path = "../../crates/runtimeexec" }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 anyhow = { workspace = true }

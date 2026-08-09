@@ -144,7 +144,7 @@ impl bootstrap::HealthProbe for IdentitySignerProbe {
 }
 
 struct IdentitySignerReadinessWorker {
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
     token: CancellationToken,
 }
 
@@ -170,7 +170,7 @@ impl IdentitySignerReadinessWorker {
             health.stopped();
         });
         Self {
-            handle: tokio::sync::Mutex::new(Some(handle)),
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
             token,
         }
     }
@@ -184,7 +184,10 @@ impl ManagedResource for IdentitySignerReadinessWorker {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
         if let Some(handle) = self.handle.lock().await.take() {
-            let _ = handle.await;
+            handle
+                .join()
+                .await
+                .map_err(ShutdownError::from_join_error)?;
         }
         Ok(())
     }
@@ -1128,10 +1131,10 @@ pub(crate) enum ProviderBuildError {
 mod tests {
     use super::{
         BuiltDeviceRevocationProvider, CHANNELS_ALL, CHANNELS_PROBES_WORKERS, CHANNELS_RESOURCES,
-        DeviceRevocationStorePermit, DistributedLockStorePermit, ListenerPdpConstructor,
-        ProviderBuild, ProviderBuildError, ProviderFactoryDispatch, ProviderFactoryPermit,
-        ProviderOutput, ProviderReceipt, RuntimeObjectStorePermit, build_pg_runtime_module,
-        commit_listener_pdp_jwks_lifecycle,
+        DeviceRevocationStorePermit, DistributedLockStorePermit, IdentitySignerReadinessWorker,
+        ListenerPdpConstructor, ProviderBuild, ProviderBuildError, ProviderFactoryDispatch,
+        ProviderFactoryPermit, ProviderOutput, ProviderReceipt, RuntimeObjectStorePermit,
+        build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle,
     };
     use crate::providers_gen::ListenerPdpJwksLifecycle;
 
@@ -1154,6 +1157,37 @@ mod tests {
         PlannedLifecycleChannel::Resources,
     ];
     const LISTENER_PDP_JWKS_PROBE_NAME: &str = "rss_access_token_jwks_ready";
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn identity_signer_readiness_worker_propagates_join_failures() {
+        const MARKER: &str = "identity-signer-readiness-plain-panic-secret";
+        let panicked = IdentitySignerReadinessWorker {
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
+                panic!("{MARKER}");
+            })))),
+            token: tokio_util::sync::CancellationToken::new(),
+        };
+        let panic_error = ManagedResource::shutdown(&panicked)
+            .await
+            .expect_err("panic join must propagate");
+        assert_eq!(panic_error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+        assert!(!format!("{panic_error:?}").contains(MARKER));
+
+        let cancelled_handle = tokio::spawn(std::future::pending::<()>());
+        cancelled_handle.abort();
+        let cancelled = IdentitySignerReadinessWorker {
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(cancelled_handle))),
+            token: tokio_util::sync::CancellationToken::new(),
+        };
+        let cancelled_error = ManagedResource::shutdown(&cancelled)
+            .await
+            .expect_err("cancelled join must propagate");
+        assert_eq!(
+            cancelled_error.kind(),
+            diport::ShutdownErrorKind::TaskCancelled
+        );
+    }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]

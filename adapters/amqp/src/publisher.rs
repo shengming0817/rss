@@ -545,6 +545,14 @@ enum PublisherTransportError {
     Close(#[source] lapin::Error),
     #[error("amqp publisher admission drain deadline elapsed")]
     AdmissionDrainDeadline,
+    #[error("amqp publisher recovery task panicked")]
+    RecoveryTaskPanicked,
+    #[error("amqp publisher recovery task was cancelled")]
+    RecoveryTaskCancelled,
+    #[error("amqp publisher recovery task terminated unexpectedly")]
+    RecoveryTaskUnknown,
+    #[error("amqp publisher recovery join deadline elapsed")]
+    RecoveryJoinDeadline,
 }
 
 /// `Publisher::publish` 的唯一内部失败载体。Display 只含固定安全摘要；endpoint、routing key、event id、
@@ -1007,26 +1015,32 @@ impl AmqpPublisher {
             let retiring = lifecycle.slot.begin_port_shutdown();
             (lifecycle.recovery.take(), retiring)
         };
-        if let Some(recovery) = recovery {
+        let recovery_result = if let Some(recovery) = recovery {
             // ShuttingDown type-state and cancellation are established before joining. A pending
             // connect is dropped; a simultaneously-ready connection wins the biased select and is
             // then fenced by CAS and closed as an orphan within the original recovery deadline.
-            join_cancelled_recovery(recovery).await;
-        }
-        if let Some(retiring) = retiring {
+            join_cancelled_recovery(recovery).await
+        } else {
+            Ok(())
+        };
+        let transport_result = if let Some(retiring) = retiring {
             let admission_drained =
                 wait_for_shutdown_admission(&retiring.admission, shutdown_deadline).await;
-            if retiring.transport.confirm_channel.status().connected() {
+            let close_result = if retiring.transport.confirm_channel.status().connected() {
                 retiring
                     .transport
                     .confirm_channel
                     .close(REPLY_SUCCESS, "publisher shutdown".into())
                     .await
-                    .map_err(PublisherTransportError::Close)?;
-            }
-            admission_drained?;
-        }
-        Ok(())
+                    .map_err(PublisherTransportError::Close)
+            } else {
+                Ok(())
+            };
+            close_result.and(admission_drained)
+        } else {
+            Ok(())
+        };
+        recovery_result.and(transport_result)
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -1038,23 +1052,29 @@ impl AmqpPublisher {
             let retiring = lifecycle.slot.take_for_resource_shutdown();
             (lifecycle.recovery.take(), retiring)
         };
-        if let Some(recovery) = recovery {
-            join_cancelled_recovery(recovery).await;
-        }
-        if let Some(retiring) = retiring {
+        let recovery_result = if let Some(recovery) = recovery {
+            join_cancelled_recovery(recovery).await
+        } else {
+            Ok(())
+        };
+        let transport_result = if let Some(retiring) = retiring {
             let admission_drained =
                 wait_for_shutdown_admission(&retiring.admission, shutdown_deadline).await;
-            if retiring.transport.connection.status().connected() {
+            let close_result = if retiring.transport.connection.status().connected() {
                 retiring
                     .transport
                     .connection
                     .close(REPLY_SUCCESS, "publisher resource shutdown".into())
                     .await
-                    .map_err(PublisherTransportError::Close)?;
-            }
-            admission_drained?;
-        }
-        Ok(())
+                    .map_err(PublisherTransportError::Close)
+            } else {
+                Ok(())
+            };
+            close_result.and(admission_drained)
+        } else {
+            Ok(())
+        };
+        recovery_result.and(transport_result)
     }
 
     /// Integration-only deterministic fault barrier. The next publish closes the exact snapshot connection after
@@ -1119,18 +1139,35 @@ async fn wait_for_shutdown_admission(
         .map_err(|_| PublisherTransportError::AdmissionDrainDeadline)
 }
 
-async fn join_cancelled_recovery(mut recovery: OwnedTransportRecovery) {
+async fn join_cancelled_recovery(
+    mut recovery: OwnedTransportRecovery,
+) -> Result<(), PublisherTransportError> {
     recovery.cancellation.cancel();
     tokio::select! {
         biased;
-        _ = &mut recovery.task => {}
+        joined = &mut recovery.task => classify_recovery_join(joined),
         _ = tokio::time::sleep_until(recovery.deadline) => {
             // Cooperative stages are deadline-bound; abort is only a hard backstop for code between
             // awaits once the shared budget is already exhausted.
             recovery.task.abort();
             let _ = recovery.task.await;
+            Err(PublisherTransportError::RecoveryJoinDeadline)
         }
     }
+}
+
+fn classify_recovery_join(
+    joined: Result<(), tokio::task::JoinError>,
+) -> Result<(), PublisherTransportError> {
+    joined.map_err(|error| {
+        if error.is_panic() {
+            PublisherTransportError::RecoveryTaskPanicked
+        } else if error.is_cancelled() {
+            PublisherTransportError::RecoveryTaskCancelled
+        } else {
+            PublisherTransportError::RecoveryTaskUnknown
+        }
+    })
 }
 
 /// ambiguous/client failure 后的资源恢复在 owned task 中执行，避免 Postgres 外层 publisher watchdog drop
@@ -1640,12 +1677,26 @@ impl ManagedResource for AmqpPublisher {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.shutdown_resource_transport()
-            .await
-            .inspect_err(|e| {
-                tracing::warn!(target: "amqp", resource = %self.name, error = %secure::redact_error(e), "amqp publisher transport close error");
-            })
-            .map_err(ShutdownError::new)
+        match self.shutdown_resource_transport().await {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                tracing::warn!(target: "amqp", resource = %self.name, error = %secure::redact_error(&error), "amqp publisher transport close error");
+                Err(publisher_transport_shutdown_error(error))
+            }
+        }
+    }
+}
+
+fn publisher_transport_shutdown_error(error: PublisherTransportError) -> ShutdownError {
+    match error {
+        PublisherTransportError::RecoveryTaskPanicked => ShutdownError::task_panicked(error),
+        PublisherTransportError::RecoveryTaskCancelled => ShutdownError::task_cancelled(error),
+        PublisherTransportError::RecoveryTaskUnknown => ShutdownError::task_unknown(error),
+        PublisherTransportError::RecoveryJoinDeadline
+        | PublisherTransportError::AdmissionDrainDeadline => {
+            ShutdownError::deadline_exceeded(error)
+        }
+        _ => ShutdownError::new(error),
     }
 }
 
@@ -2682,8 +2733,8 @@ mod publisher_channel_recovery_deadline_tests {
 
     use super::{
         OwnedTransportRecovery, PublisherTransportError, RecoveryStageError, TransportAdmission,
-        TransportSlot, join_cancelled_recovery, run_publisher_transport_recovery_pipeline,
-        wait_for_shutdown_admission,
+        TransportSlot, join_cancelled_recovery, publisher_transport_shutdown_error,
+        run_publisher_transport_recovery_pipeline, wait_for_shutdown_admission,
     };
 
     #[tokio::test(start_paused = true)]
@@ -2721,10 +2772,49 @@ mod publisher_channel_recovery_deadline_tests {
             deadline: started + Duration::from_secs(9),
             task,
         })
-        .await;
+        .await
+        .expect("cooperative recovery stops cleanly");
 
         assert!(observed.load(Ordering::SeqCst));
         assert_eq!(started.elapsed(), Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    #[allow(clippy::panic)]
+    async fn shutdown_join_reports_panic_and_deadline_as_closed_reasons() {
+        let panic_result = join_cancelled_recovery(OwnedTransportRecovery {
+            cancellation: CancellationToken::new(),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(9),
+            task: tokio::spawn(async { panic!("amqp-recovery-plain-panic-secret") }),
+        })
+        .await;
+        assert!(matches!(
+            panic_result,
+            Err(PublisherTransportError::RecoveryTaskPanicked)
+        ));
+        assert_eq!(
+            publisher_transport_shutdown_error(PublisherTransportError::RecoveryTaskPanicked)
+                .kind(),
+            diport::ShutdownErrorKind::TaskPanicked
+        );
+
+        let started = tokio::time::Instant::now();
+        let deadline_result = join_cancelled_recovery(OwnedTransportRecovery {
+            cancellation: CancellationToken::new(),
+            deadline: started + Duration::from_secs(9),
+            task: tokio::spawn(std::future::pending::<()>()),
+        })
+        .await;
+        assert!(matches!(
+            deadline_result,
+            Err(PublisherTransportError::RecoveryJoinDeadline)
+        ));
+        assert_eq!(started.elapsed(), Duration::from_secs(9));
+        assert_eq!(
+            publisher_transport_shutdown_error(PublisherTransportError::RecoveryJoinDeadline)
+                .kind(),
+            diport::ShutdownErrorKind::DeadlineExceeded
+        );
     }
 
     #[tokio::test(start_paused = true)]

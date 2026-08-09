@@ -80,6 +80,8 @@ pub struct MqttsEndpoint {
 }
 
 impl MqttsEndpoint {
+    #[allow(clippy::cognitive_complexity)]
+    // reason: one closed parser validates the complete authority surface and emits a distinct low-cardinality rejection reason for each boundary.
     pub fn parse(raw: &str) -> Result<Self, MqttConfigError> {
         let parsed = url::Url::parse(raw).map_err(|_| {
             tracing::warn!(target: "mqtt", reason = "endpoint_parse", "mqtt config rejected");
@@ -313,6 +315,8 @@ fn validate_client_id(client_id: &str) -> Result<(), MqttConfigError> {
     }
 }
 
+#[allow(clippy::cognitive_complexity)]
+// reason: TLS material is consumed once through a linear fail-closed validation and rustls construction boundary.
 pub(crate) fn prepare_tls(
     material: MqttTlsMaterial,
     expected_client_id: &str,
@@ -379,6 +383,8 @@ pub(crate) fn prepare_tls(
     Ok(Arc::new(config))
 }
 
+#[allow(clippy::cognitive_complexity)]
+// reason: the certificate identity contract is intentionally kept in one fail-closed verifier so no required check can be bypassed by a partial caller.
 fn validate_leaf_identity(der: &[u8], expected_client_id: &str) -> Result<(), MqttConfigError> {
     let (remaining, certificate) = X509Certificate::from_der(der).map_err(|_| {
         tracing::warn!(target: "mqtt", reason = "tls_leaf_der", "mqtt config rejected");

@@ -569,7 +569,7 @@ impl bootstrap::HealthProbe for RedisReadyProbe {
 
 struct RedisReadinessWorker {
     token: tokio_util::sync::CancellationToken,
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
 }
 
 impl RedisReadinessWorker {
@@ -610,7 +610,7 @@ impl RedisReadinessWorker {
         });
         Self {
             token,
-            handle: tokio::sync::Mutex::new(Some(handle)),
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
         }
     }
 }
@@ -623,7 +623,10 @@ impl ManagedResource for RedisReadinessWorker {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
         if let Some(handle) = self.handle.lock().await.take() {
-            handle.await.map_err(ShutdownError::new)?;
+            handle
+                .join()
+                .await
+                .map_err(ShutdownError::from_join_error)?;
         }
         Ok(())
     }

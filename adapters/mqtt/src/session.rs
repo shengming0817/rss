@@ -757,17 +757,38 @@ impl MqttSession {
     }
 
     pub async fn shutdown(&self) -> Result<(), MqttSessionError> {
-        self.shutdown_inner().await;
-        Ok(())
+        self.shutdown_inner()
+            .await
+            .map_err(|_| MqttSessionError::DriverFailed)
     }
 
-    async fn shutdown_inner(&self) {
+    async fn shutdown_inner(&self) -> Result<(), ShutdownError> {
         self.shared.cancel.cancel();
-        let join = self.shared.join.lock().await.take();
-        if let Some(join) = join {
-            let _ = join.await;
-        }
+        join_owned_driver(&self.shared.join).await
     }
+
+    /// Force-stop the owned driver after an enclosing lifecycle deadline expires.
+    ///
+    /// The normal shutdown future keeps the handle in its owner until join completes, so cancelling
+    /// that future cannot detach the task. This method is the sole deadline backstop.
+    pub async fn abort_driver_for_shutdown(&self) {
+        self.shared.cancel.cancel();
+        let Some(handle) = self.shared.join.lock().await.take() else {
+            return;
+        };
+        handle.abort();
+        let _ = handle.await;
+    }
+}
+
+async fn join_owned_driver(join: &Mutex<Option<JoinHandle<()>>>) -> Result<(), ShutdownError> {
+    let mut join = join.lock().await;
+    if let Some(handle) = join.as_mut() {
+        let result = handle.await.map_err(ShutdownError::from_join_error);
+        join.take();
+        result?;
+    }
+    Ok(())
 }
 
 impl Drop for MqttSession {
@@ -782,8 +803,7 @@ impl ManagedResource for MqttSession {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        self.shutdown_inner().await;
-        Ok(())
+        self.shutdown_inner().await
     }
 }
 
@@ -1804,6 +1824,30 @@ pub(crate) fn suback_grants_exact_uplinks(
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn owned_driver_join_preserves_failure_kind_and_handle_on_cancellation() {
+        let panicked = Mutex::new(Some(tokio::spawn(async {
+            panic!("mqtt-driver-plain-panic-secret");
+        })));
+        let error = join_owned_driver(&panicked)
+            .await
+            .expect_err("panic must propagate");
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+        assert!(!format!("{error:?}").contains("plain-panic-secret"));
+
+        let pending = Mutex::new(Some(tokio::spawn(std::future::pending::<()>())));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), join_owned_driver(&pending))
+                .await
+                .is_err()
+        );
+        let retained = pending.lock().await.take().expect("handle remains owned");
+        retained.abort();
+        let cancelled = retained.await.expect_err("abort must cancel task");
+        assert!(cancelled.is_cancelled());
+    }
 
     fn settle(capability: AckCapability) -> Result<(), MqttSessionError> {
         let fence = Arc::clone(&capability.fence);

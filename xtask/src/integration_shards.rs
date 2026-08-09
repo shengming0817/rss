@@ -318,10 +318,11 @@ pub(crate) enum LocalFeatureScope {
     JourneysFaultMatrix,
     S3,
     SettingsOnly,
+    IdentityAudit,
 }
 
 impl LocalFeatureScope {
-    pub(crate) const ALL: [Self; 12] = [
+    pub(crate) const ALL: [Self; 13] = [
         Self::Postgres,
         Self::PostgresMigration,
         Self::RedisAdapter,
@@ -334,6 +335,7 @@ impl LocalFeatureScope {
         Self::JourneysFaultMatrix,
         Self::S3,
         Self::SettingsOnly,
+        Self::IdentityAudit,
     ];
 
     pub(crate) const fn package(self) -> &'static str {
@@ -350,6 +352,7 @@ impl LocalFeatureScope {
             Self::JourneysFaultMatrix => "journeys-fault-matrix",
             Self::S3 => "s3",
             Self::SettingsOnly => "settingsonly",
+            Self::IdentityAudit => "identityaudit",
         }
     }
 
@@ -357,6 +360,7 @@ impl LocalFeatureScope {
         match self {
             Self::Mqtt => "broker-tests",
             Self::DeviceIdentity => "test-support",
+            Self::IdentityAudit => "artifact-acceptance",
             Self::Postgres
             | Self::PostgresMigration
             | Self::RedisAdapter
@@ -384,6 +388,7 @@ impl LocalFeatureScope {
             Self::JourneysFaultMatrix => "journeys-fault-matrix",
             Self::S3 => "adapters/s3",
             Self::SettingsOnly => "assemblies/settingsonly",
+            Self::IdentityAudit => "assemblies/identityaudit",
         }
     }
 
@@ -918,11 +923,14 @@ integration_shard_catalog! {
     },
     RuntimeHttpAuth => {
         name: "runtime-http-auth",
-        local_feature_scopes: [Journeys, Runtime, SettingsOnly],
+        local_feature_scopes: [Journeys, Runtime, SettingsOnly, IdentityAudit],
         units: [
             SecurityProviderCloseoutJourney => ("security-provider-closeout-journey", ReleaseCheck, "journeys", "security_provider_closeout", Test, Parallel, Affected, resources: [Postgres, Vault], impact_packages: [], capabilities: []),
             SettingsOnlyRuntimeJourney => ("settings-only-runtime-journey", ReleaseCheck, "journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly, resources: [Vault], impact_packages: [], capabilities: []),
             SettingsOnlyLib => ("settings-only-lib", ReleaseCheck, "settingsonly", "settingsonly", Lib, Serial, Affected, resources: [Vault], impact_packages: [], capabilities: []),
+            IdentityAuditLib => ("identity-audit-lib", ReleaseCheck, "identityaudit", "identityaudit", Lib, Serial, Affected, resources: [], impact_packages: [], capabilities: []),
+            IdentityAuditArtifactAcceptance => ("identity-audit-artifact-acceptance", ReleaseCheck, "identityaudit", "artifact_acceptance", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            IdentityAuditRuntimeImageAcceptance => ("identity-audit-runtime-image-acceptance", ReleaseCheck, "identityaudit", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
             RuntimeLib => ("runtime-lib", ReleaseCheck, "runtime", "runtime", Lib, Serial, Affected, resources: [Postgres, Redis, Vault], impact_packages: [], capabilities: []),
             AuthE2e => ("auth-e2e", ReleaseCheck, "runtime", "auth_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             AuthBridgeStructure => ("auth-bridge-structure", ReleaseCheck, "runtime", "auth_bridge_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -1574,6 +1582,7 @@ const INTEGRATION_PACKAGES: &[&str] = &[
     "testkit",
     "s3",
     "settingsonly",
+    "identityaudit",
 ];
 
 type TargetId = (String, String, String);
@@ -2772,6 +2781,7 @@ mod tests {
         assert!(LocalFeatureScope::ALL.into_iter().all(|scope| match scope {
             LocalFeatureScope::Mqtt => scope.feature() == "broker-tests",
             LocalFeatureScope::DeviceIdentity => scope.feature() == "test-support",
+            LocalFeatureScope::IdentityAudit => scope.feature() == "artifact-acceptance",
             _ => scope.feature() == "integration",
         }));
         validate_local_feature_catalog(SHARD_SPECS)?;
@@ -2943,6 +2953,8 @@ mod tests {
             ("journeys", "identityaudit_runtime"),
             ("runtime", "event_transport_durable_e2e"),
             ("settingsonly", "settingsonly"),
+            ("identityaudit", "identityaudit"),
+            ("identityaudit", "runtime_image_acceptance"),
             ("runtime", "runtime"),
             ("runtime", "configs_ready_e2e"),
             ("runtime", "identity_login_wire_e2e"),
@@ -3353,7 +3365,7 @@ mod tests {
         .expect_err("missing integration package must fail closed");
         assert_eq!(
             error.to_string(),
-            "workspace facts missing legacy integration packages: [\"settingsonly\"]"
+            "workspace facts missing legacy integration packages: [\"identityaudit\"]"
         );
 
         let mut duplicate = all_units();

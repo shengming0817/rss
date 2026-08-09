@@ -17,6 +17,9 @@ pub mod inventory;
 pub mod test_support;
 
 use std::future::Future;
+use std::io::Write as _;
+use std::sync::Once;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::Context as _;
@@ -26,6 +29,39 @@ use diport::DynManagedResource;
 use tokio::runtime::Handle;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
+
+static INSTALL_REDACTED_PANIC_HOOK: Once = Once::new();
+static STRUCTURED_PANIC_OBSERVATION: AtomicBool = AtomicBool::new(false);
+
+/// Install the process panic boundary before any production worker can be spawned.
+///
+/// Executable entrypoints call this before parsing or constructing a runtime. Libraries must not
+/// install or replace the process-global hook. Panic payloads are never delegated to the default
+/// hook.
+pub fn install_redacted_panic_hook() {
+    INSTALL_REDACTED_PANIC_HOOK.call_once(|| {
+        std::panic::set_hook(Box::new(|_| {
+            if STRUCTURED_PANIC_OBSERVATION.load(Ordering::Acquire) {
+                let panic_scope = if eventexec::managed_panic_scope_active() {
+                    "managed_blocking_worker"
+                } else {
+                    "process_task_or_thread"
+                };
+                tracing::error!(panic_scope, "process panic observed; payload redacted");
+            } else {
+                let _ = writeln!(
+                    std::io::stderr().lock(),
+                    "process task or thread panicked; payload redacted"
+                );
+            }
+        }));
+    });
+}
+
+/// Switch the process panic dispatcher to the installed structured tracing generation.
+pub fn activate_structured_panic_observation() {
+    STRUCTURED_PANIC_OBSERVATION.store(true, Ordering::Release);
+}
 
 /// Assembly-owned launch behavior consumed by the common executor.
 ///

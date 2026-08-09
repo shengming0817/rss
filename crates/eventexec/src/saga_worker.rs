@@ -79,7 +79,7 @@ impl Default for SagaWorkerConfig {
 /// Worker handle adopted by bootstrap shutdown.
 pub struct SagaWorker {
     name: String,
-    inner: tokio::sync::Mutex<Option<JoinHandle<()>>>,
+    inner: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
     health: Arc<WorkerHealth>,
     token: CancellationToken,
 }
@@ -93,7 +93,7 @@ impl SagaWorker {
     ) -> Self {
         Self {
             name,
-            inner: tokio::sync::Mutex::new(Some(handle)),
+            inner: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
             health,
             token,
         }
@@ -116,7 +116,10 @@ impl ManagedResource for SagaWorker {
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
         self.token.cancel();
         if let Some(handle) = self.inner.lock().await.take() {
-            handle.await.map_err(diport::ShutdownError::new)?;
+            handle
+                .join()
+                .await
+                .map_err(diport::ShutdownError::from_join_error)?;
         }
         Ok(())
     }

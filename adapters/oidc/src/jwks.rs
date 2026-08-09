@@ -352,7 +352,7 @@ pub struct JwksKeySource {
     /// 刷新任务取消信号（`shutdown` 触发；幂等——ShutdownStack 阶段 1 可能已 cancel）。
     token: CancellationToken,
     /// 后台 poll 任务句柄（`shutdown` 取走 + await 收敛；`tokio::sync::Mutex` 供 `&self` 异步关闭）。
-    handle: Mutex<Option<JoinHandle<()>>>,
+    handle: Mutex<Option<diport::OwnedTask<()>>>,
 }
 
 impl Drop for JwksKeySource {
@@ -453,7 +453,7 @@ impl JwksKeySource {
             ready,
             isolation,
             token,
-            handle: Mutex::new(Some(handle)),
+            handle: Mutex::new(Some(diport::OwnedTask::new(handle))),
         })
     }
 
@@ -502,19 +502,7 @@ impl JwksKeySource {
         let Some(handle) = handle else {
             return Ok(());
         };
-        match handle.await {
-            Ok(()) => Ok(()),
-            Err(join_err) => {
-                // JoinError Display 无 PII（任务 panic / abort 摘要）。
-                tracing::error!(
-                    target: LOG_TARGET,
-                    resource = LOG_TARGET,
-                    err = %join_err,
-                    "jwks refresh task join error on shutdown"
-                );
-                Err(ShutdownError::new(join_err))
-            }
-        }
+        handle.join().await.map_err(ShutdownError::from_join_error)
     }
 }
 
@@ -1478,6 +1466,32 @@ mod tests {
         src.shutdown()
             .await
             .expect("second shutdown ok (idempotent)");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn shutdown_classifies_join_panic_without_exposing_payload() {
+        const MARKER: &str = "jwks-refresh-plain-panic-secret";
+        let tmp = TempJwks::new(&jwks_doc(&[ec_jwk(&sk(&SK1_BYTES), "k1")]));
+        let src = JwksKeySource::load_and_watch(
+            "test-idp",
+            tmp.path(),
+            Duration::from_secs(3600),
+            CancellationToken::new(),
+        )
+        .expect("initial load");
+        let original = src
+            .handle
+            .lock()
+            .await
+            .replace(diport::OwnedTask::new(tokio::spawn(async {
+                panic!("{MARKER}");
+            })));
+        original.expect("watch task exists").abort();
+
+        let error = src.shutdown().await.expect_err("panic must propagate");
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+        assert!(!format!("{error:?}").contains(MARKER));
     }
 
     // ── 后台 poll 任务确定性轮转（start_paused + advance 驱动 interval tick，非 wall-clock）──────────

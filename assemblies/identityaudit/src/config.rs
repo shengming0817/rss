@@ -130,10 +130,16 @@ impl ConfigSource for ProcessConfigSource {
 
     fn read_secret_bundle(&mut self, path: &Path) -> std::io::Result<SecretDocument> {
         #[cfg(feature = "test-support")]
-        let path = std::env::var_os(TEST_SECRET_BUNDLE_PATH_ENV)
-            .map(PathBuf::from)
-            .unwrap_or_else(|| path.to_owned());
-        runtimeexec::config::read_secret_document(path.as_ref())
+        {
+            let path = std::env::var_os(TEST_SECRET_BUNDLE_PATH_ENV)
+                .map(PathBuf::from)
+                .unwrap_or_else(|| path.to_owned());
+            runtimeexec::config::read_secret_document(&path)
+        }
+        #[cfg(not(feature = "test-support"))]
+        {
+            runtimeexec::config::read_secret_document(path)
+        }
     }
 
     fn read_environment(&mut self, name: &'static str) -> Option<OsString> {

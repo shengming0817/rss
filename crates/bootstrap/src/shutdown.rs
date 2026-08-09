@@ -43,7 +43,7 @@ use std::time::Duration;
 // ADR-003 dynosaur 派发统一）；本 crate 仅保留关闭编排（ShutdownStack + 两阶段 LIFO 驱动器，ADR-001）。
 // dynosaur Send 变体 `ManagedResource` + `DynManagedResource`（Send wrapper）：ShutdownStack 以
 // `Box<DynManagedResource<'static>>` 持有并 tokio::spawn 隔离 panic（Box 仅需 Send，免 Arc 的 Sync 要求）。
-use diport::{DynManagedResource, ManagedResource, ShutdownError};
+use diport::{DynManagedResource, ManagedResource, ShutdownError, ShutdownErrorKind};
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 use tracing::Instrument;
@@ -60,6 +60,15 @@ pub enum ShutdownFailureKind {
     /// 关闭过程 panic（下游 adapter），被驱动器隔离。
     #[error("panicked during shutdown")]
     Panicked,
+    /// 资源持有的后台 task 在关闭期间被取消。
+    #[error("background task cancelled during shutdown")]
+    Cancelled,
+    /// 资源持有的后台 task 以未知方式异常终止。
+    #[error("background task terminated unexpectedly during shutdown")]
+    TaskUnknown,
+    /// 嵌套 lifecycle 的显式关闭 deadline 耗尽。
+    #[error("nested shutdown deadline exceeded")]
+    DeadlineExceeded,
     /// 整体 shutdown 预算（[`ShutdownStack::shutdown_within`]）耗尽，本资源未及关闭被跳过
     /// （cancel-safe：驱动器不再 await；在飞资源的 task 已 `abort`，剩余资源从未启动）。
     #[error("skipped: overall shutdown budget exhausted")]
@@ -335,9 +344,60 @@ fn budget_exhausted(name: String) -> ResourceShutdownError {
     }
 }
 
+fn observe_returned_shutdown_error(source: ShutdownError) -> ShutdownFailureKind {
+    match source.kind() {
+        ShutdownErrorKind::Operation => observe_operation_error(source),
+        ShutdownErrorKind::TaskPanicked => observe_task_panicked(),
+        ShutdownErrorKind::TaskCancelled => observe_task_cancelled(),
+        ShutdownErrorKind::TaskUnknown => observe_task_unknown(),
+        ShutdownErrorKind::DeadlineExceeded => observe_deadline_exceeded(),
+    }
+}
+
+fn observe_operation_error(source: ShutdownError) -> ShutdownFailureKind {
+    tracing::warn!(
+        error_kind = ShutdownErrorKind::Operation.as_str(),
+        error = %secure::redact_error(&source),
+        "resource shutdown returned error"
+    );
+    ShutdownFailureKind::Failed(source)
+}
+
+fn observe_task_panicked() -> ShutdownFailureKind {
+    tracing::error!(
+        error_kind = ShutdownErrorKind::TaskPanicked.as_str(),
+        "resource background task panicked (state unknown)"
+    );
+    ShutdownFailureKind::Panicked
+}
+
+fn observe_task_cancelled() -> ShutdownFailureKind {
+    tracing::warn!(
+        error_kind = ShutdownErrorKind::TaskCancelled.as_str(),
+        "resource background task cancelled unexpectedly"
+    );
+    ShutdownFailureKind::Cancelled
+}
+
+fn observe_task_unknown() -> ShutdownFailureKind {
+    tracing::error!(
+        error_kind = ShutdownErrorKind::TaskUnknown.as_str(),
+        "resource background task terminated unexpectedly (state unknown)"
+    );
+    ShutdownFailureKind::TaskUnknown
+}
+
+fn observe_deadline_exceeded() -> ShutdownFailureKind {
+    tracing::error!(
+        error_kind = ShutdownErrorKind::DeadlineExceeded.as_str(),
+        "nested resource shutdown deadline exceeded"
+    );
+    ShutdownFailureKind::DeadlineExceeded
+}
+
 /// 单资源关闭推进结果（`run` 据此决定继续或熔断）。
 enum ShutdownStep {
-    /// 整体预算在本资源在飞时耗尽——其 shutdown task 已 `abort`；当前 + 剩余资源记 BudgetExhausted。
+    /// 整体预算在本资源在飞时耗尽——其 shutdown task 已 `abort` 并 await 析构；当前 + 剩余资源记 BudgetExhausted。
     Exhausted(String),
     /// 资源关闭完成（`None` = 干净）或失败（`Some`，交 `run` 聚合，不中断循环
     /// `INVARIANT: SHUTDOWN-CONTINUE-ON-ERROR-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）。
@@ -347,7 +407,8 @@ enum ShutdownStep {
 /// 关闭单个资源：单 `select` 整体预算 vs per-resource（超时 + panic 隔离）+ tracing span。
 ///
 /// `deadline` 是 `run` 持有的**共享**整体预算 future（跨资源复用同一 deadline，cancel-safe）。
-/// 预算先判（`biased`）：耗尽则 **abort 在飞 task**（非阻塞，cancel-safe，不 detach 等进程退出回收，
+/// 预算先判（`biased`）：耗尽则 **abort 并 await 在飞 shutdown owner**（cancel-safe；owner 内的
+/// `OwnedTask` drop guard 同步发出内层 abort，不 detach 等进程退出回收，
 /// `INVARIANT: SHUTDOWN-BUDGET-CANCEL-SAFE-01` { level = "Medium", exec = "manual/opt-in", source = "code" }）→ 返回 [`ShutdownStep::Exhausted`]。
 async fn shutdown_one<D>(
     resource: Box<DynManagedResource<'static>>,
@@ -379,9 +440,10 @@ where
         };
 
         match resolved {
-            // 整体预算耗尽：abort 在飞 task（cancel-safe，非阻塞）。
+            // 整体预算耗尽：abort 并 await 在飞 shutdown owner 的析构。
             None => {
                 handle.abort();
+                let _ = handle.await;
                 tracing::error!(
                     "overall shutdown budget exhausted; in-flight resource shutdown aborted"
                 );
@@ -399,13 +461,7 @@ where
                     // 经 `secure::redact_error` 记录——funnel 只取顶层 Display（安全摘要常量、不遍历 source 链，
                     // 杜绝 adapter 原始错误 PII 经日志泄漏）；原始 source 由 `RedactedSource` owned 但 write-only
                     // 保留，不经 `Error::source()` 链暴露（fail-closed，DIPORT-ERR-SOURCE-REDACT-01）。
-                    Ok(Ok(Err(source))) => {
-                        tracing::warn!(
-                            error = %secure::redact_error(&source),
-                            "resource shutdown returned error"
-                        );
-                        Some(ShutdownFailureKind::Failed(source))
-                    }
+                    Ok(Ok(Err(source))) => Some(observe_returned_shutdown_error(source)),
                     // INVARIANT: SHUTDOWN-PANIC-ISOLATE-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— 下游 panic 被 spawn 隔离，仅本资源失败。
                     Ok(Err(join_err)) => {
                         // 未超时分支的 JoinError 只可能来自 panic（驱动器从不 abort 未超时 task）；
@@ -418,7 +474,8 @@ where
                     }
                     // INVARIANT: SHUTDOWN-TIMEOUT-BOUNDED-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— per-resource 超时有界，hung task abort 后继续。
                     Err(_elapsed) => {
-                        handle.abort(); // 停止 hung task，避免后台泄漏。
+                        handle.abort();
+                        let _ = handle.await;
                         tracing::error!("resource shutdown timed out (state unknown)");
                         Some(ShutdownFailureKind::TimedOut(budget))
                     }
@@ -464,6 +521,9 @@ mod tests {
         Err,
         Hang,
         Panic,
+        ReportedTaskPanic,
+        ReportedTaskCancelled,
+        ReportedDeadline,
         AwaitCancel(CancellationToken),
         Gate {
             started: Arc<Notify>,
@@ -475,6 +535,30 @@ mod tests {
         name: String,
         behavior: Behavior,
         log: Log,
+    }
+
+    struct DropObservedHangingResource {
+        dropped: Arc<AtomicBool>,
+    }
+
+    impl Drop for DropObservedHangingResource {
+        fn drop(&mut self) {
+            self.dropped.store(true, Ordering::SeqCst);
+        }
+    }
+
+    impl ManagedResource for DropObservedHangingResource {
+        fn name(&self) -> &str {
+            "drop-observed-hang"
+        }
+
+        fn shutdown_timeout(&self) -> Duration {
+            Duration::from_secs(5)
+        }
+
+        async fn shutdown(&self) -> Result<(), ShutdownError> {
+            std::future::pending().await
+        }
     }
 
     impl MockResource {
@@ -501,7 +585,7 @@ mod tests {
 
         // reason: Behavior::Panic 刻意 panic，验证驱动器对下游 adapter panic 的隔离；
         // 此 carve-out 仅作用于本 mock（item-level，见 error-handling.md §Carve-out）。
-        #[allow(clippy::panic)]
+        #[allow(clippy::expect_used, clippy::panic)]
         async fn shutdown(&self) -> Result<(), ShutdownError> {
             record(&self.log, &self.name);
             match &self.behavior {
@@ -520,6 +604,21 @@ mod tests {
                     Ok(())
                 }
                 Behavior::Panic => panic!("mock-panic-{}", self.name),
+                Behavior::ReportedTaskPanic => {
+                    let join_error = tokio::spawn(async { panic!("reported-task-panic") })
+                        .await
+                        .expect_err("task must panic");
+                    Err(ShutdownError::from_join_error(join_error))
+                }
+                Behavior::ReportedTaskCancelled => {
+                    let handle = tokio::spawn(std::future::pending::<()>());
+                    handle.abort();
+                    let join_error = handle.await.expect_err("task must be cancelled");
+                    Err(ShutdownError::from_join_error(join_error))
+                }
+                Behavior::ReportedDeadline => Err(ShutdownError::deadline_exceeded(
+                    std::io::Error::other("nested deadline marker"),
+                )),
                 Behavior::AwaitCancel(token) => {
                     token.cancelled().await;
                     Ok(())
@@ -563,6 +662,43 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].name, "b");
         assert!(matches!(failures[0].kind, ShutdownFailureKind::Failed(_)));
+    }
+
+    #[tokio::test]
+    async fn shutdown_preserves_reported_task_failure_kinds_and_continues() {
+        let log = new_log();
+        let mut stack = ShutdownStack::new(CancellationToken::new());
+        stack.register_detached(MockResource::boxed("a", Behavior::Ok, &log));
+        stack.register_detached(MockResource::boxed(
+            "panic",
+            Behavior::ReportedTaskPanic,
+            &log,
+        ));
+        stack.register_detached(MockResource::boxed(
+            "cancelled",
+            Behavior::ReportedTaskCancelled,
+            &log,
+        ));
+        stack.register_detached(MockResource::boxed(
+            "deadline",
+            Behavior::ReportedDeadline,
+            &log,
+        ));
+        stack.register_detached(MockResource::boxed("c", Behavior::Ok, &log));
+
+        let failures = stack.shutdown().await;
+
+        assert_eq!(
+            entries(&log),
+            vec!["c", "deadline", "cancelled", "panic", "a"]
+        );
+        assert_eq!(failures.len(), 3);
+        assert!(matches!(
+            failures[0].kind,
+            ShutdownFailureKind::DeadlineExceeded
+        ));
+        assert!(matches!(failures[1].kind, ShutdownFailureKind::Cancelled));
+        assert!(matches!(failures[2].kind, ShutdownFailureKind::Panicked));
     }
 
     #[tokio::test]
@@ -634,6 +770,23 @@ mod tests {
         assert_eq!(failures.len(), 1);
         assert_eq!(failures[0].name, "hang");
         assert!(matches!(failures[0].kind, ShutdownFailureKind::TimedOut(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_waits_for_aborted_shutdown_owner_to_drop_before_returning() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let mut stack = ShutdownStack::new(CancellationToken::new());
+        stack.register_detached(DynManagedResource::new_box(DropObservedHangingResource {
+            dropped: Arc::clone(&dropped),
+        }));
+
+        let failures = stack.shutdown().await;
+
+        assert_eq!(failures.len(), 1);
+        assert!(
+            dropped.load(Ordering::SeqCst),
+            "shutdown owner must be dropped before LIFO advances or returns"
+        );
     }
 
     // 混合失败类型同时出现：验证 SHUTDOWN-ERROR-AGGREGATE-01 在异构失败下仍逆序、全聚合、类型不串。

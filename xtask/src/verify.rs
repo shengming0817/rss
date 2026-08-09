@@ -944,10 +944,62 @@ fn docker_available() -> bool {
         .unwrap_or(false)
 }
 
-const INTEGRATION_ENV: &[(&str, &str)] = &[(
-    "RSS_AUDIT_CHAIN_KEY_B64URL",
-    "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-)];
+const IDENTITYAUDIT_ACCEPTANCE_IMAGE_ENV: &str = "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE";
+const IDENTITYAUDIT_ACCEPTANCE_IMAGE: &str = "rss-identityaudit:artifact-acceptance";
+const IDENTITYAUDIT_IMAGE_BUILD_ARGS: &[&str] = &[
+    "build",
+    "--target",
+    "identityaudit-runtime",
+    "--tag",
+    IDENTITYAUDIT_ACCEPTANCE_IMAGE,
+    ".",
+];
+const INTEGRATION_ENV: &[(&str, &str)] = &[
+    (
+        "RSS_AUDIT_CHAIN_KEY_B64URL",
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    ),
+    (
+        IDENTITYAUDIT_ACCEPTANCE_IMAGE_ENV,
+        IDENTITYAUDIT_ACCEPTANCE_IMAGE,
+    ),
+];
+
+fn provision_integration_batch(batch: &integration_shards::ShardBatch, root: &Path) -> Result<()> {
+    if !batch_requires_identityaudit_image(batch) {
+        return Ok(());
+    }
+    let status = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::Docker,
+        IDENTITYAUDIT_IMAGE_BUILD_ARGS,
+        &[],
+        Some(root),
+    )
+    .status()
+    .context("build identityaudit runtime acceptance image")?;
+    anyhow::ensure!(
+        status.success(),
+        "identityaudit runtime acceptance image build failed"
+    );
+    Ok(())
+}
+
+fn batch_requires_identityaudit_image(batch: &integration_shards::ShardBatch) -> bool {
+    batch
+        .unit_ids
+        .contains(&integration_shards::IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
+}
+
+fn run_integration_batch(
+    selection: &IntegrationSelection,
+    batch: &integration_shards::ShardBatch,
+    partition: Option<crate::nextest::HashPartition>,
+    root: &Path,
+) -> Result<()> {
+    provision_integration_batch(batch, root)?;
+    crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
+        .run(root, INTEGRATION_ENV)
+}
 
 fn run_integration_batches(
     selection: &IntegrationSelection,
@@ -967,10 +1019,7 @@ fn run_integration_batches(
             Scheduling::Serial => "serial".to_owned(),
             Scheduling::Parallel => "parallel".to_owned(),
         },
-        |batch| {
-            crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
-                .run(root, INTEGRATION_ENV)
-        },
+        |batch| run_integration_batch(selection, batch, partition, root),
     )
 }
 
@@ -1037,8 +1086,7 @@ pub(crate) fn run_nextest_replay(
         let [batch] = matching.as_slice() else {
             bail!("integration replay unitIds must uniquely match a selection-derived batch");
         };
-        crate::nextest::NextestInvocation::for_integration_batch(selection, batch, partition)?
-            .run(workspace.root(), INTEGRATION_ENV)
+        run_integration_batch(selection, batch, partition, workspace.root())
     })
 }
 
@@ -2034,6 +2082,34 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identityaudit_runtime_image_batch_has_exact_provisioning_and_environment() {
+        let selection = IntegrationSelection::release_check();
+        let batch = integration_shards::batches(&selection, IntegrationShard::RuntimeHttpAuth)
+            .into_iter()
+            .find(batch_requires_identityaudit_image)
+            .expect("runtime image batch remains in the release-check plan");
+
+        assert_eq!(batch.package, "identityaudit");
+        assert_eq!(batch.feature, "artifact-acceptance");
+        assert_eq!(batch.targets, ["runtime_image_acceptance"]);
+        assert_eq!(
+            IDENTITYAUDIT_IMAGE_BUILD_ARGS,
+            [
+                "build",
+                "--target",
+                "identityaudit-runtime",
+                "--tag",
+                "rss-identityaudit:artifact-acceptance",
+                ".",
+            ]
+        );
+        assert!(INTEGRATION_ENV.contains(&(
+            "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE",
+            "rss-identityaudit:artifact-acceptance"
+        )));
+    }
 
     fn shell_executable_prefix(line: &str) -> &str {
         let mut single_quoted = false;

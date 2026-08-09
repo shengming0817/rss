@@ -3,6 +3,8 @@
 //! Gated by Cargo `required-features = ["artifact-acceptance"]`. Missing or
 //! illegal `RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE` fails closed (no harness ignore).
 
+#![allow(clippy::expect_used, clippy::unwrap_used)] // reason: deterministic validator contract fixtures fail loudly when a fixed case changes polarity.
+
 mod support;
 
 use anyhow::Context;

@@ -71,6 +71,7 @@ pub(crate) fn install_runtime_subscriber(
         .with(StructuredJsonLayer::new(std::io::stderr, resource))
         .try_init()
         .context("install runtime-managed tracing subscriber")?;
+    runtimeexec::activate_structured_panic_observation();
     JSON_SUBSCRIBER_INSTALLED.store(true, Ordering::Release);
     Ok(())
 }

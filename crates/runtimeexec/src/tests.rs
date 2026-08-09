@@ -17,6 +17,122 @@ use static_assertions::assert_not_impl_any;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+#[test]
+#[allow(clippy::panic)]
+fn production_panic_hook_redacts_payload() {
+    const CHILD_ENV: &str = "RSS_RUNTIMEEXEC_PANIC_HOOK_CHILD";
+    const SECRET: &str = "runtime-task-plain-panic-secret";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        install_redacted_panic_hook();
+        panic!("{SECRET}");
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            "tests::production_panic_hook_redacts_payload",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("spawn panic-hook child");
+    assert!(!output.status.success(), "child must panic");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("payload redacted"), "{stderr}");
+    assert!(!stderr.contains(SECRET), "{stderr}");
+}
+
+#[test]
+#[allow(clippy::panic)]
+fn structured_panic_observation_never_writes_plaintext_after_activation() {
+    const CHILD_ENV: &str = "RSS_RUNTIMEEXEC_STRUCTURED_PANIC_CHILD";
+    const SECRET: &str = "runtime-structured-panic-secret";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        install_redacted_panic_hook();
+        tracing_subscriber::fmt()
+            .json()
+            .with_writer(std::io::stderr)
+            .try_init()
+            .expect("subscriber");
+        activate_structured_panic_observation();
+        panic!("{SECRET}");
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            "tests::structured_panic_observation_never_writes_plaintext_after_activation",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("spawn structured panic child");
+    assert!(!output.status.success(), "child must panic");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!stderr.contains(SECRET), "{stderr}");
+    for line in stderr.lines().filter(|line| line.starts_with('{')) {
+        let parsed = serde_json::from_str::<serde_json::Value>(line);
+        assert!(parsed.is_ok(), "panic observation must be JSON: {line}");
+    }
+    assert!(stderr.contains("payload redacted"), "{stderr}");
+    assert!(
+        !stderr
+            .lines()
+            .any(|line| line == "process task or thread panicked; payload redacted"),
+        "structured generation must not contain plaintext lines: {stderr}"
+    );
+}
+
+#[test]
+fn managed_worker_panic_uses_the_same_structured_dispatcher() {
+    const CHILD_ENV: &str = "RSS_RUNTIMEEXEC_MANAGED_PANIC_CHILD";
+    const SECRET: &str = "runtime-managed-worker-panic-secret";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        install_redacted_panic_hook();
+        tracing_subscriber::fmt()
+            .json()
+            .with_writer(std::io::stderr)
+            .try_init()
+            .expect("subscriber");
+        activate_structured_panic_observation();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let worker = eventexec::ManagedBlockingWorker::spawn(
+                "managed-panic-test",
+                CancellationToken::new(),
+                Arc::new(eventexec::WorkerHealth::starting()),
+                Duration::from_secs(1),
+                |_token| -> Result<(), ShutdownError> { panic!("{SECRET}") },
+            );
+            assert!(worker.shutdown().await.is_err());
+        });
+        return;
+    }
+
+    let output = std::process::Command::new(std::env::current_exe().expect("current test binary"))
+        .args([
+            "--exact",
+            "tests::managed_worker_panic_uses_the_same_structured_dispatcher",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("spawn managed panic child");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("managed_blocking_worker"), "{stderr}");
+    assert!(stderr.contains("payload redacted"), "{stderr}");
+    assert!(!stderr.contains(SECRET), "{stderr}");
+    assert!(stderr.lines().all(|line| line.starts_with('{')), "{stderr}");
+}
+
 #[derive(Clone)]
 struct Transcript(Arc<Mutex<Vec<&'static str>>>);
 

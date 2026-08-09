@@ -5362,6 +5362,12 @@ mod tests {
                     target: None,
                     check_includes_lib: true,
                 },
+                LocalStep::Packages {
+                    operation: LocalCargoOperation::Test,
+                    packages: vec!["identityaudit".to_owned()],
+                    target: None,
+                    check_includes_lib: true,
+                },
             ],
             facts,
         )?;
@@ -5399,6 +5405,14 @@ mod tests {
         assert!(!steps.iter().any(|step| matches!(step,
             LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
                 if packages == &["mqtt"] && name == "integration"
+        )));
+        assert!(steps.iter().any(|step| matches!(step,
+            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
+                if packages == &["identityaudit"] && name == "artifact_acceptance"
+        )));
+        assert!(!steps.iter().any(|step| matches!(step,
+            LocalStep::Packages { packages, target: Some(LocalCargoTarget::Test { name, .. }), .. }
+                if packages == &["identityaudit"] && name == "runtime_image_acceptance"
         )));
         for step in &steps {
             if let LocalStep::Packages {

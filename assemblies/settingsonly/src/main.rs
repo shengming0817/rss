@@ -56,6 +56,7 @@ fn parse_command(arguments: impl IntoIterator<Item = OsString>) -> anyhow::Resul
 }
 
 fn main() -> anyhow::Result<()> {
+    runtimeexec::install_redacted_panic_hook();
     let CliCommand::Run(config) = parse_command(std::env::args_os().skip(1))? else {
         std::io::stdout()
             .lock()
@@ -67,6 +68,7 @@ fn main() -> anyhow::Result<()> {
         .with_env_filter(settingsonly::TRACING_FILTER)
         .try_init()
         .map_err(|_| anyhow::anyhow!("initialize settingsonly tracing subscriber"))?;
+    runtimeexec::activate_structured_panic_observation();
     settingsonly::run(&config)
 }
 

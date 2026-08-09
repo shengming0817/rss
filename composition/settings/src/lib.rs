@@ -615,7 +615,7 @@ async fn verify_keyprovider_ready(
 }
 
 struct KeyProviderReadinessSampler {
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
     token: CancellationToken,
 }
 
@@ -627,10 +627,11 @@ impl ManagedResource for KeyProviderReadinessSampler {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
         let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take()
-            && let Err(error) = handle.await
-        {
-            tracing::warn!(error = %error, "keyprovider readiness sampler join failed");
+        if let Some(handle) = handle.take() {
+            handle
+                .join()
+                .await
+                .map_err(ShutdownError::from_join_error)?;
         }
         Ok(())
     }
@@ -657,13 +658,13 @@ fn spawn_keyprovider_readiness_sampler(
         }
     });
     KeyProviderReadinessSampler {
-        handle: tokio::sync::Mutex::new(Some(handle)),
+        handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
         token: child,
     }
 }
 
 struct SecretResolverReadinessSampler {
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
     token: CancellationToken,
 }
 
@@ -675,10 +676,11 @@ impl ManagedResource for SecretResolverReadinessSampler {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
         let mut handle = self.handle.lock().await;
-        if let Some(handle) = handle.take()
-            && let Err(error) = handle.await
-        {
-            tracing::warn!(error = %error, "vault secret resolver readiness sampler join failed");
+        if let Some(handle) = handle.take() {
+            handle
+                .join()
+                .await
+                .map_err(ShutdownError::from_join_error)?;
         }
         Ok(())
     }
@@ -705,7 +707,7 @@ fn spawn_secret_resolver_readiness_sampler(
         }
     });
     SecretResolverReadinessSampler {
-        handle: tokio::sync::Mutex::new(Some(handle)),
+        handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
         token: child,
     }
 }
@@ -837,6 +839,35 @@ mod tests {
     use vault::{
         StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver,
     };
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn readiness_samplers_propagate_closed_join_failure_kinds() {
+        let key_provider = KeyProviderReadinessSampler {
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
+                panic!("settings-readiness-plain-panic-secret");
+            })))),
+            token: CancellationToken::new(),
+        };
+        let error = key_provider
+            .shutdown()
+            .await
+            .expect_err("panic must propagate");
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+        assert!(!format!("{error:?}").contains("plain-panic-secret"));
+
+        let handle = tokio::spawn(std::future::pending::<()>());
+        handle.abort();
+        let secret_resolver = SecretResolverReadinessSampler {
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
+            token: CancellationToken::new(),
+        };
+        let error = secret_resolver
+            .shutdown()
+            .await
+            .expect_err("cancellation must propagate");
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskCancelled);
+    }
 
     struct ReadinessTestWorker;
 

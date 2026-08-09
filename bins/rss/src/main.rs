@@ -34,7 +34,9 @@ fn init_migration_tracing() -> anyhow::Result<()> {
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .try_init()
-        .map_err(|_| anyhow::anyhow!("initialize postgres migration tracing subscriber"))
+        .map_err(|_| anyhow::anyhow!("initialize postgres migration tracing subscriber"))?;
+    runtimeexec::activate_structured_panic_observation();
+    Ok(())
 }
 
 fn classify_command(args: &[String]) -> anyhow::Result<CommandFamily> {
@@ -242,6 +244,7 @@ fn process_exit(result: anyhow::Result<()>) -> std::process::ExitCode {
 }
 
 fn main() -> std::process::ExitCode {
+    runtimeexec::install_redacted_panic_hook();
     process_exit(run_main())
 }
 

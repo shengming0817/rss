@@ -420,7 +420,7 @@ impl bootstrap::HealthProbe for RedisProbe {
 }
 
 struct RedisReadinessWorker {
-    handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    handle: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
     token: tokio_util::sync::CancellationToken,
 }
 
@@ -445,7 +445,7 @@ impl RedisReadinessWorker {
             ready.store(false, Ordering::Release);
         });
         Self {
-            handle: tokio::sync::Mutex::new(Some(handle)),
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
             token,
         }
     }
@@ -459,7 +459,10 @@ impl ManagedResource for RedisReadinessWorker {
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         self.token.cancel();
         if let Some(handle) = self.handle.lock().await.take() {
-            let _ = handle.await;
+            handle
+                .join()
+                .await
+                .map_err(ShutdownError::from_join_error)?;
         }
         Ok(())
     }
@@ -768,7 +771,47 @@ struct VaultReadinessWorker {
     name: &'static str,
     token: tokio_util::sync::CancellationToken,
     handle: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
-    shutdown_bound: Duration,
+}
+
+struct AbortReadinessTaskOnDrop {
+    handle: tokio::task::JoinHandle<()>,
+    armed: bool,
+}
+
+#[derive(Debug)]
+struct VaultReadinessJoinDeadline;
+
+impl std::fmt::Display for VaultReadinessJoinDeadline {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("identityaudit Vault readiness join deadline exceeded")
+    }
+}
+
+impl std::error::Error for VaultReadinessJoinDeadline {}
+
+impl AbortReadinessTaskOnDrop {
+    fn new(handle: tokio::task::JoinHandle<()>) -> Self {
+        Self {
+            handle,
+            armed: true,
+        }
+    }
+
+    fn handle(&mut self) -> &mut tokio::task::JoinHandle<()> {
+        &mut self.handle
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for AbortReadinessTaskOnDrop {
+    fn drop(&mut self) {
+        if self.armed {
+            self.handle.abort();
+        }
+    }
 }
 
 impl VaultReadinessWorker {
@@ -804,7 +847,6 @@ impl VaultReadinessWorker {
             name: "identityaudit-vault-signer-readiness",
             token,
             handle: tokio::sync::Mutex::new(Some(handle)),
-            shutdown_bound: Duration::from_secs(1),
         }
     }
 
@@ -837,7 +879,6 @@ impl VaultReadinessWorker {
             name: "identityaudit-vault-dlx-key-readiness",
             token,
             handle: tokio::sync::Mutex::new(Some(handle)),
-            shutdown_bound: Duration::from_secs(1),
         }
     }
 }
@@ -847,19 +888,30 @@ impl diport::ManagedResource for VaultReadinessWorker {
         self.name
     }
 
+    fn shutdown_timeout(&self) -> Duration {
+        Duration::from_secs(2)
+    }
+
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
         self.token.cancel();
-        let Some(mut handle) = self.handle.lock().await.take() else {
+        let Some(handle) = self.handle.lock().await.take() else {
             return Ok(());
         };
-        if tokio::time::timeout(self.shutdown_bound, &mut handle)
-            .await
-            .is_err()
-        {
-            handle.abort();
-            let _ = handle.await;
+        let mut guard = AbortReadinessTaskOnDrop::new(handle);
+        match tokio::time::timeout(Duration::from_secs(1), guard.handle()).await {
+            Ok(joined) => {
+                guard.disarm();
+                joined.map_err(diport::ShutdownError::from_join_error)
+            }
+            Err(_) => {
+                guard.handle().abort();
+                let _ = guard.handle().await;
+                guard.disarm();
+                Err(diport::ShutdownError::deadline_exceeded(
+                    VaultReadinessJoinDeadline,
+                ))
+            }
         }
-        Ok(())
     }
 }
 
@@ -1099,6 +1151,52 @@ mod tests {
     use axum::{Json, Router, routing::post};
     use base64::Engine as _;
     use diport::KeyProvider as _;
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn readiness_workers_propagate_closed_join_failure_kinds() {
+        struct DropMarker(Arc<AtomicBool>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let redis = RedisReadinessWorker {
+            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
+                panic!("identityaudit-readiness-plain-panic-secret");
+            })))),
+            token: tokio_util::sync::CancellationToken::new(),
+        };
+        let error = redis.shutdown().await.expect_err("panic must propagate");
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+        assert!(!format!("{error:?}").contains("plain-panic-secret"));
+
+        let vault_stopped = Arc::new(AtomicBool::new(false));
+        let vault = VaultReadinessWorker {
+            name: "test-vault-readiness",
+            token: tokio_util::sync::CancellationToken::new(),
+            handle: tokio::sync::Mutex::new(Some(tokio::spawn({
+                let vault_stopped = Arc::clone(&vault_stopped);
+                async move {
+                    let _marker = DropMarker(vault_stopped);
+                    std::future::pending::<()>().await;
+                }
+            }))),
+        };
+        tokio::task::yield_now().await;
+        let mut stack =
+            bootstrap::shutdown::ShutdownStack::new(tokio_util::sync::CancellationToken::new());
+        stack.register_detached(diport::DynManagedResource::new_box(vault));
+        let failures = stack.shutdown().await;
+        assert!(matches!(
+            failures.as_slice(),
+            [bootstrap::shutdown::ResourceShutdownError {
+                kind: bootstrap::shutdown::ShutdownFailureKind::DeadlineExceeded,
+                ..
+            }]
+        ));
+        assert!(vault_stopped.load(Ordering::Acquire));
+    }
 
     struct TestResource {
         shutdowns: Arc<std::sync::atomic::AtomicUsize>,

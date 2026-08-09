@@ -34,5 +34,5 @@ serde_json_canonicalizer = { workspace = true }
 sha2 = { workspace = true }
 static_assertions = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json"] }
 trybuild = { workspace = true }

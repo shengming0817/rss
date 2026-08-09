@@ -7,7 +7,7 @@
 use std::fmt::Write as _;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use diport::{
@@ -647,6 +647,7 @@ async fn run_ingress_loop(
     settlement_timeout: Duration,
     cancellation: CancellationToken,
     control: PilotLoopControl,
+    transport_shutdown_failed: Arc<PilotShutdownFailureLatch>,
 ) {
     let _stopped = LoopStoppedGuard(control.clone());
     let mut paused = control.paused.subscribe();
@@ -657,6 +658,7 @@ async fn run_ingress_loop(
         settlement_timeout,
         &cancellation,
         &control,
+        &transport_shutdown_failed,
         &mut paused,
     )
     .await
@@ -676,6 +678,7 @@ async fn ingress_step(
     settlement_timeout: Duration,
     cancellation: &CancellationToken,
     control: &PilotLoopControl,
+    transport_shutdown_failed: &PilotShutdownFailureLatch,
     paused: &mut watch::Receiver<bool>,
 ) -> LoopStep {
     if cancellation.is_cancelled() {
@@ -696,6 +699,7 @@ async fn ingress_step(
                 *delivery,
                 cancellation,
                 control,
+                transport_shutdown_failed,
             )
             .await
         }
@@ -734,6 +738,7 @@ async fn handle_ingress_delivery(
     delivery: Result<mqtt::AuthenticatedDeviceDelivery, mqtt::MqttSessionError>,
     cancellation: &CancellationToken,
     control: &PilotLoopControl,
+    transport_shutdown_failed: &PilotShutdownFailureLatch,
 ) -> LoopStep {
     let Ok(delivery) = delivery else {
         control.mark_degraded();
@@ -749,7 +754,13 @@ async fn handle_ingress_delivery(
     observe_ingress_outcome(outcome, control);
     control.set_in_flight(0);
     if shutdown {
-        let _ = tokio::time::timeout(settlement_timeout, mqtt.shutdown()).await;
+        match tokio::time::timeout(settlement_timeout, ManagedResource::shutdown(mqtt)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => transport_shutdown_failed.record(error.kind()),
+            Err(_) => {
+                transport_shutdown_failed.record(diport::ShutdownErrorKind::DeadlineExceeded);
+            }
+        }
         LoopStep::Stop
     } else {
         LoopStep::Continue
@@ -1091,6 +1102,7 @@ struct DeviceIdentityPilot {
     receipt_relay_control: PilotLoopControl,
     cancellation: CancellationToken,
     joins: Mutex<Vec<JoinHandle<()>>>,
+    transport_shutdown_failed: Arc<PilotShutdownFailureLatch>,
     shutdown_timeout: Duration,
 }
 
@@ -1221,7 +1233,10 @@ impl DeviceIdentityPilotAdoption {
         let Some(pilot) = self.pilot.take() else {
             return Ok(());
         };
-        pilot.shutdown().await
+        pilot
+            .shutdown()
+            .await
+            .map_err(PilotShutdownFailure::into_public)
     }
 }
 
@@ -1276,7 +1291,11 @@ impl ManagedResource for PilotManagedResource {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        let result = self.pilot.shutdown().await.map_err(ShutdownError::new);
+        let result = self
+            .pilot
+            .shutdown()
+            .await
+            .map_err(PilotShutdownFailure::into_shutdown_error);
         if result.is_ok() {
             self.cleanup_armed.store(false, Ordering::Release);
         }
@@ -1360,6 +1379,98 @@ pub enum DeviceIdentityPilotShutdownError {
     WorkerFailed,
     #[error("deviceidentity MQTT transport shutdown failed")]
     Transport,
+}
+
+#[derive(Debug, thiserror::Error)]
+enum PilotShutdownFailure {
+    #[error("deviceidentity pilot drain deadline exceeded")]
+    DrainTimeout,
+    #[error("deviceidentity pilot worker join deadline exceeded")]
+    JoinTimeout,
+    #[error("deviceidentity pilot worker terminated abnormally")]
+    Worker(#[source] ShutdownError),
+    #[error("deviceidentity MQTT transport shutdown failed")]
+    Transport(#[source] ShutdownError),
+}
+
+impl PilotShutdownFailure {
+    fn into_public(self) -> DeviceIdentityPilotShutdownError {
+        match self {
+            Self::DrainTimeout => DeviceIdentityPilotShutdownError::DrainTimeout,
+            Self::JoinTimeout => DeviceIdentityPilotShutdownError::JoinTimeout,
+            Self::Worker(_) => DeviceIdentityPilotShutdownError::WorkerFailed,
+            Self::Transport(_) => DeviceIdentityPilotShutdownError::Transport,
+        }
+    }
+
+    fn into_shutdown_error(self) -> ShutdownError {
+        match self {
+            Self::DrainTimeout => {
+                ShutdownError::deadline_exceeded(DeviceIdentityPilotShutdownError::DrainTimeout)
+            }
+            Self::JoinTimeout => {
+                ShutdownError::deadline_exceeded(DeviceIdentityPilotShutdownError::JoinTimeout)
+            }
+            Self::Worker(error) | Self::Transport(error) => error,
+        }
+    }
+}
+
+struct PilotShutdownFailureLatch(AtomicU8);
+
+impl PilotShutdownFailureLatch {
+    const NONE: u8 = 0;
+
+    const fn new() -> Self {
+        Self(AtomicU8::new(Self::NONE))
+    }
+
+    fn record(&self, kind: diport::ShutdownErrorKind) {
+        let encoded = match kind {
+            diport::ShutdownErrorKind::Operation => 1,
+            diport::ShutdownErrorKind::TaskPanicked => 2,
+            diport::ShutdownErrorKind::TaskCancelled => 3,
+            diport::ShutdownErrorKind::TaskUnknown => 4,
+            diport::ShutdownErrorKind::DeadlineExceeded => 5,
+        };
+        let _ = self
+            .0
+            .compare_exchange(Self::NONE, encoded, Ordering::AcqRel, Ordering::Acquire);
+    }
+
+    fn load(&self) -> Option<diport::ShutdownErrorKind> {
+        match self.0.load(Ordering::Acquire) {
+            Self::NONE => None,
+            1 => Some(diport::ShutdownErrorKind::Operation),
+            2 => Some(diport::ShutdownErrorKind::TaskPanicked),
+            3 => Some(diport::ShutdownErrorKind::TaskCancelled),
+            4 => Some(diport::ShutdownErrorKind::TaskUnknown),
+            5 => Some(diport::ShutdownErrorKind::DeadlineExceeded),
+            _ => Some(diport::ShutdownErrorKind::TaskUnknown),
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("deviceidentity MQTT transport previously failed during shutdown")]
+struct LatchedTransportShutdownFailure;
+
+fn latched_transport_shutdown_error(kind: diport::ShutdownErrorKind) -> ShutdownError {
+    match kind {
+        diport::ShutdownErrorKind::Operation => ShutdownError::new(LatchedTransportShutdownFailure),
+        diport::ShutdownErrorKind::TaskPanicked => {
+            ShutdownError::task_panicked(LatchedTransportShutdownFailure)
+        }
+        diport::ShutdownErrorKind::TaskCancelled => {
+            ShutdownError::task_cancelled(LatchedTransportShutdownFailure)
+        }
+        diport::ShutdownErrorKind::TaskUnknown => {
+            ShutdownError::task_unknown(LatchedTransportShutdownFailure)
+        }
+        diport::ShutdownErrorKind::DeadlineExceeded => {
+            ShutdownError::deadline_exceeded(LatchedTransportShutdownFailure)
+        }
+    }
 }
 
 impl DeviceIdentityPilot {
@@ -1449,6 +1560,7 @@ impl DeviceIdentityPilot {
         let ingress_control = PilotLoopControl::new();
         let command_relay_control = PilotLoopControl::new();
         let receipt_relay_control = PilotLoopControl::new();
+        let transport_shutdown_failed = Arc::new(PilotShutdownFailureLatch::new());
 
         let reconcile_join = runtime.spawn(scheduler.run(cancellation.child_token()));
         let ingress_join = runtime.spawn(run_ingress_loop(
@@ -1457,6 +1569,7 @@ impl DeviceIdentityPilot {
             relay_budget.settle_timeout(),
             cancellation.child_token(),
             ingress_control.clone(),
+            Arc::clone(&transport_shutdown_failed),
         ));
         let command_relay_join = runtime.spawn(
             DeviceRelayRuntime {
@@ -1499,6 +1612,7 @@ impl DeviceIdentityPilot {
                 command_relay_join,
                 receipt_relay_join,
             ]),
+            transport_shutdown_failed,
             shutdown_timeout,
         })
     }
@@ -1536,7 +1650,7 @@ impl DeviceIdentityPilot {
     }
 
     /// Stop admission, drain attempts and publications, then stop workers and MQTT within bounds.
-    async fn shutdown(&self) -> Result<(), DeviceIdentityPilotShutdownError> {
+    async fn shutdown(&self) -> Result<(), PilotShutdownFailure> {
         self.pause_admission();
         let budget = tokio::time::sleep(self.shutdown_timeout);
         tokio::pin!(budget);
@@ -1544,15 +1658,28 @@ impl DeviceIdentityPilot {
 
         self.cancellation.cancel();
         let join_result = if drain_timed_out {
+            abort_workers(&self.joins).await;
             None
         } else {
-            join_before_budget(&self.joins, budget.as_mut()).await
+            match join_before_budget(&self.joins, budget.as_mut()).await {
+                JoinBeforeBudget::Completed(result) => Some(result),
+                JoinBeforeBudget::Deadline(first_failure) => {
+                    let failure = first_failure.or(abort_workers(&self.joins).await);
+                    failure.map(Err)
+                }
+            }
         };
-        let transport_result = if drain_timed_out || join_result.is_none() {
+        let mut transport_result = if drain_timed_out || join_result.is_none() {
             None
         } else {
             shutdown_transport_before_budget(&self.mqtt, budget.as_mut()).await
         };
+        if transport_result.is_none() {
+            self.mqtt.abort_driver_for_shutdown().await;
+        }
+        if let Some(kind) = self.transport_shutdown_failed.load() {
+            transport_result = Some(Err(latched_transport_shutdown_error(kind)));
+        }
         classify_shutdown(drain_timed_out, join_result, transport_result)
     }
 }
@@ -1575,51 +1702,80 @@ async fn wait_pilot_drain(
     }
 }
 
+enum JoinBeforeBudget {
+    Completed(Result<(), ShutdownError>),
+    Deadline(Option<ShutdownError>),
+}
+
 async fn join_before_budget(
     joins: &Mutex<Vec<JoinHandle<()>>>,
-    budget: Pin<&mut tokio::time::Sleep>,
-) -> Option<bool> {
-    tokio::select! {
-        clean = join_workers(joins) => Some(clean),
-        () = budget => None,
+    mut budget: Pin<&mut tokio::time::Sleep>,
+) -> JoinBeforeBudget {
+    let mut joins = joins.lock().await;
+    let mut first_failure = None;
+    while !joins.is_empty() {
+        tokio::select! {
+            joined = &mut joins[0] => {
+                if let Err(error) = joined
+                    && first_failure.is_none()
+                {
+                    first_failure = Some(ShutdownError::from_join_error(error));
+                }
+                joins.remove(0);
+            }
+            () = budget.as_mut() => return JoinBeforeBudget::Deadline(first_failure),
+        }
     }
+    JoinBeforeBudget::Completed(first_failure.map_or(Ok(()), Err))
 }
 
 async fn shutdown_transport_before_budget(
     mqtt: &MqttSession,
     budget: Pin<&mut tokio::time::Sleep>,
-) -> Option<bool> {
+) -> Option<Result<(), ShutdownError>> {
     tokio::select! {
-        result = mqtt.shutdown() => Some(result.is_ok()),
+        result = ManagedResource::shutdown(mqtt) => Some(result),
         () = budget => None,
     }
 }
 
-const fn classify_shutdown(
+fn classify_shutdown(
     drain_timed_out: bool,
-    join_result: Option<bool>,
-    transport_result: Option<bool>,
-) -> Result<(), DeviceIdentityPilotShutdownError> {
+    join_result: Option<Result<(), ShutdownError>>,
+    transport_result: Option<Result<(), ShutdownError>>,
+) -> Result<(), PilotShutdownFailure> {
     if drain_timed_out {
-        Err(DeviceIdentityPilotShutdownError::DrainTimeout)
+        Err(PilotShutdownFailure::DrainTimeout)
     } else if join_result.is_none() {
-        Err(DeviceIdentityPilotShutdownError::JoinTimeout)
-    } else if matches!(join_result, Some(false)) {
-        Err(DeviceIdentityPilotShutdownError::WorkerFailed)
-    } else if !matches!(transport_result, Some(true)) {
-        Err(DeviceIdentityPilotShutdownError::Transport)
+        Err(PilotShutdownFailure::JoinTimeout)
+    } else if let Some(Err(error)) = join_result {
+        Err(PilotShutdownFailure::Worker(error))
+    } else if let Some(Err(error)) = transport_result {
+        Err(PilotShutdownFailure::Transport(error))
+    } else if transport_result.is_none() {
+        Err(PilotShutdownFailure::Transport(
+            ShutdownError::deadline_exceeded(DeviceIdentityPilotShutdownError::Transport),
+        ))
     } else {
         Ok(())
     }
 }
 
-async fn join_workers(joins: &Mutex<Vec<JoinHandle<()>>>) -> bool {
+async fn abort_workers(joins: &Mutex<Vec<JoinHandle<()>>>) -> Option<ShutdownError> {
     let mut joins = joins.lock().await;
-    let mut clean = true;
-    for worker in joins.drain(..) {
-        clean &= worker.await.is_ok();
+    for worker in joins.iter() {
+        worker.abort();
     }
-    clean
+    let mut first_failure = None;
+    for worker in joins.drain(..) {
+        if let Err(error) = worker.await
+            && error.is_panic()
+            && first_failure.is_none()
+        {
+            first_failure = Some(ShutdownError::from_join_error(error));
+        }
+    }
+    first_failure
 }
 
 fn valid_holder_identity(holder_id: &str) -> bool {
@@ -1922,15 +2078,105 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::panic)]
     async fn worker_join_failure_is_not_reported_as_clean_shutdown() {
-        let joins = Mutex::new(vec![tokio::spawn(async {
-            panic!("synthetic worker failure")
-        })]);
-        assert!(!join_workers(&joins).await);
-        assert_eq!(
-            classify_shutdown(false, Some(false), Some(true)),
-            Err(DeviceIdentityPilotShutdownError::WorkerFailed)
+        let panicked = tokio::spawn(async { panic!("synthetic worker failure") });
+        while !panicked.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let release = Arc::new(tokio::sync::Notify::new());
+        let later_finished = Arc::new(AtomicBool::new(false));
+        let later = tokio::spawn({
+            let release = Arc::clone(&release);
+            let later_finished = Arc::clone(&later_finished);
+            async move {
+                release.notified().await;
+                later_finished.store(true, Ordering::Release);
+            }
+        });
+        let joins = Mutex::new(vec![panicked, later]);
+        let budget = tokio::time::sleep(Duration::from_secs(1));
+        tokio::pin!(budget);
+        let joining = join_before_budget(&joins, budget.as_mut());
+        tokio::pin!(joining);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut joining)
+                .await
+                .is_err(),
+            "first failure must not detach a later worker"
         );
+        release.notify_one();
+        let JoinBeforeBudget::Completed(Err(error)) = joining.await else {
+            panic!("panic must propagate after every worker joins");
+        };
+        assert!(later_finished.load(Ordering::Acquire));
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+        let failure = classify_shutdown(false, Some(Err(error)), Some(Ok(())))
+            .expect_err("worker failure must fail shutdown");
+        let managed = failure.into_shutdown_error();
+        assert_eq!(managed.kind(), diport::ShutdownErrorKind::TaskPanicked);
+    }
+
+    #[tokio::test]
+    async fn abort_workers_stops_every_retained_task_after_deadline() {
+        struct DropMarker(Arc<AtomicBool>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker = tokio::spawn({
+            let stopped = Arc::clone(&stopped);
+            async move {
+                let _marker = DropMarker(stopped);
+                std::future::pending::<()>().await;
+            }
+        });
+        tokio::task::yield_now().await;
+        let joins = Mutex::new(vec![worker]);
+        abort_workers(&joins).await;
+        assert!(stopped.load(Ordering::Acquire));
+        assert!(joins.lock().await.is_empty());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    async fn join_deadline_preserves_prior_panic_before_aborting_later_worker() {
+        let panicked = tokio::spawn(async { panic!("prior-worker-panic") });
+        while !panicked.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let later = tokio::spawn(std::future::pending::<()>());
+        let joins = Mutex::new(vec![panicked, later]);
+        let budget = tokio::time::sleep(Duration::from_millis(10));
+        tokio::pin!(budget);
+
+        let JoinBeforeBudget::Deadline(Some(error)) =
+            join_before_budget(&joins, budget.as_mut()).await
+        else {
+            panic!("deadline must retain the prior panic");
+        };
+        assert_eq!(error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+        abort_workers(&joins).await;
+        assert!(joins.lock().await.is_empty());
+    }
+
+    #[test]
+    fn transport_shutdown_latch_preserves_every_closed_kind() {
+        for kind in [
+            diport::ShutdownErrorKind::Operation,
+            diport::ShutdownErrorKind::TaskPanicked,
+            diport::ShutdownErrorKind::TaskCancelled,
+            diport::ShutdownErrorKind::TaskUnknown,
+            diport::ShutdownErrorKind::DeadlineExceeded,
+        ] {
+            let latch = PilotShutdownFailureLatch::new();
+            latch.record(kind);
+            assert_eq!(latch.load(), Some(kind));
+            assert_eq!(latched_transport_shutdown_error(kind).kind(), kind);
+        }
     }
 
     #[test]

@@ -50,7 +50,6 @@ use distributed::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
-use tokio::task::JoinHandle;
 use tokio_rustls::server::TlsStream;
 use tokio_util::sync::CancellationToken;
 use tower::Service;
@@ -71,7 +70,7 @@ pub struct HttpServer {
     /// 驱动 serve task 退出的 token：组合根经 funnel 注入（或 [`HttpServer::serve`] 的内部 detached token）。
     /// `shutdown()` `cancel()` 它触发 graceful 退出（幂等：阶段 1 广播已 cancel 则 no-op）。
     token: CancellationToken,
-    handle: Mutex<Option<JoinHandle<std::io::Result<()>>>>,
+    handle: Mutex<Option<diport::OwnedTask<std::io::Result<()>>>>,
 }
 
 /// HTTP server 启动失败（构造期 fail-fast，不静默 noop）。
@@ -660,7 +659,96 @@ impl AsyncWrite for VerifiedTlsStream {
     }
 }
 
+/// Closed, payload-free observation carrier for every mTLS listener rejection.
+///
+/// Raw transport/TLS errors and peer addresses deliberately cannot be stored here. Converting at
+/// the ownership boundary makes the only rejection logging path safe by construction, including
+/// third-party error variants whose `Display` contains certificate text.
+///
+/// INVARIANT: HTTPD-MTLS-REJECTION-CLOSED-01 { level = "Hard", exec = "native-compile", source = "code", native = "private payload-free enum plus sole record method" }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MtlsRejectionObservation {
+    TcpAccept(std::io::ErrorKind),
+    TlsRustls,
+    CertificateParse,
+    MissingSpiffeId,
+    TlsIo(std::io::ErrorKind),
+    PeerIdMissing,
+    PeerIdInvalid,
+    PeerNotAllowed,
+    Unknown,
+}
+
+impl MtlsRejectionObservation {
+    fn from_tcp_accept_error(error: &std::io::Error) -> Self {
+        Self::TcpAccept(error.kind())
+    }
+
+    fn from_handshake_error(error: &spiffe_rustls_tokio::Error) -> Self {
+        match error {
+            spiffe_rustls_tokio::Error::Rustls(_) => Self::TlsRustls,
+            spiffe_rustls_tokio::Error::CertParse(_) => Self::CertificateParse,
+            spiffe_rustls_tokio::Error::MissingSpiffeId => Self::MissingSpiffeId,
+            spiffe_rustls_tokio::Error::Io(error) => Self::TlsIo(error.kind()),
+            _ => Self::Unknown,
+        }
+    }
+
+    fn stage(self) -> &'static str {
+        match self {
+            Self::TcpAccept(_) => "tcp_accept",
+            Self::TlsRustls
+            | Self::CertificateParse
+            | Self::MissingSpiffeId
+            | Self::TlsIo(_)
+            | Self::Unknown => "tls_handshake",
+            Self::PeerIdMissing | Self::PeerIdInvalid | Self::PeerNotAllowed => "peer_identity",
+        }
+    }
+
+    fn reason(self) -> &'static str {
+        match self {
+            Self::TcpAccept(_) => "tcp_accept",
+            Self::TlsRustls => "tls_rustls",
+            Self::CertificateParse => "certificate_parse",
+            Self::MissingSpiffeId => "missing_spiffe_id",
+            Self::TlsIo(_) => "tls_io",
+            Self::PeerIdMissing => "peer_id_missing",
+            Self::PeerIdInvalid => "peer_id_invalid",
+            Self::PeerNotAllowed => "peer_not_allowed",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    fn record(self, listener: &'static str) {
+        match self {
+            Self::TcpAccept(io_kind) => self.record_tcp_accept(listener, io_kind),
+            Self::TlsIo(io_kind) => self.record_connection_with_io(listener, io_kind),
+            _ => self.record_connection(listener),
+        }
+    }
+
+    fn record_tcp_accept(self, listener: &'static str, io_kind: std::io::ErrorKind) {
+        let stage = self.stage();
+        let reason = self.reason();
+        tracing::error!(listener, stage, reason, io_kind = ?io_kind, "http mtls listener rejected transport");
+    }
+
+    fn record_connection_with_io(self, listener: &'static str, io_kind: std::io::ErrorKind) {
+        let stage = self.stage();
+        let reason = self.reason();
+        tracing::warn!(listener, stage, reason, io_kind = ?io_kind, "http mtls connection rejected");
+    }
+
+    fn record_connection(self, listener: &'static str) {
+        let stage = self.stage();
+        let reason = self.reason();
+        tracing::warn!(listener, stage, reason, "http mtls connection rejected");
+    }
+}
+
 struct MtlsListener {
+    name: &'static str,
     listener: TcpListener,
     local_addr: SocketAddr,
     config: MtlsServerConfig,
@@ -678,7 +766,7 @@ impl axum::serve::Listener for MtlsListener {
             let (stream, addr) = match self.listener.accept().await {
                 Ok(parts) => parts,
                 Err(e) => {
-                    tracing::error!(err = %e, "http mtls tcp accept failed");
+                    MtlsRejectionObservation::from_tcp_accept_error(&e).record(self.name);
                     tokio::time::sleep(Duration::from_secs(1)).await;
                     continue;
                 }
@@ -686,25 +774,25 @@ impl axum::serve::Listener for MtlsListener {
             let (tls, identity) = match self.config.acceptor.accept(stream).await {
                 Ok(parts) => parts,
                 Err(e) => {
-                    tracing::warn!(err = %e, addr = %addr, "http mtls handshake failed");
+                    MtlsRejectionObservation::from_handshake_error(&e).record(self.name);
                     continue;
                 }
             };
             let Some(peer_id) = identity.spiffe_id() else {
-                tracing::warn!(addr = %addr, "http mtls handshake produced no peer spiffe id");
+                MtlsRejectionObservation::PeerIdMissing.record(self.name);
                 continue;
             };
             let peer_id = match authn::SpiffeId::parse(&peer_id.to_string()) {
                 Ok(peer_id) => peer_id,
-                Err(e) => {
-                    tracing::warn!(err = ?e, addr = %addr, "http mtls peer spiffe id rejected");
+                Err(_) => {
+                    MtlsRejectionObservation::PeerIdInvalid.record(self.name);
                     continue;
                 }
             };
             let peer = match authn::verify_mtls_peer(peer_id, &self.config.allow_set) {
                 Ok(peer) => peer,
-                Err(e) => {
-                    tracing::warn!(err = ?e, addr = %addr, "http mtls peer not allowed");
+                Err(_) => {
+                    MtlsRejectionObservation::PeerNotAllowed.record(self.name);
                     continue;
                 }
             };
@@ -981,7 +1069,7 @@ impl BoundHttpServer {
             name: self.name,
             local_addr: self.local_addr,
             token,
-            handle: Mutex::new(Some(handle)),
+            handle: Mutex::new(Some(diport::OwnedTask::new(handle))),
         }
     }
 
@@ -995,6 +1083,7 @@ impl BoundHttpServer {
     ) -> HttpServer {
         let serve_token = token.clone();
         let listener = MtlsListener {
+            name: self.name,
             listener: self.listener,
             local_addr: self.local_addr,
             config: mtls,
@@ -1014,7 +1103,7 @@ impl BoundHttpServer {
             name: self.name,
             local_addr: self.local_addr,
             token,
-            handle: Mutex::new(Some(handle)),
+            handle: Mutex::new(Some(diport::OwnedTask::new(handle))),
         }
     }
 }
@@ -1083,27 +1172,17 @@ impl ManagedResource for HttpServer {
         self.name
     }
 
-    // reason: 3-arm JoinHandle 结果 match 各臂一条 tracing 宏；宏展开在 cognitive_complexity 计数贡献
-    // 额外节点（同 grpc adapter / bootstrap shutdown），实际控制流简单——item-level carve-out（error-handling.md §Carve-out）。
-    #[allow(clippy::cognitive_complexity)]
     async fn shutdown(&self) -> Result<(), ShutdownError> {
         // 触发 graceful 退出：cancel token（幂等——若 ShutdownStack 阶段 1 已 cancel 则 no-op）。
         self.token.cancel();
-        // await serve task 收敛，映射 JoinHandle / io 错误到 ShutdownError。
+        // await serve task 收敛；失败只经 typed shutdown funnel 上抛，由 ShutdownStack 统一观察。
         if let Some(handle) = self.handle.lock().await.take() {
-            match handle.await {
-                Ok(Ok(())) => {
-                    tracing::info!(name = self.name, "http server shutdown complete");
-                }
-                Ok(Err(e)) => {
-                    tracing::warn!(name = self.name, err = %e, "http server io error on shutdown");
-                    return Err(ShutdownError::new(e));
-                }
-                Err(e) => {
-                    tracing::error!(name = self.name, err = %e, "http server task join error on shutdown");
-                    return Err(ShutdownError::new(e));
-                }
-            }
+            let serve_result = handle
+                .join()
+                .await
+                .map_err(ShutdownError::from_join_error)?;
+            serve_result.map_err(ShutdownError::new)?;
+            tracing::info!(name = self.name, "http server shutdown complete");
         }
         Ok(())
     }
@@ -1112,9 +1191,10 @@ impl ManagedResource for HttpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::num::NonZeroU64;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
     use axum::Router;
     use axum::body::Bytes;
@@ -1131,6 +1211,199 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio_rustls::TlsConnector;
     use tracing::Instrument as _;
+
+    #[derive(Default)]
+    struct EventCapture {
+        next_id: AtomicU64,
+        events: std::sync::Mutex<Vec<HashMap<String, String>>>,
+    }
+
+    struct EventFieldCapture<'a>(&'a mut HashMap<String, String>);
+
+    impl tracing::field::Visit for EventFieldCapture<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+    }
+
+    impl tracing::Subscriber for EventCapture {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _attrs: &tracing::span::Attributes<'_>) -> tracing::Id {
+            tracing::Id::from_u64(self.next_id.fetch_add(1, Ordering::Relaxed) + 1)
+        }
+
+        fn record(&self, _span: &tracing::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::Id, _follows: &tracing::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut fields = HashMap::new();
+            event.record(&mut EventFieldCapture(&mut fields));
+            self.events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(fields);
+        }
+
+        fn enter(&self, _span: &tracing::Id) {}
+
+        fn exit(&self, _span: &tracing::Id) {}
+    }
+
+    fn captured_event_surface(capture: &EventCapture) -> String {
+        format!(
+            "{:?}",
+            capture
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+        )
+    }
+
+    #[allow(clippy::expect_used)]
+    fn assert_shutdown_error_redacts(error: &ShutdownError, marker: &str) {
+        assert!(!error.to_string().contains(marker));
+        assert!(!format!("{error:?}").contains(marker));
+        let source = std::error::Error::source(error).expect("redacted source remains visible");
+        assert!(!source.to_string().contains(marker));
+        assert!(
+            source.source().is_none(),
+            "source chain stops at redaction boundary"
+        );
+    }
+
+    #[test]
+    fn mtls_rejection_observation_discards_raw_payloads_and_address() {
+        const LISTENER: &str = "http-primary-mtls";
+        const CERT_MARKER: &str = "certificate-subject-plain-secret";
+        const IO_MARKER: &str = "postgres://observer:plain-secret@db.internal:5432/db";
+        const RUSTLS_MARKER: &str = "rustls-alert-plain-secret";
+        const ADDRESS_MARKER: &str = "127.0.0.1:4545";
+        let raw_handshake = spiffe_rustls_tokio::Error::CertParse(CERT_MARKER.to_owned());
+        assert!(
+            raw_handshake.to_string().contains(CERT_MARKER),
+            "anti-vacuity"
+        );
+        let raw_io = std::io::Error::other(IO_MARKER);
+        assert!(raw_io.to_string().contains(IO_MARKER), "anti-vacuity");
+        let raw_tls_io = spiffe_rustls_tokio::Error::Io(std::io::Error::other(IO_MARKER));
+        let raw_rustls =
+            spiffe_rustls_tokio::Error::Rustls(rustls::Error::General(RUSTLS_MARKER.to_owned()));
+        let remote_address: SocketAddr = ADDRESS_MARKER.parse().expect("marker address");
+        assert_eq!(remote_address.to_string(), ADDRESS_MARKER, "anti-vacuity");
+
+        let capture = Arc::new(EventCapture::default());
+        let dispatch = tracing::Dispatch::new(Arc::clone(&capture));
+        tracing::dispatcher::with_default(&dispatch, || {
+            MtlsRejectionObservation::from_handshake_error(&raw_handshake).record(LISTENER);
+            MtlsRejectionObservation::from_tcp_accept_error(&raw_io).record(LISTENER);
+            MtlsRejectionObservation::from_handshake_error(&raw_tls_io).record(LISTENER);
+            MtlsRejectionObservation::from_handshake_error(&raw_rustls).record(LISTENER);
+            MtlsRejectionObservation::MissingSpiffeId.record(LISTENER);
+            MtlsRejectionObservation::PeerIdMissing.record(LISTENER);
+            MtlsRejectionObservation::PeerIdInvalid.record(LISTENER);
+            MtlsRejectionObservation::PeerNotAllowed.record(LISTENER);
+            MtlsRejectionObservation::Unknown.record(LISTENER);
+        });
+
+        let surface = captured_event_surface(&capture);
+        for reason in [
+            "certificate_parse",
+            "tcp_accept",
+            "tls_io",
+            "tls_rustls",
+            "missing_spiffe_id",
+            "peer_id_missing",
+            "peer_id_invalid",
+            "peer_not_allowed",
+            "unknown",
+        ] {
+            assert!(surface.contains(reason), "missing {reason}: {surface}");
+        }
+        for marker in [CERT_MARKER, IO_MARKER, RUSTLS_MARKER, ADDRESS_MARKER] {
+            assert!(!surface.contains(marker), "raw marker leaked: {surface}");
+        }
+        let events = capture
+            .events
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert_eq!(events.len(), 9);
+        for event in events.iter() {
+            assert!(event.contains_key("message"));
+            assert!(event.contains_key("stage"));
+            assert_eq!(event.get("listener").map(String::as_str), Some(LISTENER));
+            assert!(event.contains_key("reason"));
+            assert!(
+                event.keys().all(|key| matches!(
+                    key.as_str(),
+                    "message" | "listener" | "stage" | "reason" | "io_kind"
+                )),
+                "unexpected observation field: {event:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used, clippy::panic)]
+    async fn http_server_shutdown_propagates_redacted_io_and_join_failures() {
+        const IO_MARKER: &str = "redis://shutdown:io-secret@cache.internal/0";
+        const PANIC_MARKER: &str = "http-worker-plain-panic-secret";
+
+        let io_server = HttpServer {
+            name: "http-io-failure",
+            local_addr: "127.0.0.1:0".parse().expect("test address"),
+            token: CancellationToken::new(),
+            handle: Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
+                Err(std::io::Error::other(IO_MARKER))
+            })))),
+        };
+        let io_error = ManagedResource::shutdown(&io_server)
+            .await
+            .expect_err("serve io failure must propagate");
+        assert_shutdown_error_redacts(&io_error, IO_MARKER);
+        assert_eq!(io_error.kind(), diport::ShutdownErrorKind::Operation);
+        assert!(
+            ManagedResource::shutdown(&io_server).await.is_ok(),
+            "shutdown is idempotent"
+        );
+
+        let panic_server = HttpServer {
+            name: "http-join-failure",
+            local_addr: "127.0.0.1:0".parse().expect("test address"),
+            token: CancellationToken::new(),
+            handle: Mutex::new(Some(diport::OwnedTask::new(tokio::spawn(async {
+                panic!("{PANIC_MARKER}")
+            })))),
+        };
+        let join_error = ManagedResource::shutdown(&panic_server)
+            .await
+            .expect_err("serve task panic must propagate");
+        assert_shutdown_error_redacts(&join_error, PANIC_MARKER);
+        assert_eq!(join_error.kind(), diport::ShutdownErrorKind::TaskPanicked);
+
+        let cancelled_handle = tokio::spawn(std::future::pending::<std::io::Result<()>>());
+        cancelled_handle.abort();
+        let cancelled_server = HttpServer {
+            name: "http-cancelled",
+            local_addr: "127.0.0.1:0".parse().expect("test address"),
+            token: CancellationToken::new(),
+            handle: Mutex::new(Some(diport::OwnedTask::new(cancelled_handle))),
+        };
+        let cancelled_error = ManagedResource::shutdown(&cancelled_server)
+            .await
+            .expect_err("serve task cancellation must propagate");
+        assert_eq!(
+            cancelled_error.kind(),
+            diport::ShutdownErrorKind::TaskCancelled
+        );
+    }
 
     /// 极简 router → budget-sealed server service，挂一个 GET /healthz 恒 200。
     fn make_svc() -> httpserve::ServerService {
