@@ -70,7 +70,7 @@ crates/identity/
 └── src/
     ├── lib.rs                    # facade re-export（PR1 建子模块声明；后续 PR additive += 极少）
     ├── domain/
-    │   ├── mod.rs                # 共享 newtype（RoleId/PermissionId/PolicyId/ResourcePattern/AttributeKey/AttributeValue）+ IdentityError + re-export 枢纽 [PR1]
+    │   ├── mod.rs                # 共享 newtype（RoleId/PermissionId/PolicyId/ResourcePattern/AttributeKey/PolicyValue）+ IdentityError + re-export 枢纽 [PR1]
     │   ├── rbac.rs               # Permission/Role/RoleBinding + authorize_rbac [PR1]
     │   ├── abac.rs               # AbacAttribute/PolicyRule(+operator 枚举)/Policy + evaluate_abac(deny-overrides) [PR2]
     │   ├── account.rs            # Credential + 独立的临时 AccountLockout + 密码 CAS 域类型 [PR3/#1833]

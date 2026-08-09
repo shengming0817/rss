@@ -3229,6 +3229,7 @@ dependencies = [
  "mockall",
  "observ",
  "primitives",
+ "regex",
  "rstest",
  "runctx",
  "secure",

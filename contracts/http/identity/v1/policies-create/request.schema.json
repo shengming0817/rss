@@ -2,120 +2,97 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "IdentityPoliciesCreateRequest",
   "type": "object",
-  "required": ["policyId", "contractId", "permission", "effectiveFrom", "rules"],
+  "required": [
+    "policyId",
+    "contractId",
+    "permission",
+    "effectiveFrom",
+    "rules"
+  ],
   "properties": {
-    "policyId": { "type": "string" },
-    "contractId": { "type": "string" },
-    "permission": { "type": "string" },
-    "effectiveFrom": { "type": "integer", "format": "int64" },
-    "effectiveUntil": { "type": "integer", "format": "int64" },
+    "policyId": {
+      "type": "string"
+    },
+    "contractId": {
+      "type": "string"
+    },
+    "permission": {
+      "type": "string"
+    },
+    "effectiveFrom": {
+      "type": "integer",
+      "format": "int64"
+    },
+    "effectiveUntil": {
+      "type": "integer",
+      "format": "int64"
+    },
     "rules": {
       "type": "array",
       "minItems": 1,
       "items": {
         "title": "IdentityPolicyCreateRule",
         "type": "object",
-        "required": ["condition", "effect"],
+        "required": [
+          "condition",
+          "effect"
+        ],
         "properties": {
           "condition": {
             "title": "IdentityPolicyCreateCondition",
             "type": "object",
-            "required": ["attribute", "operator"],
+            "required": [
+              "attribute",
+              "operator"
+            ],
             "properties": {
-              "attribute": { "type": "string" },
+              "attribute": {
+                "type": "string"
+              },
               "operator": {
                 "title": "IdentityPolicyCreateOperator",
                 "oneOf": [
                   {
-                    "type": "object",
-                    "required": ["kind", "value"],
-                    "properties": {
-                      "kind": { "type": "string", "enum": ["eq"] },
-                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947)." },
-                      "pattern": false,
-                      "attribute": false
-                    },
-                    "additionalProperties": false
+                    "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
                   },
                   {
-                    "type": "object",
-                    "required": ["kind", "value"],
-                    "properties": {
-                      "kind": { "type": "string", "enum": ["ne"] },
-                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947)." },
-                      "pattern": false,
-                      "attribute": false
-                    },
-                    "additionalProperties": false
+                    "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
                   },
                   {
-                    "type": "object",
-                    "required": ["kind", "pattern"],
-                    "properties": {
-                      "kind": { "type": "string", "enum": ["like"] },
-                      "value": false,
-                      "pattern": { "type": "string" },
-                      "attribute": false
-                    },
-                    "additionalProperties": false
+                    "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
                   },
                   {
-                    "type": "object",
-                    "required": ["kind", "value"],
-                    "properties": {
-                      "kind": { "type": "string", "enum": ["gt"] },
-                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947)." },
-                      "pattern": false,
-                      "attribute": false
-                    },
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "required": ["kind", "value"],
-                    "properties": {
-                      "kind": { "type": "string", "enum": ["lt"] },
-                      "value": { "type": "string", "maxLength": 256, "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947)." },
-                      "pattern": false,
-                      "attribute": false
-                    },
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "required": ["kind", "attribute"],
-                    "properties": {
-                      "kind": { "type": "string", "enum": ["eqAttr"] },
-                      "value": false,
-                      "pattern": false,
-                      "attribute": {
-                        "type": "string",
-                        "enum": [
-                          "principal.kind",
-                          "principal.id",
-                          "tenant.id",
-                          "contract.id",
-                          "permission",
-                          "resource.id"
-                        ]
-                      }
-                    },
-                    "additionalProperties": false
+                    "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
                   }
                 ]
               }
             },
             "additionalProperties": false
           },
-          "effect": { "type": "string", "enum": ["allow", "deny"] },
+          "effect": {
+            "type": "string",
+            "enum": [
+              "allow",
+              "deny"
+            ]
+          },
           "obligations": {
             "title": "IdentityPolicyCreateObligations",
             "type": "object",
             "properties": {
-              "rowScope": { "type": "string", "enum": ["selfOnly", "device", "tenant"] },
+              "rowScope": {
+                "type": "string",
+                "enum": [
+                  "selfOnly",
+                  "device",
+                  "tenant"
+                ]
+              },
               "fieldMask": {
                 "type": "array",
-                "items": { "type": "string" },
+                "items": {
+                  "type": "string"
+                },
                 "default": []
               }
             },
@@ -126,5 +103,517 @@
       }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "definitions": {
+    "IdentityPolicyCreateOperatorLiteralOperand": {
+      "title": "IdentityPolicyCreateOperatorLiteralOperand",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "literal"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "maxLength": 256
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "literal"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "boolean"
+              ]
+            },
+            "value": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "literal"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "integer"
+              ]
+            },
+            "value": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "literal"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "decimal"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IdentityPolicyCreateOperatorAttributeOperand": {
+      "title": "IdentityPolicyCreateOperatorAttributeOperand",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "attribute"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "attribute"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
+            },
+            "attribute": {
+              "type": "string",
+              "enum": [
+                "principal.kind",
+                "principal.id",
+                "tenant.id",
+                "contract.id",
+                "permission",
+                "resource.id"
+              ]
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IdentityPolicyCreateOperatorNumericLiteralOperand": {
+      "title": "IdentityPolicyCreateOperatorNumericLiteralOperand",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "literal"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "integer"
+              ]
+            },
+            "value": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "value"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "literal"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "decimal"
+              ]
+            },
+            "value": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IdentityPolicyCreateOperatorSetOperand": {
+      "title": "IdentityPolicyCreateOperatorSetOperand",
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "values"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "set"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "string"
+              ]
+            },
+            "values": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "maxLength": 256
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "values"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "set"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "boolean"
+              ]
+            },
+            "values": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "boolean"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "values"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "set"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "integer"
+              ]
+            },
+            "values": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "integer",
+                "format": "int64"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "kind",
+            "valueType",
+            "values"
+          ],
+          "properties": {
+            "kind": {
+              "type": "string",
+              "enum": [
+                "set"
+              ]
+            },
+            "valueType": {
+              "type": "string",
+              "enum": [
+                "decimal"
+              ]
+            },
+            "values": {
+              "type": "array",
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "IdentityPolicyCreateOperatorPatternOperand": {
+      "title": "IdentityPolicyCreateOperatorPatternOperand",
+      "type": "object",
+      "required": [
+        "kind",
+        "valueType",
+        "value"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "pattern"
+          ]
+        },
+        "valueType": {
+          "type": "string",
+          "enum": [
+            "string"
+          ]
+        },
+        "value": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "additionalProperties": false
+    },
+    "IdentityPolicyCreateOperatorEqualityFamily": {
+      "title": "IdentityPolicyCreateOperatorEqualityFamily",
+      "type": "object",
+      "required": [
+        "family",
+        "predicate",
+        "operand"
+      ],
+      "properties": {
+        "family": {
+          "type": "string",
+          "enum": [
+            "equality"
+          ]
+        },
+        "predicate": {
+          "title": "IdentityPolicyCreateOperatorEqualityFamilyPredicate",
+          "type": "string",
+          "enum": [
+            "eq",
+            "ne"
+          ]
+        },
+        "operand": {
+          "title": "IdentityPolicyCreateOperatorEqualityFamilyOperand",
+          "oneOf": [
+            {
+              "$ref": "#/definitions/IdentityPolicyCreateOperatorLiteralOperand"
+            },
+            {
+              "$ref": "#/definitions/IdentityPolicyCreateOperatorAttributeOperand"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "IdentityPolicyCreateOperatorOrderingFamily": {
+      "title": "IdentityPolicyCreateOperatorOrderingFamily",
+      "type": "object",
+      "required": [
+        "family",
+        "predicate",
+        "operand"
+      ],
+      "properties": {
+        "family": {
+          "type": "string",
+          "enum": [
+            "ordering"
+          ]
+        },
+        "predicate": {
+          "title": "IdentityPolicyCreateOperatorOrderingFamilyPredicate",
+          "type": "string",
+          "enum": [
+            "gt",
+            "ge",
+            "lt",
+            "le"
+          ]
+        },
+        "operand": {
+          "$ref": "#/definitions/IdentityPolicyCreateOperatorNumericLiteralOperand"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IdentityPolicyCreateOperatorMembershipFamily": {
+      "title": "IdentityPolicyCreateOperatorMembershipFamily",
+      "type": "object",
+      "required": [
+        "family",
+        "predicate",
+        "operand"
+      ],
+      "properties": {
+        "family": {
+          "type": "string",
+          "enum": [
+            "membership"
+          ]
+        },
+        "predicate": {
+          "title": "IdentityPolicyCreateOperatorMembershipFamilyPredicate",
+          "type": "string",
+          "enum": [
+            "in",
+            "notIn"
+          ]
+        },
+        "operand": {
+          "$ref": "#/definitions/IdentityPolicyCreateOperatorSetOperand"
+        }
+      },
+      "additionalProperties": false
+    },
+    "IdentityPolicyCreateOperatorStringFamily": {
+      "title": "IdentityPolicyCreateOperatorStringFamily",
+      "type": "object",
+      "required": [
+        "family",
+        "predicate",
+        "operand"
+      ],
+      "properties": {
+        "family": {
+          "type": "string",
+          "enum": [
+            "string"
+          ]
+        },
+        "predicate": {
+          "title": "IdentityPolicyCreateOperatorStringFamilyPredicate",
+          "type": "string",
+          "enum": [
+            "startsWith",
+            "endsWith",
+            "contains",
+            "glob",
+            "regex"
+          ]
+        },
+        "operand": {
+          "$ref": "#/definitions/IdentityPolicyCreateOperatorPatternOperand"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

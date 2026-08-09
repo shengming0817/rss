@@ -41,11 +41,14 @@ use generated::http::identity_v1::{
 };
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use httpserve::ProducerMarker;
+use httpserve::{RouteAuthorizationDecision, RouteAuthorizationRequest, RouteResource};
 use identity::ports::{
-    AttributeKey, AttributeValue, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
-    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, Operator,
-    POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect, PolicyLifecycle,
-    PolicyObligations, PolicyRouteScope, PolicyRule, TenantId, TenantRepoScope,
+    AttributeKey, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
+    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, MembershipOperator,
+    MembershipPredicate, Operator, POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition,
+    PolicyEffect, PolicyLifecycle, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyValue,
+    PolicyValueSet, ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
+    ResourceAttributeWriteRepo, TenantId, TenantRepoScope,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
@@ -619,6 +622,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let resource_attribute_reads = Arc::from(DynResourceAttributeReadRepo::new_box(
         id.resource_attribute_repo(),
     ));
+    let resource_attribute_writer = id.resource_attribute_repo();
     let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
         id.policy_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
     ));
@@ -741,6 +745,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let mut registry =
         bootstrap::compose(&[&identity_domain, &settings_domain, &audit_domain_inst])?;
     let subscribers = bridge_generated_subscriptions(registry.drain_subscribers())?;
+    let route_authorizer = registry.take_primary_authorizer()?;
     let generated_group = |contract_id: &str, consumer: &str| {
         generated::event::EVENTS
             .iter()
@@ -966,6 +971,77 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 8b：identity.policy-updated active event 走生产 relay + audit ConsumerTx ─────────────
 
+    // Typed PostgreSQL resource attribute → durable policy hydrate → production authorizer join.
+    let typed_resource_id = ResourceAttributeResourceId::parse(CANON_USER)?;
+    let typed_scope = PolicyRouteScope::parse(
+        "identity.account-status-get",
+        "identity:account-security:read",
+    )?;
+    resource_attribute_writer
+        .upsert(
+            TenantRepoScope::for_test(tenant),
+            ResourceAttribute::build(
+                tenant,
+                typed_scope.clone(),
+                typed_resource_id.clone(),
+                ResourceAttributeKey::parse("resource.clearance")?,
+                PolicyValue::integer(7),
+                SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS),
+                None,
+            )?,
+            None,
+        )
+        .await?;
+    let typed_policy = Policy::build(
+        "policy-typed-resource-runtime-e2e",
+        tenant,
+        typed_scope,
+        SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS),
+        None,
+        vec![PolicyRule::with_obligations(
+            PolicyCondition::new(
+                AttributeKey::parse("resource.clearance")?,
+                Operator::Membership(MembershipOperator::new(
+                    MembershipPredicate::In,
+                    PolicyValueSet::new(vec![PolicyValue::integer(7)])?,
+                )),
+            ),
+            PolicyEffect::Allow,
+            PolicyObligations::empty(),
+        )],
+    )?;
+    let typed_event_id = "policy-typed-resource-runtime-e2e-created-v1";
+    policy_lifecycle
+        .create_and_emit(
+            ProducerMarker::for_test(POLICIES_CREATE_PRODUCER).into_receipt(),
+            TenantRepoScope::for_test(tenant),
+            typed_policy,
+            policy_updated_event(
+                tenant,
+                "policy-typed-resource-runtime-e2e",
+                "identity.account-status-get",
+                "identity:account-security:read",
+                typed_event_id,
+            )
+            .await?,
+        )
+        .await?;
+    assert_eq!(
+        route_authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "identity.account-status-get",
+                permission: vocab::RoutePermissionId::IdentityAccountSecurityRead,
+                tenant_id: Some(tenant),
+                principal_kind: vocab::PrincipalKind::User,
+                principal_id: CANON_USER.to_string(),
+                resource: Some(RouteResource::new(CANON_USER).context("canonical resource")?),
+                federated_permissions: None,
+            })
+            .await,
+        RouteAuthorizationDecision::Allow,
+        "typed PostgreSQL resource attributes must drive the production route authorizer"
+    );
+
     let policy_id = "policy-runtime-e2e";
     let policy_contract_id = "identity.policies-get";
     let policy_permission = "identity:policy:read";
@@ -978,7 +1054,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         vec![PolicyRule::with_obligations(
             PolicyCondition::new(
                 AttributeKey::parse(POLICY_ATTR_PRINCIPAL_KIND)?,
-                Operator::Eq(AttributeValue::parse("admin")?),
+                Operator::equal(PolicyValue::parse("admin")?),
             ),
             PolicyEffect::Allow,
             PolicyObligations::empty(),

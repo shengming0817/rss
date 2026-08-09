@@ -1572,6 +1572,7 @@ pub mod password_change {
 
 /// 端点 `policies-create` 派生契约（源 `policies-create/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
 pub mod policies_create {
+    #![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.
     /// Error types.
     pub mod error {
         /// Error from a `TryFrom` or `FromStr` implementation.
@@ -1656,146 +1657,16 @@ pub mod policies_create {
     ///                "title": "IdentityPolicyCreateOperator",
     ///                "oneOf": [
     ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "value"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "eq"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256
-    ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
     ///                  },
     ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "value"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "ne"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256
-    ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
     ///                  },
     ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "pattern"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "like"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": {
-    ///                        "type": "string"
-    ///                      },
-    ///                      "value": false
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
     ///                  },
     ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "value"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "gt"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256
-    ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
-    ///                  },
-    ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "value"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "lt"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256
-    ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
-    ///                  },
-    ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "attribute",
-    ///                      "kind"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "principal.kind",
-    ///                          "principal.id",
-    ///                          "tenant.id",
-    ///                          "contract.id",
-    ///                          "permission",
-    ///                          "resource.id"
-    ///                        ]
-    ///                      },
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "eqAttr"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": false
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
     ///                  }
     ///                ]
     ///              }
@@ -1878,7 +1749,7 @@ pub mod policies_create {
     ///  ],
     ///  "properties": {
     ///    "data": {
-    ///      "title": "IdentityPolicyCreateView",
+    ///      "title": "IdentityPolicyView",
     ///      "type": "object",
     ///      "required": [
     ///        "contractId",
@@ -1909,7 +1780,7 @@ pub mod policies_create {
     ///        "rules": {
     ///          "type": "array",
     ///          "items": {
-    ///            "title": "IdentityPolicyCreateRuleView",
+    ///            "title": "IdentityPolicyRuleView",
     ///            "type": "object",
     ///            "required": [
     ///              "condition",
@@ -1917,7 +1788,7 @@ pub mod policies_create {
     ///            ],
     ///            "properties": {
     ///              "condition": {
-    ///                "title": "IdentityPolicyCreateConditionView",
+    ///                "title": "IdentityPolicyConditionView",
     ///                "type": "object",
     ///                "required": [
     ///                  "attribute",
@@ -1928,45 +1799,21 @@ pub mod policies_create {
     ///                    "type": "string"
     ///                  },
     ///                  "operator": {
-    ///                    "title": "IdentityPolicyCreateOperatorView",
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "principal.kind",
-    ///                          "principal.id",
-    ///                          "tenant.id",
-    ///                          "contract.id",
-    ///                          "permission",
-    ///                          "resource.id"
-    ///                        ]
+    ///                    "title": "IdentityPolicyOperatorView",
+    ///                    "oneOf": [
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///                      },
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "eq",
-    ///                          "ne",
-    ///                          "like",
-    ///                          "gt",
-    ///                          "lt",
-    ///                          "eqAttr"
-    ///                        ]
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///                      },
-    ///                      "pattern": {
-    ///                        "type": "string"
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///                      },
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256,
-    ///                        "x-defer-string-length-validation": true
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    ]
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -1979,7 +1826,7 @@ pub mod policies_create {
     ///                ]
     ///              },
     ///              "obligations": {
-    ///                "title": "IdentityPolicyCreateObligationsView",
+    ///                "title": "IdentityPolicyObligationsView",
     ///                "type": "object",
     ///                "properties": {
     ///                  "fieldMask": {
@@ -2021,7 +1868,53 @@ pub mod policies_create {
     #[serde(deny_unknown_fields)]
     pub struct IdentityPoliciesCreateResponse {
         #[redact(sensitivity = public)]
-        pub data: IdentityPolicyCreateView,
+        pub data: IdentityPolicyView,
+    }
+    ///`IdentityPolicyConditionView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyConditionView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "attribute",
+    ///    "operator"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "operator": {
+    ///      "title": "IdentityPolicyOperatorView",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
+    ///        }
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyConditionView {
+        #[redact(sensitivity = public)]
+        pub attribute: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub operator: IdentityPolicyOperatorView,
     }
     ///`IdentityPolicyCreateCondition`
     ///
@@ -2043,146 +1936,16 @@ pub mod policies_create {
     ///      "title": "IdentityPolicyCreateOperator",
     ///      "oneOf": [
     ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "value"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "eq"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
+    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
     ///        },
     ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "value"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "ne"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
+    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
     ///        },
     ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "pattern"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "like"
-    ///              ]
-    ///            },
-    ///            "pattern": {
-    ///              "type": "string"
-    ///            },
-    ///            "value": false
-    ///          },
-    ///          "additionalProperties": false
+    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
     ///        },
     ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "value"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "gt"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
-    ///        },
-    ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "value"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "lt"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
-    ///        },
-    ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "attribute",
-    ///            "kind"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "principal.kind",
-    ///                "principal.id",
-    ///                "tenant.id",
-    ///                "contract.id",
-    ///                "permission",
-    ///                "resource.id"
-    ///              ]
-    ///            },
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "eqAttr"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": false
-    ///          },
-    ///          "additionalProperties": false
+    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
     ///        }
     ///      ]
     ///    }
@@ -2198,245 +1961,6 @@ pub mod policies_create {
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
         pub operator: IdentityPolicyCreateOperator,
-    }
-    ///`IdentityPolicyCreateConditionOperatorAttribute`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "principal.kind",
-    ///    "principal.id",
-    ///    "tenant.id",
-    ///    "contract.id",
-    ///    "permission",
-    ///    "resource.id"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateConditionOperatorAttribute {
-        #[serde(rename = "principal.kind")]
-        PrincipalKind,
-        #[serde(rename = "principal.id")]
-        PrincipalId,
-        #[serde(rename = "tenant.id")]
-        TenantId,
-        #[serde(rename = "contract.id")]
-        ContractId,
-        #[serde(rename = "permission")]
-        Permission,
-        #[serde(rename = "resource.id")]
-        ResourceId,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateConditionOperatorAttribute {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::PrincipalKind => f.write_str("principal.kind"),
-                Self::PrincipalId => f.write_str("principal.id"),
-                Self::TenantId => f.write_str("tenant.id"),
-                Self::ContractId => f.write_str("contract.id"),
-                Self::Permission => f.write_str("permission"),
-                Self::ResourceId => f.write_str("resource.id"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateConditionOperatorAttribute {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "principal.kind" => Ok(Self::PrincipalKind),
-                "principal.id" => Ok(Self::PrincipalId),
-                "tenant.id" => Ok(Self::TenantId),
-                "contract.id" => Ok(Self::ContractId),
-                "permission" => Ok(Self::Permission),
-                "resource.id" => Ok(Self::ResourceId),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateConditionOperatorAttribute {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateConditionOperatorAttribute
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateConditionOperatorAttribute
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///  "type": "string",
-    ///  "maxLength": 256
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyCreateConditionOperatorValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyCreateConditionOperatorValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateConditionOperatorValue> for ::std::string::String {
-        fn from(value: IdentityPolicyCreateConditionOperatorValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateConditionOperatorValue {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateConditionOperatorValue {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateConditionOperatorValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateConditionOperatorValue {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateConditionOperatorValue {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyCreateConditionView`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateConditionView",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "attribute",
-    ///    "operator"
-    ///  ],
-    ///  "properties": {
-    ///    "attribute": {
-    ///      "type": "string"
-    ///    },
-    ///    "operator": {
-    ///      "title": "IdentityPolicyCreateOperatorView",
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "principal.kind",
-    ///            "principal.id",
-    ///            "tenant.id",
-    ///            "contract.id",
-    ///            "permission",
-    ///            "resource.id"
-    ///          ]
-    ///        },
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "eq",
-    ///            "ne",
-    ///            "like",
-    ///            "gt",
-    ///            "lt",
-    ///            "eqAttr"
-    ///          ]
-    ///        },
-    ///        "pattern": {
-    ///          "type": "string"
-    ///        },
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256,
-    ///          "x-defer-string-length-validation": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateConditionView {
-        #[redact(sensitivity = public)]
-        pub attribute: ::std::string::String,
-        #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyCreateOperatorView,
     }
     ///`IdentityPolicyCreateObligations`
     ///
@@ -2571,143 +2095,6 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyCreateObligationsView`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateObligationsView",
-    ///  "type": "object",
-    ///  "properties": {
-    ///    "fieldMask": {
-    ///      "default": [],
-    ///      "type": "array",
-    ///      "items": {
-    ///        "type": "string"
-    ///      }
-    ///    },
-    ///    "rowScope": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "selfOnly",
-    ///        "device",
-    ///        "tenant"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateObligationsView {
-        #[serde(
-            rename = "fieldMask",
-            default,
-            skip_serializing_if = "::std::vec::Vec::is_empty"
-        )]
-        #[redact(sensitivity = public)]
-        pub field_mask: ::std::vec::Vec<::std::string::String>,
-        #[serde(
-            rename = "rowScope",
-            default,
-            skip_serializing_if = "::std::option::Option::is_none"
-        )]
-        #[redact(sensitivity = public)]
-        pub row_scope: ::std::option::Option<IdentityPolicyCreateObligationsViewRowScope>,
-    }
-    #[allow(clippy::derivable_impls)]
-    impl ::std::default::Default for IdentityPolicyCreateObligationsView {
-        fn default() -> Self {
-            Self {
-                field_mask: Default::default(),
-                row_scope: Default::default(),
-            }
-        }
-    }
-    ///`IdentityPolicyCreateObligationsViewRowScope`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "selfOnly",
-    ///    "device",
-    ///    "tenant"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateObligationsViewRowScope {
-        #[serde(rename = "selfOnly")]
-        SelfOnly,
-        #[serde(rename = "device")]
-        Device,
-        #[serde(rename = "tenant")]
-        Tenant,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateObligationsViewRowScope {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::SelfOnly => f.write_str("selfOnly"),
-                Self::Device => f.write_str("device"),
-                Self::Tenant => f.write_str("tenant"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateObligationsViewRowScope {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "selfOnly" => Ok(Self::SelfOnly),
-                "device" => Ok(Self::Device),
-                "tenant" => Ok(Self::Tenant),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateObligationsViewRowScope {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateObligationsViewRowScope
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateObligationsViewRowScope
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
     ///`IdentityPolicyCreateOperator`
     ///
     /// <details><summary>JSON schema</summary>
@@ -2717,123 +2104,71 @@ pub mod policies_create {
     ///  "title": "IdentityPolicyCreateOperator",
     ///  "oneOf": [
     ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "eq"
-    ///          ]
-    ///        },
-    ///        "pattern": false,
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
     ///    },
     ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "ne"
-    ///          ]
-    ///        },
-    ///        "pattern": false,
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
     ///    },
     ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "pattern"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "like"
-    ///          ]
-    ///        },
-    ///        "pattern": {
-    ///          "type": "string"
-    ///        },
-    ///        "value": false
-    ///      },
-    ///      "additionalProperties": false
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
     ///    },
     ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "gt"
-    ///          ]
-    ///        },
-    ///        "pattern": false,
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "lt"
-    ///          ]
-    ///        },
-    ///        "pattern": false,
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyCreateOperator {
+        EqualityFamily(IdentityPolicyCreateOperatorEqualityFamily),
+        OrderingFamily(IdentityPolicyCreateOperatorOrderingFamily),
+        MembershipFamily(IdentityPolicyCreateOperatorMembershipFamily),
+        StringFamily(IdentityPolicyCreateOperatorStringFamily),
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorEqualityFamily>
+        for IdentityPolicyCreateOperator
+    {
+        fn from(value: IdentityPolicyCreateOperatorEqualityFamily) -> Self {
+            Self::EqualityFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorOrderingFamily>
+        for IdentityPolicyCreateOperator
+    {
+        fn from(value: IdentityPolicyCreateOperatorOrderingFamily) -> Self {
+            Self::OrderingFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorMembershipFamily>
+        for IdentityPolicyCreateOperator
+    {
+        fn from(value: IdentityPolicyCreateOperatorMembershipFamily) -> Self {
+            Self::MembershipFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorStringFamily>
+        for IdentityPolicyCreateOperator
+    {
+        fn from(value: IdentityPolicyCreateOperatorStringFamily) -> Self {
+            Self::StringFamily(value)
+        }
+    }
+    ///`IdentityPolicyCreateOperatorAttributeOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorAttributeOperand",
+    ///  "oneOf": [
     ///    {
     ///      "type": "object",
     ///      "required": [
     ///        "attribute",
-    ///        "kind"
+    ///        "kind",
+    ///        "valueType"
     ///      ],
     ///      "properties": {
     ///        "attribute": {
@@ -2850,11 +2185,15 @@ pub mod policies_create {
     ///        "kind": {
     ///          "type": "string",
     ///          "enum": [
-    ///            "eqAttr"
+    ///            "attribute"
     ///          ]
     ///        },
-    ///        "pattern": false,
-    ///        "value": false
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
     ///      },
     ///      "additionalProperties": false
     ///    }
@@ -2864,99 +2203,15 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "kind", deny_unknown_fields)]
-    pub enum IdentityPolicyCreateOperator {
-        #[serde(rename = "eq")]
-        Eq {
-            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-            value: IdentityPolicyCreateConditionOperatorValue,
-        },
-        #[serde(rename = "ne")]
-        Ne {
-            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-            value: IdentityPolicyCreateConditionOperatorValue,
-        },
-        #[serde(rename = "like")]
-        Like { pattern: ::std::string::String },
-        #[serde(rename = "gt")]
-        Gt {
-            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-            value: IdentityPolicyCreateConditionOperatorValue,
-        },
-        #[serde(rename = "lt")]
-        Lt {
-            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-            value: IdentityPolicyCreateConditionOperatorValue,
-        },
-        #[serde(rename = "eqAttr")]
-        EqAttr {
-            attribute: IdentityPolicyCreateConditionOperatorAttribute,
+    pub enum IdentityPolicyCreateOperatorAttributeOperand {
+        #[serde(rename = "attribute")]
+        Attribute {
+            attribute: IdentityPolicyCreateOperatorAttributeOperandAttribute,
+            #[serde(rename = "valueType")]
+            value_type: IdentityPolicyCreateOperatorAttributeOperandValueType,
         },
     }
-    ///`IdentityPolicyCreateOperatorView`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorView",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "kind"
-    ///  ],
-    ///  "properties": {
-    ///    "attribute": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "principal.kind",
-    ///        "principal.id",
-    ///        "tenant.id",
-    ///        "contract.id",
-    ///        "permission",
-    ///        "resource.id"
-    ///      ]
-    ///    },
-    ///    "kind": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "eq",
-    ///        "ne",
-    ///        "like",
-    ///        "gt",
-    ///        "lt",
-    ///        "eqAttr"
-    ///      ]
-    ///    },
-    ///    "pattern": {
-    ///      "type": "string"
-    ///    },
-    ///    "value": {
-    ///      "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///      "type": "string",
-    ///      "maxLength": 256,
-    ///      "x-defer-string-length-validation": true
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateOperatorView {
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub attribute: ::std::option::Option<IdentityPolicyCreateOperatorViewAttribute>,
-        #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyCreateOperatorViewKind,
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub pattern: ::std::option::Option<::std::string::String>,
-        ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub value: ::std::option::Option<IdentityPolicyCreateOperatorViewValue>,
-    }
-    ///`IdentityPolicyCreateOperatorViewAttribute`
+    ///`IdentityPolicyCreateOperatorAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -2986,7 +2241,7 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyCreateOperatorViewAttribute {
+    pub enum IdentityPolicyCreateOperatorAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -3000,7 +2255,7 @@ pub mod policies_create {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorViewAttribute {
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -3012,7 +2267,7 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorViewAttribute {
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -3026,13 +2281,15 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorViewAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateOperatorViewAttribute {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorAttributeOperandAttribute
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -3040,7 +2297,9 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateOperatorViewAttribute {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorAttributeOperandAttribute
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -3048,7 +2307,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyCreateOperatorViewKind`
+    ///`IdentityPolicyCreateOperatorAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -3056,12 +2315,7 @@ pub mod policies_create {
     ///{
     ///  "type": "string",
     ///  "enum": [
-    ///    "eq",
-    ///    "ne",
-    ///    "like",
-    ///    "gt",
-    ///    "lt",
-    ///    "eqAttr"
+    ///    "string"
     ///  ]
     ///}
     /// ```
@@ -3078,53 +2332,35 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyCreateOperatorViewKind {
-        #[serde(rename = "eq")]
-        Eq,
-        #[serde(rename = "ne")]
-        Ne,
-        #[serde(rename = "like")]
-        Like,
-        #[serde(rename = "gt")]
-        Gt,
-        #[serde(rename = "lt")]
-        Lt,
-        #[serde(rename = "eqAttr")]
-        EqAttr,
+    pub enum IdentityPolicyCreateOperatorAttributeOperandValueType {
+        #[serde(rename = "string")]
+        String,
     }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorViewKind {
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorAttributeOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
-                Self::Eq => f.write_str("eq"),
-                Self::Ne => f.write_str("ne"),
-                Self::Like => f.write_str("like"),
-                Self::Gt => f.write_str("gt"),
-                Self::Lt => f.write_str("lt"),
-                Self::EqAttr => f.write_str("eqAttr"),
+                Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorViewKind {
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
-                "eq" => Ok(Self::Eq),
-                "ne" => Ok(Self::Ne),
-                "like" => Ok(Self::Like),
-                "gt" => Ok(Self::Gt),
-                "lt" => Ok(Self::Lt),
-                "eqAttr" => Ok(Self::EqAttr),
+                "string" => Ok(Self::String),
                 _ => Err("invalid value".into()),
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorViewKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateOperatorViewKind {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -3132,7 +2368,9 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateOperatorViewKind {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -3140,48 +2378,114 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+    ///`IdentityPolicyCreateOperatorEqualityFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///  "type": "string",
-    ///  "maxLength": 256,
-    ///  "x-defer-string-length-validation": true
+    ///  "title": "IdentityPolicyCreateOperatorEqualityFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "equality"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "title": "IdentityPolicyCreateOperatorEqualityFamilyOperand",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorLiteralOperand"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorAttributeOperand"
+    ///        }
+    ///      ]
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyCreateOperatorEqualityFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
     ///}
     /// ```
     /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyCreateOperatorViewValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyCreateOperatorViewValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateOperatorEqualityFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyCreateOperatorEqualityFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyCreateOperatorEqualityFamilyOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyCreateOperatorEqualityFamilyPredicate,
+    }
+    ///`IdentityPolicyCreateOperatorEqualityFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "equality"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorEqualityFamilyFamily {
+        #[serde(rename = "equality")]
+        Equality,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorEqualityFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Equality => f.write_str("equality"),
+            }
         }
     }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorViewValue> for ::std::string::String {
-        fn from(value: IdentityPolicyCreateOperatorViewValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorViewValue {
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorEqualityFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            Ok(Self(value.to_string()))
+            match value {
+                "equality" => Ok(Self::Equality),
+                _ => Err("invalid value".into()),
+            }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorViewValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateOperatorViewValue {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorEqualityFamilyFamily
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -3189,7 +2493,9 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateOperatorViewValue {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorEqualityFamilyFamily
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -3197,7 +2503,402 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorViewValue {
+    ///`IdentityPolicyCreateOperatorEqualityFamilyOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorEqualityFamilyOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorLiteralOperand"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorAttributeOperand"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyCreateOperatorEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyCreateOperatorLiteralOperand),
+        AttributeOperand(IdentityPolicyCreateOperatorAttributeOperand),
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorLiteralOperand>
+        for IdentityPolicyCreateOperatorEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyCreateOperatorLiteralOperand) -> Self {
+            Self::LiteralOperand(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorAttributeOperand>
+        for IdentityPolicyCreateOperatorEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyCreateOperatorAttributeOperand) -> Self {
+            Self::AttributeOperand(value)
+        }
+    }
+    ///`IdentityPolicyCreateOperatorEqualityFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorEqualityFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorEqualityFamilyPredicate {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorEqualityFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorEqualityFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorEqualityFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 256
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "boolean"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyCreateOperatorLiteralOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyCreateOperatorLiteralOperandKind,
+            value: IdentityPolicyCreateOperatorLiteralOperandValue,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyCreateOperatorLiteralOperandKind,
+            value: bool,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyCreateOperatorLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyCreateOperatorLiteralOperandKind,
+            value: IdentityPolicyCreateOperatorLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyCreateOperatorLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyCreateOperatorLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyCreateOperatorLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorLiteralOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyCreateOperatorLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -3207,6 +2908,1448 @@ pub mod policies_create {
                 .map_err(|e: self::error::ConversionError| {
                     <D::Error as ::serde::de::Error>::custom(e.to_string())
                 })
+        }
+    }
+    ///`IdentityPolicyCreateOperatorMembershipFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorMembershipFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "membership"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorSetOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyCreateOperatorMembershipFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "in",
+    ///        "notIn"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateOperatorMembershipFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyCreateOperatorMembershipFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyCreateOperatorSetOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyCreateOperatorMembershipFamilyPredicate,
+    }
+    ///`IdentityPolicyCreateOperatorMembershipFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "membership"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorMembershipFamilyFamily {
+        #[serde(rename = "membership")]
+        Membership,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorMembershipFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Membership => f.write_str("membership"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorMembershipFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "membership" => Ok(Self::Membership),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorMembershipFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorMembershipFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorMembershipFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "in",
+    ///    "notIn"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorMembershipFamilyPredicate {
+        #[serde(rename = "in")]
+        In,
+        #[serde(rename = "notIn")]
+        NotIn,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorMembershipFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::In => f.write_str("in"),
+                Self::NotIn => f.write_str("notIn"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorMembershipFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "in" => Ok(Self::In),
+                "notIn" => Ok(Self::NotIn),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorMembershipFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorNumericLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorNumericLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyCreateOperatorNumericLiteralOperand {
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyCreateOperatorNumericLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyCreateOperatorNumericLiteralOperandKind,
+            value: IdentityPolicyCreateOperatorNumericLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyCreateOperatorNumericLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorNumericLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorNumericLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorNumericLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorNumericLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorNumericLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 64,
+    ///  "minLength": 1,
+    ///  "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyCreateOperatorNumericLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyCreateOperatorNumericLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorNumericLiteralOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyCreateOperatorNumericLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorNumericLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 64usize {
+                return Err("longer than 64 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| {
+                    ::regress::Regex::new(
+                        "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$",
+                    )
+                    .unwrap()
+                });
+            if PATTERN.find(value).is_none() {
+                return Err(
+                "doesn't match pattern \"^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$\""
+                    .into(),
+            );
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorNumericLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorNumericLiteralOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyCreateOperatorOrderingFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorOrderingFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ordering"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorNumericLiteralOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyCreateOperatorOrderingFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "gt",
+    ///        "ge",
+    ///        "lt",
+    ///        "le"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateOperatorOrderingFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyCreateOperatorOrderingFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyCreateOperatorNumericLiteralOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyCreateOperatorOrderingFamilyPredicate,
+    }
+    ///`IdentityPolicyCreateOperatorOrderingFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ordering"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorOrderingFamilyFamily {
+        #[serde(rename = "ordering")]
+        Ordering,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorOrderingFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Ordering => f.write_str("ordering"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorOrderingFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ordering" => Ok(Self::Ordering),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorOrderingFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorOrderingFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorOrderingFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "gt",
+    ///    "ge",
+    ///    "lt",
+    ///    "le"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorOrderingFamilyPredicate {
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "ge")]
+        Ge,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "le")]
+        Le,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorOrderingFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Gt => f.write_str("gt"),
+                Self::Ge => f.write_str("ge"),
+                Self::Lt => f.write_str("lt"),
+                Self::Le => f.write_str("le"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorOrderingFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "gt" => Ok(Self::Gt),
+                "ge" => Ok(Self::Ge),
+                "lt" => Ok(Self::Lt),
+                "le" => Ok(Self::Le),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorOrderingFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorPatternOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorPatternOperand",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind",
+    ///    "value",
+    ///    "valueType"
+    ///  ],
+    ///  "properties": {
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "pattern"
+    ///      ]
+    ///    },
+    ///    "value": {
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "minLength": 1
+    ///    },
+    ///    "valueType": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateOperatorPatternOperand {
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyCreateOperatorPatternOperandKind,
+        #[redact(sensitivity = public)]
+        pub value: IdentityPolicyCreateOperatorPatternOperandValue,
+        #[serde(rename = "valueType")]
+        #[redact(sensitivity = public)]
+        pub value_type: IdentityPolicyCreateOperatorPatternOperandValueType,
+    }
+    ///`IdentityPolicyCreateOperatorPatternOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "pattern"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorPatternOperandKind {
+        #[serde(rename = "pattern")]
+        Pattern,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorPatternOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Pattern => f.write_str("pattern"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorPatternOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "pattern" => Ok(Self::Pattern),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorPatternOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorPatternOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyCreateOperatorPatternOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyCreateOperatorPatternOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorPatternOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyCreateOperatorPatternOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorPatternOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorPatternOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorPatternOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyCreateOperatorPatternOperandValueType`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorPatternOperandValueType {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorPatternOperandValueType {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorPatternOperandValueType {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorPatternOperandValueType {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorSetOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorSetOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 256
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "boolean"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "integer",
+    ///            "format": "int64"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 64,
+    ///            "minLength": 1,
+    ///            "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyCreateOperatorSetOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyCreateOperatorSetOperandKind,
+            values: Vec<IdentityPolicyCreateOperatorSetOperandValuesItem>,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyCreateOperatorSetOperandKind,
+            values: Vec<bool>,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyCreateOperatorSetOperandKind,
+            values: Vec<i64>,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyCreateOperatorSetOperandKind,
+            values: Vec<IdentityPolicyCreateOperatorSetOperandValuesItem>,
+        },
+    }
+    ///`IdentityPolicyCreateOperatorSetOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "set"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorSetOperandKind {
+        #[serde(rename = "set")]
+        Set,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorSetOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Set => f.write_str("set"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorSetOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "set" => Ok(Self::Set),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorSetOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateOperatorSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorSetOperandValuesItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyCreateOperatorSetOperandValuesItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyCreateOperatorSetOperandValuesItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyCreateOperatorSetOperandValuesItem>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyCreateOperatorSetOperandValuesItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorSetOperandValuesItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorSetOperandValuesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorSetOperandValuesItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyCreateOperatorStringFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorStringFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorPatternOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyCreateOperatorStringFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "startsWith",
+    ///        "endsWith",
+    ///        "contains",
+    ///        "glob",
+    ///        "regex"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyCreateOperatorStringFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyCreateOperatorStringFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyCreateOperatorPatternOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyCreateOperatorStringFamilyPredicate,
+    }
+    ///`IdentityPolicyCreateOperatorStringFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorStringFamilyFamily {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorStringFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorStringFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorStringFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyCreateOperatorStringFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyCreateOperatorStringFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "startsWith",
+    ///    "endsWith",
+    ///    "contains",
+    ///    "glob",
+    ///    "regex"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyCreateOperatorStringFamilyPredicate {
+        #[serde(rename = "startsWith")]
+        StartsWith,
+        #[serde(rename = "endsWith")]
+        EndsWith,
+        #[serde(rename = "contains")]
+        Contains,
+        #[serde(rename = "glob")]
+        Glob,
+        #[serde(rename = "regex")]
+        Regex,
+    }
+    impl ::std::fmt::Display for IdentityPolicyCreateOperatorStringFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::StartsWith => f.write_str("startsWith"),
+                Self::EndsWith => f.write_str("endsWith"),
+                Self::Contains => f.write_str("contains"),
+                Self::Glob => f.write_str("glob"),
+                Self::Regex => f.write_str("regex"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyCreateOperatorStringFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "startsWith" => Ok(Self::StartsWith),
+                "endsWith" => Ok(Self::EndsWith),
+                "contains" => Ok(Self::Contains),
+                "glob" => Ok(Self::Glob),
+                "regex" => Ok(Self::Regex),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorStringFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyCreateOperatorStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyCreateOperatorStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
         }
     }
     ///`IdentityPolicyCreateRule`
@@ -3237,146 +4380,16 @@ pub mod policies_create {
     ///          "title": "IdentityPolicyCreateOperator",
     ///          "oneOf": [
     ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "value"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "eq"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": {
-    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                  "type": "string",
-    ///                  "maxLength": 256
-    ///                }
-    ///              },
-    ///              "additionalProperties": false
+    ///              "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
     ///            },
     ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "value"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "ne"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": {
-    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                  "type": "string",
-    ///                  "maxLength": 256
-    ///                }
-    ///              },
-    ///              "additionalProperties": false
+    ///              "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
     ///            },
     ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "pattern"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "like"
-    ///                  ]
-    ///                },
-    ///                "pattern": {
-    ///                  "type": "string"
-    ///                },
-    ///                "value": false
-    ///              },
-    ///              "additionalProperties": false
+    ///              "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
     ///            },
     ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "value"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "gt"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": {
-    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                  "type": "string",
-    ///                  "maxLength": 256
-    ///                }
-    ///              },
-    ///              "additionalProperties": false
-    ///            },
-    ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "value"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "lt"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": {
-    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                  "type": "string",
-    ///                  "maxLength": 256
-    ///                }
-    ///              },
-    ///              "additionalProperties": false
-    ///            },
-    ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "attribute",
-    ///                "kind"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "principal.kind",
-    ///                    "principal.id",
-    ///                    "tenant.id",
-    ///                    "contract.id",
-    ///                    "permission",
-    ///                    "resource.id"
-    ///                  ]
-    ///                },
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "eqAttr"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": false
-    ///              },
-    ///              "additionalProperties": false
+    ///              "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
     ///            }
     ///          ]
     ///        }
@@ -3500,13 +4513,2391 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyCreateRuleView`
+    ///`IdentityPolicyObligationsView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyCreateRuleView",
+    ///  "title": "IdentityPolicyObligationsView",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "fieldMask": {
+    ///      "default": [],
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string"
+    ///      }
+    ///    },
+    ///    "rowScope": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "selfOnly",
+    ///        "device",
+    ///        "tenant"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyObligationsView {
+        #[serde(
+            rename = "fieldMask",
+            default,
+            skip_serializing_if = "::std::vec::Vec::is_empty"
+        )]
+        #[redact(sensitivity = public)]
+        pub field_mask: ::std::vec::Vec<::std::string::String>,
+        #[serde(
+            rename = "rowScope",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub row_scope: ::std::option::Option<IdentityPolicyObligationsViewRowScope>,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPolicyObligationsView {
+        fn default() -> Self {
+            Self {
+                field_mask: Default::default(),
+                row_scope: Default::default(),
+            }
+        }
+    }
+    ///`IdentityPolicyObligationsViewRowScope`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "selfOnly",
+    ///    "device",
+    ///    "tenant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyObligationsViewRowScope {
+        #[serde(rename = "selfOnly")]
+        SelfOnly,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "tenant")]
+        Tenant,
+    }
+    impl ::std::fmt::Display for IdentityPolicyObligationsViewRowScope {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::SelfOnly => f.write_str("selfOnly"),
+                Self::Device => f.write_str("device"),
+                Self::Tenant => f.write_str("tenant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyObligationsViewRowScope {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "selfOnly" => Ok(Self::SelfOnly),
+                "device" => Ok(Self::Device),
+                "tenant" => Ok(Self::Tenant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyObligationsViewRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyObligationsViewRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyObligationsViewRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorView",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyOperatorView {
+        EqualityFamily(IdentityPolicyOperatorViewEqualityFamily),
+        OrderingFamily(IdentityPolicyOperatorViewOrderingFamily),
+        MembershipFamily(IdentityPolicyOperatorViewMembershipFamily),
+        StringFamily(IdentityPolicyOperatorViewStringFamily),
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewEqualityFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewEqualityFamily) -> Self {
+            Self::EqualityFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewOrderingFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewOrderingFamily) -> Self {
+            Self::OrderingFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewMembershipFamily>
+        for IdentityPolicyOperatorView
+    {
+        fn from(value: IdentityPolicyOperatorViewMembershipFamily) -> Self {
+            Self::MembershipFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewStringFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewStringFamily) -> Self {
+            Self::StringFamily(value)
+        }
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewAttributeOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "kind",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "attribute"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewAttributeOperand {
+        #[serde(rename = "attribute")]
+        Attribute {
+            attribute: IdentityPolicyOperatorViewAttributeOperandAttribute,
+            #[serde(rename = "valueType")]
+            value_type: IdentityPolicyOperatorViewAttributeOperandValueType,
+        },
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperandAttribute`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "principal.kind",
+    ///    "principal.id",
+    ///    "tenant.id",
+    ///    "contract.id",
+    ///    "permission",
+    ///    "resource.id"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewAttributeOperandAttribute {
+        #[serde(rename = "principal.kind")]
+        PrincipalKind,
+        #[serde(rename = "principal.id")]
+        PrincipalId,
+        #[serde(rename = "tenant.id")]
+        TenantId,
+        #[serde(rename = "contract.id")]
+        ContractId,
+        #[serde(rename = "permission")]
+        Permission,
+        #[serde(rename = "resource.id")]
+        ResourceId,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandAttribute {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::PrincipalKind => f.write_str("principal.kind"),
+                Self::PrincipalId => f.write_str("principal.id"),
+                Self::TenantId => f.write_str("tenant.id"),
+                Self::ContractId => f.write_str("contract.id"),
+                Self::Permission => f.write_str("permission"),
+                Self::ResourceId => f.write_str("resource.id"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandAttribute {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "principal.kind" => Ok(Self::PrincipalKind),
+                "principal.id" => Ok(Self::PrincipalId),
+                "tenant.id" => Ok(Self::TenantId),
+                "contract.id" => Ok(Self::ContractId),
+                "permission" => Ok(Self::Permission),
+                "resource.id" => Ok(Self::ResourceId),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandAttribute {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandAttribute
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandAttribute
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperandValueType`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewAttributeOperandValueType {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandValueType {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandValueType {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandValueType {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "equality"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///        }
+    ///      ]
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewEqualityFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewEqualityFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewEqualityFamilyOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewEqualityFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "equality"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyFamily {
+        #[serde(rename = "equality")]
+        Equality,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Equality => f.write_str("equality"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "equality" => Ok(Self::Equality),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyOperatorViewLiteralOperand),
+        AttributeOperand(IdentityPolicyOperatorViewAttributeOperand),
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperand>
+        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyOperatorViewLiteralOperand) -> Self {
+            Self::LiteralOperand(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewAttributeOperand>
+        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyOperatorViewAttributeOperand) -> Self {
+            Self::AttributeOperand(value)
+        }
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 256
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "boolean"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewLiteralOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: IdentityPolicyOperatorViewLiteralOperandValue,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: bool,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: IdentityPolicyOperatorViewLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorViewLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewLiteralOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewMembershipFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "membership"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewSetOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "in",
+    ///        "notIn"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewMembershipFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewMembershipFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewSetOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewMembershipFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "membership"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewMembershipFamilyFamily {
+        #[serde(rename = "membership")]
+        Membership,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Membership => f.write_str("membership"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "membership" => Ok(Self::Membership),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "in",
+    ///    "notIn"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        #[serde(rename = "in")]
+        In,
+        #[serde(rename = "notIn")]
+        NotIn,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::In => f.write_str("in"),
+                Self::NotIn => f.write_str("notIn"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "in" => Ok(Self::In),
+                "notIn" => Ok(Self::NotIn),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewNumericLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewNumericLiteralOperand {
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            value: IdentityPolicyOperatorViewNumericLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 64,
+    ///  "minLength": 1,
+    ///  "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewNumericLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewNumericLiteralOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyOperatorViewNumericLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 64usize {
+                return Err("longer than 64 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| {
+                    ::regress::Regex::new(
+                        "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$",
+                    )
+                    .unwrap()
+                });
+            if PATTERN.find(value).is_none() {
+                return Err(
+                "doesn't match pattern \"^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$\""
+                    .into(),
+            );
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewOrderingFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ordering"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewNumericLiteralOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "gt",
+    ///        "ge",
+    ///        "lt",
+    ///        "le"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewOrderingFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewOrderingFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewNumericLiteralOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewOrderingFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ordering"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewOrderingFamilyFamily {
+        #[serde(rename = "ordering")]
+        Ordering,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Ordering => f.write_str("ordering"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ordering" => Ok(Self::Ordering),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "gt",
+    ///    "ge",
+    ///    "lt",
+    ///    "le"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "ge")]
+        Ge,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "le")]
+        Le,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Gt => f.write_str("gt"),
+                Self::Ge => f.write_str("ge"),
+                Self::Lt => f.write_str("lt"),
+                Self::Le => f.write_str("le"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "gt" => Ok(Self::Gt),
+                "ge" => Ok(Self::Ge),
+                "lt" => Ok(Self::Lt),
+                "le" => Ok(Self::Le),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewPatternOperand",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind",
+    ///    "value",
+    ///    "valueType"
+    ///  ],
+    ///  "properties": {
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "pattern"
+    ///      ]
+    ///    },
+    ///    "value": {
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "minLength": 1
+    ///    },
+    ///    "valueType": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewPatternOperand {
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyOperatorViewPatternOperandKind,
+        #[redact(sensitivity = public)]
+        pub value: IdentityPolicyOperatorViewPatternOperandValue,
+        #[serde(rename = "valueType")]
+        #[redact(sensitivity = public)]
+        pub value_type: IdentityPolicyOperatorViewPatternOperandValueType,
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "pattern"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewPatternOperandKind {
+        #[serde(rename = "pattern")]
+        Pattern,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Pattern => f.write_str("pattern"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "pattern" => Ok(Self::Pattern),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewPatternOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewPatternOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewPatternOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorViewPatternOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewPatternOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandValueType`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewPatternOperandValueType {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandValueType {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValueType {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValueType {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewSetOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewSetOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 256
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "boolean"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "integer",
+    ///            "format": "int64"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 64,
+    ///            "minLength": 1,
+    ///            "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewSetOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<bool>,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<i64>,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+        },
+    }
+    ///`IdentityPolicyOperatorViewSetOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "set"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewSetOperandKind {
+        #[serde(rename = "set")]
+        Set,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewSetOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Set => f.write_str("set"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "set" => Ok(Self::Set),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewSetOperandValuesItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewSetOperandValuesItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewSetOperandValuesItem>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyOperatorViewSetOperandValuesItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewSetOperandValuesItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewStringFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewStringFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewPatternOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "startsWith",
+    ///        "endsWith",
+    ///        "contains",
+    ///        "glob",
+    ///        "regex"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewStringFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewStringFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewPatternOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewStringFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewStringFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewStringFamilyFamily {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewStringFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "startsWith",
+    ///    "endsWith",
+    ///    "contains",
+    ///    "glob",
+    ///    "regex"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewStringFamilyPredicate {
+        #[serde(rename = "startsWith")]
+        StartsWith,
+        #[serde(rename = "endsWith")]
+        EndsWith,
+        #[serde(rename = "contains")]
+        Contains,
+        #[serde(rename = "glob")]
+        Glob,
+        #[serde(rename = "regex")]
+        Regex,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::StartsWith => f.write_str("startsWith"),
+                Self::EndsWith => f.write_str("endsWith"),
+                Self::Contains => f.write_str("contains"),
+                Self::Glob => f.write_str("glob"),
+                Self::Regex => f.write_str("regex"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "startsWith" => Ok(Self::StartsWith),
+                "endsWith" => Ok(Self::EndsWith),
+                "contains" => Ok(Self::Contains),
+                "glob" => Ok(Self::Glob),
+                "regex" => Ok(Self::Regex),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyRuleView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyRuleView",
     ///  "type": "object",
     ///  "required": [
     ///    "condition",
@@ -3514,7 +6905,7 @@ pub mod policies_create {
     ///  ],
     ///  "properties": {
     ///    "condition": {
-    ///      "title": "IdentityPolicyCreateConditionView",
+    ///      "title": "IdentityPolicyConditionView",
     ///      "type": "object",
     ///      "required": [
     ///        "attribute",
@@ -3525,45 +6916,21 @@ pub mod policies_create {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyCreateOperatorView",
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "principal.kind",
-    ///                "principal.id",
-    ///                "tenant.id",
-    ///                "contract.id",
-    ///                "permission",
-    ///                "resource.id"
-    ///              ]
+    ///          "title": "IdentityPolicyOperatorView",
+    ///          "oneOf": [
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///            },
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "eq",
-    ///                "ne",
-    ///                "like",
-    ///                "gt",
-    ///                "lt",
-    ///                "eqAttr"
-    ///              ]
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///            },
-    ///            "pattern": {
-    ///              "type": "string"
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///            },
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256,
-    ///              "x-defer-string-length-validation": true
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///            }
-    ///          },
-    ///          "additionalProperties": false
+    ///          ]
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -3576,7 +6943,7 @@ pub mod policies_create {
     ///      ]
     ///    },
     ///    "obligations": {
-    ///      "title": "IdentityPolicyCreateObligationsView",
+    ///      "title": "IdentityPolicyObligationsView",
     ///      "type": "object",
     ///      "properties": {
     ///        "fieldMask": {
@@ -3604,16 +6971,16 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateRuleView {
+    pub struct IdentityPolicyRuleView {
         #[redact(sensitivity = public)]
-        pub condition: IdentityPolicyCreateConditionView,
+        pub condition: IdentityPolicyConditionView,
         #[redact(sensitivity = public)]
-        pub effect: IdentityPolicyCreateRuleViewEffect,
+        pub effect: IdentityPolicyRuleViewEffect,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub obligations: ::std::option::Option<IdentityPolicyCreateObligationsView>,
+        pub obligations: ::std::option::Option<IdentityPolicyObligationsView>,
     }
-    ///`IdentityPolicyCreateRuleViewEffect`
+    ///`IdentityPolicyRuleViewEffect`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -3639,13 +7006,13 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyCreateRuleViewEffect {
+    pub enum IdentityPolicyRuleViewEffect {
         #[serde(rename = "allow")]
         Allow,
         #[serde(rename = "deny")]
         Deny,
     }
-    impl ::std::fmt::Display for IdentityPolicyCreateRuleViewEffect {
+    impl ::std::fmt::Display for IdentityPolicyRuleViewEffect {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Allow => f.write_str("allow"),
@@ -3653,7 +7020,7 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyCreateRuleViewEffect {
+    impl ::std::str::FromStr for IdentityPolicyRuleViewEffect {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -3663,13 +7030,13 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateRuleViewEffect {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyCreateRuleViewEffect {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -3677,7 +7044,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateRuleViewEffect {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -3685,13 +7052,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyCreateView`
+    ///`IdentityPolicyView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyCreateView",
+    ///  "title": "IdentityPolicyView",
     ///  "type": "object",
     ///  "required": [
     ///    "contractId",
@@ -3722,7 +7089,7 @@ pub mod policies_create {
     ///    "rules": {
     ///      "type": "array",
     ///      "items": {
-    ///        "title": "IdentityPolicyCreateRuleView",
+    ///        "title": "IdentityPolicyRuleView",
     ///        "type": "object",
     ///        "required": [
     ///          "condition",
@@ -3730,7 +7097,7 @@ pub mod policies_create {
     ///        ],
     ///        "properties": {
     ///          "condition": {
-    ///            "title": "IdentityPolicyCreateConditionView",
+    ///            "title": "IdentityPolicyConditionView",
     ///            "type": "object",
     ///            "required": [
     ///              "attribute",
@@ -3741,45 +7108,21 @@ pub mod policies_create {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyCreateOperatorView",
-    ///                "type": "object",
-    ///                "required": [
-    ///                  "kind"
-    ///                ],
-    ///                "properties": {
-    ///                  "attribute": {
-    ///                    "type": "string",
-    ///                    "enum": [
-    ///                      "principal.kind",
-    ///                      "principal.id",
-    ///                      "tenant.id",
-    ///                      "contract.id",
-    ///                      "permission",
-    ///                      "resource.id"
-    ///                    ]
+    ///                "title": "IdentityPolicyOperatorView",
+    ///                "oneOf": [
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///                  },
-    ///                  "kind": {
-    ///                    "type": "string",
-    ///                    "enum": [
-    ///                      "eq",
-    ///                      "ne",
-    ///                      "like",
-    ///                      "gt",
-    ///                      "lt",
-    ///                      "eqAttr"
-    ///                    ]
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///                  },
-    ///                  "pattern": {
-    ///                    "type": "string"
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///                  },
-    ///                  "value": {
-    ///                    "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                    "type": "string",
-    ///                    "maxLength": 256,
-    ///                    "x-defer-string-length-validation": true
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///                  }
-    ///                },
-    ///                "additionalProperties": false
+    ///                ]
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -3792,7 +7135,7 @@ pub mod policies_create {
     ///            ]
     ///          },
     ///          "obligations": {
-    ///            "title": "IdentityPolicyCreateObligationsView",
+    ///            "title": "IdentityPolicyObligationsView",
     ///            "type": "object",
     ///            "properties": {
     ///              "fieldMask": {
@@ -3829,7 +7172,7 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateView {
+    pub struct IdentityPolicyView {
         #[serde(rename = "contractId")]
         #[redact(sensitivity = public)]
         pub contract_id: ::std::string::String,
@@ -3849,7 +7192,7 @@ pub mod policies_create {
         #[redact(sensitivity = public)]
         pub policy_id: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub rules: ::std::vec::Vec<IdentityPolicyCreateRuleView>,
+        pub rules: ::std::vec::Vec<IdentityPolicyRuleView>,
         #[redact(sensitivity = public)]
         pub version: ::std::num::NonZeroU32,
     }
@@ -3862,7 +7205,7 @@ pub mod policies_create {
         "identity",
         "identity.policies-create",
         "v1",
-        "sha256:1bc427dbe4bc87a87293c34b9a131676e22d637ec10ea2b304f741d6a180df20",
+        "sha256:d5a187116e817e2a5f37e7f1e8e6d72de861b6d7f9293935505245cbcb4807ed",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -4140,6 +7483,7 @@ pub mod policies_deactivate {
 
 /// 端点 `policies-get` 派生契约（源 `policies-get/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
 pub mod policies_get {
+    #![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.
     /// Error types.
     pub mod error {
         /// Error from a `TryFrom` or `FromStr` implementation.
@@ -4200,7 +7544,7 @@ pub mod policies_get {
     ///  ],
     ///  "properties": {
     ///    "data": {
-    ///      "title": "IdentityPolicyGetView",
+    ///      "title": "IdentityPolicyView",
     ///      "type": "object",
     ///      "required": [
     ///        "contractId",
@@ -4231,7 +7575,7 @@ pub mod policies_get {
     ///        "rules": {
     ///          "type": "array",
     ///          "items": {
-    ///            "title": "IdentityPolicyGetRule",
+    ///            "title": "IdentityPolicyRuleView",
     ///            "type": "object",
     ///            "required": [
     ///              "condition",
@@ -4239,7 +7583,7 @@ pub mod policies_get {
     ///            ],
     ///            "properties": {
     ///              "condition": {
-    ///                "title": "IdentityPolicyGetCondition",
+    ///                "title": "IdentityPolicyConditionView",
     ///                "type": "object",
     ///                "required": [
     ///                  "attribute",
@@ -4250,44 +7594,21 @@ pub mod policies_get {
     ///                    "type": "string"
     ///                  },
     ///                  "operator": {
-    ///                    "title": "IdentityPolicyGetOperator",
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "principal.kind",
-    ///                          "principal.id",
-    ///                          "tenant.id",
-    ///                          "contract.id",
-    ///                          "permission",
-    ///                          "resource.id"
-    ///                        ]
+    ///                    "title": "IdentityPolicyOperatorView",
+    ///                    "oneOf": [
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///                      },
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "eq",
-    ///                          "ne",
-    ///                          "like",
-    ///                          "gt",
-    ///                          "lt",
-    ///                          "eqAttr"
-    ///                        ]
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///                      },
-    ///                      "pattern": {
-    ///                        "type": "string"
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///                      },
-    ///                      "value": {
-    ///                        "type": "string",
-    ///                        "maxLength": 256,
-    ///                        "x-defer-string-length-validation": true
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    ]
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -4300,7 +7621,7 @@ pub mod policies_get {
     ///                ]
     ///              },
     ///              "obligations": {
-    ///                "title": "IdentityPolicyGetObligations",
+    ///                "title": "IdentityPolicyObligationsView",
     ///                "type": "object",
     ///                "properties": {
     ///                  "fieldMask": {
@@ -4342,15 +7663,15 @@ pub mod policies_get {
     #[serde(deny_unknown_fields)]
     pub struct IdentityPoliciesGetResponse {
         #[redact(sensitivity = public)]
-        pub data: IdentityPolicyGetView,
+        pub data: IdentityPolicyView,
     }
-    ///`IdentityPolicyGetCondition`
+    ///`IdentityPolicyConditionView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyGetCondition",
+    ///  "title": "IdentityPolicyConditionView",
     ///  "type": "object",
     ///  "required": [
     ///    "attribute",
@@ -4361,44 +7682,21 @@ pub mod policies_get {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyGetOperator",
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "principal.kind",
-    ///            "principal.id",
-    ///            "tenant.id",
-    ///            "contract.id",
-    ///            "permission",
-    ///            "resource.id"
-    ///          ]
+    ///      "title": "IdentityPolicyOperatorView",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///        },
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "eq",
-    ///            "ne",
-    ///            "like",
-    ///            "gt",
-    ///            "lt",
-    ///            "eqAttr"
-    ///          ]
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///        },
-    ///        "pattern": {
-    ///          "type": "string"
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///        },
-    ///        "value": {
-    ///          "type": "string",
-    ///          "maxLength": 256,
-    ///          "x-defer-string-length-validation": true
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///        }
-    ///      },
-    ///      "additionalProperties": false
+    ///      ]
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -4407,19 +7705,19 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyGetCondition {
+    pub struct IdentityPolicyConditionView {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyGetOperator,
+        pub operator: IdentityPolicyOperatorView,
     }
-    ///`IdentityPolicyGetObligations`
+    ///`IdentityPolicyObligationsView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyGetObligations",
+    ///  "title": "IdentityPolicyObligationsView",
     ///  "type": "object",
     ///  "properties": {
     ///    "fieldMask": {
@@ -4444,7 +7742,7 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyGetObligations {
+    pub struct IdentityPolicyObligationsView {
         #[serde(
             rename = "fieldMask",
             default,
@@ -4458,10 +7756,10 @@ pub mod policies_get {
             skip_serializing_if = "::std::option::Option::is_none"
         )]
         #[redact(sensitivity = public)]
-        pub row_scope: ::std::option::Option<IdentityPolicyGetObligationsRowScope>,
+        pub row_scope: ::std::option::Option<IdentityPolicyObligationsViewRowScope>,
     }
     #[allow(clippy::derivable_impls)]
-    impl ::std::default::Default for IdentityPolicyGetObligations {
+    impl ::std::default::Default for IdentityPolicyObligationsView {
         fn default() -> Self {
             Self {
                 field_mask: Default::default(),
@@ -4469,7 +7767,7 @@ pub mod policies_get {
             }
         }
     }
-    ///`IdentityPolicyGetObligationsRowScope`
+    ///`IdentityPolicyObligationsViewRowScope`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -4496,7 +7794,7 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyGetObligationsRowScope {
+    pub enum IdentityPolicyObligationsViewRowScope {
         #[serde(rename = "selfOnly")]
         SelfOnly,
         #[serde(rename = "device")]
@@ -4504,7 +7802,7 @@ pub mod policies_get {
         #[serde(rename = "tenant")]
         Tenant,
     }
-    impl ::std::fmt::Display for IdentityPolicyGetObligationsRowScope {
+    impl ::std::fmt::Display for IdentityPolicyObligationsViewRowScope {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::SelfOnly => f.write_str("selfOnly"),
@@ -4513,7 +7811,7 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyGetObligationsRowScope {
+    impl ::std::str::FromStr for IdentityPolicyObligationsViewRowScope {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -4524,13 +7822,13 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetObligationsRowScope {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyObligationsViewRowScope {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetObligationsRowScope {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyObligationsViewRowScope {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -4538,7 +7836,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetObligationsRowScope {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyObligationsViewRowScope {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -4546,69 +7844,117 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyGetOperator`
+    ///`IdentityPolicyOperatorView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyGetOperator",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "kind"
-    ///  ],
-    ///  "properties": {
-    ///    "attribute": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "principal.kind",
-    ///        "principal.id",
-    ///        "tenant.id",
-    ///        "contract.id",
-    ///        "permission",
-    ///        "resource.id"
-    ///      ]
+    ///  "title": "IdentityPolicyOperatorView",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///    },
-    ///    "kind": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "eq",
-    ///        "ne",
-    ///        "like",
-    ///        "gt",
-    ///        "lt",
-    ///        "eqAttr"
-    ///      ]
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///    },
-    ///    "pattern": {
-    ///      "type": "string"
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///    },
-    ///    "value": {
-    ///      "type": "string",
-    ///      "maxLength": 256,
-    ///      "x-defer-string-length-validation": true
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///    }
-    ///  },
-    ///  "additionalProperties": false
+    ///  ]
     ///}
     /// ```
     /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyGetOperator {
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub attribute: ::std::option::Option<IdentityPolicyGetOperatorAttribute>,
-        #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyGetOperatorKind,
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub pattern: ::std::option::Option<::std::string::String>,
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub value: ::std::option::Option<IdentityPolicyGetOperatorValue>,
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyOperatorView {
+        EqualityFamily(IdentityPolicyOperatorViewEqualityFamily),
+        OrderingFamily(IdentityPolicyOperatorViewOrderingFamily),
+        MembershipFamily(IdentityPolicyOperatorViewMembershipFamily),
+        StringFamily(IdentityPolicyOperatorViewStringFamily),
     }
-    ///`IdentityPolicyGetOperatorAttribute`
+    impl ::std::convert::From<IdentityPolicyOperatorViewEqualityFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewEqualityFamily) -> Self {
+            Self::EqualityFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewOrderingFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewOrderingFamily) -> Self {
+            Self::OrderingFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewMembershipFamily>
+        for IdentityPolicyOperatorView
+    {
+        fn from(value: IdentityPolicyOperatorViewMembershipFamily) -> Self {
+            Self::MembershipFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewStringFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewStringFamily) -> Self {
+            Self::StringFamily(value)
+        }
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewAttributeOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "kind",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "attribute"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewAttributeOperand {
+        #[serde(rename = "attribute")]
+        Attribute {
+            attribute: IdentityPolicyOperatorViewAttributeOperandAttribute,
+            #[serde(rename = "valueType")]
+            value_type: IdentityPolicyOperatorViewAttributeOperandValueType,
+        },
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -4638,7 +7984,7 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyGetOperatorAttribute {
+    pub enum IdentityPolicyOperatorViewAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -4652,7 +7998,7 @@ pub mod policies_get {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyGetOperatorAttribute {
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -4664,7 +8010,7 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyGetOperatorAttribute {
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -4678,13 +8024,15 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetOperatorAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetOperatorAttribute {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandAttribute
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -4692,7 +8040,9 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetOperatorAttribute {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandAttribute
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -4700,7 +8050,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyGetOperatorKind`
+    ///`IdentityPolicyOperatorViewAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -4708,12 +8058,7 @@ pub mod policies_get {
     ///{
     ///  "type": "string",
     ///  "enum": [
-    ///    "eq",
-    ///    "ne",
-    ///    "like",
-    ///    "gt",
-    ///    "lt",
-    ///    "eqAttr"
+    ///    "string"
     ///  ]
     ///}
     /// ```
@@ -4730,53 +8075,35 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyGetOperatorKind {
-        #[serde(rename = "eq")]
-        Eq,
-        #[serde(rename = "ne")]
-        Ne,
-        #[serde(rename = "like")]
-        Like,
-        #[serde(rename = "gt")]
-        Gt,
-        #[serde(rename = "lt")]
-        Lt,
-        #[serde(rename = "eqAttr")]
-        EqAttr,
+    pub enum IdentityPolicyOperatorViewAttributeOperandValueType {
+        #[serde(rename = "string")]
+        String,
     }
-    impl ::std::fmt::Display for IdentityPolicyGetOperatorKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
-                Self::Eq => f.write_str("eq"),
-                Self::Ne => f.write_str("ne"),
-                Self::Like => f.write_str("like"),
-                Self::Gt => f.write_str("gt"),
-                Self::Lt => f.write_str("lt"),
-                Self::EqAttr => f.write_str("eqAttr"),
+                Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyGetOperatorKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
-                "eq" => Ok(Self::Eq),
-                "ne" => Ok(Self::Ne),
-                "like" => Ok(Self::Like),
-                "gt" => Ok(Self::Gt),
-                "lt" => Ok(Self::Lt),
-                "eqAttr" => Ok(Self::EqAttr),
+                "string" => Ok(Self::String),
                 _ => Err("invalid value".into()),
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetOperatorKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetOperatorKind {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -4784,7 +8111,9 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetOperatorKind {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -4792,47 +8121,114 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyGetOperatorValue`
+    ///`IdentityPolicyOperatorViewEqualityFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "equality"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///        }
+    ///      ]
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewEqualityFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewEqualityFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewEqualityFamilyOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewEqualityFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256,
-    ///  "x-defer-string-length-validation": true
+    ///  "enum": [
+    ///    "equality"
+    ///  ]
     ///}
     /// ```
     /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyGetOperatorValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyGetOperatorValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyFamily {
+        #[serde(rename = "equality")]
+        Equality,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Equality => f.write_str("equality"),
+            }
         }
     }
-    impl ::std::convert::From<IdentityPolicyGetOperatorValue> for ::std::string::String {
-        fn from(value: IdentityPolicyGetOperatorValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyGetOperatorValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            Ok(Self(value.to_string()))
+            match value {
+                "equality" => Ok(Self::Equality),
+                _ => Err("invalid value".into()),
+            }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetOperatorValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetOperatorValue {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyFamily
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -4840,7 +8236,9 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetOperatorValue {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyFamily
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -4848,7 +8246,400 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyGetOperatorValue {
+    ///`IdentityPolicyOperatorViewEqualityFamilyOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyOperatorViewLiteralOperand),
+        AttributeOperand(IdentityPolicyOperatorViewAttributeOperand),
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperand>
+        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyOperatorViewLiteralOperand) -> Self {
+            Self::LiteralOperand(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewAttributeOperand>
+        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyOperatorViewAttributeOperand) -> Self {
+            Self::AttributeOperand(value)
+        }
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 256
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "boolean"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewLiteralOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: IdentityPolicyOperatorViewLiteralOperandValue,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: bool,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: IdentityPolicyOperatorViewLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorViewLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -4860,13 +8651,1451 @@ pub mod policies_get {
                 })
         }
     }
-    ///`IdentityPolicyGetRule`
+    ///`IdentityPolicyOperatorViewMembershipFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyGetRule",
+    ///  "title": "IdentityPolicyOperatorViewMembershipFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "membership"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewSetOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "in",
+    ///        "notIn"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewMembershipFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewMembershipFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewSetOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewMembershipFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "membership"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewMembershipFamilyFamily {
+        #[serde(rename = "membership")]
+        Membership,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Membership => f.write_str("membership"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "membership" => Ok(Self::Membership),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "in",
+    ///    "notIn"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        #[serde(rename = "in")]
+        In,
+        #[serde(rename = "notIn")]
+        NotIn,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::In => f.write_str("in"),
+                Self::NotIn => f.write_str("notIn"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "in" => Ok(Self::In),
+                "notIn" => Ok(Self::NotIn),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewNumericLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewNumericLiteralOperand {
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            value: IdentityPolicyOperatorViewNumericLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 64,
+    ///  "minLength": 1,
+    ///  "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewNumericLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewNumericLiteralOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyOperatorViewNumericLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 64usize {
+                return Err("longer than 64 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| {
+                    ::regress::Regex::new(
+                        "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$",
+                    )
+                    .unwrap()
+                });
+            if PATTERN.find(value).is_none() {
+                return Err(
+                "doesn't match pattern \"^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$\""
+                    .into(),
+            );
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewOrderingFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ordering"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewNumericLiteralOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "gt",
+    ///        "ge",
+    ///        "lt",
+    ///        "le"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewOrderingFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewOrderingFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewNumericLiteralOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewOrderingFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ordering"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewOrderingFamilyFamily {
+        #[serde(rename = "ordering")]
+        Ordering,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Ordering => f.write_str("ordering"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ordering" => Ok(Self::Ordering),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "gt",
+    ///    "ge",
+    ///    "lt",
+    ///    "le"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "ge")]
+        Ge,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "le")]
+        Le,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Gt => f.write_str("gt"),
+                Self::Ge => f.write_str("ge"),
+                Self::Lt => f.write_str("lt"),
+                Self::Le => f.write_str("le"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "gt" => Ok(Self::Gt),
+                "ge" => Ok(Self::Ge),
+                "lt" => Ok(Self::Lt),
+                "le" => Ok(Self::Le),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewPatternOperand",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind",
+    ///    "value",
+    ///    "valueType"
+    ///  ],
+    ///  "properties": {
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "pattern"
+    ///      ]
+    ///    },
+    ///    "value": {
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "minLength": 1
+    ///    },
+    ///    "valueType": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewPatternOperand {
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyOperatorViewPatternOperandKind,
+        #[redact(sensitivity = public)]
+        pub value: IdentityPolicyOperatorViewPatternOperandValue,
+        #[serde(rename = "valueType")]
+        #[redact(sensitivity = public)]
+        pub value_type: IdentityPolicyOperatorViewPatternOperandValueType,
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "pattern"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewPatternOperandKind {
+        #[serde(rename = "pattern")]
+        Pattern,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Pattern => f.write_str("pattern"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "pattern" => Ok(Self::Pattern),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewPatternOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewPatternOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewPatternOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorViewPatternOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewPatternOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandValueType`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewPatternOperandValueType {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandValueType {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValueType {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValueType {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewSetOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewSetOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 256
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "boolean"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "integer",
+    ///            "format": "int64"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 64,
+    ///            "minLength": 1,
+    ///            "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewSetOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<bool>,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<i64>,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+        },
+    }
+    ///`IdentityPolicyOperatorViewSetOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "set"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewSetOperandKind {
+        #[serde(rename = "set")]
+        Set,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewSetOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Set => f.write_str("set"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "set" => Ok(Self::Set),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewSetOperandValuesItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewSetOperandValuesItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewSetOperandValuesItem>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyOperatorViewSetOperandValuesItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewSetOperandValuesItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewStringFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewStringFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewPatternOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "startsWith",
+    ///        "endsWith",
+    ///        "contains",
+    ///        "glob",
+    ///        "regex"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewStringFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewStringFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewPatternOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewStringFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewStringFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewStringFamilyFamily {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewStringFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "startsWith",
+    ///    "endsWith",
+    ///    "contains",
+    ///    "glob",
+    ///    "regex"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewStringFamilyPredicate {
+        #[serde(rename = "startsWith")]
+        StartsWith,
+        #[serde(rename = "endsWith")]
+        EndsWith,
+        #[serde(rename = "contains")]
+        Contains,
+        #[serde(rename = "glob")]
+        Glob,
+        #[serde(rename = "regex")]
+        Regex,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::StartsWith => f.write_str("startsWith"),
+                Self::EndsWith => f.write_str("endsWith"),
+                Self::Contains => f.write_str("contains"),
+                Self::Glob => f.write_str("glob"),
+                Self::Regex => f.write_str("regex"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "startsWith" => Ok(Self::StartsWith),
+                "endsWith" => Ok(Self::EndsWith),
+                "contains" => Ok(Self::Contains),
+                "glob" => Ok(Self::Glob),
+                "regex" => Ok(Self::Regex),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyRuleView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyRuleView",
     ///  "type": "object",
     ///  "required": [
     ///    "condition",
@@ -4874,7 +10103,7 @@ pub mod policies_get {
     ///  ],
     ///  "properties": {
     ///    "condition": {
-    ///      "title": "IdentityPolicyGetCondition",
+    ///      "title": "IdentityPolicyConditionView",
     ///      "type": "object",
     ///      "required": [
     ///        "attribute",
@@ -4885,44 +10114,21 @@ pub mod policies_get {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyGetOperator",
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "principal.kind",
-    ///                "principal.id",
-    ///                "tenant.id",
-    ///                "contract.id",
-    ///                "permission",
-    ///                "resource.id"
-    ///              ]
+    ///          "title": "IdentityPolicyOperatorView",
+    ///          "oneOf": [
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///            },
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "eq",
-    ///                "ne",
-    ///                "like",
-    ///                "gt",
-    ///                "lt",
-    ///                "eqAttr"
-    ///              ]
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///            },
-    ///            "pattern": {
-    ///              "type": "string"
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///            },
-    ///            "value": {
-    ///              "type": "string",
-    ///              "maxLength": 256,
-    ///              "x-defer-string-length-validation": true
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///            }
-    ///          },
-    ///          "additionalProperties": false
+    ///          ]
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -4935,7 +10141,7 @@ pub mod policies_get {
     ///      ]
     ///    },
     ///    "obligations": {
-    ///      "title": "IdentityPolicyGetObligations",
+    ///      "title": "IdentityPolicyObligationsView",
     ///      "type": "object",
     ///      "properties": {
     ///        "fieldMask": {
@@ -4963,16 +10169,16 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyGetRule {
+    pub struct IdentityPolicyRuleView {
         #[redact(sensitivity = public)]
-        pub condition: IdentityPolicyGetCondition,
+        pub condition: IdentityPolicyConditionView,
         #[redact(sensitivity = public)]
-        pub effect: IdentityPolicyGetRuleEffect,
+        pub effect: IdentityPolicyRuleViewEffect,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub obligations: ::std::option::Option<IdentityPolicyGetObligations>,
+        pub obligations: ::std::option::Option<IdentityPolicyObligationsView>,
     }
-    ///`IdentityPolicyGetRuleEffect`
+    ///`IdentityPolicyRuleViewEffect`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -4998,13 +10204,13 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyGetRuleEffect {
+    pub enum IdentityPolicyRuleViewEffect {
         #[serde(rename = "allow")]
         Allow,
         #[serde(rename = "deny")]
         Deny,
     }
-    impl ::std::fmt::Display for IdentityPolicyGetRuleEffect {
+    impl ::std::fmt::Display for IdentityPolicyRuleViewEffect {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Allow => f.write_str("allow"),
@@ -5012,7 +10218,7 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyGetRuleEffect {
+    impl ::std::str::FromStr for IdentityPolicyRuleViewEffect {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5022,13 +10228,13 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyGetRuleEffect {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyGetRuleEffect {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -5036,7 +10242,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyGetRuleEffect {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -5044,13 +10250,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyGetView`
+    ///`IdentityPolicyView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyGetView",
+    ///  "title": "IdentityPolicyView",
     ///  "type": "object",
     ///  "required": [
     ///    "contractId",
@@ -5081,7 +10287,7 @@ pub mod policies_get {
     ///    "rules": {
     ///      "type": "array",
     ///      "items": {
-    ///        "title": "IdentityPolicyGetRule",
+    ///        "title": "IdentityPolicyRuleView",
     ///        "type": "object",
     ///        "required": [
     ///          "condition",
@@ -5089,7 +10295,7 @@ pub mod policies_get {
     ///        ],
     ///        "properties": {
     ///          "condition": {
-    ///            "title": "IdentityPolicyGetCondition",
+    ///            "title": "IdentityPolicyConditionView",
     ///            "type": "object",
     ///            "required": [
     ///              "attribute",
@@ -5100,44 +10306,21 @@ pub mod policies_get {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyGetOperator",
-    ///                "type": "object",
-    ///                "required": [
-    ///                  "kind"
-    ///                ],
-    ///                "properties": {
-    ///                  "attribute": {
-    ///                    "type": "string",
-    ///                    "enum": [
-    ///                      "principal.kind",
-    ///                      "principal.id",
-    ///                      "tenant.id",
-    ///                      "contract.id",
-    ///                      "permission",
-    ///                      "resource.id"
-    ///                    ]
+    ///                "title": "IdentityPolicyOperatorView",
+    ///                "oneOf": [
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///                  },
-    ///                  "kind": {
-    ///                    "type": "string",
-    ///                    "enum": [
-    ///                      "eq",
-    ///                      "ne",
-    ///                      "like",
-    ///                      "gt",
-    ///                      "lt",
-    ///                      "eqAttr"
-    ///                    ]
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///                  },
-    ///                  "pattern": {
-    ///                    "type": "string"
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///                  },
-    ///                  "value": {
-    ///                    "type": "string",
-    ///                    "maxLength": 256,
-    ///                    "x-defer-string-length-validation": true
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///                  }
-    ///                },
-    ///                "additionalProperties": false
+    ///                ]
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -5150,7 +10333,7 @@ pub mod policies_get {
     ///            ]
     ///          },
     ///          "obligations": {
-    ///            "title": "IdentityPolicyGetObligations",
+    ///            "title": "IdentityPolicyObligationsView",
     ///            "type": "object",
     ///            "properties": {
     ///              "fieldMask": {
@@ -5187,7 +10370,7 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyGetView {
+    pub struct IdentityPolicyView {
         #[serde(rename = "contractId")]
         #[redact(sensitivity = public)]
         pub contract_id: ::std::string::String,
@@ -5207,7 +10390,7 @@ pub mod policies_get {
         #[redact(sensitivity = public)]
         pub policy_id: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub rules: ::std::vec::Vec<IdentityPolicyGetRule>,
+        pub rules: ::std::vec::Vec<IdentityPolicyRuleView>,
         #[redact(sensitivity = public)]
         pub version: ::std::num::NonZeroU32,
     }
@@ -5220,7 +10403,7 @@ pub mod policies_get {
         "identity",
         "identity.policies-get",
         "v1",
-        "sha256:10647e26aa4351ee12a190e7105d7588e3b9b551a4d28a9c943fe47882d8bb02",
+        "sha256:9438224af3ba135a4748a9539f7d00b06d8ed9f1f6c29d4d44828d1bb3331ffb",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -5278,6 +10461,7 @@ pub mod policies_get {
 
 /// 端点 `policies-list` 派生契约（源 `policies-list/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
 pub mod policies_list {
+    #![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.
     /// Error types.
     pub mod error {
         /// Error from a `TryFrom` or `FromStr` implementation.
@@ -5365,7 +10549,7 @@ pub mod policies_list {
     ///    "data": {
     ///      "type": "array",
     ///      "items": {
-    ///        "title": "IdentityPolicyListView",
+    ///        "title": "IdentityPolicyView",
     ///        "type": "object",
     ///        "required": [
     ///          "contractId",
@@ -5396,7 +10580,7 @@ pub mod policies_list {
     ///          "rules": {
     ///            "type": "array",
     ///            "items": {
-    ///              "title": "IdentityPolicyListRule",
+    ///              "title": "IdentityPolicyRuleView",
     ///              "type": "object",
     ///              "required": [
     ///                "condition",
@@ -5404,7 +10588,7 @@ pub mod policies_list {
     ///              ],
     ///              "properties": {
     ///                "condition": {
-    ///                  "title": "IdentityPolicyListCondition",
+    ///                  "title": "IdentityPolicyConditionView",
     ///                  "type": "object",
     ///                  "required": [
     ///                    "attribute",
@@ -5415,44 +10599,21 @@ pub mod policies_list {
     ///                      "type": "string"
     ///                    },
     ///                    "operator": {
-    ///                      "title": "IdentityPolicyListOperator",
-    ///                      "type": "object",
-    ///                      "required": [
-    ///                        "kind"
-    ///                      ],
-    ///                      "properties": {
-    ///                        "attribute": {
-    ///                          "type": "string",
-    ///                          "enum": [
-    ///                            "principal.kind",
-    ///                            "principal.id",
-    ///                            "tenant.id",
-    ///                            "contract.id",
-    ///                            "permission",
-    ///                            "resource.id"
-    ///                          ]
+    ///                      "title": "IdentityPolicyOperatorView",
+    ///                      "oneOf": [
+    ///                        {
+    ///                          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///                        },
-    ///                        "kind": {
-    ///                          "type": "string",
-    ///                          "enum": [
-    ///                            "eq",
-    ///                            "ne",
-    ///                            "like",
-    ///                            "gt",
-    ///                            "lt",
-    ///                            "eqAttr"
-    ///                          ]
+    ///                        {
+    ///                          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///                        },
-    ///                        "pattern": {
-    ///                          "type": "string"
+    ///                        {
+    ///                          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///                        },
-    ///                        "value": {
-    ///                          "type": "string",
-    ///                          "maxLength": 256,
-    ///                          "x-defer-string-length-validation": true
+    ///                        {
+    ///                          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///                        }
-    ///                      },
-    ///                      "additionalProperties": false
+    ///                      ]
     ///                    }
     ///                  },
     ///                  "additionalProperties": false
@@ -5465,7 +10626,7 @@ pub mod policies_list {
     ///                  ]
     ///                },
     ///                "obligations": {
-    ///                  "title": "IdentityPolicyListObligations",
+    ///                  "title": "IdentityPolicyObligationsView",
     ///                  "type": "object",
     ///                  "properties": {
     ///                    "fieldMask": {
@@ -5514,7 +10675,7 @@ pub mod policies_list {
     #[serde(deny_unknown_fields)]
     pub struct IdentityPoliciesListResponse {
         #[redact(sensitivity = public)]
-        pub data: ::std::vec::Vec<IdentityPolicyListView>,
+        pub data: ::std::vec::Vec<IdentityPolicyView>,
         #[serde(rename = "hasMore")]
         #[redact(sensitivity = public)]
         pub has_more: bool,
@@ -5526,13 +10687,13 @@ pub mod policies_list {
         #[redact(sensitivity = public)]
         pub next_cursor: ::std::option::Option<::std::string::String>,
     }
-    ///`IdentityPolicyListCondition`
+    ///`IdentityPolicyConditionView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyListCondition",
+    ///  "title": "IdentityPolicyConditionView",
     ///  "type": "object",
     ///  "required": [
     ///    "attribute",
@@ -5543,44 +10704,21 @@ pub mod policies_list {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyListOperator",
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "principal.kind",
-    ///            "principal.id",
-    ///            "tenant.id",
-    ///            "contract.id",
-    ///            "permission",
-    ///            "resource.id"
-    ///          ]
+    ///      "title": "IdentityPolicyOperatorView",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///        },
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "eq",
-    ///            "ne",
-    ///            "like",
-    ///            "gt",
-    ///            "lt",
-    ///            "eqAttr"
-    ///          ]
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///        },
-    ///        "pattern": {
-    ///          "type": "string"
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///        },
-    ///        "value": {
-    ///          "type": "string",
-    ///          "maxLength": 256,
-    ///          "x-defer-string-length-validation": true
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///        }
-    ///      },
-    ///      "additionalProperties": false
+    ///      ]
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -5589,19 +10727,19 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyListCondition {
+    pub struct IdentityPolicyConditionView {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyListOperator,
+        pub operator: IdentityPolicyOperatorView,
     }
-    ///`IdentityPolicyListObligations`
+    ///`IdentityPolicyObligationsView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyListObligations",
+    ///  "title": "IdentityPolicyObligationsView",
     ///  "type": "object",
     ///  "properties": {
     ///    "fieldMask": {
@@ -5626,7 +10764,7 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyListObligations {
+    pub struct IdentityPolicyObligationsView {
         #[serde(
             rename = "fieldMask",
             default,
@@ -5640,10 +10778,10 @@ pub mod policies_list {
             skip_serializing_if = "::std::option::Option::is_none"
         )]
         #[redact(sensitivity = public)]
-        pub row_scope: ::std::option::Option<IdentityPolicyListObligationsRowScope>,
+        pub row_scope: ::std::option::Option<IdentityPolicyObligationsViewRowScope>,
     }
     #[allow(clippy::derivable_impls)]
-    impl ::std::default::Default for IdentityPolicyListObligations {
+    impl ::std::default::Default for IdentityPolicyObligationsView {
         fn default() -> Self {
             Self {
                 field_mask: Default::default(),
@@ -5651,7 +10789,7 @@ pub mod policies_list {
             }
         }
     }
-    ///`IdentityPolicyListObligationsRowScope`
+    ///`IdentityPolicyObligationsViewRowScope`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5678,7 +10816,7 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyListObligationsRowScope {
+    pub enum IdentityPolicyObligationsViewRowScope {
         #[serde(rename = "selfOnly")]
         SelfOnly,
         #[serde(rename = "device")]
@@ -5686,7 +10824,7 @@ pub mod policies_list {
         #[serde(rename = "tenant")]
         Tenant,
     }
-    impl ::std::fmt::Display for IdentityPolicyListObligationsRowScope {
+    impl ::std::fmt::Display for IdentityPolicyObligationsViewRowScope {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::SelfOnly => f.write_str("selfOnly"),
@@ -5695,7 +10833,7 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyListObligationsRowScope {
+    impl ::std::str::FromStr for IdentityPolicyObligationsViewRowScope {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5706,13 +10844,13 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyListObligationsRowScope {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyObligationsViewRowScope {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListObligationsRowScope {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyObligationsViewRowScope {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -5720,7 +10858,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListObligationsRowScope {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyObligationsViewRowScope {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -5728,69 +10866,117 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyListOperator`
+    ///`IdentityPolicyOperatorView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyListOperator",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "kind"
-    ///  ],
-    ///  "properties": {
-    ///    "attribute": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "principal.kind",
-    ///        "principal.id",
-    ///        "tenant.id",
-    ///        "contract.id",
-    ///        "permission",
-    ///        "resource.id"
-    ///      ]
+    ///  "title": "IdentityPolicyOperatorView",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///    },
-    ///    "kind": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "eq",
-    ///        "ne",
-    ///        "like",
-    ///        "gt",
-    ///        "lt",
-    ///        "eqAttr"
-    ///      ]
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///    },
-    ///    "pattern": {
-    ///      "type": "string"
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///    },
-    ///    "value": {
-    ///      "type": "string",
-    ///      "maxLength": 256,
-    ///      "x-defer-string-length-validation": true
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///    }
-    ///  },
-    ///  "additionalProperties": false
+    ///  ]
     ///}
     /// ```
     /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyListOperator {
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub attribute: ::std::option::Option<IdentityPolicyListOperatorAttribute>,
-        #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyListOperatorKind,
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub pattern: ::std::option::Option<::std::string::String>,
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub value: ::std::option::Option<IdentityPolicyListOperatorValue>,
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyOperatorView {
+        EqualityFamily(IdentityPolicyOperatorViewEqualityFamily),
+        OrderingFamily(IdentityPolicyOperatorViewOrderingFamily),
+        MembershipFamily(IdentityPolicyOperatorViewMembershipFamily),
+        StringFamily(IdentityPolicyOperatorViewStringFamily),
     }
-    ///`IdentityPolicyListOperatorAttribute`
+    impl ::std::convert::From<IdentityPolicyOperatorViewEqualityFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewEqualityFamily) -> Self {
+            Self::EqualityFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewOrderingFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewOrderingFamily) -> Self {
+            Self::OrderingFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewMembershipFamily>
+        for IdentityPolicyOperatorView
+    {
+        fn from(value: IdentityPolicyOperatorViewMembershipFamily) -> Self {
+            Self::MembershipFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewStringFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewStringFamily) -> Self {
+            Self::StringFamily(value)
+        }
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewAttributeOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "kind",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "attribute"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewAttributeOperand {
+        #[serde(rename = "attribute")]
+        Attribute {
+            attribute: IdentityPolicyOperatorViewAttributeOperandAttribute,
+            #[serde(rename = "valueType")]
+            value_type: IdentityPolicyOperatorViewAttributeOperandValueType,
+        },
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5820,7 +11006,7 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyListOperatorAttribute {
+    pub enum IdentityPolicyOperatorViewAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -5834,7 +11020,7 @@ pub mod policies_list {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyListOperatorAttribute {
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -5846,7 +11032,7 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyListOperatorAttribute {
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5860,13 +11046,15 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyListOperatorAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListOperatorAttribute {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandAttribute
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -5874,7 +11062,9 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListOperatorAttribute {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandAttribute
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -5882,7 +11072,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyListOperatorKind`
+    ///`IdentityPolicyOperatorViewAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5890,12 +11080,7 @@ pub mod policies_list {
     ///{
     ///  "type": "string",
     ///  "enum": [
-    ///    "eq",
-    ///    "ne",
-    ///    "like",
-    ///    "gt",
-    ///    "lt",
-    ///    "eqAttr"
+    ///    "string"
     ///  ]
     ///}
     /// ```
@@ -5912,53 +11097,35 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyListOperatorKind {
-        #[serde(rename = "eq")]
-        Eq,
-        #[serde(rename = "ne")]
-        Ne,
-        #[serde(rename = "like")]
-        Like,
-        #[serde(rename = "gt")]
-        Gt,
-        #[serde(rename = "lt")]
-        Lt,
-        #[serde(rename = "eqAttr")]
-        EqAttr,
+    pub enum IdentityPolicyOperatorViewAttributeOperandValueType {
+        #[serde(rename = "string")]
+        String,
     }
-    impl ::std::fmt::Display for IdentityPolicyListOperatorKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
-                Self::Eq => f.write_str("eq"),
-                Self::Ne => f.write_str("ne"),
-                Self::Like => f.write_str("like"),
-                Self::Gt => f.write_str("gt"),
-                Self::Lt => f.write_str("lt"),
-                Self::EqAttr => f.write_str("eqAttr"),
+                Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyListOperatorKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
-                "eq" => Ok(Self::Eq),
-                "ne" => Ok(Self::Ne),
-                "like" => Ok(Self::Like),
-                "gt" => Ok(Self::Gt),
-                "lt" => Ok(Self::Lt),
-                "eqAttr" => Ok(Self::EqAttr),
+                "string" => Ok(Self::String),
                 _ => Err("invalid value".into()),
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyListOperatorKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListOperatorKind {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -5966,7 +11133,9 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListOperatorKind {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -5974,47 +11143,114 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyListOperatorValue`
+    ///`IdentityPolicyOperatorViewEqualityFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "equality"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///        }
+    ///      ]
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewEqualityFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewEqualityFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewEqualityFamilyOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewEqualityFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
     ///  "type": "string",
-    ///  "maxLength": 256,
-    ///  "x-defer-string-length-validation": true
+    ///  "enum": [
+    ///    "equality"
+    ///  ]
     ///}
     /// ```
     /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyListOperatorValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyListOperatorValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyFamily {
+        #[serde(rename = "equality")]
+        Equality,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Equality => f.write_str("equality"),
+            }
         }
     }
-    impl ::std::convert::From<IdentityPolicyListOperatorValue> for ::std::string::String {
-        fn from(value: IdentityPolicyListOperatorValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyListOperatorValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            Ok(Self(value.to_string()))
+            match value {
+                "equality" => Ok(Self::Equality),
+                _ => Err("invalid value".into()),
+            }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyListOperatorValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListOperatorValue {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyFamily
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -6022,7 +11258,9 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListOperatorValue {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyFamily
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -6030,7 +11268,400 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyListOperatorValue {
+    ///`IdentityPolicyOperatorViewEqualityFamilyOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyOperatorViewLiteralOperand),
+        AttributeOperand(IdentityPolicyOperatorViewAttributeOperand),
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperand>
+        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyOperatorViewLiteralOperand) -> Self {
+            Self::LiteralOperand(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewAttributeOperand>
+        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyOperatorViewAttributeOperand) -> Self {
+            Self::AttributeOperand(value)
+        }
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 256
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "boolean"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewLiteralOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: IdentityPolicyOperatorViewLiteralOperandValue,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: bool,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: IdentityPolicyOperatorViewLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorViewLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -6042,13 +11673,1451 @@ pub mod policies_list {
                 })
         }
     }
-    ///`IdentityPolicyListRule`
+    ///`IdentityPolicyOperatorViewMembershipFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyListRule",
+    ///  "title": "IdentityPolicyOperatorViewMembershipFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "membership"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewSetOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "in",
+    ///        "notIn"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewMembershipFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewMembershipFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewSetOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewMembershipFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "membership"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewMembershipFamilyFamily {
+        #[serde(rename = "membership")]
+        Membership,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Membership => f.write_str("membership"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "membership" => Ok(Self::Membership),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "in",
+    ///    "notIn"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        #[serde(rename = "in")]
+        In,
+        #[serde(rename = "notIn")]
+        NotIn,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::In => f.write_str("in"),
+                Self::NotIn => f.write_str("notIn"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "in" => Ok(Self::In),
+                "notIn" => Ok(Self::NotIn),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewNumericLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewNumericLiteralOperand {
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            value: IdentityPolicyOperatorViewNumericLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 64,
+    ///  "minLength": 1,
+    ///  "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewNumericLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewNumericLiteralOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyOperatorViewNumericLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 64usize {
+                return Err("longer than 64 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| {
+                    ::regress::Regex::new(
+                        "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$",
+                    )
+                    .unwrap()
+                });
+            if PATTERN.find(value).is_none() {
+                return Err(
+                "doesn't match pattern \"^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$\""
+                    .into(),
+            );
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewOrderingFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ordering"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewNumericLiteralOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "gt",
+    ///        "ge",
+    ///        "lt",
+    ///        "le"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewOrderingFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewOrderingFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewNumericLiteralOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewOrderingFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ordering"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewOrderingFamilyFamily {
+        #[serde(rename = "ordering")]
+        Ordering,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Ordering => f.write_str("ordering"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ordering" => Ok(Self::Ordering),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "gt",
+    ///    "ge",
+    ///    "lt",
+    ///    "le"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "ge")]
+        Ge,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "le")]
+        Le,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Gt => f.write_str("gt"),
+                Self::Ge => f.write_str("ge"),
+                Self::Lt => f.write_str("lt"),
+                Self::Le => f.write_str("le"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "gt" => Ok(Self::Gt),
+                "ge" => Ok(Self::Ge),
+                "lt" => Ok(Self::Lt),
+                "le" => Ok(Self::Le),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewPatternOperand",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind",
+    ///    "value",
+    ///    "valueType"
+    ///  ],
+    ///  "properties": {
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "pattern"
+    ///      ]
+    ///    },
+    ///    "value": {
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "minLength": 1
+    ///    },
+    ///    "valueType": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewPatternOperand {
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyOperatorViewPatternOperandKind,
+        #[redact(sensitivity = public)]
+        pub value: IdentityPolicyOperatorViewPatternOperandValue,
+        #[serde(rename = "valueType")]
+        #[redact(sensitivity = public)]
+        pub value_type: IdentityPolicyOperatorViewPatternOperandValueType,
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "pattern"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewPatternOperandKind {
+        #[serde(rename = "pattern")]
+        Pattern,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Pattern => f.write_str("pattern"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "pattern" => Ok(Self::Pattern),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewPatternOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewPatternOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewPatternOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorViewPatternOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewPatternOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandValueType`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewPatternOperandValueType {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandValueType {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValueType {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValueType {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewSetOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewSetOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 256
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "boolean"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "integer",
+    ///            "format": "int64"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 64,
+    ///            "minLength": 1,
+    ///            "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewSetOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<bool>,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<i64>,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+        },
+    }
+    ///`IdentityPolicyOperatorViewSetOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "set"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewSetOperandKind {
+        #[serde(rename = "set")]
+        Set,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewSetOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Set => f.write_str("set"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "set" => Ok(Self::Set),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewSetOperandValuesItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewSetOperandValuesItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewSetOperandValuesItem>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyOperatorViewSetOperandValuesItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewSetOperandValuesItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewStringFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewStringFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewPatternOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "startsWith",
+    ///        "endsWith",
+    ///        "contains",
+    ///        "glob",
+    ///        "regex"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewStringFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewStringFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewPatternOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewStringFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewStringFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewStringFamilyFamily {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewStringFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "startsWith",
+    ///    "endsWith",
+    ///    "contains",
+    ///    "glob",
+    ///    "regex"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewStringFamilyPredicate {
+        #[serde(rename = "startsWith")]
+        StartsWith,
+        #[serde(rename = "endsWith")]
+        EndsWith,
+        #[serde(rename = "contains")]
+        Contains,
+        #[serde(rename = "glob")]
+        Glob,
+        #[serde(rename = "regex")]
+        Regex,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::StartsWith => f.write_str("startsWith"),
+                Self::EndsWith => f.write_str("endsWith"),
+                Self::Contains => f.write_str("contains"),
+                Self::Glob => f.write_str("glob"),
+                Self::Regex => f.write_str("regex"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "startsWith" => Ok(Self::StartsWith),
+                "endsWith" => Ok(Self::EndsWith),
+                "contains" => Ok(Self::Contains),
+                "glob" => Ok(Self::Glob),
+                "regex" => Ok(Self::Regex),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyRuleView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyRuleView",
     ///  "type": "object",
     ///  "required": [
     ///    "condition",
@@ -6056,7 +13125,7 @@ pub mod policies_list {
     ///  ],
     ///  "properties": {
     ///    "condition": {
-    ///      "title": "IdentityPolicyListCondition",
+    ///      "title": "IdentityPolicyConditionView",
     ///      "type": "object",
     ///      "required": [
     ///        "attribute",
@@ -6067,44 +13136,21 @@ pub mod policies_list {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyListOperator",
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "principal.kind",
-    ///                "principal.id",
-    ///                "tenant.id",
-    ///                "contract.id",
-    ///                "permission",
-    ///                "resource.id"
-    ///              ]
+    ///          "title": "IdentityPolicyOperatorView",
+    ///          "oneOf": [
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///            },
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "eq",
-    ///                "ne",
-    ///                "like",
-    ///                "gt",
-    ///                "lt",
-    ///                "eqAttr"
-    ///              ]
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///            },
-    ///            "pattern": {
-    ///              "type": "string"
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///            },
-    ///            "value": {
-    ///              "type": "string",
-    ///              "maxLength": 256,
-    ///              "x-defer-string-length-validation": true
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///            }
-    ///          },
-    ///          "additionalProperties": false
+    ///          ]
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -6117,7 +13163,7 @@ pub mod policies_list {
     ///      ]
     ///    },
     ///    "obligations": {
-    ///      "title": "IdentityPolicyListObligations",
+    ///      "title": "IdentityPolicyObligationsView",
     ///      "type": "object",
     ///      "properties": {
     ///        "fieldMask": {
@@ -6145,16 +13191,16 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyListRule {
+    pub struct IdentityPolicyRuleView {
         #[redact(sensitivity = public)]
-        pub condition: IdentityPolicyListCondition,
+        pub condition: IdentityPolicyConditionView,
         #[redact(sensitivity = public)]
-        pub effect: IdentityPolicyListRuleEffect,
+        pub effect: IdentityPolicyRuleViewEffect,
         #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
         #[redact(sensitivity = public)]
-        pub obligations: ::std::option::Option<IdentityPolicyListObligations>,
+        pub obligations: ::std::option::Option<IdentityPolicyObligationsView>,
     }
-    ///`IdentityPolicyListRuleEffect`
+    ///`IdentityPolicyRuleViewEffect`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -6180,13 +13226,13 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyListRuleEffect {
+    pub enum IdentityPolicyRuleViewEffect {
         #[serde(rename = "allow")]
         Allow,
         #[serde(rename = "deny")]
         Deny,
     }
-    impl ::std::fmt::Display for IdentityPolicyListRuleEffect {
+    impl ::std::fmt::Display for IdentityPolicyRuleViewEffect {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Allow => f.write_str("allow"),
@@ -6194,7 +13240,7 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyListRuleEffect {
+    impl ::std::str::FromStr for IdentityPolicyRuleViewEffect {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -6204,13 +13250,13 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyListRuleEffect {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyListRuleEffect {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -6218,7 +13264,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyListRuleEffect {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyRuleViewEffect {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -6226,13 +13272,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyListView`
+    ///`IdentityPolicyView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyListView",
+    ///  "title": "IdentityPolicyView",
     ///  "type": "object",
     ///  "required": [
     ///    "contractId",
@@ -6263,7 +13309,7 @@ pub mod policies_list {
     ///    "rules": {
     ///      "type": "array",
     ///      "items": {
-    ///        "title": "IdentityPolicyListRule",
+    ///        "title": "IdentityPolicyRuleView",
     ///        "type": "object",
     ///        "required": [
     ///          "condition",
@@ -6271,7 +13317,7 @@ pub mod policies_list {
     ///        ],
     ///        "properties": {
     ///          "condition": {
-    ///            "title": "IdentityPolicyListCondition",
+    ///            "title": "IdentityPolicyConditionView",
     ///            "type": "object",
     ///            "required": [
     ///              "attribute",
@@ -6282,44 +13328,21 @@ pub mod policies_list {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyListOperator",
-    ///                "type": "object",
-    ///                "required": [
-    ///                  "kind"
-    ///                ],
-    ///                "properties": {
-    ///                  "attribute": {
-    ///                    "type": "string",
-    ///                    "enum": [
-    ///                      "principal.kind",
-    ///                      "principal.id",
-    ///                      "tenant.id",
-    ///                      "contract.id",
-    ///                      "permission",
-    ///                      "resource.id"
-    ///                    ]
+    ///                "title": "IdentityPolicyOperatorView",
+    ///                "oneOf": [
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///                  },
-    ///                  "kind": {
-    ///                    "type": "string",
-    ///                    "enum": [
-    ///                      "eq",
-    ///                      "ne",
-    ///                      "like",
-    ///                      "gt",
-    ///                      "lt",
-    ///                      "eqAttr"
-    ///                    ]
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///                  },
-    ///                  "pattern": {
-    ///                    "type": "string"
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///                  },
-    ///                  "value": {
-    ///                    "type": "string",
-    ///                    "maxLength": 256,
-    ///                    "x-defer-string-length-validation": true
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///                  }
-    ///                },
-    ///                "additionalProperties": false
+    ///                ]
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -6332,7 +13355,7 @@ pub mod policies_list {
     ///            ]
     ///          },
     ///          "obligations": {
-    ///            "title": "IdentityPolicyListObligations",
+    ///            "title": "IdentityPolicyObligationsView",
     ///            "type": "object",
     ///            "properties": {
     ///              "fieldMask": {
@@ -6369,7 +13392,7 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyListView {
+    pub struct IdentityPolicyView {
         #[serde(rename = "contractId")]
         #[redact(sensitivity = public)]
         pub contract_id: ::std::string::String,
@@ -6389,7 +13412,7 @@ pub mod policies_list {
         #[redact(sensitivity = public)]
         pub policy_id: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub rules: ::std::vec::Vec<IdentityPolicyListRule>,
+        pub rules: ::std::vec::Vec<IdentityPolicyRuleView>,
         #[redact(sensitivity = public)]
         pub version: ::std::num::NonZeroU32,
     }
@@ -6413,7 +13436,7 @@ pub mod policies_list {
         "identity",
         "identity.policies-list",
         "v1",
-        "sha256:63d7a3f344d702015e45fc6a183e2f83cb750886fca9dcdcb5074a29ca62a4f9",
+        "sha256:d1ab0c7aaf9ddc5a6a88b761f62fd891deb074fe1632521ba7d8931ed5794863",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -6474,6 +13497,7 @@ pub mod policies_list {
 
 /// 端点 `policies-update` 派生契约（源 `policies-update/contract.toml`）。由 `cargo xtask codegen` 派生；勿手改。
 pub mod policies_update {
+    #![allow(clippy::unwrap_used)] // reason: typify emits infallible static regex initialization.
     /// Error types.
     pub mod error {
         /// Error from a `TryFrom` or `FromStr` implementation.
@@ -6560,146 +13584,16 @@ pub mod policies_update {
     ///                "title": "IdentityPolicyUpdateOperator",
     ///                "oneOf": [
     ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "value"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "eq"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256
-    ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    "$ref": "#/definitions/IdentityPolicyUpdateOperatorEqualityFamily"
     ///                  },
     ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "value"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "ne"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256
-    ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    "$ref": "#/definitions/IdentityPolicyUpdateOperatorOrderingFamily"
     ///                  },
     ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "pattern"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "like"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": {
-    ///                        "type": "string"
-    ///                      },
-    ///                      "value": false
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    "$ref": "#/definitions/IdentityPolicyUpdateOperatorMembershipFamily"
     ///                  },
     ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "value"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "gt"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256
-    ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
-    ///                  },
-    ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind",
-    ///                      "value"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": false,
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "lt"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256
-    ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
-    ///                  },
-    ///                  {
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "attribute",
-    ///                      "kind"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "principal.kind",
-    ///                          "principal.id",
-    ///                          "tenant.id",
-    ///                          "contract.id",
-    ///                          "permission",
-    ///                          "resource.id"
-    ///                        ]
-    ///                      },
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "eqAttr"
-    ///                        ]
-    ///                      },
-    ///                      "pattern": false,
-    ///                      "value": false
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    "$ref": "#/definitions/IdentityPolicyUpdateOperatorStringFamily"
     ///                  }
     ///                ]
     ///              }
@@ -6782,7 +13676,7 @@ pub mod policies_update {
     ///  ],
     ///  "properties": {
     ///    "data": {
-    ///      "title": "IdentityPolicyUpdateView",
+    ///      "title": "IdentityPolicyView",
     ///      "type": "object",
     ///      "required": [
     ///        "contractId",
@@ -6813,7 +13707,7 @@ pub mod policies_update {
     ///        "rules": {
     ///          "type": "array",
     ///          "items": {
-    ///            "title": "IdentityPolicyUpdateRuleView",
+    ///            "title": "IdentityPolicyRuleView",
     ///            "type": "object",
     ///            "required": [
     ///              "condition",
@@ -6821,7 +13715,7 @@ pub mod policies_update {
     ///            ],
     ///            "properties": {
     ///              "condition": {
-    ///                "title": "IdentityPolicyUpdateConditionView",
+    ///                "title": "IdentityPolicyConditionView",
     ///                "type": "object",
     ///                "required": [
     ///                  "attribute",
@@ -6832,45 +13726,21 @@ pub mod policies_update {
     ///                    "type": "string"
     ///                  },
     ///                  "operator": {
-    ///                    "title": "IdentityPolicyUpdateOperatorView",
-    ///                    "type": "object",
-    ///                    "required": [
-    ///                      "kind"
-    ///                    ],
-    ///                    "properties": {
-    ///                      "attribute": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "principal.kind",
-    ///                          "principal.id",
-    ///                          "tenant.id",
-    ///                          "contract.id",
-    ///                          "permission",
-    ///                          "resource.id"
-    ///                        ]
+    ///                    "title": "IdentityPolicyOperatorView",
+    ///                    "oneOf": [
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///                      },
-    ///                      "kind": {
-    ///                        "type": "string",
-    ///                        "enum": [
-    ///                          "eq",
-    ///                          "ne",
-    ///                          "like",
-    ///                          "gt",
-    ///                          "lt",
-    ///                          "eqAttr"
-    ///                        ]
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///                      },
-    ///                      "pattern": {
-    ///                        "type": "string"
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///                      },
-    ///                      "value": {
-    ///                        "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                        "type": "string",
-    ///                        "maxLength": 256,
-    ///                        "x-defer-string-length-validation": true
+    ///                      {
+    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///                      }
-    ///                    },
-    ///                    "additionalProperties": false
+    ///                    ]
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -6883,7 +13753,7 @@ pub mod policies_update {
     ///                ]
     ///              },
     ///              "obligations": {
-    ///                "title": "IdentityPolicyUpdateObligationsView",
+    ///                "title": "IdentityPolicyObligationsView",
     ///                "type": "object",
     ///                "properties": {
     ///                  "fieldMask": {
@@ -6925,15 +13795,15 @@ pub mod policies_update {
     #[serde(deny_unknown_fields)]
     pub struct IdentityPoliciesUpdateResponse {
         #[redact(sensitivity = public)]
-        pub data: IdentityPolicyUpdateView,
+        pub data: IdentityPolicyView,
     }
-    ///`IdentityPolicyUpdateCondition`
+    ///`IdentityPolicyConditionView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyUpdateCondition",
+    ///  "title": "IdentityPolicyConditionView",
     ///  "type": "object",
     ///  "required": [
     ///    "attribute",
@@ -6944,149 +13814,19 @@ pub mod policies_update {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyUpdateOperator",
+    ///      "title": "IdentityPolicyOperatorView",
     ///      "oneOf": [
     ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "value"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "eq"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///        },
     ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "value"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "ne"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///        },
     ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "pattern"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "like"
-    ///              ]
-    ///            },
-    ///            "pattern": {
-    ///              "type": "string"
-    ///            },
-    ///            "value": false
-    ///          },
-    ///          "additionalProperties": false
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///        },
     ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "value"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "gt"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
-    ///        },
-    ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind",
-    ///            "value"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": false,
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "lt"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
-    ///        },
-    ///        {
-    ///          "type": "object",
-    ///          "required": [
-    ///            "attribute",
-    ///            "kind"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "principal.kind",
-    ///                "principal.id",
-    ///                "tenant.id",
-    ///                "contract.id",
-    ///                "permission",
-    ///                "resource.id"
-    ///              ]
-    ///            },
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "eqAttr"
-    ///              ]
-    ///            },
-    ///            "pattern": false,
-    ///            "value": false
-    ///          },
-    ///          "additionalProperties": false
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///        }
     ///      ]
     ///    }
@@ -7097,13 +13837,256 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateCondition {
+    pub struct IdentityPolicyConditionView {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyUpdateOperator,
+        pub operator: IdentityPolicyOperatorView,
     }
-    ///`IdentityPolicyUpdateConditionOperatorAttribute`
+    ///`IdentityPolicyObligationsView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyObligationsView",
+    ///  "type": "object",
+    ///  "properties": {
+    ///    "fieldMask": {
+    ///      "default": [],
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "string"
+    ///      }
+    ///    },
+    ///    "rowScope": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "selfOnly",
+    ///        "device",
+    ///        "tenant"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyObligationsView {
+        #[serde(
+            rename = "fieldMask",
+            default,
+            skip_serializing_if = "::std::vec::Vec::is_empty"
+        )]
+        #[redact(sensitivity = public)]
+        pub field_mask: ::std::vec::Vec<::std::string::String>,
+        #[serde(
+            rename = "rowScope",
+            default,
+            skip_serializing_if = "::std::option::Option::is_none"
+        )]
+        #[redact(sensitivity = public)]
+        pub row_scope: ::std::option::Option<IdentityPolicyObligationsViewRowScope>,
+    }
+    #[allow(clippy::derivable_impls)]
+    impl ::std::default::Default for IdentityPolicyObligationsView {
+        fn default() -> Self {
+            Self {
+                field_mask: Default::default(),
+                row_scope: Default::default(),
+            }
+        }
+    }
+    ///`IdentityPolicyObligationsViewRowScope`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "selfOnly",
+    ///    "device",
+    ///    "tenant"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyObligationsViewRowScope {
+        #[serde(rename = "selfOnly")]
+        SelfOnly,
+        #[serde(rename = "device")]
+        Device,
+        #[serde(rename = "tenant")]
+        Tenant,
+    }
+    impl ::std::fmt::Display for IdentityPolicyObligationsViewRowScope {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::SelfOnly => f.write_str("selfOnly"),
+                Self::Device => f.write_str("device"),
+                Self::Tenant => f.write_str("tenant"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyObligationsViewRowScope {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "selfOnly" => Ok(Self::SelfOnly),
+                "device" => Ok(Self::Device),
+                "tenant" => Ok(Self::Tenant),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyObligationsViewRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyObligationsViewRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyObligationsViewRowScope {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorView",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyOperatorView {
+        EqualityFamily(IdentityPolicyOperatorViewEqualityFamily),
+        OrderingFamily(IdentityPolicyOperatorViewOrderingFamily),
+        MembershipFamily(IdentityPolicyOperatorViewMembershipFamily),
+        StringFamily(IdentityPolicyOperatorViewStringFamily),
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewEqualityFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewEqualityFamily) -> Self {
+            Self::EqualityFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewOrderingFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewOrderingFamily) -> Self {
+            Self::OrderingFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewMembershipFamily>
+        for IdentityPolicyOperatorView
+    {
+        fn from(value: IdentityPolicyOperatorViewMembershipFamily) -> Self {
+            Self::MembershipFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewStringFamily> for IdentityPolicyOperatorView {
+        fn from(value: IdentityPolicyOperatorViewStringFamily) -> Self {
+            Self::StringFamily(value)
+        }
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewAttributeOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "kind",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "principal.kind",
+    ///            "principal.id",
+    ///            "tenant.id",
+    ///            "contract.id",
+    ///            "permission",
+    ///            "resource.id"
+    ///          ]
+    ///        },
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "attribute"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "kind", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewAttributeOperand {
+        #[serde(rename = "attribute")]
+        Attribute {
+            attribute: IdentityPolicyOperatorViewAttributeOperandAttribute,
+            #[serde(rename = "valueType")]
+            value_type: IdentityPolicyOperatorViewAttributeOperandValueType,
+        },
+    }
+    ///`IdentityPolicyOperatorViewAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -7133,7 +14116,7 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyUpdateConditionOperatorAttribute {
+    pub enum IdentityPolicyOperatorViewAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -7147,7 +14130,7 @@ pub mod policies_update {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyUpdateConditionOperatorAttribute {
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -7159,7 +14142,7 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyUpdateConditionOperatorAttribute {
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -7173,14 +14156,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateConditionOperatorAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateConditionOperatorAttribute
+        for IdentityPolicyOperatorViewAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -7190,7 +14173,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateConditionOperatorAttribute
+        for IdentityPolicyOperatorViewAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -7199,51 +14182,59 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+    ///`IdentityPolicyOperatorViewAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
     ///  "type": "string",
-    ///  "maxLength": 256
+    ///  "enum": [
+    ///    "string"
+    ///  ]
     ///}
     /// ```
     /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyUpdateConditionOperatorValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyUpdateConditionOperatorValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewAttributeOperandValueType {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandValueType {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
         }
     }
-    impl ::std::convert::From<IdentityPolicyUpdateConditionOperatorValue> for ::std::string::String {
-        fn from(value: IdentityPolicyUpdateConditionOperatorValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateConditionOperatorValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
             }
-            Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateConditionOperatorValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateConditionOperatorValue
+        for IdentityPolicyOperatorViewAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -7252,7 +14243,9 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateConditionOperatorValue {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -7260,7 +14253,525 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateConditionOperatorValue {
+    ///`IdentityPolicyOperatorViewEqualityFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "equality"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///        }
+    ///      ]
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewEqualityFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewEqualityFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewEqualityFamilyOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewEqualityFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "equality"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyFamily {
+        #[serde(rename = "equality")]
+        Equality,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Equality => f.write_str("equality"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "equality" => Ok(Self::Equality),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyOperatorViewLiteralOperand),
+        AttributeOperand(IdentityPolicyOperatorViewAttributeOperand),
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperand>
+        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyOperatorViewLiteralOperand) -> Self {
+            Self::LiteralOperand(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewAttributeOperand>
+        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyOperatorViewAttributeOperand) -> Self {
+            Self::AttributeOperand(value)
+        }
+    }
+    ///`IdentityPolicyOperatorViewEqualityFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 256
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "boolean"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewLiteralOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: IdentityPolicyOperatorViewLiteralOperandValue,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: bool,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            value: IdentityPolicyOperatorViewLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorViewLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -7272,59 +14783,1513 @@ pub mod policies_update {
                 })
         }
     }
-    ///`IdentityPolicyUpdateConditionView`
+    ///`IdentityPolicyOperatorViewMembershipFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyUpdateConditionView",
+    ///  "title": "IdentityPolicyOperatorViewMembershipFamily",
     ///  "type": "object",
     ///  "required": [
-    ///    "attribute",
-    ///    "operator"
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
     ///  ],
     ///  "properties": {
-    ///    "attribute": {
-    ///      "type": "string"
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "membership"
+    ///      ]
     ///    },
-    ///    "operator": {
-    ///      "title": "IdentityPolicyUpdateOperatorView",
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewSetOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "in",
+    ///        "notIn"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewMembershipFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewMembershipFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewSetOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewMembershipFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "membership"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewMembershipFamilyFamily {
+        #[serde(rename = "membership")]
+        Membership,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Membership => f.write_str("membership"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "membership" => Ok(Self::Membership),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewMembershipFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "in",
+    ///    "notIn"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        #[serde(rename = "in")]
+        In,
+        #[serde(rename = "notIn")]
+        NotIn,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::In => f.write_str("in"),
+                Self::NotIn => f.write_str("notIn"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "in" => Ok(Self::In),
+                "notIn" => Ok(Self::NotIn),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewNumericLiteralOperand",
+    ///  "oneOf": [
+    ///    {
     ///      "type": "object",
     ///      "required": [
-    ///        "kind"
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
     ///      ],
     ///      "properties": {
-    ///        "attribute": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "principal.kind",
-    ///            "principal.id",
-    ///            "tenant.id",
-    ///            "contract.id",
-    ///            "permission",
-    ///            "resource.id"
-    ///          ]
-    ///        },
     ///        "kind": {
     ///          "type": "string",
     ///          "enum": [
-    ///            "eq",
-    ///            "ne",
-    ///            "like",
-    ///            "gt",
-    ///            "lt",
-    ///            "eqAttr"
+    ///            "literal"
     ///          ]
     ///        },
-    ///        "pattern": {
-    ///          "type": "string"
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
     ///        },
     ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
     ///          "type": "string",
-    ///          "maxLength": 256,
-    ///          "x-defer-string-length-validation": true
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewNumericLiteralOperand {
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            value: IdentityPolicyOperatorViewNumericLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewNumericLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 64,
+    ///  "minLength": 1,
+    ///  "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewNumericLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewNumericLiteralOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyOperatorViewNumericLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 64usize {
+                return Err("longer than 64 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| {
+                    ::regress::Regex::new(
+                        "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$",
+                    )
+                    .unwrap()
+                });
+            if PATTERN.find(value).is_none() {
+                return Err(
+                "doesn't match pattern \"^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$\""
+                    .into(),
+            );
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewOrderingFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ordering"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewNumericLiteralOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "gt",
+    ///        "ge",
+    ///        "lt",
+    ///        "le"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewOrderingFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewOrderingFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewNumericLiteralOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewOrderingFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ordering"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewOrderingFamilyFamily {
+        #[serde(rename = "ordering")]
+        Ordering,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Ordering => f.write_str("ordering"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ordering" => Ok(Self::Ordering),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewOrderingFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "gt",
+    ///    "ge",
+    ///    "lt",
+    ///    "le"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "ge")]
+        Ge,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "le")]
+        Le,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Gt => f.write_str("gt"),
+                Self::Ge => f.write_str("ge"),
+                Self::Lt => f.write_str("lt"),
+                Self::Le => f.write_str("le"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "gt" => Ok(Self::Gt),
+                "ge" => Ok(Self::Ge),
+                "lt" => Ok(Self::Lt),
+                "le" => Ok(Self::Le),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewPatternOperand",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind",
+    ///    "value",
+    ///    "valueType"
+    ///  ],
+    ///  "properties": {
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "pattern"
+    ///      ]
+    ///    },
+    ///    "value": {
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "minLength": 1
+    ///    },
+    ///    "valueType": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewPatternOperand {
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyOperatorViewPatternOperandKind,
+        #[redact(sensitivity = public)]
+        pub value: IdentityPolicyOperatorViewPatternOperandValue,
+        #[serde(rename = "valueType")]
+        #[redact(sensitivity = public)]
+        pub value_type: IdentityPolicyOperatorViewPatternOperandValueType,
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "pattern"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewPatternOperandKind {
+        #[serde(rename = "pattern")]
+        Pattern,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Pattern => f.write_str("pattern"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "pattern" => Ok(Self::Pattern),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewPatternOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewPatternOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewPatternOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorViewPatternOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewPatternOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewPatternOperandValueType`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewPatternOperandValueType {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandValueType {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValueType {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValueType {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewSetOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewSetOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 256
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "boolean"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "integer",
+    ///            "format": "int64"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 64,
+    ///            "minLength": 1,
+    ///            "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyOperatorViewSetOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<bool>,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<i64>,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyOperatorViewSetOperandKind,
+            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+        },
+    }
+    ///`IdentityPolicyOperatorViewSetOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "set"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewSetOperandKind {
+        #[serde(rename = "set")]
+        Set,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewSetOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Set => f.write_str("set"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "set" => Ok(Self::Set),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewSetOperandValuesItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyOperatorViewSetOperandValuesItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyOperatorViewSetOperandValuesItem>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyOperatorViewSetOperandValuesItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandValuesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewSetOperandValuesItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyOperatorViewStringFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewStringFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewPatternOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "startsWith",
+    ///        "endsWith",
+    ///        "contains",
+    ///        "glob",
+    ///        "regex"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyOperatorViewStringFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyOperatorViewStringFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyOperatorViewPatternOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyOperatorViewStringFamilyPredicate,
+    }
+    ///`IdentityPolicyOperatorViewStringFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewStringFamilyFamily {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyOperatorViewStringFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "startsWith",
+    ///    "endsWith",
+    ///    "contains",
+    ///    "glob",
+    ///    "regex"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyOperatorViewStringFamilyPredicate {
+        #[serde(rename = "startsWith")]
+        StartsWith,
+        #[serde(rename = "endsWith")]
+        EndsWith,
+        #[serde(rename = "contains")]
+        Contains,
+        #[serde(rename = "glob")]
+        Glob,
+        #[serde(rename = "regex")]
+        Regex,
+    }
+    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::StartsWith => f.write_str("startsWith"),
+                Self::EndsWith => f.write_str("endsWith"),
+                Self::Contains => f.write_str("contains"),
+                Self::Glob => f.write_str("glob"),
+                Self::Regex => f.write_str("regex"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "startsWith" => Ok(Self::StartsWith),
+                "endsWith" => Ok(Self::EndsWith),
+                "contains" => Ok(Self::Contains),
+                "glob" => Ok(Self::Glob),
+                "regex" => Ok(Self::Regex),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyOperatorViewStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyRuleView`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyRuleView",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "condition",
+    ///    "effect"
+    ///  ],
+    ///  "properties": {
+    ///    "condition": {
+    ///      "title": "IdentityPolicyConditionView",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "attribute",
+    ///        "operator"
+    ///      ],
+    ///      "properties": {
+    ///        "attribute": {
+    ///          "type": "string"
+    ///        },
+    ///        "operator": {
+    ///          "title": "IdentityPolicyOperatorView",
+    ///          "oneOf": [
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
+    ///            },
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
+    ///            },
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
+    ///            },
+    ///            {
+    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
+    ///            }
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    "effect": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "allow",
+    ///        "deny"
+    ///      ]
+    ///    },
+    ///    "obligations": {
+    ///      "title": "IdentityPolicyObligationsView",
+    ///      "type": "object",
+    ///      "properties": {
+    ///        "fieldMask": {
+    ///          "default": [],
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string"
+    ///          }
+    ///        },
+    ///        "rowScope": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "selfOnly",
+    ///            "device",
+    ///            "tenant"
+    ///          ]
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -7336,11 +16301,132 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateConditionView {
+    pub struct IdentityPolicyRuleView {
+        #[redact(sensitivity = public)]
+        pub condition: IdentityPolicyConditionView,
+        #[redact(sensitivity = public)]
+        pub effect: IdentityPolicyRuleViewEffect,
+        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
+        #[redact(sensitivity = public)]
+        pub obligations: ::std::option::Option<IdentityPolicyObligationsView>,
+    }
+    ///`IdentityPolicyRuleViewEffect`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "allow",
+    ///    "deny"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyRuleViewEffect {
+        #[serde(rename = "allow")]
+        Allow,
+        #[serde(rename = "deny")]
+        Deny,
+    }
+    impl ::std::fmt::Display for IdentityPolicyRuleViewEffect {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Allow => f.write_str("allow"),
+                Self::Deny => f.write_str("deny"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyRuleViewEffect {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "allow" => Ok(Self::Allow),
+                "deny" => Ok(Self::Deny),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyRuleViewEffect {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateCondition`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateCondition",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "attribute",
+    ///    "operator"
+    ///  ],
+    ///  "properties": {
+    ///    "attribute": {
+    ///      "type": "string"
+    ///    },
+    ///    "operator": {
+    ///      "title": "IdentityPolicyUpdateOperator",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorEqualityFamily"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorOrderingFamily"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorMembershipFamily"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorStringFamily"
+    ///        }
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateCondition {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyUpdateOperatorView,
+        pub operator: IdentityPolicyUpdateOperator,
     }
     ///`IdentityPolicyUpdateObligations`
     ///
@@ -7475,143 +16561,6 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyUpdateObligationsView`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateObligationsView",
-    ///  "type": "object",
-    ///  "properties": {
-    ///    "fieldMask": {
-    ///      "default": [],
-    ///      "type": "array",
-    ///      "items": {
-    ///        "type": "string"
-    ///      }
-    ///    },
-    ///    "rowScope": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "selfOnly",
-    ///        "device",
-    ///        "tenant"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateObligationsView {
-        #[serde(
-            rename = "fieldMask",
-            default,
-            skip_serializing_if = "::std::vec::Vec::is_empty"
-        )]
-        #[redact(sensitivity = public)]
-        pub field_mask: ::std::vec::Vec<::std::string::String>,
-        #[serde(
-            rename = "rowScope",
-            default,
-            skip_serializing_if = "::std::option::Option::is_none"
-        )]
-        #[redact(sensitivity = public)]
-        pub row_scope: ::std::option::Option<IdentityPolicyUpdateObligationsViewRowScope>,
-    }
-    #[allow(clippy::derivable_impls)]
-    impl ::std::default::Default for IdentityPolicyUpdateObligationsView {
-        fn default() -> Self {
-            Self {
-                field_mask: Default::default(),
-                row_scope: Default::default(),
-            }
-        }
-    }
-    ///`IdentityPolicyUpdateObligationsViewRowScope`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "selfOnly",
-    ///    "device",
-    ///    "tenant"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateObligationsViewRowScope {
-        #[serde(rename = "selfOnly")]
-        SelfOnly,
-        #[serde(rename = "device")]
-        Device,
-        #[serde(rename = "tenant")]
-        Tenant,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateObligationsViewRowScope {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::SelfOnly => f.write_str("selfOnly"),
-                Self::Device => f.write_str("device"),
-                Self::Tenant => f.write_str("tenant"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateObligationsViewRowScope {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "selfOnly" => Ok(Self::SelfOnly),
-                "device" => Ok(Self::Device),
-                "tenant" => Ok(Self::Tenant),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateObligationsViewRowScope {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateObligationsViewRowScope
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateObligationsViewRowScope
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
     ///`IdentityPolicyUpdateOperator`
     ///
     /// <details><summary>JSON schema</summary>
@@ -7621,123 +16570,71 @@ pub mod policies_update {
     ///  "title": "IdentityPolicyUpdateOperator",
     ///  "oneOf": [
     ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "eq"
-    ///          ]
-    ///        },
-    ///        "pattern": false,
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorEqualityFamily"
     ///    },
     ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "ne"
-    ///          ]
-    ///        },
-    ///        "pattern": false,
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorOrderingFamily"
     ///    },
     ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "pattern"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "like"
-    ///          ]
-    ///        },
-    ///        "pattern": {
-    ///          "type": "string"
-    ///        },
-    ///        "value": false
-    ///      },
-    ///      "additionalProperties": false
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorMembershipFamily"
     ///    },
     ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "gt"
-    ///          ]
-    ///        },
-    ///        "pattern": false,
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": false,
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "lt"
-    ///          ]
-    ///        },
-    ///        "pattern": false,
-    ///        "value": {
-    ///          "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorStringFamily"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyUpdateOperator {
+        EqualityFamily(IdentityPolicyUpdateOperatorEqualityFamily),
+        OrderingFamily(IdentityPolicyUpdateOperatorOrderingFamily),
+        MembershipFamily(IdentityPolicyUpdateOperatorMembershipFamily),
+        StringFamily(IdentityPolicyUpdateOperatorStringFamily),
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorEqualityFamily>
+        for IdentityPolicyUpdateOperator
+    {
+        fn from(value: IdentityPolicyUpdateOperatorEqualityFamily) -> Self {
+            Self::EqualityFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorOrderingFamily>
+        for IdentityPolicyUpdateOperator
+    {
+        fn from(value: IdentityPolicyUpdateOperatorOrderingFamily) -> Self {
+            Self::OrderingFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorMembershipFamily>
+        for IdentityPolicyUpdateOperator
+    {
+        fn from(value: IdentityPolicyUpdateOperatorMembershipFamily) -> Self {
+            Self::MembershipFamily(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorStringFamily>
+        for IdentityPolicyUpdateOperator
+    {
+        fn from(value: IdentityPolicyUpdateOperatorStringFamily) -> Self {
+            Self::StringFamily(value)
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorAttributeOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorAttributeOperand",
+    ///  "oneOf": [
     ///    {
     ///      "type": "object",
     ///      "required": [
     ///        "attribute",
-    ///        "kind"
+    ///        "kind",
+    ///        "valueType"
     ///      ],
     ///      "properties": {
     ///        "attribute": {
@@ -7754,11 +16651,15 @@ pub mod policies_update {
     ///        "kind": {
     ///          "type": "string",
     ///          "enum": [
-    ///            "eqAttr"
+    ///            "attribute"
     ///          ]
     ///        },
-    ///        "pattern": false,
-    ///        "value": false
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
     ///      },
     ///      "additionalProperties": false
     ///    }
@@ -7768,99 +16669,15 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "kind", deny_unknown_fields)]
-    pub enum IdentityPolicyUpdateOperator {
-        #[serde(rename = "eq")]
-        Eq {
-            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-            value: IdentityPolicyUpdateConditionOperatorValue,
-        },
-        #[serde(rename = "ne")]
-        Ne {
-            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-            value: IdentityPolicyUpdateConditionOperatorValue,
-        },
-        #[serde(rename = "like")]
-        Like { pattern: ::std::string::String },
-        #[serde(rename = "gt")]
-        Gt {
-            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-            value: IdentityPolicyUpdateConditionOperatorValue,
-        },
-        #[serde(rename = "lt")]
-        Lt {
-            ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-            value: IdentityPolicyUpdateConditionOperatorValue,
-        },
-        #[serde(rename = "eqAttr")]
-        EqAttr {
-            attribute: IdentityPolicyUpdateConditionOperatorAttribute,
+    pub enum IdentityPolicyUpdateOperatorAttributeOperand {
+        #[serde(rename = "attribute")]
+        Attribute {
+            attribute: IdentityPolicyUpdateOperatorAttributeOperandAttribute,
+            #[serde(rename = "valueType")]
+            value_type: IdentityPolicyUpdateOperatorAttributeOperandValueType,
         },
     }
-    ///`IdentityPolicyUpdateOperatorView`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorView",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "kind"
-    ///  ],
-    ///  "properties": {
-    ///    "attribute": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "principal.kind",
-    ///        "principal.id",
-    ///        "tenant.id",
-    ///        "contract.id",
-    ///        "permission",
-    ///        "resource.id"
-    ///      ]
-    ///    },
-    ///    "kind": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "eq",
-    ///        "ne",
-    ///        "like",
-    ///        "gt",
-    ///        "lt",
-    ///        "eqAttr"
-    ///      ]
-    ///    },
-    ///    "pattern": {
-    ///      "type": "string"
-    ///    },
-    ///    "value": {
-    ///      "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///      "type": "string",
-    ///      "maxLength": 256,
-    ///      "x-defer-string-length-validation": true
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateOperatorView {
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub attribute: ::std::option::Option<IdentityPolicyUpdateOperatorViewAttribute>,
-        #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyUpdateOperatorViewKind,
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub pattern: ::std::option::Option<::std::string::String>,
-        ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub value: ::std::option::Option<IdentityPolicyUpdateOperatorViewValue>,
-    }
-    ///`IdentityPolicyUpdateOperatorViewAttribute`
+    ///`IdentityPolicyUpdateOperatorAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -7890,7 +16707,7 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyUpdateOperatorViewAttribute {
+    pub enum IdentityPolicyUpdateOperatorAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -7904,7 +16721,7 @@ pub mod policies_update {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorViewAttribute {
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -7916,7 +16733,7 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorViewAttribute {
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -7930,13 +16747,15 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorViewAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateOperatorViewAttribute {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorAttributeOperandAttribute
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -7944,7 +16763,9 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateOperatorViewAttribute {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorAttributeOperandAttribute
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -7952,7 +16773,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyUpdateOperatorViewKind`
+    ///`IdentityPolicyUpdateOperatorAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -7960,12 +16781,7 @@ pub mod policies_update {
     ///{
     ///  "type": "string",
     ///  "enum": [
-    ///    "eq",
-    ///    "ne",
-    ///    "like",
-    ///    "gt",
-    ///    "lt",
-    ///    "eqAttr"
+    ///    "string"
     ///  ]
     ///}
     /// ```
@@ -7982,53 +16798,35 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyUpdateOperatorViewKind {
-        #[serde(rename = "eq")]
-        Eq,
-        #[serde(rename = "ne")]
-        Ne,
-        #[serde(rename = "like")]
-        Like,
-        #[serde(rename = "gt")]
-        Gt,
-        #[serde(rename = "lt")]
-        Lt,
-        #[serde(rename = "eqAttr")]
-        EqAttr,
+    pub enum IdentityPolicyUpdateOperatorAttributeOperandValueType {
+        #[serde(rename = "string")]
+        String,
     }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorViewKind {
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorAttributeOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
-                Self::Eq => f.write_str("eq"),
-                Self::Ne => f.write_str("ne"),
-                Self::Like => f.write_str("like"),
-                Self::Gt => f.write_str("gt"),
-                Self::Lt => f.write_str("lt"),
-                Self::EqAttr => f.write_str("eqAttr"),
+                Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorViewKind {
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
-                "eq" => Ok(Self::Eq),
-                "ne" => Ok(Self::Ne),
-                "like" => Ok(Self::Like),
-                "gt" => Ok(Self::Gt),
-                "lt" => Ok(Self::Lt),
-                "eqAttr" => Ok(Self::EqAttr),
+                "string" => Ok(Self::String),
                 _ => Err("invalid value".into()),
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorViewKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateOperatorViewKind {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -8036,7 +16834,9 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateOperatorViewKind {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorAttributeOperandValueType
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -8044,48 +16844,114 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).
+    ///`IdentityPolicyUpdateOperatorEqualityFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///  "type": "string",
-    ///  "maxLength": 256,
-    ///  "x-defer-string-length-validation": true
+    ///  "title": "IdentityPolicyUpdateOperatorEqualityFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "equality"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "title": "IdentityPolicyUpdateOperatorEqualityFamilyOperand",
+    ///      "oneOf": [
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorLiteralOperand"
+    ///        },
+    ///        {
+    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorAttributeOperand"
+    ///        }
+    ///      ]
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyUpdateOperatorEqualityFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "eq",
+    ///        "ne"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
     ///}
     /// ```
     /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyUpdateOperatorViewValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorViewValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateOperatorEqualityFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyUpdateOperatorEqualityFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyUpdateOperatorEqualityFamilyOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyUpdateOperatorEqualityFamilyPredicate,
+    }
+    ///`IdentityPolicyUpdateOperatorEqualityFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "equality"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorEqualityFamilyFamily {
+        #[serde(rename = "equality")]
+        Equality,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorEqualityFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Equality => f.write_str("equality"),
+            }
         }
     }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorViewValue> for ::std::string::String {
-        fn from(value: IdentityPolicyUpdateOperatorViewValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorViewValue {
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorEqualityFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            Ok(Self(value.to_string()))
+            match value {
+                "equality" => Ok(Self::Equality),
+                _ => Err("invalid value".into()),
+            }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorViewValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateOperatorViewValue {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorEqualityFamilyFamily
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -8093,7 +16959,9 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateOperatorViewValue {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorEqualityFamilyFamily
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -8101,7 +16969,402 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorViewValue {
+    ///`IdentityPolicyUpdateOperatorEqualityFamilyOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorEqualityFamilyOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorLiteralOperand"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorAttributeOperand"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum IdentityPolicyUpdateOperatorEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyUpdateOperatorLiteralOperand),
+        AttributeOperand(IdentityPolicyUpdateOperatorAttributeOperand),
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorLiteralOperand>
+        for IdentityPolicyUpdateOperatorEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyUpdateOperatorLiteralOperand) -> Self {
+            Self::LiteralOperand(value)
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorAttributeOperand>
+        for IdentityPolicyUpdateOperatorEqualityFamilyOperand
+    {
+        fn from(value: IdentityPolicyUpdateOperatorAttributeOperand) -> Self {
+            Self::AttributeOperand(value)
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorEqualityFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorEqualityFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "eq",
+    ///    "ne"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorEqualityFamilyPredicate {
+        #[serde(rename = "eq")]
+        Eq,
+        #[serde(rename = "ne")]
+        Ne,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorEqualityFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Eq => f.write_str("eq"),
+                Self::Ne => f.write_str("ne"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorEqualityFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "eq" => Ok(Self::Eq),
+                "ne" => Ok(Self::Ne),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorEqualityFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorEqualityFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 256
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "boolean"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyUpdateOperatorLiteralOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyUpdateOperatorLiteralOperandKind,
+            value: IdentityPolicyUpdateOperatorLiteralOperandValue,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyUpdateOperatorLiteralOperandKind,
+            value: bool,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyUpdateOperatorLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyUpdateOperatorLiteralOperandKind,
+            value: IdentityPolicyUpdateOperatorLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyUpdateOperatorLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyUpdateOperatorLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorLiteralOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyUpdateOperatorLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -8111,6 +17374,1448 @@ pub mod policies_update {
                 .map_err(|e: self::error::ConversionError| {
                     <D::Error as ::serde::de::Error>::custom(e.to_string())
                 })
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorMembershipFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorMembershipFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "membership"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorSetOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyUpdateOperatorMembershipFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "in",
+    ///        "notIn"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateOperatorMembershipFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyUpdateOperatorMembershipFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyUpdateOperatorSetOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyUpdateOperatorMembershipFamilyPredicate,
+    }
+    ///`IdentityPolicyUpdateOperatorMembershipFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "membership"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorMembershipFamilyFamily {
+        #[serde(rename = "membership")]
+        Membership,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorMembershipFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Membership => f.write_str("membership"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorMembershipFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "membership" => Ok(Self::Membership),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorMembershipFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorMembershipFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorMembershipFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorMembershipFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "in",
+    ///    "notIn"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorMembershipFamilyPredicate {
+        #[serde(rename = "in")]
+        In,
+        #[serde(rename = "notIn")]
+        NotIn,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorMembershipFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::In => f.write_str("in"),
+                Self::NotIn => f.write_str("notIn"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorMembershipFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "in" => Ok(Self::In),
+                "notIn" => Ok(Self::NotIn),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorMembershipFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorMembershipFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorNumericLiteralOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorNumericLiteralOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "integer",
+    ///          "format": "int64"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "value",
+    ///        "valueType"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "literal"
+    ///          ]
+    ///        },
+    ///        "value": {
+    ///          "type": "string",
+    ///          "maxLength": 64,
+    ///          "minLength": 1,
+    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyUpdateOperatorNumericLiteralOperand {
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyUpdateOperatorNumericLiteralOperandKind,
+            value: i64,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyUpdateOperatorNumericLiteralOperandKind,
+            value: IdentityPolicyUpdateOperatorNumericLiteralOperandValue,
+        },
+    }
+    ///`IdentityPolicyUpdateOperatorNumericLiteralOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "literal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorNumericLiteralOperandKind {
+        #[serde(rename = "literal")]
+        Literal,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorNumericLiteralOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Literal => f.write_str("literal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorNumericLiteralOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "literal" => Ok(Self::Literal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorNumericLiteralOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorNumericLiteralOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorNumericLiteralOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 64,
+    ///  "minLength": 1,
+    ///  "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyUpdateOperatorNumericLiteralOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorNumericLiteralOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorNumericLiteralOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyUpdateOperatorNumericLiteralOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorNumericLiteralOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 64usize {
+                return Err("longer than 64 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| {
+                    ::regress::Regex::new(
+                        "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$",
+                    )
+                    .unwrap()
+                });
+            if PATTERN.find(value).is_none() {
+                return Err(
+                "doesn't match pattern \"^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$\""
+                    .into(),
+            );
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorNumericLiteralOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorNumericLiteralOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorNumericLiteralOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorOrderingFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorOrderingFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ordering"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorNumericLiteralOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyUpdateOperatorOrderingFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "gt",
+    ///        "ge",
+    ///        "lt",
+    ///        "le"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateOperatorOrderingFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyUpdateOperatorOrderingFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyUpdateOperatorNumericLiteralOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyUpdateOperatorOrderingFamilyPredicate,
+    }
+    ///`IdentityPolicyUpdateOperatorOrderingFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ordering"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorOrderingFamilyFamily {
+        #[serde(rename = "ordering")]
+        Ordering,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorOrderingFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Ordering => f.write_str("ordering"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorOrderingFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ordering" => Ok(Self::Ordering),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorOrderingFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorOrderingFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorOrderingFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorOrderingFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "gt",
+    ///    "ge",
+    ///    "lt",
+    ///    "le"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorOrderingFamilyPredicate {
+        #[serde(rename = "gt")]
+        Gt,
+        #[serde(rename = "ge")]
+        Ge,
+        #[serde(rename = "lt")]
+        Lt,
+        #[serde(rename = "le")]
+        Le,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorOrderingFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Gt => f.write_str("gt"),
+                Self::Ge => f.write_str("ge"),
+                Self::Lt => f.write_str("lt"),
+                Self::Le => f.write_str("le"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorOrderingFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "gt" => Ok(Self::Gt),
+                "ge" => Ok(Self::Ge),
+                "lt" => Ok(Self::Lt),
+                "le" => Ok(Self::Le),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorOrderingFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorOrderingFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorPatternOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorPatternOperand",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "kind",
+    ///    "value",
+    ///    "valueType"
+    ///  ],
+    ///  "properties": {
+    ///    "kind": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "pattern"
+    ///      ]
+    ///    },
+    ///    "value": {
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "minLength": 1
+    ///    },
+    ///    "valueType": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateOperatorPatternOperand {
+        #[redact(sensitivity = public)]
+        pub kind: IdentityPolicyUpdateOperatorPatternOperandKind,
+        #[redact(sensitivity = public)]
+        pub value: IdentityPolicyUpdateOperatorPatternOperandValue,
+        #[serde(rename = "valueType")]
+        #[redact(sensitivity = public)]
+        pub value_type: IdentityPolicyUpdateOperatorPatternOperandValueType,
+    }
+    ///`IdentityPolicyUpdateOperatorPatternOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "pattern"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorPatternOperandKind {
+        #[serde(rename = "pattern")]
+        Pattern,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorPatternOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Pattern => f.write_str("pattern"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorPatternOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "pattern" => Ok(Self::Pattern),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorPatternOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorPatternOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorPatternOperandValue`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyUpdateOperatorPatternOperandValue(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorPatternOperandValue {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorPatternOperandValue>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyUpdateOperatorPatternOperandValue) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorPatternOperandValue {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorPatternOperandValue {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorPatternOperandValue
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorPatternOperandValue {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorPatternOperandValueType`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorPatternOperandValueType {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorPatternOperandValueType {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorPatternOperandValueType {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorPatternOperandValueType {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorPatternOperandValueType
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorSetOperand`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorSetOperand",
+    ///  "oneOf": [
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "string"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 256
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "boolean"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "boolean"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "integer"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "integer",
+    ///            "format": "int64"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    },
+    ///    {
+    ///      "type": "object",
+    ///      "required": [
+    ///        "kind",
+    ///        "valueType",
+    ///        "values"
+    ///      ],
+    ///      "properties": {
+    ///        "kind": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "set"
+    ///          ]
+    ///        },
+    ///        "valueType": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "decimal"
+    ///          ]
+    ///        },
+    ///        "values": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "string",
+    ///            "maxLength": 64,
+    ///            "minLength": 1,
+    ///            "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
+    ///          },
+    ///          "maxItems": 32,
+    ///          "minItems": 1,
+    ///          "uniqueItems": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(tag = "valueType", deny_unknown_fields)]
+    pub enum IdentityPolicyUpdateOperatorSetOperand {
+        #[serde(rename = "string")]
+        String {
+            kind: IdentityPolicyUpdateOperatorSetOperandKind,
+            values: Vec<IdentityPolicyUpdateOperatorSetOperandValuesItem>,
+        },
+        #[serde(rename = "boolean")]
+        Boolean {
+            kind: IdentityPolicyUpdateOperatorSetOperandKind,
+            values: Vec<bool>,
+        },
+        #[serde(rename = "integer")]
+        Integer {
+            kind: IdentityPolicyUpdateOperatorSetOperandKind,
+            values: Vec<i64>,
+        },
+        #[serde(rename = "decimal")]
+        Decimal {
+            kind: IdentityPolicyUpdateOperatorSetOperandKind,
+            values: Vec<IdentityPolicyUpdateOperatorSetOperandValuesItem>,
+        },
+    }
+    ///`IdentityPolicyUpdateOperatorSetOperandKind`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "set"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorSetOperandKind {
+        #[serde(rename = "set")]
+        Set,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorSetOperandKind {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Set => f.write_str("set"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorSetOperandKind {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "set" => Ok(Self::Set),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorSetOperandKind
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateOperatorSetOperandKind {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorSetOperandValuesItem`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct IdentityPolicyUpdateOperatorSetOperandValuesItem(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorSetOperandValuesItem {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<IdentityPolicyUpdateOperatorSetOperandValuesItem>
+        for ::std::string::String
+    {
+        fn from(value: IdentityPolicyUpdateOperatorSetOperandValuesItem) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorSetOperandValuesItem {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorSetOperandValuesItem {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorSetOperandValuesItem
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorSetOperandValuesItem {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorStringFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorStringFamily",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "family",
+    ///    "operand",
+    ///    "predicate"
+    ///  ],
+    ///  "properties": {
+    ///    "family": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "string"
+    ///      ]
+    ///    },
+    ///    "operand": {
+    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorPatternOperand"
+    ///    },
+    ///    "predicate": {
+    ///      "title": "IdentityPolicyUpdateOperatorStringFamilyPredicate",
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "startsWith",
+    ///        "endsWith",
+    ///        "contains",
+    ///        "glob",
+    ///        "regex"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct IdentityPolicyUpdateOperatorStringFamily {
+        #[redact(sensitivity = public)]
+        pub family: IdentityPolicyUpdateOperatorStringFamilyFamily,
+        #[redact(sensitivity = public)]
+        pub operand: IdentityPolicyUpdateOperatorPatternOperand,
+        #[redact(sensitivity = public)]
+        pub predicate: IdentityPolicyUpdateOperatorStringFamilyPredicate,
+    }
+    ///`IdentityPolicyUpdateOperatorStringFamilyFamily`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "string"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorStringFamilyFamily {
+        #[serde(rename = "string")]
+        String,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorStringFamilyFamily {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::String => f.write_str("string"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorStringFamilyFamily {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "string" => Ok(Self::String),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorStringFamilyFamily {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorStringFamilyFamily
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`IdentityPolicyUpdateOperatorStringFamilyPredicate`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "IdentityPolicyUpdateOperatorStringFamilyPredicate",
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "startsWith",
+    ///    "endsWith",
+    ///    "contains",
+    ///    "glob",
+    ///    "regex"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum IdentityPolicyUpdateOperatorStringFamilyPredicate {
+        #[serde(rename = "startsWith")]
+        StartsWith,
+        #[serde(rename = "endsWith")]
+        EndsWith,
+        #[serde(rename = "contains")]
+        Contains,
+        #[serde(rename = "glob")]
+        Glob,
+        #[serde(rename = "regex")]
+        Regex,
+    }
+    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorStringFamilyPredicate {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::StartsWith => f.write_str("startsWith"),
+                Self::EndsWith => f.write_str("endsWith"),
+                Self::Contains => f.write_str("contains"),
+                Self::Glob => f.write_str("glob"),
+                Self::Regex => f.write_str("regex"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorStringFamilyPredicate {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "startsWith" => Ok(Self::StartsWith),
+                "endsWith" => Ok(Self::EndsWith),
+                "contains" => Ok(Self::Contains),
+                "glob" => Ok(Self::Glob),
+                "regex" => Ok(Self::Regex),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorStringFamilyPredicate {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for IdentityPolicyUpdateOperatorStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for IdentityPolicyUpdateOperatorStringFamilyPredicate
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
         }
     }
     ///`IdentityPolicyUpdateRule`
@@ -8141,146 +18846,16 @@ pub mod policies_update {
     ///          "title": "IdentityPolicyUpdateOperator",
     ///          "oneOf": [
     ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "value"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "eq"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": {
-    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                  "type": "string",
-    ///                  "maxLength": 256
-    ///                }
-    ///              },
-    ///              "additionalProperties": false
+    ///              "$ref": "#/definitions/IdentityPolicyUpdateOperatorEqualityFamily"
     ///            },
     ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "value"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "ne"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": {
-    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                  "type": "string",
-    ///                  "maxLength": 256
-    ///                }
-    ///              },
-    ///              "additionalProperties": false
+    ///              "$ref": "#/definitions/IdentityPolicyUpdateOperatorOrderingFamily"
     ///            },
     ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "pattern"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "like"
-    ///                  ]
-    ///                },
-    ///                "pattern": {
-    ///                  "type": "string"
-    ///                },
-    ///                "value": false
-    ///              },
-    ///              "additionalProperties": false
+    ///              "$ref": "#/definitions/IdentityPolicyUpdateOperatorMembershipFamily"
     ///            },
     ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "value"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "gt"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": {
-    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                  "type": "string",
-    ///                  "maxLength": 256
-    ///                }
-    ///              },
-    ///              "additionalProperties": false
-    ///            },
-    ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "kind",
-    ///                "value"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": false,
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "lt"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": {
-    ///                  "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                  "type": "string",
-    ///                  "maxLength": 256
-    ///                }
-    ///              },
-    ///              "additionalProperties": false
-    ///            },
-    ///            {
-    ///              "type": "object",
-    ///              "required": [
-    ///                "attribute",
-    ///                "kind"
-    ///              ],
-    ///              "properties": {
-    ///                "attribute": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "principal.kind",
-    ///                    "principal.id",
-    ///                    "tenant.id",
-    ///                    "contract.id",
-    ///                    "permission",
-    ///                    "resource.id"
-    ///                  ]
-    ///                },
-    ///                "kind": {
-    ///                  "type": "string",
-    ///                  "enum": [
-    ///                    "eqAttr"
-    ///                  ]
-    ///                },
-    ///                "pattern": false,
-    ///                "value": false
-    ///              },
-    ///              "additionalProperties": false
+    ///              "$ref": "#/definitions/IdentityPolicyUpdateOperatorStringFamily"
     ///            }
     ///          ]
     ///        }
@@ -8404,198 +18979,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyUpdateRuleView`
+    ///`IdentityPolicyView`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyUpdateRuleView",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "condition",
-    ///    "effect"
-    ///  ],
-    ///  "properties": {
-    ///    "condition": {
-    ///      "title": "IdentityPolicyUpdateConditionView",
-    ///      "type": "object",
-    ///      "required": [
-    ///        "attribute",
-    ///        "operator"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": {
-    ///          "type": "string"
-    ///        },
-    ///        "operator": {
-    ///          "title": "IdentityPolicyUpdateOperatorView",
-    ///          "type": "object",
-    ///          "required": [
-    ///            "kind"
-    ///          ],
-    ///          "properties": {
-    ///            "attribute": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "principal.kind",
-    ///                "principal.id",
-    ///                "tenant.id",
-    ///                "contract.id",
-    ///                "permission",
-    ///                "resource.id"
-    ///              ]
-    ///            },
-    ///            "kind": {
-    ///              "type": "string",
-    ///              "enum": [
-    ///                "eq",
-    ///                "ne",
-    ///                "like",
-    ///                "gt",
-    ///                "lt",
-    ///                "eqAttr"
-    ///              ]
-    ///            },
-    ///            "pattern": {
-    ///              "type": "string"
-    ///            },
-    ///            "value": {
-    ///              "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///              "type": "string",
-    ///              "maxLength": 256,
-    ///              "x-defer-string-length-validation": true
-    ///            }
-    ///          },
-    ///          "additionalProperties": false
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    "effect": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "allow",
-    ///        "deny"
-    ///      ]
-    ///    },
-    ///    "obligations": {
-    ///      "title": "IdentityPolicyUpdateObligationsView",
-    ///      "type": "object",
-    ///      "properties": {
-    ///        "fieldMask": {
-    ///          "default": [],
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "string"
-    ///          }
-    ///        },
-    ///        "rowScope": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "selfOnly",
-    ///            "device",
-    ///            "tenant"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateRuleView {
-        #[redact(sensitivity = public)]
-        pub condition: IdentityPolicyUpdateConditionView,
-        #[redact(sensitivity = public)]
-        pub effect: IdentityPolicyUpdateRuleViewEffect,
-        #[serde(default, skip_serializing_if = "::std::option::Option::is_none")]
-        #[redact(sensitivity = public)]
-        pub obligations: ::std::option::Option<IdentityPolicyUpdateObligationsView>,
-    }
-    ///`IdentityPolicyUpdateRuleViewEffect`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "allow",
-    ///    "deny"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateRuleViewEffect {
-        #[serde(rename = "allow")]
-        Allow,
-        #[serde(rename = "deny")]
-        Deny,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateRuleViewEffect {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Allow => f.write_str("allow"),
-                Self::Deny => f.write_str("deny"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateRuleViewEffect {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "allow" => Ok(Self::Allow),
-                "deny" => Ok(Self::Deny),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateRuleViewEffect {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyUpdateRuleViewEffect {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateRuleViewEffect {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateView`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateView",
+    ///  "title": "IdentityPolicyView",
     ///  "type": "object",
     ///  "required": [
     ///    "contractId",
@@ -8626,7 +19016,7 @@ pub mod policies_update {
     ///    "rules": {
     ///      "type": "array",
     ///      "items": {
-    ///        "title": "IdentityPolicyUpdateRuleView",
+    ///        "title": "IdentityPolicyRuleView",
     ///        "type": "object",
     ///        "required": [
     ///          "condition",
@@ -8634,7 +19024,7 @@ pub mod policies_update {
     ///        ],
     ///        "properties": {
     ///          "condition": {
-    ///            "title": "IdentityPolicyUpdateConditionView",
+    ///            "title": "IdentityPolicyConditionView",
     ///            "type": "object",
     ///            "required": [
     ///              "attribute",
@@ -8645,45 +19035,21 @@ pub mod policies_update {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyUpdateOperatorView",
-    ///                "type": "object",
-    ///                "required": [
-    ///                  "kind"
-    ///                ],
-    ///                "properties": {
-    ///                  "attribute": {
-    ///                    "type": "string",
-    ///                    "enum": [
-    ///                      "principal.kind",
-    ///                      "principal.id",
-    ///                      "tenant.id",
-    ///                      "contract.id",
-    ///                      "permission",
-    ///                      "resource.id"
-    ///                    ]
+    ///                "title": "IdentityPolicyOperatorView",
+    ///                "oneOf": [
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
     ///                  },
-    ///                  "kind": {
-    ///                    "type": "string",
-    ///                    "enum": [
-    ///                      "eq",
-    ///                      "ne",
-    ///                      "like",
-    ///                      "gt",
-    ///                      "lt",
-    ///                      "eqAttr"
-    ///                    ]
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
     ///                  },
-    ///                  "pattern": {
-    ///                    "type": "string"
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
     ///                  },
-    ///                  "value": {
-    ///                    "description": "Wire bound is Unicode code points (JSON Schema maxLength); domain authority is UTF-8 bytes ≤ 256 (Hard unit align deferred #1947).",
-    ///                    "type": "string",
-    ///                    "maxLength": 256,
-    ///                    "x-defer-string-length-validation": true
+    ///                  {
+    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
     ///                  }
-    ///                },
-    ///                "additionalProperties": false
+    ///                ]
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -8696,7 +19062,7 @@ pub mod policies_update {
     ///            ]
     ///          },
     ///          "obligations": {
-    ///            "title": "IdentityPolicyUpdateObligationsView",
+    ///            "title": "IdentityPolicyObligationsView",
     ///            "type": "object",
     ///            "properties": {
     ///              "fieldMask": {
@@ -8733,7 +19099,7 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateView {
+    pub struct IdentityPolicyView {
         #[serde(rename = "contractId")]
         #[redact(sensitivity = public)]
         pub contract_id: ::std::string::String,
@@ -8753,7 +19119,7 @@ pub mod policies_update {
         #[redact(sensitivity = public)]
         pub policy_id: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub rules: ::std::vec::Vec<IdentityPolicyUpdateRuleView>,
+        pub rules: ::std::vec::Vec<IdentityPolicyRuleView>,
         #[redact(sensitivity = public)]
         pub version: ::std::num::NonZeroU32,
     }
@@ -8766,7 +19132,7 @@ pub mod policies_update {
         "identity",
         "identity.policies-update",
         "v1",
-        "sha256:4e14d049d84aa998fa759ed4d4edb6c0e8ce1fa81a3625afb460f5e7b7cd4b39",
+        "sha256:75f6631ddc6f7070bf9007eda2f8610ff2b8fb35ccc04402e3efa82299f1ae57",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

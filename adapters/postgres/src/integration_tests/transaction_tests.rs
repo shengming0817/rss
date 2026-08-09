@@ -1054,7 +1054,9 @@ async fn policy_repo_cotx_rolls_back_policy_and_outbox() -> TestResult {
         PolicyEffect::Allow,
         PolicyObligations::empty(),
     )?;
-    let rules_json = principal_kind_rule_json(r#"{"kind":"eq","value":"admin"}"#);
+    let rules_json = principal_kind_rule_json(
+        r#"{"family":"equality","predicate":"eq","operand":{"kind":"literal","valueType":"string","value":"admin"}}"#,
+    );
     let event_id = unique_event_id("policy-cotx-rollback");
     let (entry, _) = policy_lifecycle_event_with_id(
         tenant,

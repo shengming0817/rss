@@ -2186,3 +2186,59 @@ lock / catalog precondition，也禁止手写部分 DDL。
    `rss_projection_worker` 授 raw relation，或改写 `0101` / 历史 `0085`/`0097` checksum；缺陷只能由
    0101-compatible 新镜像或新的前向迁移修复。数据库级回滚仅允许恢复迁移前的完整备份，并与旧
    artifact 一起整体恢复。
+
+### 0102 Common ABAC Profile（typed values + closed operators）
+
+`0102` 是 `/api/v1` 与数据库同时切换的 forward-only hard cut，禁止滚动升级、双读或旧 binary
+回连。迁移只自动转换能够证明语义等价的旧 `eq`、`ne`、`like`、`eqAttr`；发现旧 `gt`/`lt`、
+畸形规则或超限属性值会在任何写入前失败，并列出需要人工改写的 policy id。迁移不猜测数值类型，
+也不删除 policy 或 resource attribute。
+
+1. 停止所有读写 identity policy/resource attribute 的旧实例，取得**完整数据库备份**，并确认旧应用连接
+   已排空、ledger 精确停在 101：
+
+   ```sql
+   SELECT count(*) = 0 AS old_identity_sessions_drained
+     FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid()
+      AND backend_type = 'client backend'
+      AND application_name IN
+          ('rss-postgres-reader', 'rss-postgres-writer', 'rss-postgres-maintenance');
+
+   SELECT max(version) = 101 AS exact_pre_0102_ledger,
+          bool_and(success) FILTER (WHERE version = 101) AS version_101_success
+     FROM public._sqlx_migrations;
+
+   SELECT pg_total_relation_size('public.abac_policies') AS policy_bytes,
+          pg_total_relation_size('public.resource_attributes') AS attribute_bytes;
+   ```
+
+2. 运行唯一的 `rss postgres migrate-all` Job。`0102` 自带 5 秒 lock timeout、5 分钟 statement
+   timeout，并在 preflight 前以 `ACCESS EXCLUSIVE` 同时冻结两张表。
+3. 若 ledger 仍为 `101`，修正迁移报告的数据并重跑；不得手工跳过或局部执行 `0102`。
+4. 以下 postflight 全部通过后，只部署理解 RSS Common ABAC Profile 的新实例；不得恢复旧实例：
+
+   ```sql
+   SELECT max(version) = 102 AS exact_post_0102_ledger,
+          bool_and(success) FILTER (WHERE version = 102) AS version_102_success
+     FROM public._sqlx_migrations;
+
+   SELECT data_type = 'jsonb' AS typed_jsonb
+     FROM information_schema.columns
+    WHERE table_schema = 'public' AND table_name = 'resource_attributes'
+      AND column_name = 'attribute_value';
+
+   SELECT count(*) = 1 AS exact_typed_constraint
+     FROM pg_constraint
+    WHERE conrelid = 'public.resource_attributes'::regclass
+      AND conname = 'resource_attributes_typed_value' AND convalidated;
+
+   SELECT count(*) = 0 AS no_legacy_operator
+     FROM public.abac_policies AS policy,
+          LATERAL jsonb_array_elements(policy.rules -> 'rules') AS rule
+    WHERE rule #>> '{condition,operator,kind}' IS NOT NULL
+       OR rule #>> '{condition,operator,family}' NOT IN
+          ('equality', 'ordering', 'membership', 'string');
+   ```
+5. 已提交后的缺陷只能通过新 forward migration 修复。数据库级回滚必须连同迁移前完整备份和旧
+   artifact 一起整体恢复。

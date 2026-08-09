@@ -337,10 +337,13 @@ RSS 只承诺同一安全目标由 typed / in-process 机制承载，不承诺�
 - durable policy 引用动态 `resource.*` 条件时，Authorizer 必须先取当前有效属性再进入规则求值；
   resolver 返回 `Missing` / `Stale` 或存储错误时直接 deny，且发生在 baseline 之前。
   global route 禁止动态 `resource.*` 条件，防止 shared 资源通过 tenant-local PIP 数据得到伪隔离判断。
-- `EqAttr` 的 RHS 只能引用内置 PIP 属性键闭集（`principal.kind` / `principal.id` / `tenant.id` /
-  `contract.id` / `permission` / `resource.id`）。域类型为 `PipAttributeKey`；HTTP active v1
-  schema 将 `eqAttr.attribute` 收紧为同闭枚举；写侧 wire 与读侧 hydrate 均经 `parse` fail-closed，
-  非 PIP 键不可表达、不得落库或参与求值（堵住属性存在性侦察）。
+- operator 使用 ADR-025 的闭合 RSS Common ABAC Profile：equality、numeric ordering、bounded
+  membership 与 string matching。值类型固定为 string/boolean/integer/exact-decimal，不做隐式转换。
+  membership 集合必须同型、唯一、规范排序且为 1–32 项；pattern 非空且 UTF-8 bytes ≤256，regex
+  在 authoring/hydration 时预编译。
+- typed attribute operand 的 RHS 只能引用内置 PIP 属性键闭集（`principal.kind` / `principal.id` /
+  `tenant.id` / `contract.id` / `permission` / `resource.id`），并显式声明 `valueType`。写侧 wire 与
+  读侧 hydrate 均 fail-closed；缺 RHS、类型错配或非 PIP 键不得因 `ne`/`notIn` 反转为命中。
 - obligation 必须 round-trip 持久化，不得在 store 层静默丢弃或默认化。
 
 ## gRPC 授权

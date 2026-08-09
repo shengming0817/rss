@@ -5,10 +5,11 @@ use std::time::SystemTime;
 
 use identity::ports::PolicyRouteScope;
 use identity::ports::{
-    AttributeValue, IdentityError, ResourceAttribute, ResourceAttributeKey,
+    IdentityError, PolicyValue, PolicyValueRef, ResourceAttribute, ResourceAttributeKey,
     ResourceAttributeReadRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
     ResourceAttributeVersion, ResourceAttributeWriteRepo, TenantId, TenantRepoScope,
 };
+use serde::{Deserialize, Serialize};
 use sqlx::Row;
 
 use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
@@ -41,7 +42,73 @@ fn storage(e: sqlx::Error) -> IdentityError {
     IdentityError::Storage(Box::new(e))
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PolicyValueDto {
+    value_type: PolicyValueTypeDto,
+    value: serde_json::Value,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum PolicyValueTypeDto {
+    String,
+    Boolean,
+    Integer,
+    Decimal,
+}
+
+pub(crate) fn encode_policy_value(value: &PolicyValue) -> Result<String, IdentityError> {
+    let dto = match value.as_ref() {
+        PolicyValueRef::String(value) => PolicyValueDto {
+            value_type: PolicyValueTypeDto::String,
+            value: serde_json::Value::String(value.to_string()),
+        },
+        PolicyValueRef::Boolean(value) => PolicyValueDto {
+            value_type: PolicyValueTypeDto::Boolean,
+            value: serde_json::Value::Bool(value),
+        },
+        PolicyValueRef::Integer(value) => PolicyValueDto {
+            value_type: PolicyValueTypeDto::Integer,
+            value: serde_json::Value::Number(value.into()),
+        },
+        PolicyValueRef::Decimal(value) => PolicyValueDto {
+            value_type: PolicyValueTypeDto::Decimal,
+            value: serde_json::Value::String(value.as_str().to_string()),
+        },
+    };
+    serde_json::to_string(&dto).map_err(|error| IdentityError::Storage(Box::new(error)))
+}
+
+fn decode_policy_value(raw: &str) -> Result<PolicyValue, IdentityError> {
+    let dto: PolicyValueDto =
+        serde_json::from_str(raw).map_err(|_| IdentityError::InvalidPolicy)?;
+    match dto.value_type {
+        PolicyValueTypeDto::String => dto
+            .value
+            .as_str()
+            .ok_or(IdentityError::InvalidPolicy)
+            .and_then(|value| PolicyValue::string(value).map_err(|_| IdentityError::InvalidPolicy)),
+        PolicyValueTypeDto::Boolean => dto
+            .value
+            .as_bool()
+            .map(PolicyValue::boolean)
+            .ok_or(IdentityError::InvalidPolicy),
+        PolicyValueTypeDto::Integer => dto
+            .value
+            .as_i64()
+            .map(PolicyValue::integer)
+            .ok_or(IdentityError::InvalidPolicy),
+        PolicyValueTypeDto::Decimal => dto
+            .value
+            .as_str()
+            .ok_or(IdentityError::InvalidPolicy)
+            .and_then(|value| {
+                PolicyValue::decimal(value).map_err(|_| IdentityError::InvalidPolicy)
+            }),
+    }
+}
+
 pub(crate) struct RawResourceAttribute {
     key: String,
     value: String,
@@ -49,6 +116,19 @@ pub(crate) struct RawResourceAttribute {
     effective_from: i64,
     effective_until: Option<i64>,
     deleted: bool,
+}
+
+impl std::fmt::Debug for RawResourceAttribute {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawResourceAttribute")
+            .field("key", &self.key)
+            .field("value", &"<redacted>")
+            .field("version", &self.version)
+            .field("effective_from", &self.effective_from)
+            .field("effective_until", &self.effective_until)
+            .field("deleted", &self.deleted)
+            .finish()
+    }
 }
 
 pub(crate) fn row_to_raw(row: sqlx::postgres::PgRow) -> Result<RawResourceAttribute, sqlx::Error> {
@@ -74,7 +154,7 @@ fn hydrate_attribute(
         scope,
         resource_id,
         ResourceAttributeKey::parse(&raw.key).map_err(|_| IdentityError::InvalidPolicy)?,
-        AttributeValue::parse(&raw.value).map_err(|_| IdentityError::InvalidPolicy)?,
+        decode_policy_value(&raw.value)?,
         version,
         epoch_secs_to_time(raw.effective_from),
         raw.effective_until.map(epoch_secs_to_time),
@@ -242,7 +322,9 @@ mod attribute_value_bound_tests {
     fn hydrate_attribute_rejects_overlong_value_as_invalid_policy() {
         let raw = RawResourceAttribute {
             key: "resource.owner".into(),
-            value: "a".repeat(ATTR_VALUE_MAX_LEN + 1),
+            value:
+                serde_json::json!({"valueType":"string","value":"a".repeat(ATTR_VALUE_MAX_LEN + 1)})
+                    .to_string(),
             version: 1,
             effective_from: 0,
             effective_until: None,
@@ -258,7 +340,8 @@ mod attribute_value_bound_tests {
     fn hydrate_attribute_accepts_exact_max_value() {
         let raw = RawResourceAttribute {
             key: "resource.owner".into(),
-            value: "a".repeat(ATTR_VALUE_MAX_LEN),
+            value: serde_json::json!({"valueType":"string","value":"a".repeat(ATTR_VALUE_MAX_LEN)})
+                .to_string(),
             version: 1,
             effective_from: 0,
             effective_until: None,
@@ -267,9 +350,37 @@ mod attribute_value_bound_tests {
         assert!(
             matches!(
                 hydrate_attribute(sample_tenant(), sample_scope(), sample_resource_id(), raw),
-                Ok(attr) if attr.value().as_str().len() == ATTR_VALUE_MAX_LEN
+                Ok(attr) if attr.value().string_value().is_some_and(|value| value.len() == ATTR_VALUE_MAX_LEN)
             ),
             "exact-max must hydrate"
         );
+    }
+
+    #[test]
+    fn typed_value_codec_round_trips_without_coercion() {
+        for value in [
+            PolicyValue::boolean(true),
+            PolicyValue::integer(42),
+            PolicyValue::decimal("12.34").expect("decimal"),
+            PolicyValue::string("eng").expect("string"),
+        ] {
+            let encoded = encode_policy_value(&value).expect("encode");
+            assert_eq!(decode_policy_value(&encoded).expect("decode"), value);
+        }
+    }
+
+    #[test]
+    fn raw_attribute_debug_redacts_typed_value() {
+        let raw = RawResourceAttribute {
+            key: "resource.secret".into(),
+            value: r#"{"valueType":"string","value":"do-not-log"}"#.into(),
+            version: 1,
+            effective_from: 0,
+            effective_until: None,
+            deleted: false,
+        };
+        let debug = format!("{raw:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("do-not-log"));
     }
 }

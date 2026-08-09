@@ -4015,6 +4015,331 @@ async fn role_repo_tenant_conformance() -> TestResult {
     Ok(())
 }
 
+struct DurableOperatorCase {
+    name: String,
+    predicate: &'static str,
+    operator: Operator,
+    matching: Vec<AbacAttribute>,
+    non_matching: Vec<AbacAttribute>,
+}
+
+fn profile_attribute(value: PolicyValue) -> Result<AbacAttribute, IdentityError> {
+    Ok(AbacAttribute::new(
+        AttributeKey::parse("resource.profile").map_err(|_| IdentityError::InvalidPolicy)?,
+        value,
+    ))
+}
+
+fn profile_named_attribute(key: &str, value: PolicyValue) -> Result<AbacAttribute, IdentityError> {
+    Ok(AbacAttribute::new(
+        AttributeKey::parse(key).map_err(|_| IdentityError::InvalidPolicy)?,
+        value,
+    ))
+}
+
+fn durable_operator_cases()
+-> Result<Vec<DurableOperatorCase>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut cases = Vec::new();
+    let equality_values = [
+        (
+            "string",
+            PolicyValue::string("eng")?,
+            PolicyValue::string("ops")?,
+        ),
+        (
+            "boolean",
+            PolicyValue::boolean(true),
+            PolicyValue::boolean(false),
+        ),
+        ("integer", PolicyValue::integer(7), PolicyValue::integer(8)),
+        (
+            "decimal",
+            PolicyValue::decimal("1.25")?,
+            PolicyValue::decimal("2.5")?,
+        ),
+    ];
+    for (value_type, expected, alternative) in equality_values {
+        for predicate in [EqualityPredicate::Eq, EqualityPredicate::Ne] {
+            let (matching, non_matching) = match predicate {
+                EqualityPredicate::Eq => (expected.clone(), alternative.clone()),
+                EqualityPredicate::Ne => (alternative.clone(), expected.clone()),
+            };
+            cases.push(DurableOperatorCase {
+                name: format!(
+                    "equality-{}-{value_type}",
+                    match predicate {
+                        EqualityPredicate::Eq => "eq",
+                        EqualityPredicate::Ne => "ne",
+                    }
+                ),
+                predicate: match predicate {
+                    EqualityPredicate::Eq => "eq",
+                    EqualityPredicate::Ne => "ne",
+                },
+                operator: Operator::Equality(EqualityOperator::new(
+                    predicate,
+                    EqualityOperand::Literal(expected.clone()),
+                )),
+                matching: vec![profile_attribute(matching)?],
+                non_matching: vec![profile_attribute(non_matching)?],
+            });
+        }
+    }
+    cases.push(DurableOperatorCase {
+        name: "equality-attribute-string".to_owned(),
+        predicate: "eq",
+        operator: Operator::equal_attribute(PipAttributeKey::principal_id()),
+        matching: vec![
+            profile_attribute(PolicyValue::string("alice")?)?,
+            profile_named_attribute("principal.id", PolicyValue::string("alice")?)?,
+        ],
+        non_matching: vec![
+            profile_attribute(PolicyValue::string("alice")?)?,
+            profile_named_attribute("principal.id", PolicyValue::string("bob")?)?,
+        ],
+    });
+
+    let order_values = [
+        (
+            "integer",
+            NumericValue::Integer(7),
+            PolicyValue::integer(8),
+            PolicyValue::integer(7),
+            PolicyValue::integer(6),
+        ),
+        (
+            "decimal",
+            NumericValue::Decimal(DecimalValue::parse("1.5")?),
+            PolicyValue::decimal("2")?,
+            PolicyValue::decimal("1.5")?,
+            PolicyValue::decimal("1")?,
+        ),
+    ];
+    for (value_type, expected, greater, equal, less) in order_values {
+        for (predicate, matching, non_matching, wire) in [
+            (OrderingPredicate::Gt, greater.clone(), equal.clone(), "gt"),
+            (OrderingPredicate::Ge, equal.clone(), less.clone(), "ge"),
+            (OrderingPredicate::Lt, less.clone(), equal.clone(), "lt"),
+            (OrderingPredicate::Le, equal.clone(), greater.clone(), "le"),
+        ] {
+            cases.push(DurableOperatorCase {
+                name: format!("ordering-{wire}-{value_type}"),
+                predicate: wire,
+                operator: Operator::Ordering(OrderingOperator::new(
+                    predicate,
+                    OrderingOperand::literal(expected.clone()),
+                )),
+                matching: vec![profile_attribute(matching)?],
+                non_matching: vec![profile_attribute(non_matching)?],
+            });
+        }
+    }
+
+    let membership_values = [
+        (
+            "string",
+            vec![PolicyValue::string("eng")?, PolicyValue::string("ops")?],
+            PolicyValue::string("eng")?,
+            PolicyValue::string("sales")?,
+        ),
+        (
+            "boolean",
+            vec![PolicyValue::boolean(false)],
+            PolicyValue::boolean(false),
+            PolicyValue::boolean(true),
+        ),
+        (
+            "integer",
+            vec![PolicyValue::integer(7), PolicyValue::integer(8)],
+            PolicyValue::integer(7),
+            PolicyValue::integer(9),
+        ),
+        (
+            "decimal",
+            vec![PolicyValue::decimal("1.25")?, PolicyValue::decimal("2.5")?],
+            PolicyValue::decimal("1.25")?,
+            PolicyValue::decimal("3.75")?,
+        ),
+    ];
+    for (value_type, values, member, outsider) in membership_values {
+        for predicate in [MembershipPredicate::In, MembershipPredicate::NotIn] {
+            let (matching, non_matching, wire) = match predicate {
+                MembershipPredicate::In => (member.clone(), outsider.clone(), "in"),
+                MembershipPredicate::NotIn => (outsider.clone(), member.clone(), "notIn"),
+            };
+            cases.push(DurableOperatorCase {
+                name: format!("membership-{wire}-{value_type}"),
+                predicate: wire,
+                operator: Operator::Membership(MembershipOperator::new(
+                    predicate,
+                    PolicyValueSet::new(values.clone())?,
+                )),
+                matching: vec![profile_attribute(matching)?],
+                non_matching: vec![profile_attribute(non_matching)?],
+            });
+        }
+    }
+
+    for (predicate, pattern, matching, non_matching, wire) in [
+        (
+            StringPredicate::StartsWith,
+            "team-",
+            "team-ops",
+            "ops-team",
+            "startsWith",
+        ),
+        (
+            StringPredicate::EndsWith,
+            "-ops",
+            "team-ops",
+            "ops-team",
+            "endsWith",
+        ),
+        (
+            StringPredicate::Contains,
+            "am-o",
+            "team-ops",
+            "team-dev",
+            "contains",
+        ),
+        (
+            StringPredicate::Glob,
+            "team-*",
+            "team-ops",
+            "ops-team",
+            "glob",
+        ),
+        (
+            StringPredicate::Regex,
+            "^team-[a-z]+$",
+            "team-ops",
+            "team-123",
+            "regex",
+        ),
+    ] {
+        cases.push(DurableOperatorCase {
+            name: format!("string-{wire}"),
+            predicate: wire,
+            operator: Operator::string(predicate, pattern)?,
+            matching: vec![profile_attribute(PolicyValue::string(matching)?)?],
+            non_matching: vec![profile_attribute(PolicyValue::string(non_matching)?)?],
+        });
+    }
+    Ok(cases)
+}
+
+fn durable_operator_policy(
+    id: &str,
+    tenant: vocab::TenantId,
+    version: u32,
+    operator: Operator,
+    effect: PolicyEffect,
+) -> Result<Policy, IdentityError> {
+    let rules = vec![PolicyRule::with_obligations(
+        PolicyCondition::new(
+            AttributeKey::parse("resource.profile").map_err(|_| IdentityError::InvalidPolicy)?,
+            operator,
+        ),
+        effect,
+        PolicyObligations::empty(),
+    )];
+    Policy::hydrate(
+        id,
+        tenant,
+        policy_scope()?,
+        version,
+        policy_time(10),
+        None,
+        rules,
+    )
+}
+
+/// Every Common ABAC predicate/value shape crosses the real create/update JSONB path, hydrates
+/// through PgPolicyRepo, and preserves the production PDP decision.
+#[tokio::test(flavor = "multi_thread")]
+async fn policy_repo_common_abac_profile_matrix_is_durable_and_authoritative() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let repo = PgPolicyRepo::from_unverified_for_test(&store);
+    let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+
+    for (index, case) in durable_operator_cases()?.into_iter().enumerate() {
+        let id = format!("profile-matrix-{index}");
+        let created =
+            durable_operator_policy(&id, tenant, 1, case.operator.clone(), PolicyEffect::Allow)?;
+        policy_create_and_emit(&lifecycle, tenant, created).await?;
+
+        let durable = repo
+            .find(identity_scope(tenant), policy_id(&id)?)
+            .await?
+            .ok_or("created profile policy must be durable")?;
+        assert_eq!(
+            durable.rules()[0].operator(),
+            &case.operator,
+            "{}",
+            case.name
+        );
+        let stored_predicate: String = sqlx::query_scalar(
+            "SELECT rules #>> '{rules,0,condition,operator,predicate}' \
+             FROM abac_policies WHERE tenant_id=$1::uuid AND id=$2",
+        )
+        .bind(ROLE_TENANT_A)
+        .bind(&id)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(stored_predicate, case.predicate, "{}", case.name);
+        assert_eq!(
+            identity::test_support::evaluate_policies_for_test(
+                tenant,
+                &case.matching,
+                std::slice::from_ref(&durable),
+            ),
+            vocab::Decision::Allow,
+            "created {} must authorize its matching tuple",
+            case.name,
+        );
+        assert_eq!(
+            identity::test_support::evaluate_policies_for_test(
+                tenant,
+                &case.non_matching,
+                std::slice::from_ref(&durable),
+            ),
+            vocab::Decision::Deny,
+            "created {} must deny its non-matching tuple",
+            case.name,
+        );
+
+        let updated =
+            durable_operator_policy(&id, tenant, 2, case.operator.clone(), PolicyEffect::Deny)?;
+        policy_update_and_emit(&lifecycle, tenant, updated, policy_version(1)?).await?;
+        let durable = repo
+            .find(identity_scope(tenant), policy_id(&id)?)
+            .await?
+            .ok_or("updated profile policy must be durable")?;
+        assert_eq!(durable.version().get(), 2, "{}", case.name);
+        assert_eq!(
+            durable.rules()[0].operator(),
+            &case.operator,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            identity::test_support::evaluate_policies_for_test(
+                tenant,
+                &case.matching,
+                std::slice::from_ref(&durable),
+            ),
+            vocab::Decision::Deny,
+            "updated deny {} must override its matching tuple",
+            case.name,
+        );
+    }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// policy repo enrollment：统一 conformance 覆盖 create/find/list/update/delete。
 #[tokio::test(flavor = "multi_thread")]
 async fn policy_repo_lifecycle_conformance() -> TestResult {
@@ -4684,7 +5009,7 @@ async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
         .into());
     };
     assert_eq!(attrs.len(), 1);
-    assert_eq!(attrs[0].value().as_str(), "owner-a");
+    assert_eq!(attrs[0].value().string_value(), Some("owner-a"));
 
     let missing = repo
         .resolve_effective(

@@ -14,7 +14,7 @@
 
 use std::time::SystemTime;
 
-use super::{AttributeKey, AttributeValue, IdentityError, PolicyId};
+use super::{AttributeKey, DecimalValue, IdentityError, PolicyId, PolicyValue, PolicyValueType};
 use vocab::RoutePermissionId;
 
 const GLOB_MAX_LEN: usize = 256;
@@ -41,12 +41,12 @@ pub const POLICY_ATTR_RESOURCE_ID: &str = "resource.id";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AbacAttribute {
     key: AttributeKey,
-    value: AttributeValue,
+    value: PolicyValue,
 }
 
 impl AbacAttribute {
     /// 构造 ABAC 属性。
-    pub fn new(key: AttributeKey, value: AttributeValue) -> Self {
+    pub fn new(key: AttributeKey, value: PolicyValue) -> Self {
         Self { key, value }
     }
 
@@ -56,7 +56,7 @@ impl AbacAttribute {
     }
 
     /// 取属性值引用。
-    pub fn value(&self) -> &AttributeValue {
+    pub fn value(&self) -> &PolicyValue {
         &self.value
     }
 }
@@ -191,9 +191,9 @@ impl PolicyObligations {
 // Operator / PolicyEffect / PolicyCondition
 // ---------------------------------------------------------------------------
 
-/// PIP 属性键闭集：仅 `POLICY_ATTR_*` 常量可成为 `EqAttr` RHS。
+/// PIP 属性键闭集：仅 `POLICY_ATTR_*` 常量可成为 typed attribute operand。
 ///
-/// INVARIANT: ABAC-EQATTR-PIP-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::pip_attribute_key_parse_rejects_non_pip", anti_vacuity = "tests::pip_attribute_key_parse_accepts_closed_set" } — `Operator::EqAttr` 载荷只能是本类型；非 PIP 键在域内不可表达，
+/// INVARIANT: ABAC-TYPED-ATTRIBUTE-PIP-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::pip_attribute_key_parse_rejects_non_pip", anti_vacuity = "tests::pip_attribute_key_parse_accepts_closed_set" } — attribute operand 载荷只能是本类型；非 PIP 键在域内不可表达，
 /// 外部字符串入口必须经 [`PipAttributeKey::parse`] fail-closed。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PipAttributeKey(AttributeKey);
@@ -202,12 +202,12 @@ pub struct PipAttributeKey(AttributeKey);
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum PipAttributeKeyError {
-    #[error("eqAttr attribute is not a PIP policy attribute key")]
+    #[error("attribute operand is not a PIP policy attribute key")]
     NotPip,
 }
 
 impl PipAttributeKey {
-    /// 解析 EqAttr 可引用的 PIP 键；仅命中 `POLICY_ATTR_*` 闭集，否则 fail-closed。
+    /// 解析 attribute operand 可引用的 PIP 键；仅命中 `POLICY_ATTR_*` 闭集，否则 fail-closed。
     pub fn parse(raw: &str) -> Result<Self, PipAttributeKeyError> {
         match raw {
             POLICY_ATTR_PRINCIPAL_KIND
@@ -220,7 +220,7 @@ impl PipAttributeKey {
         }
     }
 
-    /// `principal.id` PIP 键（所有权 EqAttr 的标准 RHS）。
+    /// `principal.id` PIP 键（所有权 equality attribute operand 的标准 RHS）。
     pub fn principal_id() -> Self {
         Self(AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID))
     }
@@ -236,18 +236,319 @@ impl PipAttributeKey {
     }
 }
 
-/// 比较 operator。
-///
-/// `ABAC-EQATTR-PIP-01` 同时约束 `EqAttr` 只能携带 [`PipAttributeKey`]。
+pub const POLICY_VALUE_SET_MAX_ITEMS: usize = 32;
+
+/// Rejection reasons shared by the four closed operator families.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OperatorError {
+    #[error("policy value set must not be empty")]
+    EmptySet,
+    #[error("policy value set exceeds 32 items")]
+    SetTooLarge,
+    #[error("policy value set must be homogeneous")]
+    MixedSet,
+    #[error("policy value set contains a duplicate")]
+    DuplicateSetValue,
+    #[error("string pattern is empty, too long, or contains control characters")]
+    InvalidPattern,
+    #[error("regular expression is invalid")]
+    InvalidRegex,
+}
+
+/// Exact equality predicates. `Ne` never turns a missing or ill-typed value into a match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EqualityPredicate {
+    Eq,
+    Ne,
+}
+
+/// Exact numeric ordering predicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OrderingPredicate {
+    Gt,
+    Ge,
+    Lt,
+    Le,
+}
+
+/// Homogeneous-set membership predicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MembershipPredicate {
+    In,
+    NotIn,
+}
+
+/// Case-sensitive, bounded string predicates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringPredicate {
+    StartsWith,
+    EndsWith,
+    Contains,
+    Glob,
+    Regex,
+}
+
+/// Equality RHS bound to the closed, intrinsically typed PIP key set.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[non_exhaustive]
+pub struct TypedAttributeOperand {
+    attribute: PipAttributeKey,
+}
+
+impl TypedAttributeOperand {
+    /// Builds an equality RHS from the closed PIP set. Every currently supported PIP attribute
+    /// has an intrinsic string type, so callers cannot claim an impossible numeric/bool type.
+    pub const fn new(attribute: PipAttributeKey) -> Self {
+        Self { attribute }
+    }
+
+    pub const fn value_type(&self) -> PolicyValueType {
+        PolicyValueType::String
+    }
+
+    pub fn attribute(&self) -> &PipAttributeKey {
+        &self.attribute
+    }
+}
+
+/// Equality compares either a typed literal or another closed PIP attribute.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EqualityOperand {
+    Literal(PolicyValue),
+    Attribute(TypedAttributeOperand),
+}
+
+/// Numeric literal accepted by the ordering family.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum NumericValue {
+    Integer(i64),
+    Decimal(DecimalValue),
+}
+
+impl NumericValue {
+    pub const fn value_type(&self) -> PolicyValueType {
+        match self {
+            Self::Integer(_) => PolicyValueType::Integer,
+            Self::Decimal(_) => PolicyValueType::Decimal,
+        }
+    }
+
+    pub fn into_policy_value(self) -> PolicyValue {
+        match self {
+            Self::Integer(value) => PolicyValue::integer(value),
+            Self::Decimal(value) => PolicyValue::from_decimal(value),
+        }
+    }
+
+    pub fn from_policy_value(value: PolicyValue) -> Option<Self> {
+        if let Some(integer) = value.integer_value() {
+            Some(Self::Integer(integer))
+        } else {
+            value.decimal_value().cloned().map(Self::Decimal)
+        }
+    }
+}
+
+/// Ordering operand sealed to numeric literals until a numeric PIP key exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderingOperand {
+    value: NumericValue,
+}
+
+impl OrderingOperand {
+    pub const fn literal(value: NumericValue) -> Self {
+        Self { value }
+    }
+
+    pub const fn value(&self) -> &NumericValue {
+        &self.value
+    }
+}
+
+/// Canonically sorted, homogeneous, unique set containing between 1 and 32 values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PolicyValueSet {
+    value_type: PolicyValueType,
+    values: Vec<PolicyValue>,
+}
+
+impl PolicyValueSet {
+    pub fn new(mut values: Vec<PolicyValue>) -> Result<Self, OperatorError> {
+        let Some(first) = values.first() else {
+            return Err(OperatorError::EmptySet);
+        };
+        if values.len() > POLICY_VALUE_SET_MAX_ITEMS {
+            return Err(OperatorError::SetTooLarge);
+        }
+        let value_type = first.value_type();
+        if values.iter().any(|value| value.value_type() != value_type) {
+            return Err(OperatorError::MixedSet);
+        }
+        values.sort();
+        if values.windows(2).any(|pair| pair[0] == pair[1]) {
+            return Err(OperatorError::DuplicateSetValue);
+        }
+        Ok(Self { value_type, values })
+    }
+
+    pub const fn value_type(&self) -> PolicyValueType {
+        self.value_type
+    }
+
+    pub fn values(&self) -> &[PolicyValue] {
+        &self.values
+    }
+
+    fn contains(&self, actual: &PolicyValue) -> bool {
+        actual.value_type() == self.value_type && self.values.binary_search(actual).is_ok()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EqualityOperator {
+    predicate: EqualityPredicate,
+    operand: EqualityOperand,
+}
+
+impl EqualityOperator {
+    pub const fn new(predicate: EqualityPredicate, operand: EqualityOperand) -> Self {
+        Self { predicate, operand }
+    }
+    pub const fn predicate(&self) -> EqualityPredicate {
+        self.predicate
+    }
+    pub fn operand(&self) -> &EqualityOperand {
+        &self.operand
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OrderingOperator {
+    predicate: OrderingPredicate,
+    operand: OrderingOperand,
+}
+
+impl OrderingOperator {
+    pub const fn new(predicate: OrderingPredicate, operand: OrderingOperand) -> Self {
+        Self { predicate, operand }
+    }
+    pub const fn predicate(&self) -> OrderingPredicate {
+        self.predicate
+    }
+    pub fn operand(&self) -> &OrderingOperand {
+        &self.operand
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MembershipOperator {
+    predicate: MembershipPredicate,
+    operand: PolicyValueSet,
+}
+
+impl MembershipOperator {
+    pub const fn new(predicate: MembershipPredicate, operand: PolicyValueSet) -> Self {
+        Self { predicate, operand }
+    }
+    pub const fn predicate(&self) -> MembershipPredicate {
+        self.predicate
+    }
+    pub fn operand(&self) -> &PolicyValueSet {
+        &self.operand
+    }
+}
+
+#[derive(Clone)]
+pub struct StringOperator {
+    predicate: StringPredicate,
+    pattern: String,
+    regex: Option<regex::Regex>,
+}
+
+impl std::fmt::Debug for StringOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StringOperator")
+            .field("predicate", &self.predicate)
+            .field("pattern", &"<redacted>")
+            .finish()
+    }
+}
+
+impl PartialEq for StringOperator {
+    fn eq(&self, other: &Self) -> bool {
+        self.predicate == other.predicate && self.pattern == other.pattern
+    }
+}
+impl Eq for StringOperator {}
+
+impl StringOperator {
+    pub fn parse(predicate: StringPredicate, pattern: &str) -> Result<Self, OperatorError> {
+        if pattern.is_empty()
+            || pattern.len() > GLOB_MAX_LEN
+            || pattern.chars().any(char::is_control)
+        {
+            return Err(OperatorError::InvalidPattern);
+        }
+        let regex = if predicate == StringPredicate::Regex {
+            Some(regex::Regex::new(pattern).map_err(|_| OperatorError::InvalidRegex)?)
+        } else {
+            None
+        };
+        Ok(Self {
+            predicate,
+            pattern: pattern.to_string(),
+            regex,
+        })
+    }
+
+    pub const fn predicate(&self) -> StringPredicate {
+        self.predicate
+    }
+    pub fn pattern(&self) -> &str {
+        &self.pattern
+    }
+}
+
+/// RSS Common ABAC Profile：family 与 operand 的非法组合在类型层不可表达。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Operator {
-    Eq(AttributeValue),
-    Ne(AttributeValue),
-    Like(GlobPattern),
-    Gt(AttributeValue),
-    Lt(AttributeValue),
-    EqAttr(PipAttributeKey),
+    Equality(EqualityOperator),
+    Ordering(OrderingOperator),
+    Membership(MembershipOperator),
+    StringMatch(StringOperator),
+}
+
+impl Operator {
+    pub const fn equal(value: PolicyValue) -> Self {
+        Self::Equality(EqualityOperator::new(
+            EqualityPredicate::Eq,
+            EqualityOperand::Literal(value),
+        ))
+    }
+
+    pub const fn not_equal(value: PolicyValue) -> Self {
+        Self::Equality(EqualityOperator::new(
+            EqualityPredicate::Ne,
+            EqualityOperand::Literal(value),
+        ))
+    }
+
+    pub const fn equal_attribute(attribute: PipAttributeKey) -> Self {
+        Self::Equality(EqualityOperator::new(
+            EqualityPredicate::Eq,
+            EqualityOperand::Attribute(TypedAttributeOperand::new(attribute)),
+        ))
+    }
+
+    pub const fn ordering(predicate: OrderingPredicate, value: NumericValue) -> Self {
+        Self::Ordering(OrderingOperator::new(
+            predicate,
+            OrderingOperand::literal(value),
+        ))
+    }
+
+    pub fn string(predicate: StringPredicate, pattern: &str) -> Result<Self, OperatorError> {
+        StringOperator::parse(predicate, pattern).map(Self::StringMatch)
+    }
 }
 
 /// 规则效果（命中后贡献 Allow 或 Deny；deny-overrides 下 Deny 压过 Allow）。
@@ -256,36 +557,6 @@ pub enum Operator {
 pub enum PolicyEffect {
     Allow,
     Deny,
-}
-
-/// `like` glob 模式 newtype（私有字段；parse funnel fail-closed）。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GlobPattern(String);
-
-impl GlobPattern {
-    pub fn parse(raw: &str) -> Result<Self, GlobPatternError> {
-        super::validate_token(raw, GLOB_MAX_LEN, |c| c.is_ascii_graphic()).map_err(
-            |r| match r {
-                super::Reason::Empty => GlobPatternError::Empty,
-                super::Reason::Format => GlobPatternError::Format,
-            },
-        )?;
-        Ok(Self(raw.to_string()))
-    }
-
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
-
-/// glob 模式解析错误。
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum GlobPatternError {
-    #[error("glob pattern is empty")]
-    Empty,
-    #[error("glob pattern is too long or has invalid characters")]
-    Format,
 }
 
 /// 单条规则条件（属性键 + 比较 operator）。
@@ -583,18 +854,22 @@ fn rule_matches(rule: &PolicyRule, attrs: &[AbacAttribute]) -> bool {
         return false;
     };
     match rule.operator() {
-        Operator::Eq(expected) => actual == expected,
-        Operator::Ne(expected) => actual != expected,
-        Operator::Like(pattern) => glob_match(pattern.as_str(), actual.as_str()),
-        Operator::Gt(threshold) => numeric_cmp(actual, threshold, std::cmp::Ordering::Greater),
-        Operator::Lt(threshold) => numeric_cmp(actual, threshold, std::cmp::Ordering::Less),
-        Operator::EqAttr(other_key) => {
-            find_attr(attrs, other_key.as_attribute_key()).is_some_and(|other| other == actual)
+        Operator::Equality(operator) => equality_matches(operator, actual, attrs),
+        Operator::Ordering(operator) => ordering_matches(operator, actual, attrs),
+        Operator::Membership(operator) => {
+            let contains = operator.operand().contains(actual);
+            match operator.predicate() {
+                MembershipPredicate::In => contains,
+                MembershipPredicate::NotIn => {
+                    actual.value_type() == operator.operand().value_type() && !contains
+                }
+            }
         }
+        Operator::StringMatch(operator) => string_matches(operator, actual),
     }
 }
 
-fn find_attr<'a>(attrs: &'a [AbacAttribute], key: &AttributeKey) -> Option<&'a AttributeValue> {
+fn find_attr<'a>(attrs: &'a [AbacAttribute], key: &AttributeKey) -> Option<&'a PolicyValue> {
     attrs
         .iter()
         .find(|a| a.key() == key)
@@ -606,19 +881,69 @@ fn has_duplicate_key(attrs: &[AbacAttribute]) -> bool {
     !attrs.iter().all(|a| seen.insert(a.key()))
 }
 
-fn numeric_cmp(
-    actual: &AttributeValue,
-    threshold: &AttributeValue,
-    want: std::cmp::Ordering,
+fn equality_matches(
+    operator: &EqualityOperator,
+    actual: &PolicyValue,
+    attrs: &[AbacAttribute],
 ) -> bool {
-    match (numeric(actual.as_str()), numeric(threshold.as_str())) {
-        (Some(a), Some(b)) => a.partial_cmp(&b) == Some(want),
-        _ => false,
+    let expected = match operator.operand() {
+        EqualityOperand::Literal(expected) => expected,
+        EqualityOperand::Attribute(operand) => {
+            if actual.value_type() != operand.value_type() {
+                return false;
+            }
+            let Some(expected) = find_attr(attrs, operand.attribute().as_attribute_key()) else {
+                return false;
+            };
+            expected
+        }
+    };
+    if actual.value_type() != expected.value_type() {
+        return false;
+    }
+    match operator.predicate() {
+        EqualityPredicate::Eq => actual == expected,
+        EqualityPredicate::Ne => actual != expected,
     }
 }
 
-fn numeric(raw: &str) -> Option<f64> {
-    raw.parse::<f64>().ok().filter(|n| n.is_finite())
+fn ordering_matches(
+    operator: &OrderingOperator,
+    actual: &PolicyValue,
+    _attrs: &[AbacAttribute],
+) -> bool {
+    let expected = operator.operand().value().clone().into_policy_value();
+    if actual.value_type() != expected.value_type()
+        || !matches!(
+            actual.value_type(),
+            PolicyValueType::Integer | PolicyValueType::Decimal
+        )
+    {
+        return false;
+    }
+    let ordering = actual.cmp(&expected);
+    match operator.predicate() {
+        OrderingPredicate::Gt => ordering.is_gt(),
+        OrderingPredicate::Ge => ordering.is_ge(),
+        OrderingPredicate::Lt => ordering.is_lt(),
+        OrderingPredicate::Le => ordering.is_le(),
+    }
+}
+
+fn string_matches(operator: &StringOperator, actual: &PolicyValue) -> bool {
+    let Some(actual) = actual.string_value() else {
+        return false;
+    };
+    match operator.predicate() {
+        StringPredicate::StartsWith => actual.starts_with(operator.pattern()),
+        StringPredicate::EndsWith => actual.ends_with(operator.pattern()),
+        StringPredicate::Contains => actual.contains(operator.pattern()),
+        StringPredicate::Glob => glob_match(operator.pattern(), actual),
+        StringPredicate::Regex => operator
+            .regex
+            .as_ref()
+            .is_some_and(|regex| regex.is_match(actual)),
+    }
 }
 
 fn glob_match(pattern: &str, value: &str) -> bool {
@@ -653,13 +978,17 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use super::{
-        AbacAttribute, GlobPattern, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
+        AbacAttribute, EqualityOperand, EqualityOperator, EqualityPredicate, MembershipOperator,
+        MembershipPredicate, NumericValue, Operator, OrderingOperand, OrderingOperator,
+        OrderingPredicate, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
         POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
-        POLICY_ATTR_TENANT_ID, PipAttributeKey, PipAttributeKeyError, Policy, PolicyCondition,
-        PolicyEffect, PolicyEvaluation, PolicyObligations, PolicyRouteScope, PolicyRule,
-        evaluate_abac, evaluate_abac_for_tenant, evaluate_policies_for_tenant,
+        POLICY_ATTR_TENANT_ID, POLICY_VALUE_SET_MAX_ITEMS, PipAttributeKey, PipAttributeKeyError,
+        Policy, PolicyCondition, PolicyEffect, PolicyEvaluation, PolicyObligations,
+        PolicyRouteScope, PolicyRule, PolicyValueSet, StringOperator, StringPredicate,
+        TypedAttributeOperand, evaluate_abac, evaluate_abac_for_tenant,
+        evaluate_policies_for_tenant,
     };
-    use crate::domain::{AttributeKey, AttributeValue, PolicyId};
+    use crate::domain::{AttributeKey, DecimalValue, PolicyId, PolicyValue};
     use authn::Principal;
     use rstest::rstest;
     use vocab::tenant::{ScopedTenant, TenantId};
@@ -678,17 +1007,58 @@ mod tests {
         AttributeKey::parse(raw).expect("valid attribute key")
     }
 
-    fn aval(raw: &str) -> AttributeValue {
-        AttributeValue::new(raw)
+    fn aval(raw: &str) -> PolicyValue {
+        PolicyValue::new(raw)
     }
 
     fn attr(key: &str, value: &str) -> AbacAttribute {
         AbacAttribute::new(akey(key), aval(value))
     }
 
-    fn glob(raw: &str) -> GlobPattern {
+    fn int_attr(key: &str, value: i64) -> AbacAttribute {
+        AbacAttribute::new(akey(key), PolicyValue::integer(value))
+    }
+
+    fn eq(value: PolicyValue) -> Operator {
+        Operator::Equality(EqualityOperator::new(
+            EqualityPredicate::Eq,
+            EqualityOperand::Literal(value),
+        ))
+    }
+
+    fn ne(value: PolicyValue) -> Operator {
+        Operator::Equality(EqualityOperator::new(
+            EqualityPredicate::Ne,
+            EqualityOperand::Literal(value),
+        ))
+    }
+
+    fn glob(raw: &str) -> Operator {
         #[allow(clippy::expect_used)]
-        GlobPattern::parse(raw).expect("valid glob pattern")
+        let operator =
+            StringOperator::parse(StringPredicate::Glob, raw).expect("valid glob pattern");
+        Operator::StringMatch(operator)
+    }
+
+    fn gt(value: i64) -> Operator {
+        Operator::Ordering(OrderingOperator::new(
+            OrderingPredicate::Gt,
+            OrderingOperand::literal(NumericValue::Integer(value)),
+        ))
+    }
+
+    fn lt(value: i64) -> Operator {
+        Operator::Ordering(OrderingOperator::new(
+            OrderingPredicate::Lt,
+            OrderingOperand::literal(NumericValue::Integer(value)),
+        ))
+    }
+
+    fn eq_attr(attribute: PipAttributeKey) -> Operator {
+        Operator::Equality(EqualityOperator::new(
+            EqualityPredicate::Eq,
+            EqualityOperand::Attribute(TypedAttributeOperand::new(attribute)),
+        ))
     }
 
     fn pid(raw: &str) -> PolicyId {
@@ -713,11 +1083,11 @@ mod tests {
     fn entity_accessors_echo() {
         let a = attr("dept", "eng");
         assert_eq!(a.key().as_str(), "dept");
-        assert_eq!(a.value().as_str(), "eng");
+        assert_eq!(a.value().string_value(), Some("eng"));
 
-        let r = rule("dept", Operator::Eq(aval("eng")), PolicyEffect::Allow);
+        let r = rule("dept", eq(aval("eng")), PolicyEffect::Allow);
         assert_eq!(r.attribute_key().as_str(), "dept");
-        assert!(matches!(r.operator(), Operator::Eq(_)));
+        assert!(matches!(r.operator(), Operator::Equality(_)));
         assert_eq!(r.effect(), PolicyEffect::Allow);
         assert!(r.obligations().is_empty());
 
@@ -797,95 +1167,56 @@ mod tests {
         match op {
             Op::EqTrue => (
                 vec![attr("role", "admin")],
-                rule("role", Operator::Eq(aval("admin")), allow),
+                rule("role", eq(aval("admin")), allow),
             ),
             Op::EqFalse => (
                 vec![attr("role", "user")],
-                rule("role", Operator::Eq(aval("admin")), allow),
+                rule("role", eq(aval("admin")), allow),
             ),
-            Op::EqMissing => (vec![], rule("role", Operator::Eq(aval("admin")), allow)),
+            Op::EqMissing => (vec![], rule("role", eq(aval("admin")), allow)),
             Op::NeTrue => (
                 vec![attr("role", "user")],
-                rule("role", Operator::Ne(aval("admin")), allow),
+                rule("role", ne(aval("admin")), allow),
             ),
             Op::NeFalse => (
                 vec![attr("role", "admin")],
-                rule("role", Operator::Ne(aval("admin")), allow),
+                rule("role", ne(aval("admin")), allow),
             ),
-            Op::NeMissing => (vec![], rule("role", Operator::Ne(aval("admin")), allow)),
+            Op::NeMissing => (vec![], rule("role", ne(aval("admin")), allow)),
             Op::LikeStar => (
                 vec![attr("path", "/docs/a/b")],
-                rule("path", Operator::Like(glob("/docs/*")), allow),
+                rule("path", glob("/docs/*"), allow),
             ),
             Op::LikeStarMiss => (
                 vec![attr("path", "/etc/passwd")],
-                rule("path", Operator::Like(glob("/docs/*")), allow),
+                rule("path", glob("/docs/*"), allow),
             ),
-            Op::LikeQuestion => (
-                vec![attr("code", "ab")],
-                rule("code", Operator::Like(glob("a?")), allow),
-            ),
-            Op::LikeQuestionMiss => (
-                vec![attr("code", "abc")],
-                rule("code", Operator::Like(glob("a?")), allow),
-            ),
-            Op::GtTrue => (
-                vec![attr("level", "5")],
-                rule("level", Operator::Gt(aval("3")), allow),
-            ),
-            Op::GtFalse => (
-                vec![attr("level", "2")],
-                rule("level", Operator::Gt(aval("3")), allow),
-            ),
-            Op::GtEqual => (
-                vec![attr("level", "3")],
-                rule("level", Operator::Gt(aval("3")), allow),
-            ),
-            Op::GtTypeMismatch => (
-                vec![attr("level", "high")],
-                rule("level", Operator::Gt(aval("3")), allow),
-            ),
-            Op::LtTrue => (
-                vec![attr("level", "2")],
-                rule("level", Operator::Lt(aval("3")), allow),
-            ),
-            Op::LtFalse => (
-                vec![attr("level", "5")],
-                rule("level", Operator::Lt(aval("3")), allow),
-            ),
-            Op::LtEqual => (
-                vec![attr("level", "3")],
-                rule("level", Operator::Lt(aval("3")), allow),
-            ),
+            Op::LikeQuestion => (vec![attr("code", "ab")], rule("code", glob("a?"), allow)),
+            Op::LikeQuestionMiss => (vec![attr("code", "abc")], rule("code", glob("a?"), allow)),
+            Op::GtTrue => (vec![int_attr("level", 5)], rule("level", gt(3), allow)),
+            Op::GtFalse => (vec![int_attr("level", 2)], rule("level", gt(3), allow)),
+            Op::GtEqual => (vec![int_attr("level", 3)], rule("level", gt(3), allow)),
+            Op::GtTypeMismatch => (vec![attr("level", "high")], rule("level", gt(3), allow)),
+            Op::LtTrue => (vec![int_attr("level", 2)], rule("level", lt(3), allow)),
+            Op::LtFalse => (vec![int_attr("level", 5)], rule("level", lt(3), allow)),
+            Op::LtEqual => (vec![int_attr("level", 3)], rule("level", lt(3), allow)),
             Op::EqAttrTrue => (
                 vec![
                     attr("owner", "alice"),
                     attr(POLICY_ATTR_PRINCIPAL_ID, "alice"),
                 ],
-                rule(
-                    "owner",
-                    Operator::EqAttr(PipAttributeKey::principal_id()),
-                    allow,
-                ),
+                rule("owner", eq_attr(PipAttributeKey::principal_id()), allow),
             ),
             Op::EqAttrFalse => (
                 vec![
                     attr("owner", "alice"),
                     attr(POLICY_ATTR_PRINCIPAL_ID, "bob"),
                 ],
-                rule(
-                    "owner",
-                    Operator::EqAttr(PipAttributeKey::principal_id()),
-                    allow,
-                ),
+                rule("owner", eq_attr(PipAttributeKey::principal_id()), allow),
             ),
             Op::EqAttrMissing => (
                 vec![attr("owner", "alice")],
-                rule(
-                    "owner",
-                    Operator::EqAttr(PipAttributeKey::principal_id()),
-                    allow,
-                ),
+                rule("owner", eq_attr(PipAttributeKey::principal_id()), allow),
             ),
         }
     }
@@ -921,8 +1252,8 @@ mod tests {
     #[case::deny_before_allow(true)]
     fn deny_overrides(#[case] deny_first: bool) {
         let attrs = vec![attr("role", "admin")];
-        let allow = rule("role", Operator::Eq(aval("admin")), PolicyEffect::Allow);
-        let deny = rule("role", Operator::Eq(aval("admin")), PolicyEffect::Deny);
+        let allow = rule("role", eq(aval("admin")), PolicyEffect::Allow);
+        let deny = rule("role", eq(aval("admin")), PolicyEffect::Deny);
         let rules = if deny_first {
             vec![deny, allow]
         } else {
@@ -934,25 +1265,21 @@ mod tests {
     #[test]
     fn deny_hit_with_allow_miss_still_denies() {
         let attrs = vec![attr("role", "admin")];
-        let allow = rule("role", Operator::Eq(aval("user")), PolicyEffect::Allow);
-        let deny = rule("role", Operator::Eq(aval("admin")), PolicyEffect::Deny);
+        let allow = rule("role", eq(aval("user")), PolicyEffect::Allow);
+        let deny = rule("role", eq(aval("admin")), PolicyEffect::Deny);
         assert_eq!(eval(&attrs, vec![allow, deny]), Decision::Deny);
     }
 
     #[test]
     fn duplicate_attribute_key_denies() {
         let attrs = vec![attr("clearance", "public"), attr("clearance", "secret")];
-        let allow = rule(
-            "clearance",
-            Operator::Eq(aval("public")),
-            PolicyEffect::Allow,
-        );
+        let allow = rule("clearance", eq(aval("public")), PolicyEffect::Allow);
         assert_eq!(eval(&attrs, vec![allow]), Decision::Deny);
     }
 
     #[test]
     fn default_deny_and_single_allow() {
-        let allow = rule("role", Operator::Eq(aval("admin")), PolicyEffect::Allow);
+        let allow = rule("role", eq(aval("admin")), PolicyEffect::Allow);
         assert_eq!(
             eval(&[attr("role", "user")], vec![allow.clone()]),
             Decision::Deny
@@ -972,11 +1299,7 @@ mod tests {
         let policy = Policy::new(
             pid("pol-1"),
             tid(TENANT_A),
-            vec![rule(
-                "role",
-                Operator::Eq(aval("admin")),
-                PolicyEffect::Allow,
-            )],
+            vec![rule("role", eq(aval("admin")), PolicyEffect::Allow)],
         );
         assert_eq!(
             evaluate_abac(&principal, &[attr("role", "admin")], &policy),
@@ -988,7 +1311,7 @@ mod tests {
     fn obligations_are_preserved_but_route_allow_requires_empty_obligations() {
         let obligations = PolicyObligations::new(Some(ScopedTenant::Tenant), vec![akey("email")]);
         let rule = PolicyRule::with_obligations(
-            PolicyCondition::new(akey("role"), Operator::Eq(aval("admin"))),
+            PolicyCondition::new(akey("role"), eq(aval("admin"))),
             PolicyEffect::Allow,
             obligations.clone(),
         );
@@ -1006,17 +1329,13 @@ mod tests {
         let empty_allow = Policy::new(
             pid("allow-1"),
             tid(TENANT_A),
-            vec![rule(
-                "role",
-                Operator::Eq(aval("admin")),
-                PolicyEffect::Allow,
-            )],
+            vec![rule("role", eq(aval("admin")), PolicyEffect::Allow)],
         );
         let obligated_allow = Policy::new(
             pid("allow-2"),
             tid(TENANT_A),
             vec![PolicyRule::with_obligations(
-                PolicyCondition::new(akey("dept"), Operator::Eq(aval("eng"))),
+                PolicyCondition::new(akey("dept"), eq(aval("eng"))),
                 PolicyEffect::Allow,
                 PolicyObligations::new(Some(ScopedTenant::Tenant), vec![]),
             )],
@@ -1033,11 +1352,7 @@ mod tests {
         let deny = Policy::new(
             pid("deny-1"),
             tid(TENANT_A),
-            vec![rule(
-                "role",
-                Operator::Eq(aval("admin")),
-                PolicyEffect::Deny,
-            )],
+            vec![rule("role", eq(aval("admin")), PolicyEffect::Deny)],
         );
         let got = evaluate_policies_for_tenant(Some(tid(TENANT_A)), &attrs, &[deny]);
         assert_eq!(got, PolicyEvaluation::Deny);
@@ -1048,14 +1363,212 @@ mod tests {
     #[case::ok_wildcards("a?b*c".to_string(), true)]
     #[case::ok_max_len("a".repeat(256), true)]
     #[case::empty(String::new(), false)]
-    #[case::space("a b".to_string(), false)]
+    #[case::space("a b".to_string(), true)]
     #[case::tab("a\tb".to_string(), false)]
     #[case::null("a\u{0}b".to_string(), false)]
     #[case::newline("a\nb".to_string(), false)]
-    #[case::non_ascii("café".to_string(), false)]
+    #[case::non_ascii("café".to_string(), true)]
     #[case::too_long("a".repeat(257), false)]
     fn glob_pattern_parse_fail_closed(#[case] raw: String, #[case] ok: bool) {
-        assert_eq!(GlobPattern::parse(&raw).is_ok(), ok);
+        assert_eq!(
+            StringOperator::parse(StringPredicate::Glob, &raw).is_ok(),
+            ok
+        );
+    }
+
+    #[test]
+    fn value_set_is_bounded_homogeneous_unique_and_canonical() {
+        assert_eq!(
+            PolicyValueSet::new(Vec::new()),
+            Err(super::OperatorError::EmptySet)
+        );
+        assert_eq!(
+            PolicyValueSet::new(vec![aval("a"), PolicyValue::integer(1)]),
+            Err(super::OperatorError::MixedSet)
+        );
+        assert_eq!(
+            PolicyValueSet::new(vec![aval("a"), aval("a")]),
+            Err(super::OperatorError::DuplicateSetValue)
+        );
+        assert_eq!(
+            PolicyValueSet::new(
+                (0..=POLICY_VALUE_SET_MAX_ITEMS)
+                    .map(|value| PolicyValue::integer(value as i64))
+                    .collect()
+            ),
+            Err(super::OperatorError::SetTooLarge)
+        );
+        let set = PolicyValueSet::new(vec![aval("ops"), aval("eng")]).expect("valid set");
+        assert_eq!(set.values(), &[aval("eng"), aval("ops")]);
+    }
+
+    #[test]
+    fn membership_and_regex_are_typed_and_fail_closed() {
+        let set = PolicyValueSet::new(vec![aval("eng"), aval("ops")]).expect("valid set");
+        let in_rule = rule(
+            "dept",
+            Operator::Membership(MembershipOperator::new(
+                MembershipPredicate::In,
+                set.clone(),
+            )),
+            PolicyEffect::Allow,
+        );
+        assert_eq!(eval(&[attr("dept", "ops")], vec![in_rule]), Decision::Allow);
+
+        let not_in = rule(
+            "dept",
+            Operator::Membership(MembershipOperator::new(MembershipPredicate::NotIn, set)),
+            PolicyEffect::Allow,
+        );
+        assert_eq!(eval(&[], vec![not_in.clone()]), Decision::Deny);
+        assert_eq!(eval(&[int_attr("dept", 7)], vec![not_in]), Decision::Deny);
+
+        let regex = StringOperator::parse(StringPredicate::Regex, r"^team-[0-9]+$").expect("regex");
+        assert_eq!(
+            eval(
+                &[attr("name", "team-42")],
+                vec![rule(
+                    "name",
+                    Operator::StringMatch(regex),
+                    PolicyEffect::Allow
+                )]
+            ),
+            Decision::Allow
+        );
+        assert!(StringOperator::parse(StringPredicate::Regex, "(").is_err());
+    }
+
+    #[test]
+    fn common_profile_predicate_matrix_is_typed_and_fail_closed() {
+        let allow = PolicyEffect::Allow;
+        for (predicate, actual, expected) in [
+            (OrderingPredicate::Gt, 3, Decision::Allow),
+            (OrderingPredicate::Ge, 2, Decision::Allow),
+            (OrderingPredicate::Lt, 1, Decision::Allow),
+            (OrderingPredicate::Le, 2, Decision::Allow),
+        ] {
+            let operator = Operator::ordering(predicate, NumericValue::Integer(2));
+            assert_eq!(
+                eval(&[int_attr("n", actual)], vec![rule("n", operator, allow)]),
+                expected
+            );
+        }
+        let decimal = |raw: &str| PolicyValue::decimal(raw).expect("canonical decimal");
+        let decimal_rule = Operator::ordering(
+            OrderingPredicate::Gt,
+            NumericValue::Decimal(DecimalValue::parse("1.09").expect("decimal")),
+        );
+        assert_eq!(
+            eval(
+                &[AbacAttribute::new(akey("n"), decimal("1.1"))],
+                vec![rule("n", decimal_rule.clone(), allow)]
+            ),
+            Decision::Allow
+        );
+        assert_eq!(
+            eval(&[attr("n", "1.1")], vec![rule("n", decimal_rule, allow)]),
+            Decision::Deny
+        );
+
+        for predicate in [
+            StringPredicate::StartsWith,
+            StringPredicate::EndsWith,
+            StringPredicate::Contains,
+            StringPredicate::Glob,
+            StringPredicate::Regex,
+        ] {
+            let pattern = match predicate {
+                StringPredicate::StartsWith => "团队",
+                StringPredicate::EndsWith => "Ops",
+                StringPredicate::Contains => "队O",
+                StringPredicate::Glob => "团队?ps",
+                StringPredicate::Regex => r"^团队Ops$",
+            };
+            let miss = match predicate {
+                StringPredicate::StartsWith => "小组Ops",
+                StringPredicate::Glob => "团队opx",
+                StringPredicate::EndsWith | StringPredicate::Contains | StringPredicate::Regex => {
+                    "团队ops"
+                }
+            };
+            let operator = Operator::string(predicate, pattern).expect("pattern");
+            assert_eq!(
+                eval(
+                    &[attr("name", "团队Ops")],
+                    vec![rule("name", operator.clone(), allow)]
+                ),
+                Decision::Allow
+            );
+            assert_eq!(
+                eval(
+                    &[attr("name", miss)],
+                    vec![rule("name", operator.clone(), allow)]
+                ),
+                Decision::Deny
+            );
+            assert_eq!(
+                eval(&[], vec![rule("name", operator.clone(), allow)]),
+                Decision::Deny
+            );
+            assert_eq!(
+                eval(&[int_attr("name", 1)], vec![rule("name", operator, allow)]),
+                Decision::Deny
+            );
+        }
+
+        let bool_set = PolicyValueSet::new(vec![
+            PolicyValue::boolean(false),
+            PolicyValue::boolean(true),
+        ])
+        .expect("set");
+        for (predicate, actual, expected) in [
+            (MembershipPredicate::In, true, Decision::Allow),
+            (MembershipPredicate::NotIn, true, Decision::Deny),
+        ] {
+            let operator =
+                Operator::Membership(MembershipOperator::new(predicate, bool_set.clone()));
+            assert_eq!(
+                eval(
+                    &[AbacAttribute::new(
+                        akey("enabled"),
+                        PolicyValue::boolean(actual)
+                    )],
+                    vec![rule("enabled", operator, allow)]
+                ),
+                expected
+            );
+        }
+        let one = PolicyValueSet::new(vec![PolicyValue::integer(1)]).expect("set");
+        let not_in = Operator::Membership(MembershipOperator::new(MembershipPredicate::NotIn, one));
+        assert_eq!(
+            eval(&[int_attr("n", 2)], vec![rule("n", not_in.clone(), allow)]),
+            Decision::Allow
+        );
+        assert_eq!(
+            eval(&[attr("n", "2")], vec![rule("n", not_in.clone(), allow)]),
+            Decision::Deny
+        );
+        assert_eq!(eval(&[], vec![rule("n", not_in, allow)]), Decision::Deny);
+
+        let bool_eq = Operator::equal(PolicyValue::boolean(true));
+        assert_eq!(
+            eval(
+                &[AbacAttribute::new(
+                    akey("enabled"),
+                    PolicyValue::boolean(true)
+                )],
+                vec![rule("enabled", bool_eq, allow)]
+            ),
+            Decision::Allow
+        );
+        let decimal_ne = Operator::not_equal(decimal("2.5"));
+        assert_eq!(
+            eval(
+                &[AbacAttribute::new(akey("ratio"), decimal("2.6"))],
+                vec![rule("ratio", decimal_ne, allow)]
+            ),
+            Decision::Allow
+        );
     }
 
     #[rstest]

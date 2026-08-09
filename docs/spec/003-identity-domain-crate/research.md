@@ -10,7 +10,9 @@ casbin-rs 的 deny-override 落在 `DefaultEffectStream::push_effect`（`Default
 
 **RSS 侧对应**（`identity::domain::evaluate_abac`，`domain/abac.rs`）：
 - `PolicyRule.effect ∈ {Allow, Deny}`；遍历命中规则，任一命中 Deny → 整体 `Decision::Deny`（短路）；否则有命中 Allow → `Allow`；**无规则命中 → 默认 Deny**（比 casbin 更严的 fail-closed 缺省，对齐零信任）。
-- 偏离：casbin 用 Polar/matcher 表达式 DSL；RSS 不引入 DSL，用 typed `operator` 枚举（eq/ne/like/gt/lt/eq_attr）做属性比较——更窄、更 Rust 原生、编译期可枚举，避免运行期表达式解析的攻击面（优雅简洁 + AI-HARD）。
+- 偏离：casbin 使用 matcher 表达式与函数表；RSS 不引入 DSL 或动态函数注册，而用 ADR-025
+  的 closed typed family（equality/ordering/membership/string）和 family-specific operand。
+  XACML/Casbin 只作为语义与扩展分类对标，不构成 wire/runtime 兼容承诺。
 - 跨租 / 类型不匹配在 RSS 侧 fail-closed 判不命中（不 panic），casbin 无此租户语义——RSS 多租户硬约束（IDENTITY-AUTHZ-TENANT-01）。
 
 ## 2. RBAC 模型

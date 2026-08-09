@@ -132,10 +132,10 @@ use vocab::{
 #[cfg(test)]
 use crate::domain::RefreshTokenSnapshot;
 use crate::domain::{
-    AbacAttribute, AttributeKey, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier,
+    AbacAttribute, AttributeKey, AuthOutcome, IdentityError, LoginIdentifier,
     POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
     POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
-    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, RefreshStatus,
+    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, PolicyValue, RefreshStatus,
     RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
     ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
     evaluate_policies_for_tenant,
@@ -2159,7 +2159,7 @@ fn route_resource_sharing_is_global_in(
 }
 
 fn policy_attr(key: &str, value: &str) -> Result<AbacAttribute, AuthReject> {
-    let value = AttributeValue::parse(value).map_err(|_| AuthReject::Forbidden)?;
+    let value = PolicyValue::parse(value).map_err(|_| AuthReject::Forbidden)?;
     Ok(AbacAttribute::new(AttributeKey::new(key), value))
 }
 
@@ -3194,20 +3194,23 @@ fn policy_error_response(
     if matches!(err, PolicyManageError::OutboxFactConflict(_)) {
         return fact_conflict_response(request_id);
     }
-    if matches!(err, PolicyManageError::AttributeValueTooLong) {
-        return attribute_value_too_long_response(request_id);
+    if matches!(err, PolicyManageError::PolicyValueTooLong) {
+        return policy_value_too_long_response(request_id);
+    }
+    if let PolicyManageError::InvalidOperator(reason) = err {
+        return policy_operator_error_response(reason.as_str(), request_id);
     }
     let kind = policy_manage_error_kind(err);
     log_policy_manage_error(err, kind, tenant, request_id, spec);
     core_response(kind, request_id)
 }
 
-fn attribute_value_too_long_response(request_id: &str) -> Response {
+fn policy_value_too_long_response(request_id: &str) -> Response {
     httpserve::error::core_error_response(
         &CoreError::new(CoreErrorKind::Validation)
             .with_details(PublicDetail::Str(
                 "reason",
-                "attributeValueTooLong".to_string(),
+                "policyValueTooLong".to_string(),
             ))
             .with_details(PublicDetail::Int(
                 "maxBytes",
@@ -3217,11 +3220,19 @@ fn attribute_value_too_long_response(request_id: &str) -> Response {
     )
 }
 
+fn policy_operator_error_response(reason: &str, request_id: &str) -> Response {
+    httpserve::error::core_error_response(
+        &CoreError::new(CoreErrorKind::Validation)
+            .with_details(PublicDetail::Str("reason", reason.to_string())),
+        request_id,
+    )
+}
+
 fn policy_manage_error_kind(err: &PolicyManageError) -> CoreErrorKind {
     match err {
-        PolicyManageError::AttributeValueTooLong | PolicyManageError::InvalidPolicy => {
-            CoreErrorKind::Validation
-        }
+        PolicyManageError::PolicyValueTooLong
+        | PolicyManageError::InvalidOperator(_)
+        | PolicyManageError::InvalidPolicy => CoreErrorKind::Validation,
         PolicyManageError::PolicyNotFound => CoreErrorKind::NotFound,
         PolicyManageError::PolicyAlreadyExists => CoreErrorKind::Conflict,
         PolicyManageError::VersionConflict => CoreErrorKind::VersionConflict,
@@ -3640,7 +3651,7 @@ mod tests {
     use crate::ports::{
         AccountSecurityReadRepo, AccountSecurityState, Credential, DynPolicyLifecycle, Operator,
         PipAttributeKey, Policy, PolicyCondition, PolicyEffect, PolicyObligations, PolicyRule,
-        Role,
+        Role, StringPredicate,
     };
     use authn::CredentialSecurityEventKind;
     use diport::OutboxEmitError;
@@ -4866,6 +4877,48 @@ mod tests {
         assert_eq!(json["error"]["retryable"], true);
     }
 
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn policy_validation_errors_expose_stable_structured_reasons() {
+        for (error, expected_reason, expected_max) in [
+            (
+                PolicyManageError::InvalidOperator(
+                    policy_manage::PolicyOperatorReason::InvalidRegex,
+                ),
+                "invalidRegex",
+                None,
+            ),
+            (
+                PolicyManageError::InvalidOperator(
+                    policy_manage::PolicyOperatorReason::InvalidOperatorCombination,
+                ),
+                "invalidOperatorCombination",
+                None,
+            ),
+            (
+                PolicyManageError::PolicyValueTooLong,
+                "policyValueTooLong",
+                Some(crate::ATTR_VALUE_MAX_LEN as i64),
+            ),
+        ] {
+            let response =
+                policy_error_response(&error, tid(CANON_TENANT), "rid", &POLICIES_CREATE_HTTP_SPEC);
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("collect validation body");
+            let json: serde_json::Value =
+                serde_json::from_slice(&body).expect("parse validation body");
+            let details = json["error"]["details"]
+                .as_array()
+                .expect("validation details array");
+            assert_eq!(details[0]["reason"], expected_reason);
+            if let Some(max) = expected_max {
+                assert_eq!(details[1]["maxBytes"], max);
+            }
+        }
+    }
+
     // 域单测不依赖 adapter crate（rust-standards.md §命名）：AuthGrantLifecycle / Clock 替身在此手写。
     // CapturingAuthGrantLifecycle 捕获原子 login mutation，并将 grant/refresh 一起委托给共享
     // `InMemAuthGrantStore`；同一 store 也注入 RefreshService，避免测试出现双存储漂移。
@@ -5403,7 +5456,7 @@ mod tests {
             vec![PolicyRule::with_obligations(
                 PolicyCondition::new(
                     AttributeKey::new(POLICY_ATTR_PRINCIPAL_KIND),
-                    Operator::Eq(AttributeValue::new("admin")),
+                    Operator::equal(PolicyValue::new("admin")),
                 ),
                 PolicyEffect::Allow,
                 PolicyObligations::empty(),
@@ -6188,7 +6241,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": POLICY_ATTR_PRINCIPAL_KIND,
-                    "operator": { "kind": "eq", "value": "admin" }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "admin" } }
                 },
                 "effect": "allow"
             }]
@@ -6216,7 +6269,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": POLICY_ATTR_PRINCIPAL_KIND,
-                    "operator": { "kind": "eq", "value": "admin" }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "admin" } }
                 },
                 "effect": "deny"
             }]
@@ -6241,7 +6294,7 @@ mod tests {
             permission,
             PolicyCondition::new(
                 AttributeKey::new(POLICY_ATTR_PRINCIPAL_KIND),
-                Operator::Eq(AttributeValue::new("admin")),
+                Operator::equal(PolicyValue::new("admin")),
             ),
             effect,
             obligations,
@@ -6289,7 +6342,7 @@ mod tests {
             PolicyRouteScope::parse("other.contract", "identity:policy:read").expect("scope"),
             resource_id(),
             ResourceAttributeKey::parse("resource.owner").expect("key"),
-            AttributeValue::new(CANON_USER),
+            PolicyValue::new(CANON_USER),
             SystemTime::UNIX_EPOCH + Duration::from_secs(effective_from_secs),
             effective_until_secs.map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
         )
@@ -6303,7 +6356,7 @@ mod tests {
             vocab::RoutePermissionId::IdentityPolicyRead,
             PolicyCondition::new(
                 AttributeKey::new("resource.owner"),
-                Operator::EqAttr(PipAttributeKey::principal_id()),
+                Operator::equal_attribute(PipAttributeKey::principal_id()),
             ),
             PolicyEffect::Allow,
             PolicyObligations::empty(),
@@ -7600,7 +7653,7 @@ mod tests {
         assert!(
             matches!(
                 policy_attr(POLICY_ATTR_PRINCIPAL_ID, &"a".repeat(256)),
-                Ok(attr) if attr.value().as_str().len() == 256
+                Ok(attr) if attr.value().string_value().is_some_and(|value| value.len() == 256)
             ),
             "exact-256 principal id must parse"
         );
@@ -7648,7 +7701,7 @@ mod tests {
                 vocab::RoutePermissionId::IdentityPolicyRead,
                 PolicyCondition::new(
                     AttributeKey::new(POLICY_ATTR_PRINCIPAL_ID),
-                    Operator::Like(crate::domain::GlobPattern::parse("*").expect("glob")),
+                    Operator::string(StringPredicate::Glob, "*").expect("glob"),
                 ),
                 PolicyEffect::Allow,
                 PolicyObligations::empty(),

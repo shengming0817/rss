@@ -1032,7 +1032,7 @@ impl IdentityRead<'_, '_> {
             .collect::<Vec<_>>();
         let rows = sqlx::query(
             r#"
-            SELECT attribute_key, attribute_value, version,
+            SELECT attribute_key, attribute_value::text AS attribute_value, version,
                    extract(epoch from effective_from)::bigint AS effective_from,
                    extract(epoch from effective_until)::bigint AS effective_until,
                    deleted_at IS NOT NULL AS deleted
@@ -1438,11 +1438,11 @@ impl IdentityWrite<'_, '_> {
                     INSERT INTO resource_attributes
                         (tenant_id, contract_id, permission, resource_id,
                          attribute_key, attribute_value, version, effective_from, effective_until)
-                    VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6, $7,
+                    VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6::jsonb, $7,
                             to_timestamp($8), to_timestamp($9))
                     ON CONFLICT (tenant_id, contract_id, permission, resource_id, attribute_key)
                         DO NOTHING
-                    RETURNING attribute_key, attribute_value, version,
+                    RETURNING attribute_key, attribute_value::text AS attribute_value, version,
                               extract(epoch from effective_from)::bigint AS effective_from,
                               extract(epoch from effective_until)::bigint AS effective_until,
                               deleted_at IS NOT NULL AS deleted
@@ -1453,7 +1453,9 @@ impl IdentityWrite<'_, '_> {
                 .bind(attribute.route_scope().permission().as_str())
                 .bind(attribute.resource_id().as_str())
                 .bind(attribute.key().as_str())
-                .bind(attribute.value().as_str())
+                .bind(crate::resource_attribute_repo::encode_policy_value(
+                    attribute.value(),
+                )?)
                 .bind(version(first)?)
                 .bind(crate::outbox::unix_secs(attribute.effective_from()))
                 .bind(attribute.effective_until().map(crate::outbox::unix_secs))
@@ -1464,13 +1466,13 @@ impl IdentityWrite<'_, '_> {
                 sqlx::query(
                     r#"
                     UPDATE resource_attributes
-                    SET attribute_value = $6, version = version + 1,
+                    SET attribute_value = $6::jsonb, version = version + 1,
                         effective_from = to_timestamp($7), effective_until = to_timestamp($8),
                         deleted_at = NULL, updated_at = now()
                     WHERE tenant_id = $1::uuid AND contract_id = $2 AND permission = $3
                       AND resource_id = $4::uuid AND attribute_key = $5
                       AND version = $9 AND deleted_at IS NULL
-                    RETURNING attribute_key, attribute_value, version,
+                    RETURNING attribute_key, attribute_value::text AS attribute_value, version,
                               extract(epoch from effective_from)::bigint AS effective_from,
                               extract(epoch from effective_until)::bigint AS effective_until,
                               deleted_at IS NOT NULL AS deleted
@@ -1481,7 +1483,9 @@ impl IdentityWrite<'_, '_> {
                 .bind(attribute.route_scope().permission().as_str())
                 .bind(attribute.resource_id().as_str())
                 .bind(attribute.key().as_str())
-                .bind(attribute.value().as_str())
+                .bind(crate::resource_attribute_repo::encode_policy_value(
+                    attribute.value(),
+                )?)
                 .bind(crate::outbox::unix_secs(attribute.effective_from()))
                 .bind(attribute.effective_until().map(crate::outbox::unix_secs))
                 .bind(version(expected)?)

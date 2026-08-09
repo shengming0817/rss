@@ -12,26 +12,29 @@ use generated::event::identity_v1::policy_updated::{
     IdentityPolicyUpdatedPayloadChangeKind, SPEC as POLICY_UPDATED_SPEC,
 };
 use generated::http::identity_v1::{
-    policies_create::{
-        IdentityPoliciesCreateRequest, IdentityPoliciesCreateResponse, IdentityPolicyCreateView,
-    },
+    policies_create as create_wire,
+    policies_create::{IdentityPoliciesCreateRequest, IdentityPoliciesCreateResponse},
     policies_deactivate::{IdentityPoliciesDeactivateRequest, IdentityPoliciesDeactivateResponse},
-    policies_get::{IdentityPoliciesGetResponse, IdentityPolicyGetView},
-    policies_list::{IdentityPoliciesListResponse, IdentityPolicyListView},
-    policies_update::{
-        IdentityPoliciesUpdateRequest, IdentityPoliciesUpdateResponse, IdentityPolicyUpdateView,
-    },
+    policies_get as get_wire,
+    policies_get::IdentityPoliciesGetResponse,
+    policies_list as list_wire,
+    policies_list::IdentityPoliciesListResponse,
+    policies_update as update_wire,
+    policies_update::{IdentityPoliciesUpdateRequest, IdentityPoliciesUpdateResponse},
 };
 use generated::http::{HttpSpec, SPECS as HTTP_SPECS};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use vocab::{HttpRouteAuth, TenantId, http::HttpResourceSharing as HttpResourceSharingMode};
 
 use super::{EventWireProjectionError, unix_secs};
 use crate::domain::{
-    AttributeKey, AttributeValue, GlobPattern, IdentityError, Operator, PipAttributeKey, Policy,
-    PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule,
-    PolicyVersion, ResourcePolicyAttributeKey,
+    AttributeKey, EqualityOperand, EqualityOperator, EqualityPredicate, IdentityError,
+    MembershipOperator, MembershipPredicate, NumericValue, Operator, OperatorError,
+    OrderingOperand, OrderingOperator, OrderingPredicate, PipAttributeKey, Policy, PolicyCondition,
+    PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyValue,
+    PolicyValueRef, PolicyValueSet, PolicyValueType, PolicyVersion, ResourcePolicyAttributeKey,
+    StringOperator, StringPredicate, TypedAttributeOperand,
 };
 use crate::ports::{
     DynPolicyLifecycle, DynPolicyRepo, PoliciesCreateProducerReceipt,
@@ -48,7 +51,9 @@ pub enum PolicyManageError {
     InvalidPolicy,
     /// 属性值超过域 UTF-8 字节上界（wire 字符上界可能仍放行；见 [`ATTR_VALUE_MAX_LEN`]）。
     #[error("attribute value exceeds max length")]
-    AttributeValueTooLong,
+    PolicyValueTooLong,
+    #[error("policy operator is invalid: {0:?}")]
+    InvalidOperator(PolicyOperatorReason),
     #[error("policy not found")]
     PolicyNotFound,
     #[error("policy already exists")]
@@ -68,6 +73,43 @@ pub enum PolicyManageError {
     WireProjection(#[source] EventWireProjectionError),
     #[error("policy store failed")]
     Store(#[source] IdentityError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyOperatorReason {
+    InvalidRegex,
+    InvalidPattern,
+    DuplicateSetValue,
+    MixedSet,
+    InvalidSetSize,
+    InvalidDecimal,
+    InvalidOperatorCombination,
+}
+
+impl PolicyOperatorReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRegex => "invalidRegex",
+            Self::InvalidPattern => "invalidPattern",
+            Self::DuplicateSetValue => "duplicateSetValue",
+            Self::MixedSet => "mixedSet",
+            Self::InvalidSetSize => "invalidSetSize",
+            Self::InvalidDecimal => "invalidDecimal",
+            Self::InvalidOperatorCombination => "invalidOperatorCombination",
+        }
+    }
+}
+
+fn operator_reason(error: OperatorError) -> PolicyOperatorReason {
+    match error {
+        OperatorError::InvalidRegex => PolicyOperatorReason::InvalidRegex,
+        OperatorError::InvalidPattern => PolicyOperatorReason::InvalidPattern,
+        OperatorError::DuplicateSetValue => PolicyOperatorReason::DuplicateSetValue,
+        OperatorError::MixedSet => PolicyOperatorReason::MixedSet,
+        OperatorError::EmptySet | OperatorError::SetTooLarge => {
+            PolicyOperatorReason::InvalidSetSize
+        }
+    }
 }
 
 pub struct PolicyCreateDraft {
@@ -108,7 +150,7 @@ impl TryFrom<IdentityPoliciesCreateRequest> for PolicyCreateDraft {
                 .map_err(|_| PolicyManageError::InvalidPolicy)?,
             effective_from: wire_time(request.effective_from)?,
             effective_until: request.effective_until.map(wire_time).transpose()?,
-            rules: policy_rules_from_wire(&request.rules)?,
+            rules: create_rules_from_wire(request.rules)?,
         })
     }
 }
@@ -134,7 +176,7 @@ impl PolicyUpdateDraft {
                 .map_err(|_| PolicyManageError::InvalidPolicy)?,
             effective_from: wire_time(request.effective_from)?,
             effective_until: request.effective_until.map(wire_time).transpose()?,
-            rules: policy_rules_from_wire(&request.rules)?,
+            rules: update_rules_from_wire(request.rules)?,
         })
     }
 }
@@ -437,7 +479,7 @@ pub fn create_response(
     policy: &Policy,
 ) -> Result<IdentityPoliciesCreateResponse, PolicyManageError> {
     Ok(IdentityPoliciesCreateResponse {
-        data: policy_view::<IdentityPolicyCreateView>(policy)?,
+        data: create_policy_view(WirePolicyView::from_policy(policy)?)?,
     })
 }
 
@@ -445,7 +487,7 @@ pub fn update_response(
     policy: &Policy,
 ) -> Result<IdentityPoliciesUpdateResponse, PolicyManageError> {
     Ok(IdentityPoliciesUpdateResponse {
-        data: policy_view::<IdentityPolicyUpdateView>(policy)?,
+        data: update_policy_view(WirePolicyView::from_policy(policy)?)?,
     })
 }
 
@@ -464,7 +506,7 @@ pub fn deactivate_response(
 
 pub fn get_response(policy: &Policy) -> Result<IdentityPoliciesGetResponse, PolicyManageError> {
     Ok(IdentityPoliciesGetResponse {
-        data: policy_view::<IdentityPolicyGetView>(policy)?,
+        data: get_policy_view(WirePolicyView::from_policy(policy)?)?,
     })
 }
 
@@ -475,19 +517,13 @@ pub fn list_response(
 ) -> Result<IdentityPoliciesListResponse, PolicyManageError> {
     let data = policies
         .iter()
-        .map(policy_view::<IdentityPolicyListView>)
+        .map(|policy| WirePolicyView::from_policy(policy).and_then(list_policy_view))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(IdentityPoliciesListResponse {
         data,
         has_more,
         next_cursor,
     })
-}
-
-fn policy_view<T: DeserializeOwned>(policy: &Policy) -> Result<T, PolicyManageError> {
-    let value = WirePolicyView::from_policy(policy)?;
-    serde_json::from_value(serde_json::to_value(value).map_err(PolicyManageError::PayloadEncode)?)
-        .map_err(|_| PolicyManageError::InvalidPolicy)
 }
 
 fn map_identity_error(err: IdentityError) -> PolicyManageError {
@@ -561,15 +597,329 @@ fn policy_attribute_key_is_dynamic_resource(key: &AttributeKey) -> Result<bool, 
         .map_err(|_| PolicyManageError::InvalidPolicy)
 }
 
-fn policy_rules_from_wire<T: Serialize>(rules: &[T]) -> Result<Vec<PolicyRule>, PolicyManageError> {
+fn typed_rules_from_wire(
+    rules: impl IntoIterator<Item = Result<WireRule, PolicyManageError>>,
+) -> Result<Vec<PolicyRule>, PolicyManageError> {
+    let rules = rules.into_iter().collect::<Result<Vec<_>, _>>()?;
     if rules.is_empty() {
         return Err(PolicyManageError::InvalidPolicy);
     }
-    let wire: Vec<WireRule> = serde_json::from_value(
-        serde_json::to_value(rules).map_err(PolicyManageError::PayloadEncode)?,
-    )
-    .map_err(|_| PolicyManageError::InvalidPolicy)?;
-    wire.into_iter().map(WireRule::into_rule).collect()
+    rules.into_iter().map(WireRule::into_rule).collect()
+}
+
+fn create_rules_from_wire(
+    rules: Vec<create_wire::IdentityPolicyCreateRule>,
+) -> Result<Vec<PolicyRule>, PolicyManageError> {
+    typed_rules_from_wire(rules.into_iter().map(create_rule_from_wire))
+}
+
+fn update_rules_from_wire(
+    rules: Vec<update_wire::IdentityPolicyUpdateRule>,
+) -> Result<Vec<PolicyRule>, PolicyManageError> {
+    typed_rules_from_wire(rules.into_iter().map(update_rule_from_wire))
+}
+
+fn create_rule_from_wire(
+    rule: create_wire::IdentityPolicyCreateRule,
+) -> Result<WireRule, PolicyManageError> {
+    Ok(WireRule {
+        condition: WireCondition {
+            attribute: rule.condition.attribute,
+            operator: create_operator_from_wire(rule.condition.operator)?,
+        },
+        effect: match rule.effect {
+            create_wire::IdentityPolicyCreateRuleEffect::Allow => WireEffect::Allow,
+            create_wire::IdentityPolicyCreateRuleEffect::Deny => WireEffect::Deny,
+        },
+        obligations: rule.obligations.map(|value| WireObligations {
+            row_scope: value.row_scope.map(|scope| match scope {
+                create_wire::IdentityPolicyCreateObligationsRowScope::SelfOnly => {
+                    WireRowScope::SelfOnly
+                }
+                create_wire::IdentityPolicyCreateObligationsRowScope::Device => {
+                    WireRowScope::Device
+                }
+                create_wire::IdentityPolicyCreateObligationsRowScope::Tenant => {
+                    WireRowScope::Tenant
+                }
+            }),
+            field_mask: value.field_mask,
+        }),
+    })
+}
+
+fn update_rule_from_wire(
+    rule: update_wire::IdentityPolicyUpdateRule,
+) -> Result<WireRule, PolicyManageError> {
+    Ok(WireRule {
+        condition: WireCondition {
+            attribute: rule.condition.attribute,
+            operator: update_operator_from_wire(rule.condition.operator)?,
+        },
+        effect: match rule.effect {
+            update_wire::IdentityPolicyUpdateRuleEffect::Allow => WireEffect::Allow,
+            update_wire::IdentityPolicyUpdateRuleEffect::Deny => WireEffect::Deny,
+        },
+        obligations: rule.obligations.map(|value| WireObligations {
+            row_scope: value.row_scope.map(|scope| match scope {
+                update_wire::IdentityPolicyUpdateObligationsRowScope::SelfOnly => {
+                    WireRowScope::SelfOnly
+                }
+                update_wire::IdentityPolicyUpdateObligationsRowScope::Device => {
+                    WireRowScope::Device
+                }
+                update_wire::IdentityPolicyUpdateObligationsRowScope::Tenant => {
+                    WireRowScope::Tenant
+                }
+            }),
+            field_mask: value.field_mask,
+        }),
+    })
+}
+
+fn create_attribute_name(
+    value: create_wire::IdentityPolicyCreateOperatorAttributeOperandAttribute,
+) -> &'static str {
+    match value {
+        create_wire::IdentityPolicyCreateOperatorAttributeOperandAttribute::PrincipalKind => {
+            "principal.kind"
+        }
+        create_wire::IdentityPolicyCreateOperatorAttributeOperandAttribute::PrincipalId => {
+            "principal.id"
+        }
+        create_wire::IdentityPolicyCreateOperatorAttributeOperandAttribute::TenantId => "tenant.id",
+        create_wire::IdentityPolicyCreateOperatorAttributeOperandAttribute::ContractId => {
+            "contract.id"
+        }
+        create_wire::IdentityPolicyCreateOperatorAttributeOperandAttribute::Permission => {
+            "permission"
+        }
+        create_wire::IdentityPolicyCreateOperatorAttributeOperandAttribute::ResourceId => {
+            "resource.id"
+        }
+    }
+}
+
+fn update_attribute_name(
+    value: update_wire::IdentityPolicyUpdateOperatorAttributeOperandAttribute,
+) -> &'static str {
+    match value {
+        update_wire::IdentityPolicyUpdateOperatorAttributeOperandAttribute::PrincipalKind => {
+            "principal.kind"
+        }
+        update_wire::IdentityPolicyUpdateOperatorAttributeOperandAttribute::PrincipalId => {
+            "principal.id"
+        }
+        update_wire::IdentityPolicyUpdateOperatorAttributeOperandAttribute::TenantId => "tenant.id",
+        update_wire::IdentityPolicyUpdateOperatorAttributeOperandAttribute::ContractId => {
+            "contract.id"
+        }
+        update_wire::IdentityPolicyUpdateOperatorAttributeOperandAttribute::Permission => {
+            "permission"
+        }
+        update_wire::IdentityPolicyUpdateOperatorAttributeOperandAttribute::ResourceId => {
+            "resource.id"
+        }
+    }
+}
+
+fn create_operator_from_wire(
+    operator: create_wire::IdentityPolicyCreateOperator,
+) -> Result<WireOperator, PolicyManageError> {
+    use create_wire::IdentityPolicyCreateOperator as O;
+    Ok(match operator {
+        O::EqualityFamily(value) => WireOperator::Equality {
+            predicate: match value.predicate {
+                create_wire::IdentityPolicyCreateOperatorEqualityFamilyPredicate::Eq => {
+                    WireEqualityPredicate::Eq
+                }
+                create_wire::IdentityPolicyCreateOperatorEqualityFamilyPredicate::Ne => {
+                    WireEqualityPredicate::Ne
+                }
+            },
+            operand: match value.operand {
+                create_wire::IdentityPolicyCreateOperatorEqualityFamilyOperand::LiteralOperand(
+                    operand,
+                ) => match operand {
+                    create_wire::IdentityPolicyCreateOperatorLiteralOperand::String { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::String, value: serde_json::Value::String(value.into()) },
+                    create_wire::IdentityPolicyCreateOperatorLiteralOperand::Boolean { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::Boolean, value: serde_json::Value::Bool(value) },
+                    create_wire::IdentityPolicyCreateOperatorLiteralOperand::Integer { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::Integer, value: value.into() },
+                    create_wire::IdentityPolicyCreateOperatorLiteralOperand::Decimal { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::Decimal, value: serde_json::Value::String(value.into()) },
+                },
+                create_wire::IdentityPolicyCreateOperatorEqualityFamilyOperand::AttributeOperand(
+                    create_wire::IdentityPolicyCreateOperatorAttributeOperand::Attribute { attribute, .. },
+                ) => WireScalarOperand::Attribute { value_type: WireValueType::String, attribute: create_attribute_name(attribute).to_string() },
+            },
+        },
+        O::OrderingFamily(value) => WireOperator::Ordering {
+            predicate: match value.predicate {
+                create_wire::IdentityPolicyCreateOperatorOrderingFamilyPredicate::Gt => WireOrderingPredicate::Gt,
+                create_wire::IdentityPolicyCreateOperatorOrderingFamilyPredicate::Ge => WireOrderingPredicate::Ge,
+                create_wire::IdentityPolicyCreateOperatorOrderingFamilyPredicate::Lt => WireOrderingPredicate::Lt,
+                create_wire::IdentityPolicyCreateOperatorOrderingFamilyPredicate::Le => WireOrderingPredicate::Le,
+            },
+            operand: match value.operand {
+                create_wire::IdentityPolicyCreateOperatorNumericLiteralOperand::Integer { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::Integer, value: value.into() },
+                create_wire::IdentityPolicyCreateOperatorNumericLiteralOperand::Decimal { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::Decimal, value: serde_json::Value::String(value.into()) },
+            },
+        },
+        O::MembershipFamily(value) => WireOperator::Membership {
+            predicate: match value.predicate {
+                create_wire::IdentityPolicyCreateOperatorMembershipFamilyPredicate::In => WireMembershipPredicate::In,
+                create_wire::IdentityPolicyCreateOperatorMembershipFamilyPredicate::NotIn => WireMembershipPredicate::NotIn,
+            },
+            operand: match value.operand {
+                create_wire::IdentityPolicyCreateOperatorSetOperand::String { values, .. } => WireSetOperand { kind: WireSetKind::Set, value_type: WireValueType::String, values: values.into_iter().map(|value| serde_json::Value::String(value.into())).collect() },
+                create_wire::IdentityPolicyCreateOperatorSetOperand::Boolean { values, .. } => WireSetOperand { kind: WireSetKind::Set, value_type: WireValueType::Boolean, values: values.into_iter().map(serde_json::Value::Bool).collect() },
+                create_wire::IdentityPolicyCreateOperatorSetOperand::Integer { values, .. } => WireSetOperand { kind: WireSetKind::Set, value_type: WireValueType::Integer, values: values.into_iter().map(Into::into).collect() },
+                create_wire::IdentityPolicyCreateOperatorSetOperand::Decimal { values, .. } => WireSetOperand { kind: WireSetKind::Set, value_type: WireValueType::Decimal, values: values.into_iter().map(|value| serde_json::Value::String(value.into())).collect() },
+            },
+        },
+        O::StringFamily(value) => WireOperator::String {
+            predicate: match value.predicate {
+                create_wire::IdentityPolicyCreateOperatorStringFamilyPredicate::StartsWith => WireStringPredicate::StartsWith,
+                create_wire::IdentityPolicyCreateOperatorStringFamilyPredicate::EndsWith => WireStringPredicate::EndsWith,
+                create_wire::IdentityPolicyCreateOperatorStringFamilyPredicate::Contains => WireStringPredicate::Contains,
+                create_wire::IdentityPolicyCreateOperatorStringFamilyPredicate::Glob => WireStringPredicate::Glob,
+                create_wire::IdentityPolicyCreateOperatorStringFamilyPredicate::Regex => WireStringPredicate::Regex,
+            },
+            operand: WirePatternOperand { kind: WirePatternKind::Pattern, value_type: WireStringType::String, value: value.operand.value.into() },
+        },
+    })
+}
+
+fn update_operator_from_wire(
+    operator: update_wire::IdentityPolicyUpdateOperator,
+) -> Result<WireOperator, PolicyManageError> {
+    let json = match operator {
+        update_wire::IdentityPolicyUpdateOperator::EqualityFamily(value) => {
+            let predicate = match value.predicate {
+                update_wire::IdentityPolicyUpdateOperatorEqualityFamilyPredicate::Eq => {
+                    WireEqualityPredicate::Eq
+                }
+                update_wire::IdentityPolicyUpdateOperatorEqualityFamilyPredicate::Ne => {
+                    WireEqualityPredicate::Ne
+                }
+            };
+            let operand = match value.operand {
+                update_wire::IdentityPolicyUpdateOperatorEqualityFamilyOperand::LiteralOperand(operand) => match operand {
+                    update_wire::IdentityPolicyUpdateOperatorLiteralOperand::String { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::String, value: serde_json::Value::String(value.into()) },
+                    update_wire::IdentityPolicyUpdateOperatorLiteralOperand::Boolean { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::Boolean, value: serde_json::Value::Bool(value) },
+                    update_wire::IdentityPolicyUpdateOperatorLiteralOperand::Integer { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::Integer, value: value.into() },
+                    update_wire::IdentityPolicyUpdateOperatorLiteralOperand::Decimal { value, .. } => WireScalarOperand::Literal { value_type: WireValueType::Decimal, value: serde_json::Value::String(value.into()) },
+                },
+                update_wire::IdentityPolicyUpdateOperatorEqualityFamilyOperand::AttributeOperand(update_wire::IdentityPolicyUpdateOperatorAttributeOperand::Attribute { attribute, .. }) => WireScalarOperand::Attribute { value_type: WireValueType::String, attribute: update_attribute_name(attribute).to_string() },
+            };
+            WireOperator::Equality { predicate, operand }
+        }
+        update_wire::IdentityPolicyUpdateOperator::OrderingFamily(value) => {
+            WireOperator::Ordering {
+                predicate: match value.predicate {
+                    update_wire::IdentityPolicyUpdateOperatorOrderingFamilyPredicate::Gt => {
+                        WireOrderingPredicate::Gt
+                    }
+                    update_wire::IdentityPolicyUpdateOperatorOrderingFamilyPredicate::Ge => {
+                        WireOrderingPredicate::Ge
+                    }
+                    update_wire::IdentityPolicyUpdateOperatorOrderingFamilyPredicate::Lt => {
+                        WireOrderingPredicate::Lt
+                    }
+                    update_wire::IdentityPolicyUpdateOperatorOrderingFamilyPredicate::Le => {
+                        WireOrderingPredicate::Le
+                    }
+                },
+                operand: match value.operand {
+                    update_wire::IdentityPolicyUpdateOperatorNumericLiteralOperand::Integer {
+                        value,
+                        ..
+                    } => WireScalarOperand::Literal {
+                        value_type: WireValueType::Integer,
+                        value: value.into(),
+                    },
+                    update_wire::IdentityPolicyUpdateOperatorNumericLiteralOperand::Decimal {
+                        value,
+                        ..
+                    } => WireScalarOperand::Literal {
+                        value_type: WireValueType::Decimal,
+                        value: serde_json::Value::String(value.into()),
+                    },
+                },
+            }
+        }
+        update_wire::IdentityPolicyUpdateOperator::MembershipFamily(value) => {
+            WireOperator::Membership {
+                predicate: match value.predicate {
+                    update_wire::IdentityPolicyUpdateOperatorMembershipFamilyPredicate::In => {
+                        WireMembershipPredicate::In
+                    }
+                    update_wire::IdentityPolicyUpdateOperatorMembershipFamilyPredicate::NotIn => {
+                        WireMembershipPredicate::NotIn
+                    }
+                },
+                operand: match value.operand {
+                    update_wire::IdentityPolicyUpdateOperatorSetOperand::String {
+                        values, ..
+                    } => WireSetOperand {
+                        kind: WireSetKind::Set,
+                        value_type: WireValueType::String,
+                        values: values
+                            .into_iter()
+                            .map(|value| serde_json::Value::String(value.into()))
+                            .collect(),
+                    },
+                    update_wire::IdentityPolicyUpdateOperatorSetOperand::Boolean {
+                        values, ..
+                    } => WireSetOperand {
+                        kind: WireSetKind::Set,
+                        value_type: WireValueType::Boolean,
+                        values: values.into_iter().map(serde_json::Value::Bool).collect(),
+                    },
+                    update_wire::IdentityPolicyUpdateOperatorSetOperand::Integer {
+                        values, ..
+                    } => WireSetOperand {
+                        kind: WireSetKind::Set,
+                        value_type: WireValueType::Integer,
+                        values: values.into_iter().map(Into::into).collect(),
+                    },
+                    update_wire::IdentityPolicyUpdateOperatorSetOperand::Decimal {
+                        values, ..
+                    } => WireSetOperand {
+                        kind: WireSetKind::Set,
+                        value_type: WireValueType::Decimal,
+                        values: values
+                            .into_iter()
+                            .map(|value| serde_json::Value::String(value.into()))
+                            .collect(),
+                    },
+                },
+            }
+        }
+        update_wire::IdentityPolicyUpdateOperator::StringFamily(value) => WireOperator::String {
+            predicate: match value.predicate {
+                update_wire::IdentityPolicyUpdateOperatorStringFamilyPredicate::StartsWith => {
+                    WireStringPredicate::StartsWith
+                }
+                update_wire::IdentityPolicyUpdateOperatorStringFamilyPredicate::EndsWith => {
+                    WireStringPredicate::EndsWith
+                }
+                update_wire::IdentityPolicyUpdateOperatorStringFamilyPredicate::Contains => {
+                    WireStringPredicate::Contains
+                }
+                update_wire::IdentityPolicyUpdateOperatorStringFamilyPredicate::Glob => {
+                    WireStringPredicate::Glob
+                }
+                update_wire::IdentityPolicyUpdateOperatorStringFamilyPredicate::Regex => {
+                    WireStringPredicate::Regex
+                }
+            },
+            operand: WirePatternOperand {
+                kind: WirePatternKind::Pattern,
+                value_type: WireStringType::String,
+                value: value.operand.value.into(),
+            },
+        },
+    };
+    Ok(json)
 }
 
 #[derive(Deserialize)]
@@ -588,29 +938,120 @@ struct WireCondition {
     operator: WireOperator,
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct WireOperator {
-    kind: WireOperatorKind,
-    value: Option<String>,
-    pattern: Option<String>,
-    attribute: Option<String>,
+#[derive(Deserialize, Serialize)]
+#[serde(
+    tag = "family",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum WireOperator {
+    Equality {
+        predicate: WireEqualityPredicate,
+        operand: WireScalarOperand,
+    },
+    Ordering {
+        predicate: WireOrderingPredicate,
+        operand: WireScalarOperand,
+    },
+    Membership {
+        predicate: WireMembershipPredicate,
+        operand: WireSetOperand,
+    },
+    String {
+        predicate: WireStringPredicate,
+        operand: WirePatternOperand,
+    },
 }
 
-#[derive(Deserialize)]
-enum WireOperatorKind {
-    #[serde(rename = "eq")]
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WireEqualityPredicate {
     Eq,
-    #[serde(rename = "ne")]
     Ne,
-    #[serde(rename = "like")]
-    Like,
-    #[serde(rename = "gt")]
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WireOrderingPredicate {
     Gt,
-    #[serde(rename = "lt")]
+    Ge,
     Lt,
-    #[serde(rename = "eqAttr")]
-    EqAttr,
+    Le,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WireMembershipPredicate {
+    In,
+    NotIn,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WireStringPredicate {
+    StartsWith,
+    EndsWith,
+    Contains,
+    Glob,
+    Regex,
+}
+
+#[derive(Deserialize, Serialize, Clone, Copy)]
+#[serde(rename_all = "camelCase")]
+enum WireValueType {
+    String,
+    Boolean,
+    Integer,
+    Decimal,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase",
+    deny_unknown_fields
+)]
+enum WireScalarOperand {
+    Literal {
+        value_type: WireValueType,
+        value: serde_json::Value,
+    },
+    Attribute {
+        value_type: WireValueType,
+        attribute: String,
+    },
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireSetOperand {
+    kind: WireSetKind,
+    value_type: WireValueType,
+    values: Vec<serde_json::Value>,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WireSetKind {
+    Set,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WirePatternOperand {
+    kind: WirePatternKind,
+    value_type: WireStringType,
+    value: String,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WirePatternKind {
+    Pattern,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum WireStringType {
+    String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -658,61 +1099,129 @@ impl WireRule {
 
 impl WireOperator {
     fn into_operator(self) -> Result<Operator, PolicyManageError> {
-        match self.kind {
-            WireOperatorKind::Eq => Ok(Operator::Eq(
-                AttributeValue::parse(&self.only_value()?)
-                    .map_err(|_| PolicyManageError::AttributeValueTooLong)?,
-            )),
-            WireOperatorKind::Ne => Ok(Operator::Ne(
-                AttributeValue::parse(&self.only_value()?)
-                    .map_err(|_| PolicyManageError::AttributeValueTooLong)?,
-            )),
-            WireOperatorKind::Gt => Ok(Operator::Gt(
-                AttributeValue::parse(&self.only_value()?)
-                    .map_err(|_| PolicyManageError::AttributeValueTooLong)?,
-            )),
-            WireOperatorKind::Lt => Ok(Operator::Lt(
-                AttributeValue::parse(&self.only_value()?)
-                    .map_err(|_| PolicyManageError::AttributeValueTooLong)?,
-            )),
-            WireOperatorKind::Like => {
-                let pattern = self.only_pattern()?;
-                Ok(Operator::Like(
-                    GlobPattern::parse(&pattern).map_err(|_| PolicyManageError::InvalidPolicy)?,
-                ))
+        match self {
+            Self::Equality { predicate, operand } => Ok(Operator::Equality(EqualityOperator::new(
+                match predicate {
+                    WireEqualityPredicate::Eq => EqualityPredicate::Eq,
+                    WireEqualityPredicate::Ne => EqualityPredicate::Ne,
+                },
+                operand.into_equality()?,
+            ))),
+            Self::Ordering { predicate, operand } => Ok(Operator::Ordering(OrderingOperator::new(
+                match predicate {
+                    WireOrderingPredicate::Gt => OrderingPredicate::Gt,
+                    WireOrderingPredicate::Ge => OrderingPredicate::Ge,
+                    WireOrderingPredicate::Lt => OrderingPredicate::Lt,
+                    WireOrderingPredicate::Le => OrderingPredicate::Le,
+                },
+                operand.into_ordering()?,
+            ))),
+            Self::Membership { predicate, operand } => {
+                Ok(Operator::Membership(MembershipOperator::new(
+                    match predicate {
+                        WireMembershipPredicate::In => MembershipPredicate::In,
+                        WireMembershipPredicate::NotIn => MembershipPredicate::NotIn,
+                    },
+                    PolicyValueSet::new(operand.into_values()?).map_err(|error| {
+                        PolicyManageError::InvalidOperator(operator_reason(error))
+                    })?,
+                )))
             }
-            WireOperatorKind::EqAttr => {
-                let attribute = self.only_attribute()?;
-                Ok(Operator::EqAttr(
+            Self::String { predicate, operand } => Ok(Operator::StringMatch(
+                StringOperator::parse(
+                    match predicate {
+                        WireStringPredicate::StartsWith => StringPredicate::StartsWith,
+                        WireStringPredicate::EndsWith => StringPredicate::EndsWith,
+                        WireStringPredicate::Contains => StringPredicate::Contains,
+                        WireStringPredicate::Glob => StringPredicate::Glob,
+                        WireStringPredicate::Regex => StringPredicate::Regex,
+                    },
+                    &operand.value,
+                )
+                .map_err(|error| PolicyManageError::InvalidOperator(operator_reason(error)))?,
+            )),
+        }
+    }
+}
+
+impl WireScalarOperand {
+    fn into_equality(self) -> Result<EqualityOperand, PolicyManageError> {
+        match self {
+            Self::Literal { value_type, value } => Ok(EqualityOperand::Literal(parse_wire_value(
+                value_type, value,
+            )?)),
+            Self::Attribute {
+                value_type,
+                attribute,
+            } => {
+                if !matches!(value_type, WireValueType::String) {
+                    return Err(PolicyManageError::InvalidOperator(
+                        PolicyOperatorReason::InvalidOperatorCombination,
+                    ));
+                }
+                Ok(EqualityOperand::Attribute(TypedAttributeOperand::new(
                     PipAttributeKey::parse(&attribute)
                         .map_err(|_| PolicyManageError::InvalidPolicy)?,
-                ))
+                )))
             }
         }
     }
 
-    fn only_value(self) -> Result<String, PolicyManageError> {
-        if self.pattern.is_none() && self.attribute.is_none() {
-            self.value.ok_or(PolicyManageError::InvalidPolicy)
-        } else {
-            Err(PolicyManageError::InvalidPolicy)
+    fn into_ordering(self) -> Result<OrderingOperand, PolicyManageError> {
+        match self {
+            Self::Literal { value_type, value } => {
+                NumericValue::from_policy_value(parse_wire_value(value_type, value)?)
+                    .map(OrderingOperand::literal)
+                    .ok_or(PolicyManageError::InvalidOperator(
+                        PolicyOperatorReason::InvalidOperatorCombination,
+                    ))
+            }
+            Self::Attribute { .. } => Err(PolicyManageError::InvalidOperator(
+                PolicyOperatorReason::InvalidOperatorCombination,
+            )),
         }
     }
+}
 
-    fn only_pattern(self) -> Result<String, PolicyManageError> {
-        if self.value.is_none() && self.attribute.is_none() {
-            self.pattern.ok_or(PolicyManageError::InvalidPolicy)
-        } else {
-            Err(PolicyManageError::InvalidPolicy)
+impl WireSetOperand {
+    fn into_values(self) -> Result<Vec<PolicyValue>, PolicyManageError> {
+        if !matches!(self.kind, WireSetKind::Set) {
+            return Err(PolicyManageError::InvalidPolicy);
         }
+        self.values
+            .into_iter()
+            .map(|value| parse_wire_value(self.value_type, value))
+            .collect()
     }
+}
 
-    fn only_attribute(self) -> Result<String, PolicyManageError> {
-        if self.value.is_none() && self.pattern.is_none() {
-            self.attribute.ok_or(PolicyManageError::InvalidPolicy)
-        } else {
-            Err(PolicyManageError::InvalidPolicy)
-        }
+fn parse_wire_value(
+    value_type: WireValueType,
+    value: serde_json::Value,
+) -> Result<PolicyValue, PolicyManageError> {
+    match value_type {
+        WireValueType::String => value
+            .as_str()
+            .ok_or(PolicyManageError::InvalidPolicy)
+            .and_then(|value| {
+                PolicyValue::string(value).map_err(|_| PolicyManageError::PolicyValueTooLong)
+            }),
+        WireValueType::Boolean => value
+            .as_bool()
+            .map(PolicyValue::boolean)
+            .ok_or(PolicyManageError::InvalidPolicy),
+        WireValueType::Integer => value
+            .as_i64()
+            .map(PolicyValue::integer)
+            .ok_or(PolicyManageError::InvalidPolicy),
+        WireValueType::Decimal => value
+            .as_str()
+            .ok_or(PolicyManageError::InvalidPolicy)
+            .and_then(|value| {
+                PolicyValue::decimal(value).map_err(|_| {
+                    PolicyManageError::InvalidOperator(PolicyOperatorReason::InvalidDecimal)
+                })
+            }),
     }
 }
 
@@ -773,19 +1282,7 @@ struct WireRuleView {
 #[serde(rename_all = "camelCase")]
 struct WireConditionView {
     attribute: String,
-    operator: WireOperatorView,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct WireOperatorView {
-    kind: &'static str,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    value: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pattern: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    attribute: Option<String>,
+    operator: WireOperator,
 }
 
 #[derive(Serialize)]
@@ -796,6 +1293,189 @@ struct WireObligationsView {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     field_mask: Vec<String>,
 }
+
+macro_rules! define_typed_policy_view_projection {
+    ($view_fn:ident, $operator_fn:ident, $module:ident) => {
+        fn $view_fn(
+            view: WirePolicyView,
+        ) -> Result<$module::IdentityPolicyView, PolicyManageError> {
+            Ok($module::IdentityPolicyView {
+                policy_id: view.policy_id,
+                version: NonZeroU32::new(view.version)
+                    .ok_or(PolicyManageError::InvalidPolicy)?,
+                contract_id: view.contract_id,
+                permission: view.permission,
+                effective_from: view.effective_from,
+                effective_until: view.effective_until,
+                rules: view
+                    .rules
+                    .into_iter()
+                    .map(|rule| {
+                        Ok($module::IdentityPolicyRuleView {
+                            condition: $module::IdentityPolicyConditionView {
+                                attribute: rule.condition.attribute,
+                                operator: $operator_fn(rule.condition.operator)?,
+                            },
+                            effect: match rule.effect {
+                                WireEffect::Allow => $module::IdentityPolicyRuleViewEffect::Allow,
+                                WireEffect::Deny => $module::IdentityPolicyRuleViewEffect::Deny,
+                            },
+                            obligations: rule.obligations.map(|obligations| {
+                                $module::IdentityPolicyObligationsView {
+                                    row_scope: obligations.row_scope.map(|scope| match scope {
+                                        WireRowScope::SelfOnly => $module::IdentityPolicyObligationsViewRowScope::SelfOnly,
+                                        WireRowScope::Device => $module::IdentityPolicyObligationsViewRowScope::Device,
+                                        WireRowScope::Tenant => $module::IdentityPolicyObligationsViewRowScope::Tenant,
+                                    }),
+                                    field_mask: obligations.field_mask,
+                                }
+                            }),
+                        })
+                    })
+                    .collect::<Result<Vec<_>, PolicyManageError>>()?,
+            })
+        }
+
+        fn $operator_fn(
+            operator: WireOperator,
+        ) -> Result<$module::IdentityPolicyOperatorView, PolicyManageError> {
+            let invalid = |_| PolicyManageError::InvalidPolicy;
+            Ok(match operator {
+                WireOperator::Equality { predicate, operand } => {
+                    let operand = match operand {
+                        WireScalarOperand::Literal { value_type, value } => {
+                            let kind = $module::IdentityPolicyOperatorViewLiteralOperandKind::Literal;
+                            let value = match value_type {
+                                WireValueType::String => $module::IdentityPolicyOperatorViewLiteralOperand::String {
+                                    kind,
+                                    value: $module::IdentityPolicyOperatorViewLiteralOperandValue::try_from(value.as_str().ok_or(PolicyManageError::InvalidPolicy)?.to_string()).map_err(invalid)?,
+                                },
+                                WireValueType::Boolean => $module::IdentityPolicyOperatorViewLiteralOperand::Boolean {
+                                    kind,
+                                    value: value.as_bool().ok_or(PolicyManageError::InvalidPolicy)?,
+                                },
+                                WireValueType::Integer => $module::IdentityPolicyOperatorViewLiteralOperand::Integer {
+                                    kind,
+                                    value: value.as_i64().ok_or(PolicyManageError::InvalidPolicy)?,
+                                },
+                                WireValueType::Decimal => $module::IdentityPolicyOperatorViewLiteralOperand::Decimal {
+                                    kind,
+                                    value: $module::IdentityPolicyOperatorViewLiteralOperandValue::try_from(value.as_str().ok_or(PolicyManageError::InvalidPolicy)?.to_string()).map_err(invalid)?,
+                                },
+                            };
+                            $module::IdentityPolicyOperatorViewEqualityFamilyOperand::LiteralOperand(value)
+                        }
+                        WireScalarOperand::Attribute { value_type: WireValueType::String, attribute } => {
+                            let attribute = $module::IdentityPolicyOperatorViewAttributeOperandAttribute::try_from(attribute.as_str()).map_err(invalid)?;
+                            $module::IdentityPolicyOperatorViewEqualityFamilyOperand::AttributeOperand(
+                                $module::IdentityPolicyOperatorViewAttributeOperand::Attribute {
+                                    attribute,
+                                    value_type: $module::IdentityPolicyOperatorViewAttributeOperandValueType::String,
+                                },
+                            )
+                        }
+                        WireScalarOperand::Attribute { .. } => return Err(PolicyManageError::InvalidPolicy),
+                    };
+                    $module::IdentityPolicyOperatorView::EqualityFamily(
+                        $module::IdentityPolicyOperatorViewEqualityFamily {
+                            family: $module::IdentityPolicyOperatorViewEqualityFamilyFamily::Equality,
+                            predicate: match predicate {
+                                WireEqualityPredicate::Eq => $module::IdentityPolicyOperatorViewEqualityFamilyPredicate::Eq,
+                                WireEqualityPredicate::Ne => $module::IdentityPolicyOperatorViewEqualityFamilyPredicate::Ne,
+                            },
+                            operand,
+                        },
+                    )
+                }
+                WireOperator::Ordering { predicate, operand } => {
+                    let WireScalarOperand::Literal { value_type, value } = operand else {
+                        return Err(PolicyManageError::InvalidPolicy);
+                    };
+                    let kind = $module::IdentityPolicyOperatorViewNumericLiteralOperandKind::Literal;
+                    let operand = match value_type {
+                        WireValueType::Integer => $module::IdentityPolicyOperatorViewNumericLiteralOperand::Integer {
+                            kind,
+                            value: value.as_i64().ok_or(PolicyManageError::InvalidPolicy)?,
+                        },
+                        WireValueType::Decimal => $module::IdentityPolicyOperatorViewNumericLiteralOperand::Decimal {
+                            kind,
+                            value: $module::IdentityPolicyOperatorViewNumericLiteralOperandValue::try_from(value.as_str().ok_or(PolicyManageError::InvalidPolicy)?.to_string()).map_err(invalid)?,
+                        },
+                        WireValueType::String | WireValueType::Boolean => return Err(PolicyManageError::InvalidPolicy),
+                    };
+                    $module::IdentityPolicyOperatorView::OrderingFamily(
+                        $module::IdentityPolicyOperatorViewOrderingFamily {
+                            family: $module::IdentityPolicyOperatorViewOrderingFamilyFamily::Ordering,
+                            predicate: match predicate {
+                                WireOrderingPredicate::Gt => $module::IdentityPolicyOperatorViewOrderingFamilyPredicate::Gt,
+                                WireOrderingPredicate::Ge => $module::IdentityPolicyOperatorViewOrderingFamilyPredicate::Ge,
+                                WireOrderingPredicate::Lt => $module::IdentityPolicyOperatorViewOrderingFamilyPredicate::Lt,
+                                WireOrderingPredicate::Le => $module::IdentityPolicyOperatorViewOrderingFamilyPredicate::Le,
+                            },
+                            operand,
+                        },
+                    )
+                }
+                WireOperator::Membership { predicate, operand } => {
+                    let kind = $module::IdentityPolicyOperatorViewSetOperandKind::Set;
+                    let values = operand.values;
+                    let operand = match operand.value_type {
+                        WireValueType::String => $module::IdentityPolicyOperatorViewSetOperand::String {
+                            kind,
+                            values: values.into_iter().map(|value| $module::IdentityPolicyOperatorViewSetOperandValuesItem::try_from(value.as_str().ok_or(PolicyManageError::InvalidPolicy)?.to_string()).map_err(invalid)).collect::<Result<Vec<_>, _>>()?,
+                        },
+                        WireValueType::Boolean => $module::IdentityPolicyOperatorViewSetOperand::Boolean {
+                            kind,
+                            values: values.into_iter().map(|value| value.as_bool().ok_or(PolicyManageError::InvalidPolicy)).collect::<Result<Vec<_>, _>>()?,
+                        },
+                        WireValueType::Integer => $module::IdentityPolicyOperatorViewSetOperand::Integer {
+                            kind,
+                            values: values.into_iter().map(|value| value.as_i64().ok_or(PolicyManageError::InvalidPolicy)).collect::<Result<Vec<_>, _>>()?,
+                        },
+                        WireValueType::Decimal => $module::IdentityPolicyOperatorViewSetOperand::Decimal {
+                            kind,
+                            values: values.into_iter().map(|value| $module::IdentityPolicyOperatorViewSetOperandValuesItem::try_from(value.as_str().ok_or(PolicyManageError::InvalidPolicy)?.to_string()).map_err(invalid)).collect::<Result<Vec<_>, _>>()?,
+                        },
+                    };
+                    $module::IdentityPolicyOperatorView::MembershipFamily(
+                        $module::IdentityPolicyOperatorViewMembershipFamily {
+                            family: $module::IdentityPolicyOperatorViewMembershipFamilyFamily::Membership,
+                            predicate: match predicate {
+                                WireMembershipPredicate::In => $module::IdentityPolicyOperatorViewMembershipFamilyPredicate::In,
+                                WireMembershipPredicate::NotIn => $module::IdentityPolicyOperatorViewMembershipFamilyPredicate::NotIn,
+                            },
+                            operand,
+                        },
+                    )
+                }
+                WireOperator::String { predicate, operand } => {
+                    $module::IdentityPolicyOperatorView::StringFamily(
+                        $module::IdentityPolicyOperatorViewStringFamily {
+                            family: $module::IdentityPolicyOperatorViewStringFamilyFamily::String,
+                            predicate: match predicate {
+                                WireStringPredicate::StartsWith => $module::IdentityPolicyOperatorViewStringFamilyPredicate::StartsWith,
+                                WireStringPredicate::EndsWith => $module::IdentityPolicyOperatorViewStringFamilyPredicate::EndsWith,
+                                WireStringPredicate::Contains => $module::IdentityPolicyOperatorViewStringFamilyPredicate::Contains,
+                                WireStringPredicate::Glob => $module::IdentityPolicyOperatorViewStringFamilyPredicate::Glob,
+                                WireStringPredicate::Regex => $module::IdentityPolicyOperatorViewStringFamilyPredicate::Regex,
+                            },
+                            operand: $module::IdentityPolicyOperatorViewPatternOperand {
+                                kind: $module::IdentityPolicyOperatorViewPatternOperandKind::Pattern,
+                                value_type: $module::IdentityPolicyOperatorViewPatternOperandValueType::String,
+                                value: $module::IdentityPolicyOperatorViewPatternOperandValue::try_from(operand.value).map_err(invalid)?,
+                            },
+                        },
+                    )
+                }
+            })
+        }
+    };
+}
+
+define_typed_policy_view_projection!(create_policy_view, create_operator_view, create_wire);
+define_typed_policy_view_projection!(update_policy_view, update_operator_view, update_wire);
+define_typed_policy_view_projection!(get_policy_view, get_operator_view, get_wire);
+define_typed_policy_view_projection!(list_policy_view, list_operator_view, list_wire);
 
 impl WirePolicyView {
     fn from_policy(policy: &Policy) -> Result<Self, PolicyManageError> {
@@ -821,7 +1501,7 @@ impl WireRuleView {
         Ok(Self {
             condition: WireConditionView {
                 attribute: rule.attribute_key().as_str().to_string(),
-                operator: WireOperatorView::from_operator(rule.operator())?,
+                operator: WireOperator::from_operator(rule.operator())?,
             },
             effect: match rule.effect() {
                 PolicyEffect::Allow => WireEffect::Allow,
@@ -832,46 +1512,98 @@ impl WireRuleView {
     }
 }
 
-impl WireOperatorView {
+impl WireOperator {
     fn from_operator(operator: &Operator) -> Result<Self, PolicyManageError> {
         match operator {
-            Operator::Eq(value) => Ok(Self {
-                kind: "eq",
-                value: Some(value.as_str().to_string()),
-                pattern: None,
-                attribute: None,
+            Operator::Equality(operator) => Ok(Self::Equality {
+                predicate: match operator.predicate() {
+                    EqualityPredicate::Eq => WireEqualityPredicate::Eq,
+                    EqualityPredicate::Ne => WireEqualityPredicate::Ne,
+                },
+                operand: WireScalarOperand::from_equality(operator.operand()),
             }),
-            Operator::Ne(value) => Ok(Self {
-                kind: "ne",
-                value: Some(value.as_str().to_string()),
-                pattern: None,
-                attribute: None,
+            Operator::Ordering(operator) => Ok(Self::Ordering {
+                predicate: match operator.predicate() {
+                    OrderingPredicate::Gt => WireOrderingPredicate::Gt,
+                    OrderingPredicate::Ge => WireOrderingPredicate::Ge,
+                    OrderingPredicate::Lt => WireOrderingPredicate::Lt,
+                    OrderingPredicate::Le => WireOrderingPredicate::Le,
+                },
+                operand: WireScalarOperand::from_ordering(operator.operand()),
             }),
-            Operator::Gt(value) => Ok(Self {
-                kind: "gt",
-                value: Some(value.as_str().to_string()),
-                pattern: None,
-                attribute: None,
+            Operator::Membership(operator) => Ok(Self::Membership {
+                predicate: match operator.predicate() {
+                    MembershipPredicate::In => WireMembershipPredicate::In,
+                    MembershipPredicate::NotIn => WireMembershipPredicate::NotIn,
+                },
+                operand: WireSetOperand {
+                    kind: WireSetKind::Set,
+                    value_type: WireValueType::from_domain(operator.operand().value_type()),
+                    values: operator
+                        .operand()
+                        .values()
+                        .iter()
+                        .map(wire_json_value)
+                        .collect(),
+                },
             }),
-            Operator::Lt(value) => Ok(Self {
-                kind: "lt",
-                value: Some(value.as_str().to_string()),
-                pattern: None,
-                attribute: None,
-            }),
-            Operator::Like(pattern) => Ok(Self {
-                kind: "like",
-                value: None,
-                pattern: Some(pattern.as_str().to_string()),
-                attribute: None,
-            }),
-            Operator::EqAttr(attribute) => Ok(Self {
-                kind: "eqAttr",
-                value: None,
-                pattern: None,
-                attribute: Some(attribute.as_str().to_string()),
+            Operator::StringMatch(operator) => Ok(Self::String {
+                predicate: match operator.predicate() {
+                    StringPredicate::StartsWith => WireStringPredicate::StartsWith,
+                    StringPredicate::EndsWith => WireStringPredicate::EndsWith,
+                    StringPredicate::Contains => WireStringPredicate::Contains,
+                    StringPredicate::Glob => WireStringPredicate::Glob,
+                    StringPredicate::Regex => WireStringPredicate::Regex,
+                },
+                operand: WirePatternOperand {
+                    kind: WirePatternKind::Pattern,
+                    value_type: WireStringType::String,
+                    value: operator.pattern().to_string(),
+                },
             }),
         }
+    }
+}
+
+impl WireScalarOperand {
+    fn from_equality(operand: &EqualityOperand) -> Self {
+        match operand {
+            EqualityOperand::Literal(value) => Self::Literal {
+                value_type: WireValueType::from_domain(value.value_type()),
+                value: wire_json_value(value),
+            },
+            EqualityOperand::Attribute(value) => Self::Attribute {
+                value_type: WireValueType::from_domain(value.value_type()),
+                attribute: value.attribute().as_str().to_string(),
+            },
+        }
+    }
+    fn from_ordering(operand: &OrderingOperand) -> Self {
+        let value = operand.value().clone().into_policy_value();
+        Self::Literal {
+            value_type: WireValueType::from_domain(value.value_type()),
+            value: wire_json_value(&value),
+        }
+    }
+}
+
+impl WireValueType {
+    const fn from_domain(value: PolicyValueType) -> Self {
+        match value {
+            PolicyValueType::String => Self::String,
+            PolicyValueType::Boolean => Self::Boolean,
+            PolicyValueType::Integer => Self::Integer,
+            PolicyValueType::Decimal => Self::Decimal,
+        }
+    }
+}
+
+fn wire_json_value(value: &PolicyValue) -> serde_json::Value {
+    match value.as_ref() {
+        PolicyValueRef::String(value) => serde_json::Value::String(value.to_string()),
+        PolicyValueRef::Boolean(value) => serde_json::Value::Bool(value),
+        PolicyValueRef::Integer(value) => serde_json::Value::Number(value.into()),
+        PolicyValueRef::Decimal(value) => serde_json::Value::String(value.as_str().to_string()),
     }
 }
 
@@ -981,7 +1713,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": "admin" }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "admin" } }
                 },
                 "effect": "allow"
             }]
@@ -998,7 +1730,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": "admin" }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "admin" } }
                 },
                 "effect": "allow",
                 "obligations": { "fieldMask": ["actor"] }
@@ -1016,7 +1748,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": "admin" }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "admin" } }
                 },
                 "effect": "allow"
             }]
@@ -1033,7 +1765,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "resource.owner",
-                    "operator": { "kind": "eqAttr", "attribute": "principal.id" }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "attribute", "valueType": "string", "attribute": "principal.id" } }
                 },
                 "effect": "allow"
             }]
@@ -1050,7 +1782,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "resource.owner",
-                    "operator": { "kind": "eqAttr", "attribute": "principal.id" }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "attribute", "valueType": "string", "attribute": "principal.id" } }
                 },
                 "effect": "allow"
             }]
@@ -1112,7 +1844,7 @@ mod tests {
         PolicyRule::with_obligations(
             PolicyCondition::new(
                 AttributeKey::new("resource.owner"),
-                Operator::EqAttr(PipAttributeKey::principal_id()),
+                Operator::equal_attribute(PipAttributeKey::principal_id()),
             ),
             PolicyEffect::Allow,
             PolicyObligations::empty(),
@@ -1138,30 +1870,32 @@ mod tests {
 
     #[test]
     fn wire_operator_rejects_overlong_attribute_value() {
-        let wire = WireOperator {
-            kind: WireOperatorKind::Eq,
-            value: Some("a".repeat(ATTR_VALUE_MAX_LEN + 1)),
-            pattern: None,
-            attribute: None,
+        let wire = WireOperator::Equality {
+            predicate: WireEqualityPredicate::Eq,
+            operand: WireScalarOperand::Literal {
+                value_type: WireValueType::String,
+                value: serde_json::json!("a".repeat(ATTR_VALUE_MAX_LEN + 1)),
+            },
         };
         assert!(matches!(
             wire.into_operator(),
-            Err(PolicyManageError::AttributeValueTooLong)
+            Err(PolicyManageError::PolicyValueTooLong)
         ));
     }
 
     #[test]
     fn wire_operator_accepts_exact_max_attribute_value() {
-        let wire = WireOperator {
-            kind: WireOperatorKind::Eq,
-            value: Some("a".repeat(ATTR_VALUE_MAX_LEN)),
-            pattern: None,
-            attribute: None,
+        let wire = WireOperator::Equality {
+            predicate: WireEqualityPredicate::Eq,
+            operand: WireScalarOperand::Literal {
+                value_type: WireValueType::String,
+                value: serde_json::json!("a".repeat(ATTR_VALUE_MAX_LEN)),
+            },
         };
         assert!(
             matches!(
                 wire.into_operator(),
-                Ok(Operator::Eq(v)) if v.as_str().len() == ATTR_VALUE_MAX_LEN
+                Ok(Operator::Equality(ref op)) if matches!(op.operand(), EqualityOperand::Literal(v) if v.string_value().is_some_and(|value| value.len() == ATTR_VALUE_MAX_LEN))
             ),
             "exact-max value must parse as Eq"
         );
@@ -1169,16 +1903,17 @@ mod tests {
 
     #[test]
     fn wire_operator_eq_attr_accepts_pip_principal_id() {
-        let wire = WireOperator {
-            kind: WireOperatorKind::EqAttr,
-            value: None,
-            pattern: None,
-            attribute: Some("principal.id".to_string()),
+        let wire = WireOperator::Equality {
+            predicate: WireEqualityPredicate::Eq,
+            operand: WireScalarOperand::Attribute {
+                value_type: WireValueType::String,
+                attribute: "principal.id".to_string(),
+            },
         };
         assert!(
             matches!(
                 wire.into_operator(),
-                Ok(Operator::EqAttr(key)) if key.as_str() == "principal.id"
+                Ok(Operator::Equality(ref op)) if matches!(op.operand(), EqualityOperand::Attribute(value) if value.attribute().as_str() == "principal.id")
             ),
             "PIP principal.id must parse as EqAttr"
         );
@@ -1186,16 +1921,201 @@ mod tests {
 
     #[test]
     fn wire_operator_eq_attr_rejects_non_pip_attribute() {
-        let wire = WireOperator {
-            kind: WireOperatorKind::EqAttr,
-            value: None,
-            pattern: None,
-            attribute: Some("secret.probe".to_string()),
+        let wire = WireOperator::Equality {
+            predicate: WireEqualityPredicate::Eq,
+            operand: WireScalarOperand::Attribute {
+                value_type: WireValueType::String,
+                attribute: "secret.probe".to_string(),
+            },
         };
         assert!(matches!(
             wire.into_operator(),
             Err(PolicyManageError::InvalidPolicy)
         ));
+    }
+
+    #[test]
+    fn active_v1_rejects_legacy_flat_operator_payload() {
+        let payload = serde_json::json!({
+            "policyId": "legacy-shape",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{"condition":{"attribute":"principal.kind","operator":{"kind":"eq","value":"admin"}},"effect":"allow"}]
+        });
+        assert!(serde_json::from_value::<IdentityPoliciesCreateRequest>(payload).is_err());
+    }
+
+    #[test]
+    fn membership_schema_and_domain_enforce_canonical_bounded_set() {
+        let values = (0..32)
+            .map(|value| format!("team-{value:02}"))
+            .collect::<Vec<_>>();
+        let payload = serde_json::json!({
+            "policyId": "membership",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{"condition":{"attribute":"principal.kind","operator":{"family":"membership","predicate":"in","operand":{"kind":"set","valueType":"string","values":values}}},"effect":"allow"}]
+        });
+        let request: IdentityPoliciesCreateRequest =
+            serde_json::from_value(payload).expect("32 values");
+        let draft = PolicyCreateDraft::try_from(request).expect("domain set");
+        assert!(matches!(draft.rules[0].operator(), Operator::Membership(_)));
+
+        let duplicate = serde_json::json!({
+            "policyId": "duplicate",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{"condition":{"attribute":"principal.kind","operator":{"family":"membership","predicate":"in","operand":{"kind":"set","valueType":"string","values":["eng","eng"]}}},"effect":"allow"}]
+        });
+        let duplicate: IdentityPoliciesCreateRequest =
+            serde_json::from_value(duplicate).expect("wire shape");
+        assert!(matches!(
+            PolicyCreateDraft::try_from(duplicate),
+            Err(PolicyManageError::InvalidOperator(
+                PolicyOperatorReason::DuplicateSetValue
+            ))
+        ));
+    }
+
+    #[test]
+    fn ordering_rejects_string_operand_before_domain_construction() {
+        let payload = serde_json::json!({
+            "policyId": "bad-ordering",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": [{"condition":{"attribute":"resource.rank","operator":{"family":"ordering","predicate":"gt","operand":{"kind":"literal","valueType":"string","value":"3"}}},"effect":"allow"}]
+        });
+        assert!(serde_json::from_value::<IdentityPoliciesCreateRequest>(payload).is_err());
+    }
+
+    #[test]
+    fn active_v1_all_predicates_round_trip_canonically_across_views() {
+        let decimal = |raw: &str| PolicyValue::decimal(raw).expect("canonical decimal");
+        let operators = vec![
+            Operator::equal(PolicyValue::boolean(true)),
+            Operator::not_equal(decimal("2.5")),
+            Operator::equal_attribute(PipAttributeKey::principal_id()),
+            Operator::ordering(OrderingPredicate::Gt, NumericValue::Integer(1)),
+            Operator::ordering(OrderingPredicate::Ge, NumericValue::Integer(1)),
+            Operator::ordering(
+                OrderingPredicate::Lt,
+                NumericValue::Decimal(crate::domain::DecimalValue::parse("1.1").expect("decimal")),
+            ),
+            Operator::ordering(OrderingPredicate::Le, NumericValue::Integer(1)),
+            Operator::Membership(MembershipOperator::new(
+                MembershipPredicate::In,
+                PolicyValueSet::new(vec![
+                    PolicyValue::string("eng").expect("string"),
+                    PolicyValue::string("ops").expect("string"),
+                ])
+                .expect("set"),
+            )),
+            Operator::Membership(MembershipOperator::new(
+                MembershipPredicate::NotIn,
+                PolicyValueSet::new(vec![PolicyValue::integer(1)]).expect("set"),
+            )),
+            Operator::string(StringPredicate::StartsWith, "team-").expect("pattern"),
+            Operator::string(StringPredicate::EndsWith, "-ops").expect("pattern"),
+            Operator::string(StringPredicate::Contains, "eng").expect("pattern"),
+            Operator::string(StringPredicate::Glob, "team-*").expect("pattern"),
+            Operator::string(StringPredicate::Regex, r"^team-[0-9]+$").expect("pattern"),
+        ];
+        let expected_operators = operators
+            .iter()
+            .map(|operator| {
+                serde_json::to_value(WireOperator::from_operator(operator).expect("wire"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .expect("json");
+        let rules = expected_operators
+            .iter()
+            .enumerate()
+            .map(|(index, operator)| serde_json::json!({
+                "condition": {"attribute": format!("resource.test{index}"), "operator": operator},
+                "effect": "allow"
+            }))
+            .collect::<Vec<_>>();
+        let payload = serde_json::json!({
+            "policyId": "all-predicates",
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "rules": rules
+        });
+        let request: IdentityPoliciesCreateRequest =
+            serde_json::from_value(payload.clone()).expect("create schema");
+        let draft = PolicyCreateDraft::try_from(request).expect("domain");
+        let policy = Policy::build(
+            draft.id.as_str(),
+            tenant(),
+            draft.scope,
+            draft.effective_from,
+            draft.effective_until,
+            draft.rules,
+        )
+        .expect("policy");
+
+        let update_payload = serde_json::json!({
+            "contractId": "identity.policies-list",
+            "permission": "identity:policy:read",
+            "effectiveFrom": 1_700_000_000,
+            "expectedVersion": 1,
+            "rules": payload["rules"].clone()
+        });
+        let update: IdentityPoliciesUpdateRequest =
+            serde_json::from_value(update_payload).expect("update schema");
+        assert_eq!(
+            PolicyUpdateDraft::try_from_wire(policy.id().clone(), update)
+                .expect("update domain")
+                .rules
+                .len(),
+            operators.len()
+        );
+
+        let views = [
+            serde_json::to_value(create_response(&policy).expect("create view")).expect("json"),
+            serde_json::to_value(update_response(&policy).expect("update view")).expect("json"),
+            serde_json::to_value(get_response(&policy).expect("get view")).expect("json"),
+            serde_json::to_value(list_response(vec![policy], false, None).expect("list view"))
+                .expect("json"),
+        ];
+        for (index, view) in views.iter().enumerate() {
+            let rules = if index == 3 {
+                &view["data"][0]["rules"]
+            } else {
+                &view["data"]["rules"]
+            };
+            let got = rules
+                .as_array()
+                .expect("rules")
+                .iter()
+                .map(|rule| rule["condition"]["operator"].clone())
+                .collect::<Vec<_>>();
+            assert_eq!(got, expected_operators);
+        }
+    }
+
+    #[test]
+    fn active_v1_rejects_impossible_attribute_types_noncanonical_decimal_and_unknown_fields() {
+        for operator in [
+            serde_json::json!({"family":"equality","predicate":"eq","operand":{"kind":"attribute","valueType":"boolean","attribute":"principal.id"}}),
+            serde_json::json!({"family":"ordering","predicate":"gt","operand":{"kind":"attribute","valueType":"integer","attribute":"principal.id"}}),
+            serde_json::json!({"family":"ordering","predicate":"gt","operand":{"kind":"literal","valueType":"decimal","value":"1.0"}}),
+            serde_json::json!({"family":"equality","predicate":"eq","operand":{"kind":"literal","valueType":"string","value":"ok","unknown":true}}),
+        ] {
+            let payload = serde_json::json!({
+                "policyId": "invalid-combination",
+                "contractId": "identity.policies-list",
+                "permission": "identity:policy:read",
+                "effectiveFrom": 1_700_000_000,
+                "rules": [{"condition":{"attribute":"resource.test","operator":operator},"effect":"allow"}]
+            });
+            assert!(serde_json::from_value::<IdentityPoliciesCreateRequest>(payload).is_err());
+        }
     }
 
     #[test]
@@ -1208,7 +2128,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "resource.owner",
-                    "operator": { "kind": "eqAttr", "attribute": "secret.probe" }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "attribute", "valueType": "string", "attribute": "secret.probe" } }
                 },
                 "effect": "allow"
             }]
@@ -1229,7 +2149,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": "a".repeat(ATTR_VALUE_MAX_LEN + 1) }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "a".repeat(ATTR_VALUE_MAX_LEN + 1) } }
                 },
                 "effect": "allow"
             }]
@@ -1250,7 +2170,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": "a".repeat(ATTR_VALUE_MAX_LEN) }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "a".repeat(ATTR_VALUE_MAX_LEN) } }
                 },
                 "effect": "allow"
             }]
@@ -1271,7 +2191,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": "a".repeat(ATTR_VALUE_MAX_LEN + 1) }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "a".repeat(ATTR_VALUE_MAX_LEN + 1) } }
                 },
                 "effect": "allow"
             }]
@@ -1292,7 +2212,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": "a".repeat(ATTR_VALUE_MAX_LEN) }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "a".repeat(ATTR_VALUE_MAX_LEN) } }
                 },
                 "effect": "allow"
             }]
@@ -1320,7 +2240,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": multibyte }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": multibyte } }
                 },
                 "effect": "allow"
             }]
@@ -1329,7 +2249,7 @@ mod tests {
 
         assert!(matches!(
             PolicyCreateDraft::try_from(req),
-            Err(PolicyManageError::AttributeValueTooLong)
+            Err(PolicyManageError::PolicyValueTooLong)
         ));
     }
 
@@ -1347,7 +2267,7 @@ mod tests {
             "rules": [{
                 "condition": {
                     "attribute": "principal.kind",
-                    "operator": { "kind": "eq", "value": multibyte }
+                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": multibyte } }
                 },
                 "effect": "allow"
             }]
@@ -1357,7 +2277,7 @@ mod tests {
         let policy_id = PolicyId::parse("policy-multibyte-upd").expect("policy id");
         assert!(matches!(
             PolicyUpdateDraft::try_from_wire(policy_id, req),
-            Err(PolicyManageError::AttributeValueTooLong)
+            Err(PolicyManageError::PolicyValueTooLong)
         ));
     }
 

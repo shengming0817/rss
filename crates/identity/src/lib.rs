@@ -76,6 +76,22 @@ pub mod test_support {
 
     use vocab::TenantId;
 
+    /// Evaluate policies loaded by a downstream adapter through the same PDP function used by the
+    /// production contract authorizer. This seam is test-only so persistence providers can prove
+    /// that durable typed operators retain their authorization semantics after hydration.
+    pub fn evaluate_policies_for_test(
+        tenant: TenantId,
+        attributes: &[crate::ports::AbacAttribute],
+        policies: &[crate::ports::Policy],
+    ) -> vocab::Decision {
+        match crate::domain::evaluate_policies_for_tenant(Some(tenant), attributes, policies) {
+            crate::domain::PolicyEvaluation::Allow(_) => vocab::Decision::Allow,
+            crate::domain::PolicyEvaluation::NoMatch | crate::domain::PolicyEvaluation::Deny => {
+                vocab::Decision::Deny
+            }
+        }
+    }
+
     /// Mint the route-typed login producer receipt for adapter tests that bypass the HTTP router.
     pub fn login_producer_receipt() -> crate::ports::LoginProducerReceipt {
         httpserve::ProducerMarker::for_test(generated::http::identity_v1::login::PRODUCER)

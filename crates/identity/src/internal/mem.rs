@@ -1415,10 +1415,11 @@ mod tests {
         InMemResourceAttributeRepo, InMemRoleBindingLifecycle, TenantId, recover,
     };
     use crate::domain::{
-        AccountSecurityState, AttributeValue, AuthOutcome, IdentityError, LoginIdentifier, Policy,
-        PolicyId, PolicyRouteScope, PolicyVersion, RefreshStatus, RefreshTokenHash, RefreshTokenId,
-        RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey, ResourceAttributeResolution,
-        ResourceAttributeResourceId, ResourceAttributeVersion, RoleBinding, RoleId,
+        AccountSecurityState, AuthOutcome, IdentityError, LoginIdentifier, Policy, PolicyId,
+        PolicyRouteScope, PolicyValue, PolicyVersion, RefreshStatus, RefreshTokenHash,
+        RefreshTokenId, RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey,
+        ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
+        RoleBinding, RoleId,
     };
     use crate::ports::{
         AccountSecurityReadRepo, AuthGrantLifecycle, CredentialRepo, IdentitySecurityLifecycle,
@@ -1628,7 +1629,7 @@ mod tests {
             resource_scope(),
             resource_id(),
             key,
-            AttributeValue::new(USER_ALICE),
+            PolicyValue::new(USER_ALICE),
             epoch(from),
             until.map(epoch),
         )

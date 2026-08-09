@@ -27,10 +27,10 @@
 | 实体 | 字段 | 不变式 / 校验 | 当前 |
 |------|------|--------------|------|
 | `AttributeKey` | `(String)` | parse 非空；fail-closed | 签名冻结 |
-| `AttributeValue` | `(String)` | 域权威：`parse` UTF-8 **字节** ≤256（允许空串、无字符白名单，仅 `TooLong`）；wire JSON Schema `maxLength` = Unicode **字符数**（typify）——多字节可 wire 过、域拒；`pub(crate) new` 仅可信短常量；手写 Debug 脱敏 | 签名演进（#1236 DoS 加固） |
-| `AbacAttribute` | `key: AttributeKey, value: AttributeValue` | funnel 构造 | 签名冻结 |
+| `PolicyValue` | `String / Boolean / Integer / Decimal` | string UTF-8 bytes ≤256；integer=i64；decimal 精确、规范、无指数；手写 Debug 脱敏 | ADR-025 破坏性替换 |
+| `AbacAttribute` | `key: AttributeKey, value: PolicyValue` | typed funnel 构造 | ADR-025 |
 | `PolicyId` | `(String)` | parse；fail-closed | 签名冻结 |
-| `PolicyRule` | `attribute_key + operator + expected(value|attr) + effect(Allow|Deny)` | **新增 operator 枚举**（eq/ne/`like`[glob风格,≤256字节,fail-closed]/gt/lt/eq_attr）+ effect(Allow\|Deny)；`like` 模式超长或含非法字符在 parse 阶段 fail-closed 拒绝，防 ReDoS | 当前仅 `attribute_key + expected_value` 等值；本 feature 扩 operator/effect |
+| `PolicyRule` | `attribute_key + closed typed operator + effect(Allow|Deny)` | equality/ordering/membership/string family；family-specific operand 令错配不可表达；集合 1–32 同型唯一；regex 预编译 | ADR-025 |
 | `Policy` | `id: PolicyId, rules: Vec<PolicyRule>` | funnel 构造 | 签名冻结 |
 
 **纯逻辑**：`evaluate_abac(&Principal, &[AbacAttribute], &Policy) -> Decision`——**deny-overrides**：任一命中的 Deny 规则 → 整体 Deny；否则有命中 Allow → Allow；无规则命中 → 默认 Deny；跨租 / 类型不匹配 fail-closed 不命中。

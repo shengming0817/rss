@@ -5,7 +5,7 @@
 //!
 //! 子域拆分（spec 003 T001，每子 PR 独占其文件，降并行写冲突）：
 //! - `mod.rs`（本文件）：共享 newtype funnel（`RoleId` / `PermissionId` / `PolicyId` / `ResourcePattern`
-//!   / `AttributeKey` / `AttributeValue`）+ `IdentityError` + 子模块 re-export 枢纽。【PR1】
+//!   / `AttributeKey` / `PolicyValue`）+ `IdentityError` + 子模块 re-export 枢纽。【PR1】
 //! - `rbac`：`Permission` / `Role` / `RoleBinding` + `authorize_rbac`。【PR1 实现】
 //! - `abac`：`AbacAttribute` / `PolicyRule`（typed `Operator` + `PolicyEffect`）/ `Policy` +
 //!   `evaluate_abac`（deny-overrides，fail-closed）。【PR2 实现】
@@ -20,8 +20,8 @@
 //! → `*Error::Format`，**永不 panic**（零信任）。`new`（部分 newtype）是 crate 内「已校验值」信任构造器
 //! （funnel 边界 = `pub(crate)`，不对外）。
 //!
-//! **`AttributeValue` 例外**：允许空串、无字符白名单；仅字节长度超 [`ATTR_VALUE_MAX_LEN`] →
-//! `AttributeValueError::TooLong`。域权威为 UTF-8 **字节** ≤256；wire JSON Schema `maxLength` 按
+//! **`PolicyValue` 例外**：允许空串、无字符白名单；仅字节长度超 [`ATTR_VALUE_MAX_LEN`] →
+//! `PolicyValueError::TooLong`。域权威为 UTF-8 **字节** ≤256；wire JSON Schema `maxLength` 按
 //! Unicode **字符数**（typify）校验——多字节字符可过 wire 而被域拒。
 //!
 //! # 对标
@@ -43,10 +43,13 @@ mod security_event;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（`ports` / `application` 等域内消费方不破）。
 pub use abac::{
-    AbacAttribute, GlobPattern, Operator, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
-    POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
-    POLICY_ATTR_TENANT_ID, PipAttributeKey, PipAttributeKeyError, Policy, PolicyCondition,
-    PolicyEffect, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyVersion,
+    AbacAttribute, EqualityOperand, EqualityOperator, EqualityPredicate, MembershipOperator,
+    MembershipPredicate, NumericValue, Operator, OperatorError, OrderingOperand, OrderingOperator,
+    OrderingPredicate, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
+    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID,
+    POLICY_VALUE_SET_MAX_ITEMS, PipAttributeKey, PipAttributeKeyError, Policy, PolicyCondition,
+    PolicyEffect, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyValueSet, PolicyVersion,
+    StringOperator, StringPredicate, TypedAttributeOperand,
 };
 pub(crate) use abac::{PolicyEvaluation, evaluate_policies_for_tenant};
 // Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
@@ -319,54 +322,239 @@ impl AttributeKey {
     }
 }
 
-/// 属性值解析错误。
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum AttributeValueError {
+/// RSS Common ABAC Profile 的闭合值类型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum PolicyValueType {
+    String,
+    Boolean,
+    Integer,
+    Decimal,
+}
+
+/// typed policy value 构造失败。
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum PolicyValueError {
     #[error("attribute value exceeds max length")]
     TooLong,
+    #[error("decimal value is not canonical or exceeds 64 bytes")]
+    InvalidDecimal,
 }
 
-/// ABAC 属性值 newtype（不 derive Serialize——域类型）。
-///
-/// Debug 手写 redacted：属性值可能含 PII / 敏感信息，不得原文打印到日志。
-/// 不透明载荷：无字符白名单；外部入口走 [`AttributeValue::parse`]（UTF-8 字节长度 ≤256，fail-closed）。
-/// wire `maxLength` 按 Unicode 字符数校验，与域字节权威分层（见 `parse` rustdoc）。
-#[derive(Clone, PartialEq, Eq)]
-pub struct AttributeValue(String);
+/// 精确十进制值；不经过 `f64`，wire 禁止指数形式。
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct DecimalValue {
+    canonical: String,
+    negative: bool,
+    integer: String,
+    fractional: String,
+}
 
-impl std::fmt::Debug for AttributeValue {
+impl std::fmt::Debug for DecimalValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("AttributeValue(<redacted>)")
+        f.write_str("DecimalValue(<redacted>)")
     }
 }
 
-impl AttributeValue {
-    /// 构造属性值（由已校验 / 可信短常量；crate 内路径使用，外部入口走 `parse`）。
-    // reason: 生产 PIP/授权路径已改走 `parse`（#1236 review F1 fail-closed）；`new` 仍供 crate 内
-    // 测试 / seed 可信短常量。非 test 构建视作 unused。
-    #[allow(dead_code)]
-    pub(crate) fn new(raw: impl Into<String>) -> Self {
-        Self(raw.into())
-    }
-
-    /// 解析属性值；拒绝超长（UTF-8 **字节**长度 > [`ATTR_VALUE_MAX_LEN`]），fail-closed。
-    ///
-    /// 允许空串；无字符白名单（不透明载荷）。上界与 `GlobPattern` / `ResourcePattern` 对齐，
-    /// 消除 `glob_match` value 侧无界分配。
-    ///
-    /// **分层约束（非 Hard 对齐）**：域权威 = 字节 ≤256；HTTP wire JSON Schema `maxLength` =
-    /// Unicode 字符数（typify）。多字节字符可过 wire 而被本 funnel 拒。
-    pub fn parse(raw: &str) -> Result<Self, AttributeValueError> {
-        if raw.len() > ATTR_VALUE_MAX_LEN {
-            return Err(AttributeValueError::TooLong);
+impl DecimalValue {
+    pub fn parse(raw: &str) -> Result<Self, PolicyValueError> {
+        if raw.is_empty() || raw.len() > 64 || raw.starts_with('+') {
+            return Err(PolicyValueError::InvalidDecimal);
         }
-        Ok(Self(raw.to_string()))
+        let (negative, unsigned) = raw
+            .strip_prefix('-')
+            .map_or((false, raw), |value| (true, value));
+        let mut parts = unsigned.split('.');
+        let integer = parts.next().unwrap_or_default();
+        let fractional = parts.next().unwrap_or_default();
+        if parts.next().is_some()
+            || integer.is_empty()
+            || !integer.bytes().all(|byte| byte.is_ascii_digit())
+            || (!fractional.is_empty() && !fractional.bytes().all(|byte| byte.is_ascii_digit()))
+            || unsigned.ends_with('.')
+            || (integer.len() > 1 && integer.starts_with('0'))
+        {
+            return Err(PolicyValueError::InvalidDecimal);
+        }
+        let fractional = fractional.trim_end_matches('0').to_string();
+        let is_zero = integer == "0" && fractional.is_empty();
+        let negative = negative && !is_zero;
+        let canonical = if fractional.is_empty() {
+            format!("{}{}", if negative { "-" } else { "" }, integer)
+        } else {
+            format!(
+                "{}{}.{}",
+                if negative { "-" } else { "" },
+                integer,
+                fractional
+            )
+        };
+        if canonical != raw {
+            return Err(PolicyValueError::InvalidDecimal);
+        }
+        Ok(Self {
+            canonical,
+            negative,
+            integer: integer.to_string(),
+            fractional,
+        })
     }
 
-    /// 取值字符串引用。
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.canonical
+    }
+
+    fn cmp_magnitude(&self, other: &Self) -> std::cmp::Ordering {
+        self.integer
+            .len()
+            .cmp(&other.integer.len())
+            .then_with(|| self.integer.cmp(&other.integer))
+            .then_with(|| {
+                let width = self.fractional.len().max(other.fractional.len());
+                self.fractional
+                    .bytes()
+                    .chain(std::iter::repeat(b'0'))
+                    .take(width)
+                    .cmp(
+                        other
+                            .fractional
+                            .bytes()
+                            .chain(std::iter::repeat(b'0'))
+                            .take(width),
+                    )
+            })
+    }
+}
+
+impl Ord for DecimalValue {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (self.negative, other.negative) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            (false, false) => self.cmp_magnitude(other),
+            (true, true) => self.cmp_magnitude(other).reverse(),
+        }
+    }
+}
+
+impl PartialOrd for DecimalValue {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+enum PolicyValueKind {
+    String(String),
+    Boolean(bool),
+    Integer(i64),
+    Decimal(DecimalValue),
+}
+
+/// ABAC typed value. The private representation makes every bounded value pass through its
+/// constructor; callers cannot forge an overlong string or non-canonical decimal.
+///
+/// ```compile_fail
+/// use identity::ports::PolicyValue;
+/// let _ = PolicyValue::String("x".repeat(257));
+/// ```
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PolicyValue(PolicyValueKind);
+
+/// Exhaustive borrowed view for serialization adapters. It exposes no construction path back into
+/// [`PolicyValue`], so the bounded-value funnel remains sealed.
+pub enum PolicyValueRef<'a> {
+    String(&'a str),
+    Boolean(bool),
+    Integer(i64),
+    Decimal(&'a DecimalValue),
+}
+
+impl std::fmt::Debug for PolicyValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PolicyValue(<redacted>)")
+    }
+}
+
+impl PolicyValue {
+    #[cfg(test)]
+    #[allow(clippy::expect_used)]
+    pub(crate) fn new(raw: impl Into<String>) -> Self {
+        let raw = raw.into();
+        Self::string(&raw).expect("test policy string must satisfy the production bound")
+    }
+
+    /// 兼作 string value 的唯一外部解析 funnel。
+    pub fn parse(raw: &str) -> Result<Self, PolicyValueError> {
+        Self::string(raw)
+    }
+
+    pub fn string(raw: &str) -> Result<Self, PolicyValueError> {
+        if raw.len() > ATTR_VALUE_MAX_LEN {
+            return Err(PolicyValueError::TooLong);
+        }
+        Ok(Self(PolicyValueKind::String(raw.to_string())))
+    }
+
+    pub const fn boolean(value: bool) -> Self {
+        Self(PolicyValueKind::Boolean(value))
+    }
+
+    pub const fn integer(value: i64) -> Self {
+        Self(PolicyValueKind::Integer(value))
+    }
+
+    pub fn decimal(raw: &str) -> Result<Self, PolicyValueError> {
+        DecimalValue::parse(raw).map(|value| Self(PolicyValueKind::Decimal(value)))
+    }
+
+    pub(crate) fn from_decimal(value: DecimalValue) -> Self {
+        Self(PolicyValueKind::Decimal(value))
+    }
+
+    pub const fn value_type(&self) -> PolicyValueType {
+        match &self.0 {
+            PolicyValueKind::String(_) => PolicyValueType::String,
+            PolicyValueKind::Boolean(_) => PolicyValueType::Boolean,
+            PolicyValueKind::Integer(_) => PolicyValueType::Integer,
+            PolicyValueKind::Decimal(_) => PolicyValueType::Decimal,
+        }
+    }
+
+    pub fn as_ref(&self) -> PolicyValueRef<'_> {
+        match &self.0 {
+            PolicyValueKind::String(value) => PolicyValueRef::String(value),
+            PolicyValueKind::Boolean(value) => PolicyValueRef::Boolean(*value),
+            PolicyValueKind::Integer(value) => PolicyValueRef::Integer(*value),
+            PolicyValueKind::Decimal(value) => PolicyValueRef::Decimal(value),
+        }
+    }
+
+    pub fn string_value(&self) -> Option<&str> {
+        match &self.0 {
+            PolicyValueKind::String(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub const fn boolean_value(&self) -> Option<bool> {
+        match &self.0 {
+            PolicyValueKind::Boolean(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub const fn integer_value(&self) -> Option<i64> {
+        match &self.0 {
+            PolicyValueKind::Integer(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    pub fn decimal_value(&self) -> Option<&DecimalValue> {
+        match &self.0 {
+            PolicyValueKind::Decimal(value) => Some(value),
+            _ => None,
+        }
     }
 }
 
@@ -465,8 +653,9 @@ pub enum IdentityError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ATTR_VALUE_MAX_LEN, AttributeKey, AttributeKeyError, AttributeValue, AttributeValueError,
-        IdParseError, PatternError, PermissionId, PolicyId, ResourcePattern, RoleId,
+        ATTR_VALUE_MAX_LEN, AttributeKey, AttributeKeyError, DecimalValue, IdParseError,
+        PatternError, PermissionId, PolicyId, PolicyValue, PolicyValueError, ResourcePattern,
+        RoleId,
     };
     use rstest::rstest;
 
@@ -591,13 +780,13 @@ mod tests {
         }
     }
 
-    // AttributeValue：可信 new + as_str 回显 + Debug 脱敏（不泄原值）。
+    // PolicyValue：typed accessor + Debug 脱敏（不泄原值）。
     #[test]
     fn attribute_value_new_and_redacted_debug() {
-        let v = AttributeValue::new("s3cr3t-payload");
-        assert_eq!(v.as_str(), "s3cr3t-payload");
+        let v = PolicyValue::new("s3cr3t-payload");
+        assert_eq!(v.string_value(), Some("s3cr3t-payload"));
         let dbg = format!("{v:?}");
-        assert_eq!(dbg, "AttributeValue(<redacted>)");
+        assert_eq!(dbg, "PolicyValue(<redacted>)");
         assert!(!dbg.contains("s3cr3t"), "Debug 不得泄露明文值");
     }
 
@@ -606,12 +795,12 @@ mod tests {
     #[case("admin", true)]
     #[case("claim/with spaces + unicode-😀", true)]
     fn attribute_value_parse_accepts_within_bound(#[case] raw: &str, #[case] ok: bool) {
-        match AttributeValue::parse(raw) {
+        match PolicyValue::parse(raw) {
             Ok(v) => {
                 assert!(ok, "input len={} 应被拒", raw.len());
-                assert_eq!(v.as_str(), raw);
+                assert_eq!(v.string_value(), Some(raw));
             }
-            Err(AttributeValueError::TooLong) => assert!(!ok),
+            Err(PolicyValueError::TooLong | PolicyValueError::InvalidDecimal) => assert!(!ok),
         }
     }
 
@@ -620,8 +809,8 @@ mod tests {
         let raw = "a".repeat(ATTR_VALUE_MAX_LEN);
         assert!(
             matches!(
-                AttributeValue::parse(&raw),
-                Ok(ref v) if v.as_str().len() == ATTR_VALUE_MAX_LEN
+                PolicyValue::parse(&raw),
+                Ok(ref v) if v.string_value().is_some_and(|value| value.len() == ATTR_VALUE_MAX_LEN)
             ),
             "exact max len must parse"
         );
@@ -631,15 +820,37 @@ mod tests {
     fn attribute_value_parse_rejects_over_max_len() {
         let raw = "a".repeat(ATTR_VALUE_MAX_LEN + 1);
         assert!(matches!(
-            AttributeValue::parse(&raw),
-            Err(AttributeValueError::TooLong)
+            PolicyValue::parse(&raw),
+            Err(PolicyValueError::TooLong)
         ));
         // 257 字节拒绝与 exact-256 接受形成边界对；多字节字符按字节计（非 chars().count()）
         let multi = "あ".repeat(86); // 86 * 3 = 258 bytes
         assert!(multi.len() > ATTR_VALUE_MAX_LEN);
         assert!(matches!(
-            AttributeValue::parse(&multi),
-            Err(AttributeValueError::TooLong)
+            PolicyValue::parse(&multi),
+            Err(PolicyValueError::TooLong)
         ));
+    }
+
+    #[test]
+    fn decimal_value_is_exact_canonical_and_ordered() {
+        let one = DecimalValue::parse("1").expect("decimal");
+        let one_point_five = DecimalValue::parse("1.5").expect("decimal");
+        let negative = DecimalValue::parse("-0.25").expect("decimal");
+        assert_eq!(one.as_str(), "1");
+        assert_eq!(one_point_five.as_str(), "1.5");
+        assert!(negative < one && one < one_point_five);
+        for non_canonical in ["1.0", "1.00", "1.50", "-0"] {
+            assert_eq!(
+                DecimalValue::parse(non_canonical),
+                Err(PolicyValueError::InvalidDecimal)
+            );
+        }
+        for invalid in ["", "+1", "01", "1.", ".1", "1e3", "--1"] {
+            assert_eq!(
+                DecimalValue::parse(invalid),
+                Err(PolicyValueError::InvalidDecimal)
+            );
+        }
     }
 }

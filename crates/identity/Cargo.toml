@@ -49,6 +49,7 @@ diport = { path = "../diport" }
 # session-created event payload 编码为 provider-agnostic 字节（PublishRequest.payload）。
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+regex = { workspace = true }
 # EventId 独立 opaque UUID（F1：不复用 session_id，session_id 已被 secure 列敏感，不得进 broker metadata）。
 uuid = { workspace = true, features = ["v4", "v5"] }
 # 登录路径结构化 span（不记 password；observability.md §日志）。

@@ -7,8 +7,8 @@
 use std::time::SystemTime;
 
 use super::{
-    AbacAttribute, AttributeKey, AttributeKeyError, AttributeValue, IdentityError,
-    POLICY_ATTR_RESOURCE_ID, PolicyRouteScope,
+    AbacAttribute, AttributeKey, AttributeKeyError, IdentityError, POLICY_ATTR_RESOURCE_ID,
+    PolicyRouteScope, PolicyValue,
 };
 
 const RESOURCE_ATTR_PREFIX: &str = "resource.";
@@ -141,7 +141,7 @@ pub struct ResourceAttribute {
     route_scope: PolicyRouteScope,
     resource_id: ResourceAttributeResourceId,
     key: ResourceAttributeKey,
-    value: AttributeValue,
+    value: PolicyValue,
     version: ResourceAttributeVersion,
     effective_from: SystemTime,
     effective_until: Option<SystemTime>,
@@ -154,7 +154,7 @@ impl ResourceAttribute {
         route_scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         key: ResourceAttributeKey,
-        value: AttributeValue,
+        value: PolicyValue,
         version: u32,
         effective_from: SystemTime,
         effective_until: Option<SystemTime>,
@@ -179,7 +179,7 @@ impl ResourceAttribute {
         route_scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         key: ResourceAttributeKey,
-        value: AttributeValue,
+        value: PolicyValue,
         effective_from: SystemTime,
         effective_until: Option<SystemTime>,
     ) -> Result<Self, IdentityError> {
@@ -211,7 +211,7 @@ impl ResourceAttribute {
         &self.key
     }
 
-    pub fn value(&self) -> &AttributeValue {
+    pub fn value(&self) -> &PolicyValue {
         &self.value
     }
 
@@ -326,7 +326,7 @@ mod tests {
                 scope(),
                 id.clone(),
                 key.clone(),
-                AttributeValue::new("owner"),
+                PolicyValue::new("owner"),
                 0,
                 from,
                 None,
@@ -339,7 +339,7 @@ mod tests {
                 scope(),
                 id,
                 key,
-                AttributeValue::new("owner"),
+                PolicyValue::new("owner"),
                 1,
                 from,
                 Some(from),

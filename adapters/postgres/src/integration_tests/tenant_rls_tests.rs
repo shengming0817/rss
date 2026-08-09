@@ -2499,7 +2499,7 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
         sqlx::query(
             "INSERT INTO resource_attributes \
              (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
-             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.owner', 'owner-a', 1, now(), NULL)",
+             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.owner', jsonb_build_object('valueType', 'string', 'value', 'owner-a'), 1, now(), NULL)",
         )
         .bind(&tenant_a)
         .bind(POLICY_CONTRACT_ID)
@@ -2558,7 +2558,7 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
         let result = sqlx::query(
             "INSERT INTO resource_attributes \
              (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
-             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.owner', 'owner-b', 1, now(), NULL)",
+             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.owner', jsonb_build_object('valueType', 'string', 'value', 'owner-b'), 1, now(), NULL)",
         )
         .bind(&tenant_b)
         .bind(POLICY_CONTRACT_ID)
@@ -2592,7 +2592,7 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
         let result = sqlx::query(
             "INSERT INTO resource_attributes \
              (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
-             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.id', 'reserved', 1, now(), NULL)",
+             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.id', jsonb_build_object('valueType', 'string', 'value', 'reserved'), 1, now(), NULL)",
         )
         .bind(&tenant_a)
         .bind(POLICY_CONTRACT_ID)
@@ -2650,7 +2650,9 @@ async fn policy_repo_rls_grants_and_tenant_isolation() -> TestResult {
 
     let tenant_a = uuid::Uuid::new_v4().to_string();
     let tenant_b = uuid::Uuid::new_v4().to_string();
-    let rules_json = principal_kind_rule_json(r#"{"kind":"eq","value":"admin"}"#);
+    let rules_json = principal_kind_rule_json(
+        r#"{"family":"equality","predicate":"eq","operand":{"kind":"literal","valueType":"string","value":"admin"}}"#,
+    );
 
     {
         let mut tx = store.pool.begin().await?;

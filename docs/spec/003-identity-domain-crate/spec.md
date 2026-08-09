@@ -105,20 +105,20 @@
 
 ### User Story 2 - ABAC 策略决策 deny-overrides（domain L0 ABAC）(Priority: P1)
 
-组合根用 `Policy`/`PolicyRule`/`AbacAttribute`/`AttributeKey`/`AttributeValue` 表达属性策略，调 `evaluate_abac(&Principal, &[AbacAttribute], &Policy) -> Decision`。`PolicyRule` 支持比较 operator（eq/ne/like/gt/lt + 跨属性 eq_attr），求值遵循 **deny-overrides** 语义（任一显式 Deny 规则命中即整体 Deny，无匹配则默认 Deny），跨租 fail-closed。
+组合根用 `Policy`/`PolicyRule`/`AbacAttribute`/`AttributeKey`/`PolicyValue` 表达属性策略，调 `evaluate_abac(&Principal, &[AbacAttribute], &Policy) -> Decision`。`PolicyRule` 使用 ADR-025 的 closed typed family（equality/ordering/membership/string），求值遵循 **deny-overrides** 语义（任一显式 Deny 规则命中即整体 Deny，无匹配则默认 Deny），跨租、缺属性和类型错配均 fail-closed。
 
 **Why this priority**: ABAC 与 RBAC 并列为零信任授权双路，决定细粒度策略可达性（P0-6 能力缺口）。它独立于 RBAC 子模块（`domain/abac.rs`），可与 US3 并行。
 
-**Independent Test**: 表驱动 `rstest` 覆盖每个 operator 的真/假/类型不匹配、deny-overrides（Deny 优先于 Allow）、无规则匹配默认 Deny、跨租 Deny、`AttributeValue` Debug 脱敏；不需运行时。
+**Independent Test**: 表驱动 `rstest` 覆盖每个 predicate 的真/假/类型不匹配、bounded set、pattern parse、deny-overrides（Deny 优先于 Allow）、无规则匹配默认 Deny、跨租 Deny、`PolicyValue` Debug 脱敏；不需运行时。
 
 **Acceptance Scenarios**:
 
 1. **Given** 一条 `eq` 规则与匹配的属性值，**When** `evaluate_abac`，**Then** 该规则判定 Allow；属性缺失或值不等则该规则不命中。
 2. **Given** 同一策略含一条命中的 Deny 规则与一条命中的 Allow 规则，**When** `evaluate_abac`，**Then** 整体 `Decision::Deny`（deny-overrides）。
 3. **Given** 策略规则集为空或全不命中，**When** `evaluate_abac`，**Then** `Decision::Deny`（默认拒绝）。
-4. **Given** `like`/`gt`/`lt`/`eq_attr` operator 与对应属性，**When** `evaluate_abac`，**Then** 比较语义正确且类型不匹配 fail-closed 判不命中（不 panic）。
+4. **Given** equality/ordering/membership/string operator 与对应 typed 属性，**When** `evaluate_abac`，**Then** 比较语义正确且缺属性、类型不匹配、非法集合或 pattern 均 fail-closed（不 panic）。
 
-**`like` operator 语义边界**：`like` 为 glob 风格通配（`*` 匹配任意长度序列，`?` 匹配单个字符），不支持嵌套通配或正则。模式最大长度 256 字节，parse 阶段 fail-closed 拒绝超长或含非法字符的模式（不推迟到求值），防止 ReDoS 风险。
+**String family 语义边界**：`startsWith` / `endsWith` / `contains` / `glob` / `regex` 全部区分大小写；glob 的 `*` 匹配任意长度序列、`?` 匹配单个 Unicode scalar，regex 使用受限长度的 Rust regex 语义。pattern 非空且最大 256 UTF-8 bytes，控制字符、超长值与非法 regex 在 authoring/hydration 阶段 fail-closed；regex 只在该阶段编译一次，不在授权热路径解析。
 
 ---
 
@@ -228,7 +228,7 @@ Suspended/Locked 恢复 Active 只做状态 CAS：保留 epoch、不发事件、
 
 - **FR-001**: 系统 MUST 在 `identity::domain` 所有 newtype 上提供 fail-closed 构造（parse 拒绝空 / 非法输入），字段保持 `pub(crate)` + funnel 构造器（不放成 `pub`）。
 - **FR-002**: 系统 MUST 实现 `authorize_rbac`，对同租户匹配权限的绑定返回 Allow，跨租 / 无匹配 / 空集返回 Deny（默认拒绝）。
-- **FR-003**: 系统 MUST 实现 `evaluate_abac`，支持 operator（eq/ne/like/gt/lt/eq_attr）+ deny-overrides + 默认 Deny + 跨租 fail-closed。
+- **FR-003**: 系统 MUST 实现 `evaluate_abac`，支持 ADR-025 closed typed operator family + deny-overrides + 默认 Deny + 跨租/缺属性/类型错配 fail-closed。
 - **FR-004**: 系统 MUST 经 `CredentialRepo` 用 argon2/bcrypt + constant-time 校验密码、支持凭据版本 pin，且密码永不进明文 / 日志 / wire。
 - **FR-005**: 系统 MUST 分离持久 `AccountSecurityState`（四值状态 + epoch/version）与临时 `AccountLockout`（阈值 5 / 窗口 15min / 阻断 TTL 15min）；暴破阈值与 TTL 到期都不得迁移 durable 状态。
 - **FR-006**: 系统 MUST 在 `LoginService` 真实登录路径上：原子校验凭据和 Active 状态 → token mint 前重读 Active/epoch → 创建会话（L1）→ 同事务发布 `identity.session-created`（L2）；失败不 mint、不创建会话、不发事件。
