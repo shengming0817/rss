@@ -9,7 +9,7 @@ use crate::{
 };
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, Metadata};
 use std::io::Read as _;
 use std::path::{Component, Path, PathBuf};
@@ -17,8 +17,211 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 const SCHEMA_HASH_TAG: &[u8] = b"rss-schema-hash-v1\0";
-const SOURCE_SNAPSHOT_TAG: &[u8] = b"rss-contract-source-snapshot-v1\0";
+const SOURCE_SNAPSHOT_TAG: &[u8] = b"rss-contract-source-snapshot-v2\0";
+const COMPONENT_URI_PREFIX: &str = "rss://component/";
 const FRAMEWORK_OWNER: &str = "_framework";
+
+/// Canonical identity of a repository-local JSON Schema component.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ComponentId(String);
+
+impl ComponentId {
+    pub fn parse(raw: &str) -> Result<Self, RepositoryContractError> {
+        component_segments(raw)?;
+        Ok(Self(raw.to_owned()))
+    }
+
+    /// Derive and validate an ID from `contracts/components/<domain>/<version>/<slug>.schema.json`.
+    pub fn from_repository_path(path: &str) -> Result<Option<Self>, RepositoryContractError> {
+        let Some(relative) = path.strip_prefix("contracts/components/") else {
+            return Ok(None);
+        };
+        let stem = relative.strip_suffix(".schema.json").ok_or_else(|| {
+            RepositoryContractError::Invalid(format!(
+                "RSS component path must end in .schema.json: {path:?}"
+            ))
+        })?;
+        let id = Self::parse(&format!("{COMPONENT_URI_PREFIX}{stem}"))?;
+        let expected = PathBuf::from("contracts").join(id.relative_path()?);
+        if expected != Path::new(path) {
+            return Err(RepositoryContractError::Invalid(format!(
+                "non-canonical RSS component path: {path:?}"
+            )));
+        }
+        Ok(Some(id))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn relative_path(&self) -> Result<PathBuf, RepositoryContractError> {
+        let [domain, version, slug] = component_segments(self.as_str())?;
+        Ok(PathBuf::from("components")
+            .join(domain)
+            .join(version)
+            .join(format!("{slug}.schema.json")))
+    }
+}
+
+impl std::fmt::Display for ComponentId {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Pure reverse-reference graph over already-read schema documents. IO remains at the caller.
+#[derive(Debug, Clone)]
+pub struct ComponentGraph {
+    components: BTreeMap<ComponentId, BTreeSet<ComponentId>>,
+    consumers: BTreeMap<String, BTreeSet<ComponentId>>,
+}
+
+impl ComponentGraph {
+    pub fn from_documents(
+        documents: impl IntoIterator<Item = (String, Value)>,
+    ) -> Result<Self, RepositoryContractError> {
+        let mut components = BTreeMap::new();
+        let mut consumers = BTreeMap::new();
+        for (path, value) in documents {
+            let references = component_references(&value)?;
+            if let Some(path_id) = ComponentId::from_repository_path(&path)? {
+                let declared = value.get("$id").and_then(Value::as_str).ok_or_else(|| {
+                    RepositoryContractError::Invalid(format!(
+                        "RSS component graph node {path:?} must declare $id"
+                    ))
+                })?;
+                let declared = ComponentId::parse(declared)?;
+                if declared != path_id {
+                    return Err(RepositoryContractError::Invalid(format!(
+                        "RSS component graph node {path:?} must declare exact $id {path_id:?}"
+                    )));
+                }
+                if components.insert(path_id.clone(), references).is_some() {
+                    return Err(RepositoryContractError::Invalid(format!(
+                        "duplicate RSS component graph identity {path_id:?}"
+                    )));
+                }
+            } else {
+                consumers.insert(path, references);
+            }
+        }
+        for references in components.values().chain(consumers.values()) {
+            for reference in references {
+                if !components.contains_key(reference) {
+                    return Err(RepositoryContractError::Invalid(format!(
+                        "RSS component graph references missing component {reference:?}"
+                    )));
+                }
+            }
+        }
+        reject_component_graph_cycles(&components)?;
+        Ok(Self {
+            components,
+            consumers,
+        })
+    }
+
+    /// All non-component document paths that directly or transitively reference `target`.
+    pub fn transitive_consumer_paths(
+        &self,
+        target: &ComponentId,
+    ) -> Result<BTreeSet<String>, RepositoryContractError> {
+        if !self.components.contains_key(target) {
+            return Err(RepositoryContractError::Invalid(format!(
+                "RSS component graph target is missing: {target:?}"
+            )));
+        }
+        let mut pending = vec![target.clone()];
+        let mut reached = BTreeSet::new();
+        while let Some(current) = pending.pop() {
+            if !reached.insert(current.clone()) {
+                continue;
+            }
+            pending.extend(
+                self.components
+                    .iter()
+                    .filter(|(_, references)| references.contains(&current))
+                    .map(|(id, _)| id.clone()),
+            );
+        }
+        Ok(self
+            .consumers
+            .iter()
+            .filter(|(_, references)| references.iter().any(|id| reached.contains(id)))
+            .map(|(path, _)| path.clone())
+            .collect())
+    }
+}
+
+fn reject_component_graph_cycles(
+    components: &BTreeMap<ComponentId, BTreeSet<ComponentId>>,
+) -> Result<(), RepositoryContractError> {
+    fn visit(
+        id: &ComponentId,
+        components: &BTreeMap<ComponentId, BTreeSet<ComponentId>>,
+        visiting: &mut BTreeSet<ComponentId>,
+        complete: &mut BTreeSet<ComponentId>,
+    ) -> Result<(), RepositoryContractError> {
+        if complete.contains(id) {
+            return Ok(());
+        }
+        if !visiting.insert(id.clone()) {
+            return Err(RepositoryContractError::Invalid(format!(
+                "RSS component graph cycle includes {id:?}"
+            )));
+        }
+        for reference in &components[id] {
+            visit(reference, components, visiting, complete)?;
+        }
+        visiting.remove(id);
+        complete.insert(id.clone());
+        Ok(())
+    }
+
+    let mut visiting = BTreeSet::new();
+    let mut complete = BTreeSet::new();
+    for id in components.keys() {
+        visit(id, components, &mut visiting, &mut complete)?;
+    }
+    Ok(())
+}
+
+/// Self-contained semantic schema plus the canonical component provenance used to build it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedSchema {
+    value: Value,
+    component_ids: Vec<String>,
+    component_definition_names: BTreeSet<String>,
+}
+
+impl ResolvedSchema {
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn into_value(self) -> Value {
+        self.value
+    }
+
+    pub fn component_ids(&self) -> &[String] {
+        &self.component_ids
+    }
+
+    /// Root `definitions` entries introduced by component resolution, used by semantic
+    /// consumers that must distinguish governed shared definitions from author inline schemas.
+    pub fn component_definition_names(&self) -> &BTreeSet<String> {
+        &self.component_definition_names
+    }
+}
+
+impl std::ops::Deref for ResolvedSchema {
+    type Target = Value;
+
+    fn deref(&self) -> &Self::Target {
+        &self.value
+    }
+}
 
 fn promote_contract_owner(
     raw: &RawContractOwner,
@@ -104,6 +307,7 @@ struct ContractSourceSnapshot {
     contracts_root: PathBuf,
     manifest: SourceFileSnapshot,
     schemas: BTreeMap<String, SchemaSourceSnapshot>,
+    components: BTreeMap<String, SourceFileSnapshot>,
     digest: String,
     repository_backed: bool,
 }
@@ -177,11 +381,16 @@ impl RepositoryContract {
     }
 
     /// Exact captured schema bytes, or `None` when the declared schema was missing or unsafe.
-    pub fn schema_bytes(&self, file: &str) -> Option<&[u8]> {
+    fn schema_bytes(&self, file: &str) -> Option<&[u8]> {
         self.source
             .schemas
             .get(file)
             .and_then(SchemaSourceSnapshot::bytes)
+    }
+
+    /// Whether a declared schema was captured as one safe regular file.
+    pub fn has_schema_source(&self, file: &str) -> bool {
+        self.schema_bytes(file).is_some()
     }
 
     /// SHA-256 of exact captured schema bytes, if the declared schema existed.
@@ -190,6 +399,70 @@ impl RepositoryContract {
             .schemas
             .get(file)
             .and_then(SchemaSourceSnapshot::digest)
+    }
+
+    /// Self-contained schema used by validation, hashing, breaking checks and code generation.
+    /// Local RSS component references are rewritten to root definitions from the immutable source
+    /// snapshot; no filesystem or network access occurs here.
+    pub fn resolved_schema(&self, file: &str) -> Result<ResolvedSchema, RepositoryContractError> {
+        let path = self
+            .schema_path(file)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.dir.join(file));
+        let bytes = self.schema_bytes(file).ok_or_else(|| {
+            RepositoryContractError::io(
+                format!("failed to read schema {}", path.display()),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "declared schema is missing"),
+            )
+        })?;
+        let schema = serde_json::from_slice(bytes).map_err(|source| {
+            RepositoryContractError::SchemaJson {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        resolve_component_references(schema, |id| {
+            let source = self.source.components.get(id).ok_or_else(|| {
+                RepositoryContractError::Invalid(format!(
+                    "schema {} references uncaptured component {id:?}",
+                    path.display()
+                ))
+            })?;
+            serde_json::from_slice(&source.bytes).map_err(|source_error| {
+                RepositoryContractError::SchemaJson {
+                    path: source.path.clone(),
+                    source: source_error,
+                }
+            })
+        })
+    }
+
+    /// Direct `$ref` values used by every schema property with the requested name. `None` means
+    /// the property was inlined or otherwise failed to declare a direct reference.
+    pub fn schema_property_references(
+        &self,
+        file: &str,
+        property: &str,
+    ) -> Result<Vec<Option<String>>, RepositoryContractError> {
+        let path = self
+            .schema_path(file)
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.dir.join(file));
+        let bytes = self.schema_bytes(file).ok_or_else(|| {
+            RepositoryContractError::io(
+                format!("failed to read schema {}", path.display()),
+                std::io::Error::new(std::io::ErrorKind::NotFound, "declared schema is missing"),
+            )
+        })?;
+        let value: Value = serde_json::from_slice(bytes).map_err(|source| {
+            RepositoryContractError::SchemaJson {
+                path: path.clone(),
+                source,
+            }
+        })?;
+        let mut references = Vec::new();
+        collect_property_references(&value, property, &mut references);
+        Ok(references)
     }
 
     /// Digest of the complete captured manifest/schema source state. This is provenance evidence,
@@ -224,6 +497,36 @@ impl RepositoryContract {
             ));
         }
         Ok(())
+    }
+}
+
+fn collect_property_references(
+    value: &Value,
+    property: &str,
+    references: &mut Vec<Option<String>>,
+) {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_property_references(value, property, references);
+            }
+        }
+        Value::Object(map) => {
+            if let Some(Value::Object(properties)) = map.get("properties")
+                && let Some(schema) = properties.get(property)
+            {
+                references.push(
+                    schema
+                        .get("$ref")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                );
+            }
+            for value in map.values() {
+                collect_property_references(value, property, references);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -286,11 +589,13 @@ impl RepositoryContractTestBuilder {
             Arc::from(manifest_bytes.into_bytes()),
         );
         let schemas = capture_synthetic_schema_sources(&self.dir, &self.manifest)?;
-        let digest = source_snapshot_digest(&manifest_source, &schemas);
+        let components = BTreeMap::new();
+        let digest = source_snapshot_digest(&manifest_source, &schemas, &components);
         let source = Arc::new(ContractSourceSnapshot {
             contracts_root: self.dir.clone(),
             manifest: manifest_source,
             schemas,
+            components,
             digest,
             repository_backed: false,
         });
@@ -357,10 +662,12 @@ pub fn load_contract_repository(
     let mut toml_paths = Vec::new();
     collect_contract_tomls(contracts_root, &mut toml_paths)?;
     toml_paths.sort();
-    toml_paths
+    let contracts = toml_paths
         .into_iter()
         .map(|path| load_contract(contracts_root, &path))
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    verify_component_universe(contracts_root, contracts.iter())?;
+    Ok(contracts)
 }
 
 /// Verify both the closed manifest universe and every captured contract source snapshot.
@@ -385,8 +692,98 @@ pub fn verify_contract_repository_unchanged<'a>(
             ),
         ));
     }
-    for contract in contracts {
+    for contract in &contracts {
         contract.verify_unchanged()?;
+    }
+    verify_component_universe(contracts_root, contracts.iter().copied())?;
+    Ok(())
+}
+
+fn verify_component_universe<'a>(
+    contracts_root: &Path,
+    contracts: impl IntoIterator<Item = &'a RepositoryContract>,
+) -> Result<(), RepositoryContractError> {
+    let mut actual = BTreeSet::new();
+    collect_component_files(&contracts_root.join("components"), &mut actual)?;
+    let expected = contracts
+        .into_iter()
+        .flat_map(|contract| contract.source.components.values())
+        .map(|source| source.path.clone())
+        .collect::<BTreeSet<_>>();
+    if actual != expected {
+        return Err(RepositoryContractError::Invalid(format!(
+            "component universe must equal the transitively referenced set: expected={expected:?} actual={actual:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn collect_component_files(
+    directory: &Path,
+    files: &mut BTreeSet<PathBuf>,
+) -> Result<(), RepositoryContractError> {
+    let metadata = match std::fs::symlink_metadata(directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(source) => {
+            return Err(RepositoryContractError::io(
+                format!(
+                    "failed to inspect component directory {}",
+                    directory.display()
+                ),
+                source,
+            ));
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(RepositoryContractError::Invalid(format!(
+            "component path must be a non-symlink directory: {}",
+            directory.display()
+        )));
+    }
+    for entry in std::fs::read_dir(directory).map_err(|source| {
+        RepositoryContractError::io(
+            format!("failed to read component directory {}", directory.display()),
+            source,
+        )
+    })? {
+        let entry = entry.map_err(|source| {
+            RepositoryContractError::io(
+                format!(
+                    "failed to read component entry under {}",
+                    directory.display()
+                ),
+                source,
+            )
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|source| {
+            RepositoryContractError::io(
+                format!("failed to inspect component entry {}", path.display()),
+                source,
+            )
+        })?;
+        if file_type.is_symlink() {
+            return Err(RepositoryContractError::Invalid(format!(
+                "component repository rejects symlink: {}",
+                path.display()
+            )));
+        }
+        if file_type.is_dir() {
+            collect_component_files(&path, files)?;
+        } else if file_type.is_file()
+            && path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(".schema.json"))
+        {
+            files.insert(path);
+        } else {
+            return Err(RepositoryContractError::Invalid(format!(
+                "component repository contains a non-schema file: {}",
+                path.display()
+            )));
+        }
     }
     Ok(())
 }
@@ -557,11 +954,13 @@ fn load_contract(
         })?;
     let owner = promote_contract_owner(&manifest.owner)?;
     let schemas = capture_schema_sources(contracts_root, dir, &manifest)?;
-    let digest = source_snapshot_digest(&manifest_source, &schemas);
+    let components = capture_component_sources(contracts_root, &schemas)?;
+    let digest = source_snapshot_digest(&manifest_source, &schemas, &components);
     let source = Arc::new(ContractSourceSnapshot {
         contracts_root: contracts_root.to_path_buf(),
         manifest: manifest_source,
         schemas,
+        components,
         digest,
         repository_backed: true,
     });
@@ -609,6 +1008,278 @@ fn capture_schema_sources(
         schemas.insert(file.to_owned(), source);
     }
     Ok(schemas)
+}
+
+fn capture_component_sources(
+    contracts_root: &Path,
+    schemas: &BTreeMap<String, SchemaSourceSnapshot>,
+) -> Result<BTreeMap<String, SourceFileSnapshot>, RepositoryContractError> {
+    let mut pending = BTreeSet::new();
+    for schema in schemas.values() {
+        let SchemaSourceSnapshot::Present(source) = schema else {
+            continue;
+        };
+        let value: Value = serde_json::from_slice(&source.bytes).map_err(|parse_error| {
+            RepositoryContractError::SchemaJson {
+                path: source.path.clone(),
+                source: parse_error,
+            }
+        })?;
+        collect_component_refs(&value, &mut pending)?;
+    }
+
+    let mut captured = BTreeMap::new();
+    while let Some(id) = pending.pop_first() {
+        if captured.contains_key(id.as_str()) {
+            continue;
+        }
+        let path = contracts_root.join(id.relative_path()?);
+        let source = read_source_file(contracts_root, &path)?;
+        let value: Value = serde_json::from_slice(&source.bytes).map_err(|parse_error| {
+            RepositoryContractError::SchemaJson {
+                path: source.path.clone(),
+                source: parse_error,
+            }
+        })?;
+        if value.get("$id").and_then(Value::as_str) != Some(id.as_str()) {
+            return Err(RepositoryContractError::Invalid(format!(
+                "component {} must declare exact $id {id:?}",
+                path.display()
+            )));
+        }
+        collect_component_refs(&value, &mut pending)?;
+        captured.insert(id.to_string(), source);
+    }
+    Ok(captured)
+}
+
+fn collect_component_refs(
+    value: &Value,
+    refs: &mut BTreeSet<ComponentId>,
+) -> Result<(), RepositoryContractError> {
+    match value {
+        Value::Array(values) => {
+            for value in values {
+                collect_component_refs(value, refs)?;
+            }
+        }
+        Value::Object(map) => {
+            if let Some(reference) = map.get("$ref").and_then(Value::as_str) {
+                if reference.starts_with(COMPONENT_URI_PREFIX) {
+                    refs.insert(ComponentId::parse(reference)?);
+                } else if !reference.starts_with('#') {
+                    return Err(RepositoryContractError::Invalid(format!(
+                        "external schema reference is not a local RSS component: {reference:?}"
+                    )));
+                }
+            }
+            for value in map.values() {
+                collect_component_refs(value, refs)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Canonical local component references in one parsed schema. Every non-fragment external
+/// reference is rejected through the same parser used by repository resolution and CI impact.
+pub fn component_references(
+    value: &Value,
+) -> Result<BTreeSet<ComponentId>, RepositoryContractError> {
+    let mut references = BTreeSet::new();
+    collect_component_refs(value, &mut references)?;
+    Ok(references)
+}
+
+fn component_segments(id: &str) -> Result<[&str; 3], RepositoryContractError> {
+    let suffix = id.strip_prefix(COMPONENT_URI_PREFIX).ok_or_else(|| {
+        RepositoryContractError::Invalid(format!("invalid RSS component id: {id:?}"))
+    })?;
+    if suffix.contains(['#', '?', '\\']) {
+        return Err(RepositoryContractError::Invalid(format!(
+            "RSS component id must not contain fragment, query or backslash: {id:?}"
+        )));
+    }
+    let segments = suffix.split('/').collect::<Vec<_>>();
+    let [domain, version, slug] = segments.as_slice() else {
+        return Err(RepositoryContractError::Invalid(format!(
+            "RSS component id must be rss://component/<domain>/<version>/<slug>: {id:?}"
+        )));
+    };
+    if [domain, version, slug].iter().any(|segment| {
+        segment.is_empty()
+            || !segment.chars().all(|character| {
+                character.is_ascii_lowercase() || character.is_ascii_digit() || character == '-'
+            })
+    }) {
+        return Err(RepositoryContractError::Invalid(format!(
+            "RSS component id contains a non-canonical segment: {id:?}"
+        )));
+    }
+    Ok([domain, version, slug])
+}
+
+/// Canonical repository-relative path for one validated RSS component id.
+pub fn component_relative_path(id: &str) -> Result<PathBuf, RepositoryContractError> {
+    ComponentId::parse(id)?.relative_path()
+}
+
+/// Resolve local RSS component references without coupling the algorithm to filesystem or Git IO.
+pub fn resolve_component_references<F>(
+    mut schema: Value,
+    mut load: F,
+) -> Result<ResolvedSchema, RepositoryContractError>
+where
+    F: FnMut(&str) -> Result<Value, RepositoryContractError>,
+{
+    struct Resolver<'a, F> {
+        load: &'a mut F,
+        resolving: BTreeSet<String>,
+        resolved: BTreeMap<String, String>,
+        definitions: BTreeMap<String, Value>,
+    }
+
+    impl<F> Resolver<'_, F>
+    where
+        F: FnMut(&str) -> Result<Value, RepositoryContractError>,
+    {
+        fn value(&mut self, value: &mut Value) -> Result<(), RepositoryContractError> {
+            match value {
+                Value::Array(values) => {
+                    for value in values {
+                        self.value(value)?;
+                    }
+                }
+                Value::Object(map) => {
+                    let external = map
+                        .get("$ref")
+                        .and_then(Value::as_str)
+                        .filter(|reference| reference.starts_with(COMPONENT_URI_PREFIX))
+                        .map(str::to_owned);
+                    if let Some(id) = external {
+                        let title = self.component(&id)?;
+                        map.insert(
+                            "$ref".to_owned(),
+                            Value::String(format!("#/definitions/{title}")),
+                        );
+                    } else if let Some(reference) = map.get("$ref").and_then(Value::as_str)
+                        && !reference.starts_with('#')
+                    {
+                        return Err(RepositoryContractError::Invalid(format!(
+                            "external schema reference is not a local RSS component: {reference:?}"
+                        )));
+                    }
+                    for value in map.values_mut() {
+                        self.value(value)?;
+                    }
+                }
+                _ => {}
+            }
+            Ok(())
+        }
+
+        fn component(&mut self, id: &str) -> Result<String, RepositoryContractError> {
+            component_segments(id)?;
+            if let Some(title) = self.resolved.get(id) {
+                return Ok(title.clone());
+            }
+            if !self.resolving.insert(id.to_owned()) {
+                return Err(RepositoryContractError::Invalid(format!(
+                    "RSS component reference cycle includes {id:?}"
+                )));
+            }
+            let mut component = (self.load)(id)?;
+            if component.get("$id").and_then(Value::as_str) != Some(id) {
+                return Err(RepositoryContractError::Invalid(format!(
+                    "RSS component must declare exact $id {id:?}"
+                )));
+            }
+            let title = component
+                .get("title")
+                .and_then(Value::as_str)
+                .filter(|title| !title.is_empty())
+                .ok_or_else(|| {
+                    RepositoryContractError::Invalid(format!(
+                        "RSS component {id:?} must declare a non-empty root title"
+                    ))
+                })?
+                .to_owned();
+            self.value(&mut component)?;
+            let object = component.as_object_mut().ok_or_else(|| {
+                RepositoryContractError::Invalid(format!(
+                    "RSS component {id:?} root must be a schema object"
+                ))
+            })?;
+            object.remove("$id");
+            object.remove("$schema");
+            if let Some(local) = object.remove("definitions") {
+                let local = local.as_object().ok_or_else(|| {
+                    RepositoryContractError::Invalid(format!(
+                        "RSS component {id:?} definitions must be an object"
+                    ))
+                })?;
+                for (name, value) in local {
+                    self.insert_definition(name, value.clone())?;
+                }
+            }
+            self.insert_definition(&title, component)?;
+            self.resolving.remove(id);
+            self.resolved.insert(id.to_owned(), title.clone());
+            Ok(title)
+        }
+
+        fn insert_definition(
+            &mut self,
+            name: &str,
+            value: Value,
+        ) -> Result<(), RepositoryContractError> {
+            if let Some(existing) = self.definitions.get(name) {
+                if existing != &value {
+                    return Err(RepositoryContractError::Invalid(format!(
+                        "resolved schema definition collision for {name:?}"
+                    )));
+                }
+                return Ok(());
+            }
+            self.definitions.insert(name.to_owned(), value);
+            Ok(())
+        }
+    }
+
+    let mut resolver = Resolver {
+        load: &mut load,
+        resolving: BTreeSet::new(),
+        resolved: BTreeMap::new(),
+        definitions: BTreeMap::new(),
+    };
+    resolver.value(&mut schema)?;
+    let component_definition_names = resolver.definitions.keys().cloned().collect();
+    if !resolver.definitions.is_empty() {
+        let object = schema.as_object_mut().ok_or_else(|| {
+            RepositoryContractError::Invalid("schema root must be an object".to_owned())
+        })?;
+        let definitions = object
+            .entry("definitions")
+            .or_insert_with(|| Value::Object(serde_json::Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| {
+                RepositoryContractError::Invalid("schema definitions must be an object".to_owned())
+            })?;
+        for (name, value) in resolver.definitions {
+            if definitions.contains_key(&name) {
+                return Err(RepositoryContractError::Invalid(format!(
+                    "resolved component definition collides with author definition {name:?}"
+                )));
+            }
+            definitions.insert(name, value);
+        }
+    }
+    Ok(ResolvedSchema {
+        value: schema,
+        component_ids: resolver.resolved.into_keys().collect(),
+        component_definition_names,
+    })
 }
 
 #[cfg(feature = "test-support")]
@@ -871,6 +1542,9 @@ fn verify_source_snapshot(
             SchemaSourceSnapshot::UnsafeName => {}
         }
     }
+    for component in snapshot.components.values() {
+        verify_file_snapshot(&snapshot.contracts_root, component)?;
+    }
     Ok(())
 }
 
@@ -891,6 +1565,7 @@ fn verify_file_snapshot(
 fn source_snapshot_digest(
     manifest: &SourceFileSnapshot,
     schemas: &BTreeMap<String, SchemaSourceSnapshot>,
+    components: &BTreeMap<String, SourceFileSnapshot>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(SOURCE_SNAPSHOT_TAG);
@@ -910,6 +1585,10 @@ fn source_snapshot_digest(
                 hash_snapshot_component(&mut hasher, b"unsafe-name");
             }
         }
+    }
+    for (id, component) in components {
+        hash_snapshot_component(&mut hasher, id.as_bytes());
+        hash_snapshot_component(&mut hasher, &component.bytes);
     }
     format!("sha256:{:x}", hasher.finalize())
 }
@@ -1018,18 +1697,7 @@ pub fn schema_hash(contract: &RepositoryContract) -> Result<String, RepositoryCo
             .schema_path(file)
             .map(Path::to_path_buf)
             .unwrap_or_else(|| contract.dir().join(file));
-        let bytes = contract.schema_bytes(file).ok_or_else(|| {
-            RepositoryContractError::io(
-                format!("failed to read schema {}", path.display()),
-                std::io::Error::new(std::io::ErrorKind::NotFound, "declared schema is missing"),
-            )
-        })?;
-        let value: Value = serde_json::from_slice(bytes).map_err(|source| {
-            RepositoryContractError::SchemaJson {
-                path: path.clone(),
-                source,
-            }
-        })?;
+        let value = contract.resolved_schema(file)?.into_value();
         let canonical = serde_json::to_vec(&canonical_json(value)).map_err(|source| {
             RepositoryContractError::SchemaJson {
                 path: path.clone(),
@@ -1531,6 +2199,220 @@ outputs = ["probes", "resources"]
                 panic!("source mutation must invalidate snapshot");
             };
             assert!(error.to_string().contains("changed after snapshot"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn repository_contract_resolves_and_snapshots_local_components() -> anyhow::Result<()> {
+        let repository = fixture_repository("settings")?;
+        let component_dir = repository.contracts_root().join("components/settings/v3");
+        fs::create_dir_all(&component_dir)?;
+        let component_path = component_dir.join("projection-row.schema.json");
+        fs::write(
+            &component_path,
+            br#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "rss://component/settings/v3/projection-row",
+  "title": "SettingsProjectionRow",
+  "type": "object",
+  "required": ["value"],
+  "properties": {"value": {"type": "string"}},
+  "additionalProperties": false
+}"#,
+        )?;
+        fs::write(
+            repository.contract_dir().join("projection.schema.json"),
+            br#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "SettingsProjectionEnvelope",
+  "type": "object",
+  "required": ["row"],
+  "properties": {
+    "row": {"$ref": "rss://component/settings/v3/projection-row"}
+  },
+  "additionalProperties": false
+}"#,
+        )?;
+
+        let contracts = load_contract_repository(&repository.contracts_root())?;
+        let [contract] = contracts.as_slice() else {
+            panic!("fixture must contain one contract");
+        };
+        let resolved = contract.resolved_schema("projection.schema.json")?;
+        assert_eq!(
+            resolved["properties"]["row"]["$ref"],
+            "#/definitions/SettingsProjectionRow"
+        );
+        assert_eq!(
+            resolved["definitions"]["SettingsProjectionRow"]["properties"]["value"]["type"],
+            "string"
+        );
+        assert_eq!(
+            resolved.component_ids(),
+            &["rss://component/settings/v3/projection-row".to_string()]
+        );
+        assert!(contract.source_snapshot_digest().starts_with("sha256:"));
+        let hash_before = schema_hash(contract)?;
+
+        fs::write(
+            &component_path,
+            br#"{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "rss://component/settings/v3/projection-row",
+  "title": "SettingsProjectionRow",
+  "type": "object",
+  "required": ["value"],
+  "properties": {"value": {"type": "string", "minLength": 1}},
+  "additionalProperties": false
+}"#,
+        )?;
+        assert!(contract.verify_unchanged().is_err());
+        let refreshed = load_contract_repository(&repository.contracts_root())?;
+        let [refreshed] = refreshed.as_slice() else {
+            panic!("fixture must contain one refreshed contract");
+        };
+        let hash_after = schema_hash(refreshed)?;
+        assert_ne!(
+            hash_before, hash_after,
+            "component semantics must affect hash"
+        );
+        let deterministic = load_contract_repository(&repository.contracts_root())?;
+        assert_eq!(hash_after, schema_hash(&deterministic[0])?);
+        Ok(())
+    }
+
+    #[test]
+    fn component_resolver_rejects_nonlocal_invalid_and_cyclic_references() {
+        for reference in [
+            "https://example.invalid/operator.schema.json",
+            "file:///tmp/operator.schema.json",
+            "../operator.schema.json",
+            "rss://component/identity/v1/../operator",
+        ] {
+            let schema = serde_json::json!({"$ref": reference});
+            assert!(resolve_component_references(schema, |_| unreachable!()).is_err());
+        }
+
+        let schema = serde_json::json!({"$ref": "rss://component/identity/v1/a"});
+        let error = resolve_component_references(schema, |id| match id {
+            "rss://component/identity/v1/a" => Ok(serde_json::json!({
+                "$id": id,
+                "title": "A",
+                "$ref": "rss://component/identity/v1/b"
+            })),
+            "rss://component/identity/v1/b" => Ok(serde_json::json!({
+                "$id": id,
+                "title": "B",
+                "$ref": "rss://component/identity/v1/a"
+            })),
+            _ => unreachable!(),
+        })
+        .expect_err("cycle must fail closed");
+        assert!(error.to_string().contains("cycle"));
+
+        let schema = serde_json::json!({
+            "$ref": "rss://component/identity/v1/a",
+            "definitions": {"A": {"title": "A", "type": "string"}}
+        });
+        let error = resolve_component_references(schema, |id| {
+            Ok(serde_json::json!({"$id": id, "title": "A", "type": "string"}))
+        })
+        .expect_err("an identical author definition must not impersonate component provenance");
+        assert!(
+            error
+                .to_string()
+                .contains("collides with author definition")
+        );
+    }
+
+    #[test]
+    fn component_graph_owns_canonical_identity_and_transitive_referrers() -> anyhow::Result<()> {
+        let target = ComponentId::parse("rss://component/identity/v1/target")?;
+        let graph = ComponentGraph::from_documents([
+            (
+                "contracts/components/identity/v1/target.schema.json".to_owned(),
+                serde_json::json!({"$id": target.as_str(), "title": "Target"}),
+            ),
+            (
+                "contracts/components/identity/v1/referrer.schema.json".to_owned(),
+                serde_json::json!({
+                    "$id": "rss://component/identity/v1/referrer",
+                    "$ref": target.as_str()
+                }),
+            ),
+            (
+                "contracts/http/identity/v1/use/request.schema.json".to_owned(),
+                serde_json::json!({"$ref": "rss://component/identity/v1/referrer"}),
+            ),
+        ])?;
+        assert_eq!(
+            graph.transitive_consumer_paths(&target)?,
+            BTreeSet::from(["contracts/http/identity/v1/use/request.schema.json".to_owned()])
+        );
+
+        let mismatch = ComponentGraph::from_documents([(
+            "contracts/components/identity/v1/target.schema.json".to_owned(),
+            serde_json::json!({"$id": "rss://component/identity/v1/other"}),
+        )]);
+        assert!(mismatch.is_err(), "path-derived identity must be exact");
+        let missing = ComponentGraph::from_documents([(
+            "contracts/http/identity/v1/use/request.schema.json".to_owned(),
+            serde_json::json!({"$ref": target.as_str()}),
+        )]);
+        assert!(
+            missing.is_err(),
+            "component graph must reject missing targets"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn component_repository_rejects_orphans_and_symlinks() -> anyhow::Result<()> {
+        let repository = fixture_repository("settings")?;
+        let component_dir = repository.contracts_root().join("components/settings/v3");
+        fs::create_dir_all(&component_dir)?;
+        fs::write(component_dir.join("orphan.schema.json"), b"{}")?;
+        assert!(load_contract_repository(&repository.contracts_root()).is_err());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+
+            fs::remove_file(component_dir.join("orphan.schema.json"))?;
+            symlink(
+                repository.contract_dir().join("projection.schema.json"),
+                component_dir.join("linked.schema.json"),
+            )?;
+            let error = load_contract_repository(&repository.contracts_root())
+                .expect_err("component symlink must fail closed");
+            assert!(error.to_string().contains("symlink"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn common_abac_component_resolves_to_self_contained_definitions() -> anyhow::Result<()> {
+        let contracts_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
+        let contracts = load_contract_repository(&contracts_root)?;
+        let contract = contracts
+            .iter()
+            .find(|contract| contract.manifest().id == "identity.policies-create")
+            .context("identity policies-create contract")?;
+        let schema = contract.resolved_schema("request.schema.json")?;
+        assert_eq!(
+            schema.pointer("/properties/rules/items/properties/condition/properties/operator/$ref"),
+            Some(&serde_json::json!("#/definitions/IdentityPolicyOperator"))
+        );
+        for name in [
+            "IdentityPolicyOperator",
+            "IdentityPolicyOperatorEqualityFamily",
+            "IdentityPolicyOperatorLiteralOperand",
+        ] {
+            assert!(
+                schema.pointer(&format!("/definitions/{name}")).is_some(),
+                "missing resolved definition {name}"
+            );
         }
         Ok(())
     }

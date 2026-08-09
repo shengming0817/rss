@@ -310,15 +310,15 @@ pub(in super::super) async fn raw_refresh_insert(
 // ───────────────────────────────────────────────────────────────────────────
 
 pub(in super::super) use identity::ports::{
-    AbacAttribute, AttributeKey, DecimalValue, DynRoleBindingLifecycle, DynRoleReadRepo,
-    EqualityOperand, EqualityOperator, EqualityPredicate, MembershipOperator, MembershipPredicate,
-    NumericValue, Operator, OrderingOperand, OrderingOperator, OrderingPredicate,
-    POLICY_ATTR_PRINCIPAL_KIND, PipAttributeKey, Policy, PolicyCondition, PolicyEffect, PolicyId,
-    PolicyLifecycle, PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule,
-    PolicyValue, PolicyValueSet, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
+    AbacAttribute, AttributeKey, DynRoleBindingLifecycle, DynRoleReadRepo, EqualityPredicate,
+    MembershipPredicate, Operator, OperatorInput, OrderingPredicate, POLICY_ATTR_PRINCIPAL_KIND,
+    Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyLifecycle, PolicyObligations,
+    PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule, PolicyScalarInput, PolicyValue,
+    PolicyValueRef, PolicyValueType, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
     ResourceAttributeReadRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
     ResourceAttributeVersion, ResourceAttributeWriteRepo, Role, RoleBinding, RoleBindingLifecycle,
-    RoleBindingReadRepo, RolePage, RoleReadRepo, RoleWriteRepo, StringPredicate,
+    RoleBindingReadRepo, RolePage, RoleReadRepo, RoleWriteRepo, ScalarOperandInput,
+    StringPredicate, TypedPolicyValueInput,
 };
 
 pub(in super::super) use crate::{
@@ -398,7 +398,14 @@ pub(in super::super) fn policy_rule(
         PolicyCondition::new(
             AttributeKey::parse(POLICY_ATTR_PRINCIPAL_KIND)
                 .map_err(|_| IdentityError::InvalidPolicy)?,
-            Operator::equal(PolicyValue::parse("admin").map_err(|_| IdentityError::InvalidPolicy)?),
+            Operator::try_from(OperatorInput::Equality {
+                predicate: EqualityPredicate::Eq,
+                operand: ScalarOperandInput::Literal(TypedPolicyValueInput::new(
+                    PolicyValueType::String,
+                    PolicyScalarInput::String("admin".to_string()),
+                )),
+            })
+            .map_err(|_| IdentityError::InvalidPolicy)?,
         ),
         effect,
         obligations,

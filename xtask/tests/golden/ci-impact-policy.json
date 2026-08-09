@@ -8,6 +8,7 @@
     "docs/spec/007-l4-device-latent-production-loop/contracts/apply-device-certificate.command.schema.json",
     "docs/spec/007-l4-device-latent-production-loop/contracts/device-certificate-reported.event.schema.json",
     "docs/spec/007-l4-device-latent-production-loop/contracts/device-command-acked.event.schema.json",
+    "docs/spec/009-observability-priority-levels/contracts/structured-log-schema.json",
     "crates/assembly-schema/schemas/assembly-lock.schema.json",
     "crates/assembly-schema/schemas/runtime-plan.schema.json",
     "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json"

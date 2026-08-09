@@ -638,7 +638,7 @@ pub(in super::super) fn projection_conformance_env() -> OutboxEnvelope {
         OutboxMetadata::new(
             0,
             test_tenant(),
-            vocab::ContractBinding::from_static(
+            test_contract_binding(
                 binding.source_domain(),
                 binding.contract_id(),
                 binding.contract_version(),
@@ -657,7 +657,7 @@ pub(in super::super) fn projection_conformance_env_with_unbound_routing_for_nega
         OutboxMetadata::new(
             0,
             test_tenant(),
-            vocab::ContractBinding::from_static(
+            test_contract_binding(
                 binding.source_domain(),
                 binding.contract_id(),
                 binding.contract_version(),

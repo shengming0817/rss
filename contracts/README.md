@@ -76,6 +76,7 @@ contracts/{kind}/{domain}/{version}/
 | R10 | `SagaBlock` | `contract` | `manifest` | Saga 必须有非空 typed steps、唯一 StepName、完整 receipt/effect/retry/compensation policy |
 | R11 | `ActiveDeliverySupported` | `contract` | `manifest` | active Event 仅允许 delivery=at-least-once |
 | R13 | `SchemaTitle` | `contract` | `schema` | 期望每个 declared schema 的 root title 为 string、全部 title 为 PascalCase 且契约内唯一；拒绝缺 root title、非法 title 或契约内重复 |
+| R27 | `IdentityAbacOperatorSsot` | `framework` | `schema` | active identity schema 的 operator 属性必须直接引用唯一 Common ABAC component，且 repository 必须存在至少一个 canonical consumer |
 | R16 | `SchemaRedaction` | `contract` | `schema` | 敏感 schema 字段必须声明闭合 redaction policy |
 | R17 | `SchemaProtection` | `contract` | `schema` | 敏感持久化字段必须声明闭合 at-rest protection policy |
 | R14 | `ActiveSubscriber` | `contract` | `manifest` | active Event 必须至少声明一个完整 subscription consumer |
@@ -91,6 +92,8 @@ contracts/{kind}/{domain}/{version}/
 ## schema.json
 
 - 每个 JSON Schema 的 root **必须声明 `title`**（缺则 typify 不生成根类型），且 `title`（含嵌套对象，如 seed 的 `SeedEchoData`）是生成的 Rust 类型名，必须 **PascalCase 且契约内唯一**；由 `cargo xtask contract validate` R13 机器校验。唯一性 scope = **契约内**——每契约独立 codegen module `{domain}_{version}`，跨契约同名类型天然不冲突。
+- 跨契约共享 schema 只允许放在 `contracts/components/<domain>/<version>/<slug>.schema.json`，并声明与路径精确对应的 `$id = rss://component/<domain>/<version>/<slug>`。契约 schema 只能用该绝对本地 URI 引用；relative、network、`file:`、traversal、symlink、missing、孤儿、冲突与引用环均 fail-closed。component 无手工 catalog，引用图、snapshot、hash、validation、breaking、codegen 与 CI impact 共用同一 resolver；它不是远程 registry。
+- component 的 root `title` 是稳定派生类型名；同一契约的多个 schema 引用同一 component 时，codegen 在该契约 `TypeSpace` 中只注册一次共享 definitions。派生 Rust 类型仍保留在各 contract module，禁止另建共享 DTO crate。
 - **HTTP 响应 envelope**：成功响应顶层包一层 `data`（seed `response.schema.json` 即 `{"data": {...}}`，派生 `SeedEchoResponse { data: SeedEchoData }`）；列表响应顶层为 `data` / `nextCursor` / `hasMore`（见 `docs/rules/rust-standards.md` §API）。错误响应走统一 error schema（见 `docs/rules/error-handling.md`），不在此 envelope 内。
 - camelCase 属性名（如 `thingId`）由 typify 生成为 snake_case Rust 字段 + `#[serde(rename)]`（wire camelCase / Rust snake，符合 RSS 命名）。
 - `format: int64`/`format: int32` → typify 生成原生整数类型（`i64`/`i32`），无外部依赖，可用。
@@ -158,7 +161,7 @@ contracts/{kind}/{domain}/{version}/
 `cargo xtask contract breaking [--against <git-ref>]`：对 **base ref ↔ working-tree** 的 manifest + `*.schema.json` 做 typed 跨版本 diff，检测 wire 破坏式变更（对标 Buf WIRE_JSON 规则分类）。与 `contract validate`（当前结构）、`cargo public-api`（轴 A Rust 符号）互补；本门守历史语义。
 
 - **基准**：`--against` 默认 `origin/develop`（PR 基准）；本地可传 `HEAD~1`。ref 不可解析、Git 命令/对象读取失败、基线 TOML/JSON 损坏均 fail-closed；只有 Git 明确证明历史路径不存在时才按“新契约”处理。
-- **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/projection/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；递归对象 `properties` + 数组元素 `items`（首版不下探 oneOf/anyOf/$ref，ADR §8 增量）。
+- **比较面**：base ↔ working 按 (契约, logical slot：request/response/payload/projection/saga step) 取并集——删除整个 active/deprecated 契约、删除 schema slot、slot 改名丢字段均进入比较（base-only 字段报删除，对标 Buf FILE/MESSAGE_NO_DELETE）；两侧先经同一 component resolver 形成 self-contained schema，再递归比较对象 `properties` + 数组元素 `items`。因此等价 inline→component-ref 不产生 wire finding，而 component 约束收紧会扇出到每个 active consumer。
 - **schema 规则**：`FIELD_NO_DELETE`、`REQUIRED_FIELD_ADDED`、`FIELD_TYPE_CHANGED`、`FIELD_FORMAT_CHANGED`、`ENUM_VALUE_DELETED`、`ADDITIONAL_PROPS_TIGHTENED`、`NULLABLE_REMOVED`、`REDACTION_POLICY_CHANGED`、`PROTECTION_POLICY_CHANGED`。
 - **manifest 规则**：HTTP 比较 `successStatus`、`auth.mode + permission`（忽略说明性 `reason`）、`idempotency`；L2 比较 topic、delivery、consistency level、outbox role/atomicity/emits，以及 subscription 集合、consumer/group、topology、execution/effect/externalEffectPolicy。Saga 比较完整 retry policy 与有序 step 执行语义；任一变化都必须形成新的 action generation。`emits` 与 subscription 忽略排序，但任何增、删、替换或既有 policy 变化都是 breaking；重复 contract identity 直接拒绝。
 - **repository 规则**：同一 contract ID/version 的 carrier kind 变化生成 `CONTRACT_KIND_CHANGED`，进入统一的 base lifecycle 分级与精确 authorization；active 默认 deny、deprecated warn、base draft 跳过。该规则不创建旧 kind shim 或永久 allowlist。

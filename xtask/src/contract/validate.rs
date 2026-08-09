@@ -123,6 +123,7 @@ const R25_COMMAND_ID: &str = "identity.apply-device-certificate";
 const R25_ACK_EVENT_ID: &str = "identity.device-command-acked";
 const R25_REPORTED_EVENT_ID: &str = "identity.device-certificate-reported";
 const R25_INGRESS_RECEIPT_EVENT_ID: &str = "identity.device-ingress-receipted";
+const IDENTITY_ABAC_OPERATOR_COMPONENT: &str = "rss://component/identity/v1/common-abac-operator";
 
 pub(crate) use super::governance::ContractRuleId as Rule;
 
@@ -546,12 +547,9 @@ fn r25_read_schema(
         ));
         return None;
     };
-    let value = match c
-        .schema_bytes(schema_file)
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(bytes).ok())
-    {
-        Some(value) => value,
-        None => {
+    let value = match c.resolved_schema(schema_file) {
+        Ok(value) => value,
+        Err(_) => {
             out.push(r25_finding(
                 c,
                 format!("contract id={contract_id} {schema_file} 必须是可读取的 JSON Schema"),
@@ -559,7 +557,7 @@ fn r25_read_schema(
             return None;
         }
     };
-    Some((schema_file.to_string(), value))
+    Some((schema_file.to_string(), value.into_value()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1568,6 +1566,11 @@ manifest_option_handler!(
     rule_active_delivery_supported
 );
 contract_vec_handler!(execute_schema_title, rule_schema_title);
+pub(crate) fn execute_identity_abac_operator_ssot(
+    contracts: &[RepositoryContract],
+) -> Vec<Finding> {
+    rule_identity_abac_operator_ssot(contracts)
+}
 contract_vec_handler!(execute_schema_redaction, rule_schema_redaction);
 contract_vec_handler!(execute_schema_protection, rule_schema_protection);
 manifest_option_handler!(execute_active_subscriber, rule_active_subscriber);
@@ -1844,7 +1847,7 @@ fn rule_schema_files_exist(c: &RepositoryContract, label: &str) -> Vec<Finding> 
     c.manifest()
         .declared_schema_files()
         .into_iter()
-        .filter(|file| c.schema_bytes(file).is_none())
+        .filter(|file| !c.has_schema_source(file))
         .map(|file| {
             finding(
                 Rule::MissingSchema,
@@ -2488,10 +2491,7 @@ fn rule_http_request_tenant_source(c: &RepositoryContract, label: &str) -> Vec<F
     if pathsafe::is_unsafe_segment(request) {
         return Vec::new();
     }
-    let Some(bytes) = c.schema_bytes(request) else {
-        return Vec::new();
-    };
-    let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+    let Ok(value) = c.resolved_schema(request) else {
         return Vec::new();
     };
     if schema_declares_property(&value, "tenantId") {
@@ -2526,10 +2526,7 @@ fn rule_http_projection_response_coverage(c: &RepositoryContract, label: &str) -
     if pathsafe::is_unsafe_segment(response) {
         return Vec::new();
     }
-    let Some(bytes) = c.schema_bytes(response) else {
-        return Vec::new();
-    };
-    let Ok(schema) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+    let Ok(schema) = c.resolved_schema(response) else {
         return Vec::new();
     };
     let protected = protected_response_paths(&schema);
@@ -2803,7 +2800,7 @@ fn rule_schema_title(c: &RepositoryContract, label: &str) -> Vec<Finding> {
         ));
     }
     // ① 非 PascalCase。
-    for (title, file) in &titles {
+    for (title, file, _, _, _) in &titles {
         if !is_pascal_case(title) {
             out.push(finding(
                 Rule::SchemaTitle,
@@ -2815,15 +2812,28 @@ fn rule_schema_title(c: &RepositoryContract, label: &str) -> Vec<Finding> {
         }
     }
     // ② 契约内重复（跨该契约全部 declared schema 文件聚合判重）。
-    let mut by_title: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-    for (title, file) in &titles {
-        by_title
-            .entry(title.as_str())
-            .or_default()
-            .push(file.as_str());
+    let mut by_title: BTreeMap<&str, Vec<(&str, &serde_json::Value, bool, bool)>> = BTreeMap::new();
+    for (title, file, schema, is_root, from_component) in &titles {
+        by_title.entry(title.as_str()).or_default().push((
+            file.as_str(),
+            schema,
+            *is_root,
+            *from_component,
+        ));
     }
-    for (title, mut files) in by_title {
-        if files.len() > 1 {
+    for (title, occurrences) in by_title {
+        if occurrences.len() > 1 {
+            let shared_component_definition = occurrences
+                .iter()
+                .all(|(_, _, is_root, from_component)| !is_root && *from_component)
+                && occurrences.windows(2).all(|pair| pair[0].1 == pair[1].1);
+            if shared_component_definition {
+                continue;
+            }
+            let mut files = occurrences
+                .iter()
+                .map(|(file, _, _, _)| *file)
+                .collect::<Vec<_>>();
             // len 判重用原始计数（同文件内重复也是重复）；显示前 dedup，避免同名文件列两次。
             files.sort();
             files.dedup();
@@ -2840,10 +2850,64 @@ fn rule_schema_title(c: &RepositoryContract, label: &str) -> Vec<Finding> {
     out
 }
 
+/// INVARIANT: IDENTITY-ABAC-OPERATOR-SSOT-01 { level = "Medium", exec = "check", source = "code",
+/// synthetic_red = "inline operator schema is rejected", anti_vacuity = "every active identity
+/// active identity schema containing an operator property must use the direct canonical ref" }
+fn rule_identity_abac_operator_ssot(contracts: &[RepositoryContract]) -> Vec<Finding> {
+    let mut out = Vec::new();
+    let mut active_consumers = 0usize;
+    let mut canonical_refs = 0usize;
+    for contract in contracts.iter().filter(|contract| {
+        contract.manifest().lifecycle == Lifecycle::Active && contract.path_domain() == "identity"
+    }) {
+        let label = contract_label(contract);
+        for file in contract.manifest().declared_schema_files() {
+            if pathsafe::is_unsafe_segment(file) {
+                continue;
+            }
+            let Ok(references) = contract.schema_property_references(file, "operator") else {
+                continue;
+            };
+            if references.is_empty() {
+                continue;
+            }
+            active_consumers += 1;
+            for reference in references {
+                if reference.as_deref() == Some(IDENTITY_ABAC_OPERATOR_COMPONENT) {
+                    canonical_refs += 1;
+                } else {
+                    out.push(finding(
+                        Rule::IdentityAbacOperatorSsot,
+                        label.clone(),
+                        format!(
+                            "{file} 的 operator property 必须直接 $ref={IDENTITY_ABAC_OPERATOR_COMPONENT:?}，实为 {reference:?}"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    if active_consumers == 0 || canonical_refs == 0 {
+        out.push(finding(
+            Rule::IdentityAbacOperatorSsot,
+            "contracts/identity".to_owned(),
+            format!(
+                "SSOT carrier anti-vacuity 失败：active identity operator consumer={active_consumers}，canonical ref={canonical_refs}"
+            ),
+        ));
+    }
+    out
+}
+
 /// 读契约的全部 declared schema（口径 = codegen `render_contract_body` 的 schema 文件集），
 /// 返回（`(title, 来源文件名)` 全集, root title 缺失的文件名集）。读不到 / parse 失败的文件 skip
 /// （见 [`rule_schema_title`] doc）；能解析但 root 无 string title 的文件计入第二项（供 ⓪ root 必填门）。
-fn collect_contract_titles(c: &RepositoryContract) -> (Vec<(String, String)>, Vec<String>) {
+fn collect_contract_titles(
+    c: &RepositoryContract,
+) -> (
+    Vec<(String, String, serde_json::Value, bool, bool)>,
+    Vec<String>,
+) {
     let mut titles = Vec::new();
     let mut missing_root = Vec::new();
     let schema_files = c.manifest().declared_schema_files();
@@ -2853,19 +2917,22 @@ fn collect_contract_titles(c: &RepositoryContract) -> (Vec<(String, String)>, Ve
             // 文件系统拒绝来保护自身），与 R6 意图一致。
             continue;
         }
-        let Some(bytes) = c.schema_bytes(file) else {
-            continue; // 缺失由 R5 报
-        };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        let Ok(value) = c.resolved_schema(file) else {
             continue; // JSON 良构由 codegen parse 门兜底
         };
         if !has_root_title(&value) {
             missing_root.push(file.to_string());
         }
         let mut found = Vec::new();
-        collect_schema_titles(&value, &mut found);
-        for t in found {
-            titles.push((t, file.to_string()));
+        collect_schema_titles(
+            &value,
+            &mut found,
+            true,
+            false,
+            Some(value.component_definition_names()),
+        );
+        for (title, schema, is_root, from_component) in found {
+            titles.push((title, file.to_string(), schema, is_root, from_component));
         }
     }
     (titles, missing_root)
@@ -2883,16 +2950,30 @@ fn has_root_title(schema: &serde_json::Value) -> bool {
 /// `required`/`enum`/`const`/`default`/`description`/`$ref` 等非 schema 文本（杜绝把字面叫 "title" 的
 /// property key 当类型名）。不走 `if`/`then`/`else`（draft-07 conditional，typify 0.7 支持有限；
 /// 漏检比误检安全）。入口对 root schema 调用一次（含 root 自身 title）。
-fn collect_schema_titles(schema: &serde_json::Value, out: &mut Vec<String>) {
+fn collect_schema_titles(
+    schema: &serde_json::Value,
+    out: &mut Vec<(String, serde_json::Value, bool, bool)>,
+    is_root: bool,
+    from_component: bool,
+    root_component_definitions: Option<&BTreeSet<String>>,
+) {
     let serde_json::Value::Object(map) = schema else {
         return;
     };
     if let Some(serde_json::Value::String(title)) = map.get("title") {
-        out.push(title.clone());
+        out.push((title.clone(), schema.clone(), is_root, from_component));
     }
-    // 子 schema = 这些关键字下 object 的各 value（properties / patternProperties / definitions / $defs 成员）。
-    for key in ["properties", "patternProperties", "definitions", "$defs"] {
-        recurse_map_values(map.get(key), out);
+    // 子 schema = 这些关键字下 object 的各 value（properties / patternProperties / $defs 成员）。
+    for key in ["properties", "patternProperties", "$defs"] {
+        recurse_map_values(map.get(key), out, from_component);
+    }
+    if let Some(serde_json::Value::Object(definitions)) = map.get("definitions") {
+        for (name, child) in definitions {
+            let child_from_component = from_component
+                || (is_root
+                    && root_component_definitions.is_some_and(|names| names.contains(name)));
+            collect_schema_titles(child, out, false, child_from_component, None);
+        }
     }
     // 子 schema = 这些关键字的值（单 schema 或 schema 数组）：items（object 或 tuple array）、
     // additionalProperties（object；bool 经入口 no-op）、not、allOf/anyOf/oneOf。
@@ -2905,7 +2986,7 @@ fn collect_schema_titles(schema: &serde_json::Value, out: &mut Vec<String>) {
         "oneOf",
     ] {
         if let Some(v) = map.get(key) {
-            recurse_subschemas(v, out);
+            recurse_subschemas(v, out, from_component);
         }
     }
 }
@@ -2918,10 +2999,7 @@ fn rule_schema_redaction(c: &RepositoryContract, label: &str) -> Vec<Finding> {
         if pathsafe::is_unsafe_segment(file) {
             continue;
         }
-        let Some(bytes) = c.schema_bytes(file) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        let Ok(value) = c.resolved_schema(file) else {
             continue;
         };
         for violation in redaction::validate_schema(&value) {
@@ -2943,10 +3021,7 @@ fn rule_schema_protection(c: &RepositoryContract, label: &str) -> Vec<Finding> {
         if pathsafe::is_unsafe_segment(file) {
             continue;
         }
-        let Some(bytes) = c.schema_bytes(file) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        let Ok(value) = c.resolved_schema(file) else {
             continue;
         };
         for violation in protection::validate_schema(&value) {
@@ -2961,24 +3036,32 @@ fn rule_schema_protection(c: &RepositoryContract, label: &str) -> Vec<Finding> {
 }
 
 /// 下钻一个 object-of-subschemas（如 `properties` / `$defs`）的各 value；非 object ⇒ no-op。
-fn recurse_map_values(value: Option<&serde_json::Value>, out: &mut Vec<String>) {
+fn recurse_map_values(
+    value: Option<&serde_json::Value>,
+    out: &mut Vec<(String, serde_json::Value, bool, bool)>,
+    from_component: bool,
+) {
     if let Some(serde_json::Value::Object(children)) = value {
         for child in children.values() {
-            collect_schema_titles(child, out);
+            collect_schema_titles(child, out, false, from_component, None);
         }
     }
 }
 
 /// 下钻一个 schema 承载值：array ⇒ 逐项递归（allOf/anyOf/oneOf/tuple items），否则单 schema 递归
 /// （非 object 在 [`collect_schema_titles`] 入口 no-op，如 `additionalProperties: false`）。
-fn recurse_subschemas(v: &serde_json::Value, out: &mut Vec<String>) {
+fn recurse_subschemas(
+    v: &serde_json::Value,
+    out: &mut Vec<(String, serde_json::Value, bool, bool)>,
+    from_component: bool,
+) {
     match v {
         serde_json::Value::Array(items) => {
             for item in items {
-                collect_schema_titles(item, out);
+                collect_schema_titles(item, out, false, from_component, None);
             }
         }
-        other => collect_schema_titles(other, out),
+        other => collect_schema_titles(other, out, false, from_component, None),
     }
 }
 
@@ -7845,6 +7928,24 @@ lifecycle = "draft"
     }
 
     #[test]
+    fn r13_identical_inline_definitions_are_not_mistaken_for_components() -> anyhow::Result<()> {
+        let shared = r#"{"title":"SeedEchoRequest","definitions":{"Inline":{"title":"Inline","type":"string"}}}"#;
+        let response = r#"{"title":"SeedEchoResponse","definitions":{"Inline":{"title":"Inline","type":"string"}}}"#;
+        let (c, dir) = http_contract_with_schemas(shared, response)?;
+        let findings = rule_schema_title(&c, "x");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.rule == Rule::SchemaTitle
+                    && finding.detail.contains("Inline")
+                    && finding.detail.contains("契约内重复")),
+            "only resolver-proven component definitions may repeat: {findings:?}"
+        );
+        Ok(())
+    }
+
+    #[test]
     fn r13_valid_titles_ok() -> anyhow::Result<()> {
         // anti-vacuity：仿真实 seed 契约，全 PascalCase 且契约内唯一 → 无 finding。
         let (c, dir) = http_contract_with_schemas(
@@ -8204,6 +8305,120 @@ lifecycle = "draft"
             }),
             "saga step receiptSchema redaction violations must be checked: {findings:?}"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn r27_identity_abac_operator_ssot_rejects_inline_and_accepts_exact_ref() -> anyhow::Result<()>
+    {
+        fn policy_contract(
+            dir: &std::path::Path,
+            operator: serde_json::Value,
+            slug: &str,
+            nested_in_rules: bool,
+            lifecycle: Lifecycle,
+        ) -> RepositoryContract {
+            let properties = if nested_in_rules {
+                serde_json::json!({
+                    "rules": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {"operator": operator}
+                        }
+                    }
+                })
+            } else {
+                serde_json::json!({"operator": operator})
+            };
+            std::fs::write(
+                dir.join("request.schema.json"),
+                serde_json::to_vec(&serde_json::json!({
+                    "title": "IdentityPolicySyntheticRequest",
+                    "type": "object",
+                    "properties": properties
+                }))
+                .expect("schema json"),
+            )
+            .expect("write schema");
+            let mut manifest = manifest(
+                ContractKind::Http,
+                ConsistencyLevel::LocalOnly,
+                RawContractOwner::Domain("identity".to_string()),
+                Schemas {
+                    request: Some("request.schema.json".to_string()),
+                    ..Schemas::default()
+                },
+            );
+            manifest.id = format!("identity.{slug}");
+            manifest.domain = "identity".to_string();
+            manifest.lifecycle = lifecycle;
+            RepositoryContractTestBuilder::new(manifest, dir.to_path_buf())
+                .path_kind("http")
+                .path_domain("identity")
+                .path_version("v1")
+                .slug(Some(slug))
+                .build()
+                .expect("synthetic policy contract")
+        }
+
+        let dir = unique_tmp("abac-operator-ssot");
+        std::fs::create_dir_all(&dir)?;
+        let inline = policy_contract(
+            &dir,
+            serde_json::json!({"type": "object"}),
+            "policies-synthetic",
+            true,
+            Lifecycle::Active,
+        );
+        let inline_findings = rule_identity_abac_operator_ssot(std::slice::from_ref(&inline));
+        assert!(
+            inline_findings
+                .iter()
+                .any(|finding| finding.detail.contains("必须直接 $ref")),
+            "inline operator must be rejected: {inline_findings:?}"
+        );
+        let referenced = policy_contract(
+            &dir,
+            serde_json::json!({"$ref": IDENTITY_ABAC_OPERATOR_COMPONENT}),
+            "policies-synthetic",
+            true,
+            Lifecycle::Active,
+        );
+        assert!(
+            rule_identity_abac_operator_ssot(std::slice::from_ref(&referenced)).is_empty(),
+            "exact component ref is the only accepted carrier"
+        );
+        assert_eq!(
+            rule_identity_abac_operator_ssot(&[]).len(),
+            1,
+            "an empty active identity consumer set must fail anti-vacuity"
+        );
+
+        let renamed = policy_contract(
+            &dir,
+            serde_json::json!({"$ref": IDENTITY_ABAC_OPERATOR_COMPONENT}),
+            "renamed-abac",
+            false,
+            Lifecycle::Active,
+        );
+        assert!(
+            rule_identity_abac_operator_ssot(&[renamed]).is_empty(),
+            "carrier discovery must not depend on policy slug naming"
+        );
+        let draft_only = policy_contract(
+            &dir,
+            serde_json::json!({"$ref": IDENTITY_ABAC_OPERATOR_COMPONENT}),
+            "draft-abac",
+            false,
+            Lifecycle::Draft,
+        );
+        assert_eq!(
+            rule_identity_abac_operator_ssot(&[draft_only]).len(),
+            1,
+            "draft-only consumers must not satisfy active anti-vacuity"
+        );
+        std::fs::remove_dir_all(dir)?;
         Ok(())
     }
 

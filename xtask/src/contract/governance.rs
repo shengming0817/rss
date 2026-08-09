@@ -282,6 +282,7 @@ contract_governance_catalog! {
         SagaBlock => ("R10", Contract, ValidationPerContract(super::validate::execute_saga_block), Manifest, Medium, "Saga 必须有非空 typed steps、唯一 StepName、完整 receipt/effect/retry/compensation policy"),
         ActiveDeliverySupported => ("R11", Contract, ValidationPerContract(super::validate::execute_active_delivery_supported), Manifest, Medium, "active Event 仅允许 delivery=at-least-once"),
         SchemaTitle => ("R13", Contract, ValidationPerContract(super::validate::execute_schema_title), Schema, Medium, "期望每个 declared schema 的 root title 为 string、全部 title 为 PascalCase 且契约内唯一；拒绝缺 root title、非法 title 或契约内重复"),
+        IdentityAbacOperatorSsot => ("R27", Framework, ValidationCatalog(super::validate::execute_identity_abac_operator_ssot), Schema, Medium, "active identity schema 的 operator 属性必须直接引用唯一 Common ABAC component，且 repository 必须存在至少一个 canonical consumer"),
         SchemaRedaction => ("R16", Contract, ValidationPerContract(super::validate::execute_schema_redaction), Schema, Medium, "敏感 schema 字段必须声明闭合 redaction policy"),
         SchemaProtection => ("R17", Contract, ValidationPerContract(super::validate::execute_schema_protection), Schema, Medium, "敏感持久化字段必须声明闭合 at-rest protection policy"),
         ActiveSubscriber => ("R14", Contract, ValidationPerContract(super::validate::execute_active_subscriber), Manifest, Medium, "active Event 必须至少声明一个完整 subscription consumer"),
@@ -476,8 +477,13 @@ impl GovernedContract {
         self.source.schema_path(file)
     }
 
-    pub(crate) fn schema_bytes(&self, file: &str) -> Option<&[u8]> {
-        self.source.schema_bytes(file)
+    pub(crate) fn resolved_schema(
+        &self,
+        file: &str,
+    ) -> Result<assembly_schema::repository_contract::ResolvedSchema> {
+        self.source
+            .resolved_schema(file)
+            .map_err(anyhow::Error::new)
     }
 
     pub(crate) fn schema_hash(&self) -> Result<String> {

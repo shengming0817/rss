@@ -43,13 +43,13 @@ mod security_event;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（`ports` / `application` 等域内消费方不破）。
 pub use abac::{
-    AbacAttribute, EqualityOperand, EqualityOperator, EqualityPredicate, MembershipOperator,
-    MembershipPredicate, NumericValue, Operator, OperatorError, OrderingOperand, OrderingOperator,
-    OrderingPredicate, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
-    POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID,
-    POLICY_VALUE_SET_MAX_ITEMS, PipAttributeKey, PipAttributeKeyError, Policy, PolicyCondition,
-    PolicyEffect, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyValueSet, PolicyVersion,
-    StringOperator, StringPredicate, TypedAttributeOperand,
+    AbacAttribute, EqualityPredicate, MembershipPredicate, Operator, OperatorInput,
+    OperatorInputError, OperatorRef, OrderingPredicate, POLICY_ATTR_CONTRACT_ID,
+    POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND,
+    POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, POLICY_VALUE_SET_MAX_ITEMS, PipAttributeKey,
+    PipAttributeKeyError, Policy, PolicyCondition, PolicyEffect, PolicyObligations,
+    PolicyRouteScope, PolicyRule, PolicyScalarInput, PolicyVersion, ScalarOperandInput,
+    ScalarOperandRef, StringPredicate, TypedPolicyValueInput,
 };
 pub(crate) use abac::{PolicyEvaluation, evaluate_policies_for_tenant};
 // Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
@@ -462,11 +462,23 @@ pub struct PolicyValue(PolicyValueKind);
 
 /// Exhaustive borrowed view for serialization adapters. It exposes no construction path back into
 /// [`PolicyValue`], so the bounded-value funnel remains sealed.
+#[derive(Clone, Copy)]
 pub enum PolicyValueRef<'a> {
     String(&'a str),
     Boolean(bool),
     Integer(i64),
     Decimal(&'a DecimalValue),
+}
+
+impl PolicyValueRef<'_> {
+    pub const fn value_type(self) -> PolicyValueType {
+        match self {
+            Self::String(_) => PolicyValueType::String,
+            Self::Boolean(_) => PolicyValueType::Boolean,
+            Self::Integer(_) => PolicyValueType::Integer,
+            Self::Decimal(_) => PolicyValueType::Decimal,
+        }
+    }
 }
 
 impl std::fmt::Debug for PolicyValue {

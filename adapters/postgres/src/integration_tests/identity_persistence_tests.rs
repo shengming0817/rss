@@ -4037,6 +4037,26 @@ fn profile_named_attribute(key: &str, value: PolicyValue) -> Result<AbacAttribut
     ))
 }
 
+fn scalar_input(value: &PolicyValue) -> PolicyScalarInput {
+    match value.as_ref() {
+        PolicyValueRef::String(value) => PolicyScalarInput::String(value.to_string()),
+        PolicyValueRef::Boolean(value) => PolicyScalarInput::Boolean(value),
+        PolicyValueRef::Integer(value) => PolicyScalarInput::Integer(value),
+        PolicyValueRef::Decimal(value) => PolicyScalarInput::String(value.as_str().to_string()),
+    }
+}
+
+fn literal_input(value: &PolicyValue) -> ScalarOperandInput {
+    ScalarOperandInput::Literal(TypedPolicyValueInput::new(
+        value.value_type(),
+        scalar_input(value),
+    ))
+}
+
+fn hydrate_operator(input: OperatorInput) -> Result<Operator, IdentityError> {
+    Operator::try_from(input).map_err(|_| IdentityError::InvalidPolicy)
+}
+
 fn durable_operator_cases()
 -> Result<Vec<DurableOperatorCase>, Box<dyn std::error::Error + Send + Sync>> {
     let mut cases = Vec::new();
@@ -4076,10 +4096,10 @@ fn durable_operator_cases()
                     EqualityPredicate::Eq => "eq",
                     EqualityPredicate::Ne => "ne",
                 },
-                operator: Operator::Equality(EqualityOperator::new(
+                operator: hydrate_operator(OperatorInput::Equality {
                     predicate,
-                    EqualityOperand::Literal(expected.clone()),
-                )),
+                    operand: literal_input(&expected),
+                })?,
                 matching: vec![profile_attribute(matching)?],
                 non_matching: vec![profile_attribute(non_matching)?],
             });
@@ -4088,7 +4108,13 @@ fn durable_operator_cases()
     cases.push(DurableOperatorCase {
         name: "equality-attribute-string".to_owned(),
         predicate: "eq",
-        operator: Operator::equal_attribute(PipAttributeKey::principal_id()),
+        operator: hydrate_operator(OperatorInput::Equality {
+            predicate: EqualityPredicate::Eq,
+            operand: ScalarOperandInput::Attribute {
+                value_type: PolicyValueType::String,
+                attribute: "principal.id".to_string(),
+            },
+        })?,
         matching: vec![
             profile_attribute(PolicyValue::string("alice")?)?,
             profile_named_attribute("principal.id", PolicyValue::string("alice")?)?,
@@ -4102,14 +4128,14 @@ fn durable_operator_cases()
     let order_values = [
         (
             "integer",
-            NumericValue::Integer(7),
+            PolicyValue::integer(7),
             PolicyValue::integer(8),
             PolicyValue::integer(7),
             PolicyValue::integer(6),
         ),
         (
             "decimal",
-            NumericValue::Decimal(DecimalValue::parse("1.5")?),
+            PolicyValue::decimal("1.5")?,
             PolicyValue::decimal("2")?,
             PolicyValue::decimal("1.5")?,
             PolicyValue::decimal("1")?,
@@ -4125,10 +4151,10 @@ fn durable_operator_cases()
             cases.push(DurableOperatorCase {
                 name: format!("ordering-{wire}-{value_type}"),
                 predicate: wire,
-                operator: Operator::Ordering(OrderingOperator::new(
+                operator: hydrate_operator(OperatorInput::Ordering {
                     predicate,
-                    OrderingOperand::literal(expected.clone()),
-                )),
+                    operand: literal_input(&expected),
+                })?,
                 matching: vec![profile_attribute(matching)?],
                 non_matching: vec![profile_attribute(non_matching)?],
             });
@@ -4170,10 +4196,11 @@ fn durable_operator_cases()
             cases.push(DurableOperatorCase {
                 name: format!("membership-{wire}-{value_type}"),
                 predicate: wire,
-                operator: Operator::Membership(MembershipOperator::new(
+                operator: hydrate_operator(OperatorInput::Membership {
                     predicate,
-                    PolicyValueSet::new(values.clone())?,
-                )),
+                    value_type: values[0].value_type(),
+                    values: values.iter().map(scalar_input).collect(),
+                })?,
                 matching: vec![profile_attribute(matching)?],
                 non_matching: vec![profile_attribute(non_matching)?],
             });
@@ -4220,7 +4247,10 @@ fn durable_operator_cases()
         cases.push(DurableOperatorCase {
             name: format!("string-{wire}"),
             predicate: wire,
-            operator: Operator::string(predicate, pattern)?,
+            operator: hydrate_operator(OperatorInput::String {
+                predicate,
+                pattern: pattern.to_string(),
+            })?,
             matching: vec![profile_attribute(PolicyValue::string(matching)?)?],
             non_matching: vec![profile_attribute(PolicyValue::string(non_matching)?)?],
         });
@@ -5127,6 +5157,56 @@ async fn policy_repo_rejects_malformed_persisted_json() -> TestResult {
         policy_rejection,
     )
     .await?;
+
+    let mut malformed_operators = vec![
+        (
+            "policy-scalar-type-mismatch".to_owned(),
+            r#"{"family":"equality","predicate":"eq","operand":{"kind":"literal","valueType":"boolean","value":"true"}}"#.to_owned(),
+        ),
+        (
+            "policy-ordering-attribute".to_owned(),
+            r#"{"family":"ordering","predicate":"gt","operand":{"kind":"attribute","valueType":"string","attribute":"principal.id"}}"#.to_owned(),
+        ),
+        (
+            "policy-empty-set".to_owned(),
+            r#"{"family":"membership","predicate":"in","operand":{"kind":"set","valueType":"string","values":[]}}"#.to_owned(),
+        ),
+        (
+            "policy-duplicate-set".to_owned(),
+            r#"{"family":"membership","predicate":"in","operand":{"kind":"set","valueType":"string","values":["admin","admin"]}}"#.to_owned(),
+        ),
+        (
+            "policy-invalid-regex".to_owned(),
+            r#"{"family":"string","predicate":"regex","operand":{"kind":"pattern","valueType":"string","value":"["}}"#.to_owned(),
+        ),
+        (
+            "policy-noncanonical-decimal".to_owned(),
+            r#"{"family":"ordering","predicate":"gt","operand":{"kind":"literal","valueType":"decimal","value":"1.0"}}"#.to_owned(),
+        ),
+    ];
+    malformed_operators.push((
+        "policy-oversized-set".to_owned(),
+        serde_json::json!({
+            "family": "membership",
+            "predicate": "in",
+            "operand": {
+                "kind": "set",
+                "valueType": "integer",
+                "values": (0..=identity::ports::POLICY_VALUE_SET_MAX_ITEMS).collect::<Vec<_>>()
+            }
+        })
+        .to_string(),
+    ));
+    for (id, operator) in malformed_operators {
+        let rules = principal_kind_rule_json(&operator);
+        let Err(error) = insert_raw_policy_and_load(&store, &repo, &id, &rules).await else {
+            panic!("poisoned operator JSON unexpectedly hydrated: {id}");
+        };
+        assert!(
+            policy_rejection(&error),
+            "poisoned operator must fail closed as InvalidPolicy: {id}: {error:?}"
+        );
+    }
 
     store.shutdown().await?;
     Ok(())

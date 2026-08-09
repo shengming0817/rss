@@ -49,18 +49,20 @@ numeric PIP key is introduced. A caller cannot declare a different type for an e
 
 Extension is code-first and exhaustive. A change must: (1) establish a real consumer and intrinsic
 PIP type; (2) add a closed domain predicate/operand whose private fields preserve its bounds; (3)
-update every compiler-enforced boundary match; (4) extend all strict request/response schema
-`oneOf` branches and regenerate code; (5) update the PostgreSQL codec, constraints and migration;
-and (6) add domain, wire, persistence and production-authorizer evidence. Arbitrary function names,
-scripts, plugins, implicit coercion, and wildcard decoder arms are forbidden.
+update the canonical `rss://component/identity/v1/common-abac-operator` schema once; (4) extend the
+unique fallible `OperatorInput` hydration funnel and borrowed `OperatorRef` projection; (5) update
+every exhaustive HTTP and PostgreSQL boundary match and regenerate code; and (6) add domain, wire,
+persistence and production-authorizer evidence. Arbitrary function names, scripts, plugins,
+implicit coercion, compatibility aliases, and wildcard decoder arms are forbidden.
 
 ## Four-principle check
 
 - **Thorough**: domain, PIP, HTTP, storage, migration, generated code, and documentation use one model.
 - **Breaking**: active v1 is replaced in place; there are no aliases, dual readers, v2, or rolling window.
 - **Simple**: four families and four operand shapes replace a function registry or policy DSL.
-- **AI-HARD**: private validated values, family-specific operands, closed exhaustive enums, strict
-  schema oneOf, and JSONB constraints make invalid combinations unrepresentable or unhydratable.
+- **AI-HARD**: the exact component ref governance rule, opaque operator representation, one
+  hydration funnel, borrowed exhaustive projection, strict serde DTOs, and JSONB constraints make
+  bypasses and invalid combinations unrepresentable or unhydratable.
 
 ## Migration
 

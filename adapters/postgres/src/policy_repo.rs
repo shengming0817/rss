@@ -5,14 +5,13 @@ use std::time::SystemTime;
 use diport::{Clock, OutboxEnvelopeParts};
 use eventexec::event::ReviewedEvent;
 use identity::ports::{
-    AttributeKey, EqualityOperand, EqualityOperator, EqualityPredicate, IdentityError,
-    MembershipOperator, MembershipPredicate, NumericValue, Operator, OrderingOperand,
-    OrderingOperator, OrderingPredicate, POLICY_UPDATED_CONTRACT, PipAttributeKey,
-    PoliciesCreateProducerReceipt, PoliciesDeactivateProducerReceipt,
-    PoliciesUpdateProducerReceipt, Policy, PolicyCondition, PolicyEffect, PolicyId,
-    PolicyLifecycle, PolicyListResult, PolicyObligations, PolicyPage, PolicyRepo, PolicyRouteScope,
-    PolicyRule, PolicyValue, PolicyValueRef, PolicyValueSet, PolicyValueType, PolicyVersion,
-    StringOperator, StringPredicate, TenantId, TenantRepoScope, TypedAttributeOperand,
+    AttributeKey, EqualityPredicate, IdentityError, MembershipPredicate, Operator, OperatorInput,
+    OperatorRef, OrderingPredicate, POLICY_UPDATED_CONTRACT, PoliciesCreateProducerReceipt,
+    PoliciesDeactivateProducerReceipt, PoliciesUpdateProducerReceipt, Policy, PolicyCondition,
+    PolicyEffect, PolicyId, PolicyLifecycle, PolicyListResult, PolicyObligations, PolicyPage,
+    PolicyRepo, PolicyRouteScope, PolicyRule, PolicyScalarInput, PolicyValue, PolicyValueRef,
+    PolicyValueType, PolicyVersion, ScalarOperandInput, ScalarOperandRef, StringPredicate,
+    TenantId, TenantRepoScope, TypedPolicyValueInput,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -303,36 +302,43 @@ impl ConditionDto {
 
 impl OperatorDto {
     fn from_operator(operator: &Operator) -> Result<Self, IdentityError> {
-        match operator {
-            Operator::Equality(value) => Ok(Self::Equality {
-                predicate: match value.predicate() {
+        match operator.as_ref() {
+            OperatorRef::Equality { predicate, operand } => Ok(Self::Equality {
+                predicate: match predicate {
                     EqualityPredicate::Eq => EqualityPredicateDto::Eq,
                     EqualityPredicate::Ne => EqualityPredicateDto::Ne,
                 },
-                operand: ScalarOperandDto::from_equality(value.operand()),
+                operand: ScalarOperandDto::from_ref(operand),
             }),
-            Operator::Ordering(value) => Ok(Self::Ordering {
-                predicate: match value.predicate() {
+            OperatorRef::Ordering { predicate, value } => Ok(Self::Ordering {
+                predicate: match predicate {
                     OrderingPredicate::Gt => OrderingPredicateDto::Gt,
                     OrderingPredicate::Ge => OrderingPredicateDto::Ge,
                     OrderingPredicate::Lt => OrderingPredicateDto::Lt,
                     OrderingPredicate::Le => OrderingPredicateDto::Le,
                 },
-                operand: ScalarOperandDto::from_ordering(value.operand()),
+                operand: ScalarOperandDto::Literal {
+                    value_type: ValueTypeDto::from_domain(value.value_type()),
+                    value: json_value_ref(value),
+                },
             }),
-            Operator::Membership(value) => Ok(Self::Membership {
-                predicate: match value.predicate() {
+            OperatorRef::Membership {
+                predicate,
+                value_type,
+                values,
+            } => Ok(Self::Membership {
+                predicate: match predicate {
                     MembershipPredicate::In => MembershipPredicateDto::In,
                     MembershipPredicate::NotIn => MembershipPredicateDto::NotIn,
                 },
                 operand: SetOperandDto {
                     kind: SetKindDto::Set,
-                    value_type: ValueTypeDto::from_domain(value.operand().value_type()),
-                    values: value.operand().values().iter().map(json_value).collect(),
+                    value_type: ValueTypeDto::from_domain(value_type),
+                    values: values.iter().map(json_value).collect(),
                 },
             }),
-            Operator::StringMatch(value) => Ok(Self::String {
-                predicate: match value.predicate() {
+            OperatorRef::String { predicate, pattern } => Ok(Self::String {
+                predicate: match predicate {
                     StringPredicate::StartsWith => StringPredicateDto::StartsWith,
                     StringPredicate::EndsWith => StringPredicateDto::EndsWith,
                     StringPredicate::Contains => StringPredicateDto::Contains,
@@ -342,117 +348,99 @@ impl OperatorDto {
                 operand: PatternOperandDto {
                     kind: PatternKindDto::Pattern,
                     value_type: StringTypeDto::String,
-                    value: value.pattern().to_string(),
+                    value: pattern.to_string(),
                 },
             }),
         }
     }
 
     fn into_operator(self) -> Result<Operator, IdentityError> {
-        Ok(match self {
-            Self::Equality { predicate, operand } => Operator::Equality(EqualityOperator::new(
-                match predicate {
+        let input = match self {
+            Self::Equality { predicate, operand } => OperatorInput::Equality {
+                predicate: match predicate {
                     EqualityPredicateDto::Eq => EqualityPredicate::Eq,
                     EqualityPredicateDto::Ne => EqualityPredicate::Ne,
                 },
-                operand.into_equality()?,
-            )),
-            Self::Ordering { predicate, operand } => Operator::Ordering(OrderingOperator::new(
-                match predicate {
+                operand: operand.into_input()?,
+            },
+            Self::Ordering { predicate, operand } => OperatorInput::Ordering {
+                predicate: match predicate {
                     OrderingPredicateDto::Gt => OrderingPredicate::Gt,
                     OrderingPredicateDto::Ge => OrderingPredicate::Ge,
                     OrderingPredicateDto::Lt => OrderingPredicate::Lt,
                     OrderingPredicateDto::Le => OrderingPredicate::Le,
                 },
-                operand.into_ordering()?,
-            )),
-            Self::Membership { predicate, operand } => {
-                Operator::Membership(MembershipOperator::new(
-                    match predicate {
-                        MembershipPredicateDto::In => MembershipPredicate::In,
-                        MembershipPredicateDto::NotIn => MembershipPredicate::NotIn,
-                    },
-                    PolicyValueSet::new(operand.into_values()?)
-                        .map_err(|_| IdentityError::InvalidPolicy)?,
-                ))
-            }
-            Self::String { predicate, operand } => Operator::StringMatch(
-                StringOperator::parse(
-                    match predicate {
-                        StringPredicateDto::StartsWith => StringPredicate::StartsWith,
-                        StringPredicateDto::EndsWith => StringPredicate::EndsWith,
-                        StringPredicateDto::Contains => StringPredicate::Contains,
-                        StringPredicateDto::Glob => StringPredicate::Glob,
-                        StringPredicateDto::Regex => StringPredicate::Regex,
-                    },
-                    &operand.value,
-                )
-                .map_err(|_| IdentityError::InvalidPolicy)?,
-            ),
-        })
+                operand: operand.into_input()?,
+            },
+            Self::Membership { predicate, operand } => OperatorInput::Membership {
+                predicate: match predicate {
+                    MembershipPredicateDto::In => MembershipPredicate::In,
+                    MembershipPredicateDto::NotIn => MembershipPredicate::NotIn,
+                },
+                value_type: operand.value_type.into_domain(),
+                values: operand.into_values()?,
+            },
+            Self::String { predicate, operand } => OperatorInput::String {
+                predicate: match predicate {
+                    StringPredicateDto::StartsWith => StringPredicate::StartsWith,
+                    StringPredicateDto::EndsWith => StringPredicate::EndsWith,
+                    StringPredicateDto::Contains => StringPredicate::Contains,
+                    StringPredicateDto::Glob => StringPredicate::Glob,
+                    StringPredicateDto::Regex => StringPredicate::Regex,
+                },
+                pattern: operand.value,
+            },
+        };
+        Operator::try_from(input).map_err(|_| IdentityError::InvalidPolicy)
     }
 }
 
 impl ScalarOperandDto {
-    fn from_equality(value: &EqualityOperand) -> Self {
+    fn from_ref(value: ScalarOperandRef<'_>) -> Self {
         match value {
-            EqualityOperand::Literal(value) => Self::Literal {
+            ScalarOperandRef::Literal(value) => Self::Literal {
                 value_type: ValueTypeDto::from_domain(value.value_type()),
-                value: json_value(value),
+                value: json_value_ref(value),
             },
-            EqualityOperand::Attribute(value) => Self::Attribute {
-                value_type: ValueTypeDto::from_domain(value.value_type()),
-                attribute: value.attribute().as_str().to_string(),
+            ScalarOperandRef::Attribute(value) => Self::Attribute {
+                value_type: ValueTypeDto::String,
+                attribute: value.as_str().to_string(),
             },
         }
     }
-    fn from_ordering(value: &OrderingOperand) -> Self {
-        let value = value.value().clone().into_policy_value();
-        Self::Literal {
-            value_type: ValueTypeDto::from_domain(value.value_type()),
-            value: json_value(&value),
-        }
-    }
-    fn into_equality(self) -> Result<EqualityOperand, IdentityError> {
+
+    fn into_input(self) -> Result<ScalarOperandInput, IdentityError> {
         match self {
-            Self::Literal { value_type, value } => {
-                Ok(EqualityOperand::Literal(parse_value(value_type, value)?))
-            }
+            Self::Literal { value_type, value } => Ok(ScalarOperandInput::Literal(
+                TypedPolicyValueInput::new(value_type.into_domain(), scalar_input(value)?),
+            )),
             Self::Attribute {
                 value_type,
                 attribute,
-            } => {
-                if !matches!(value_type, ValueTypeDto::String) {
-                    return Err(IdentityError::InvalidPolicy);
-                }
-                Ok(EqualityOperand::Attribute(TypedAttributeOperand::new(
-                    PipAttributeKey::parse(&attribute).map_err(|_| IdentityError::InvalidPolicy)?,
-                )))
-            }
-        }
-    }
-    fn into_ordering(self) -> Result<OrderingOperand, IdentityError> {
-        match self {
-            Self::Literal { value_type, value } => {
-                NumericValue::from_policy_value(parse_value(value_type, value)?)
-                    .map(OrderingOperand::literal)
-                    .ok_or(IdentityError::InvalidPolicy)
-            }
-            Self::Attribute { .. } => Err(IdentityError::InvalidPolicy),
+            } => Ok(ScalarOperandInput::Attribute {
+                value_type: value_type.into_domain(),
+                attribute,
+            }),
         }
     }
 }
 
 impl SetOperandDto {
-    fn into_values(self) -> Result<Vec<PolicyValue>, IdentityError> {
-        self.values
-            .into_iter()
-            .map(|value| parse_value(self.value_type, value))
-            .collect()
+    fn into_values(self) -> Result<Vec<PolicyScalarInput>, IdentityError> {
+        self.values.into_iter().map(scalar_input).collect()
     }
 }
 
 impl ValueTypeDto {
+    const fn into_domain(self) -> PolicyValueType {
+        match self {
+            Self::String => PolicyValueType::String,
+            Self::Boolean => PolicyValueType::Boolean,
+            Self::Integer => PolicyValueType::Integer,
+            Self::Decimal => PolicyValueType::Decimal,
+        }
+    }
+
     const fn from_domain(value: PolicyValueType) -> Self {
         match value {
             PolicyValueType::String => Self::String,
@@ -463,36 +451,24 @@ impl ValueTypeDto {
     }
 }
 
-fn parse_value(
-    value_type: ValueTypeDto,
-    value: serde_json::Value,
-) -> Result<PolicyValue, IdentityError> {
-    match value_type {
-        ValueTypeDto::String => value
-            .as_str()
-            .ok_or(IdentityError::InvalidPolicy)
-            .and_then(|value| PolicyValue::string(value).map_err(|_| IdentityError::InvalidPolicy)),
-        ValueTypeDto::Boolean => value
-            .as_bool()
-            .map(PolicyValue::boolean)
-            .ok_or(IdentityError::InvalidPolicy),
-        ValueTypeDto::Integer => value
+fn scalar_input(value: serde_json::Value) -> Result<PolicyScalarInput, IdentityError> {
+    match value {
+        serde_json::Value::String(value) => Ok(PolicyScalarInput::String(value)),
+        serde_json::Value::Bool(value) => Ok(PolicyScalarInput::Boolean(value)),
+        serde_json::Value::Number(value) => value
             .as_i64()
-            .map(PolicyValue::integer)
+            .map(PolicyScalarInput::Integer)
             .ok_or(IdentityError::InvalidPolicy),
-        ValueTypeDto::Decimal => {
-            value
-                .as_str()
-                .ok_or(IdentityError::InvalidPolicy)
-                .and_then(|value| {
-                    PolicyValue::decimal(value).map_err(|_| IdentityError::InvalidPolicy)
-                })
-        }
+        _ => Err(IdentityError::InvalidPolicy),
     }
 }
 
 fn json_value(value: &PolicyValue) -> serde_json::Value {
-    match value.as_ref() {
+    json_value_ref(value.as_ref())
+}
+
+fn json_value_ref(value: PolicyValueRef<'_>) -> serde_json::Value {
+    match value {
         PolicyValueRef::String(value) => serde_json::Value::String(value.to_string()),
         PolicyValueRef::Boolean(value) => serde_json::Value::Bool(value),
         PolicyValueRef::Integer(value) => serde_json::Value::Number(value.into()),
@@ -911,7 +887,7 @@ mod operator_dto_tests {
         assert!(
             matches!(
                 dto.into_operator(),
-                Ok(Operator::Equality(ref op)) if matches!(op.operand(), EqualityOperand::Literal(v) if v.string_value().is_some_and(|value| value.len() == ATTR_VALUE_MAX_LEN))
+                Ok(operator) if matches!(operator.as_ref(), OperatorRef::Equality { operand: ScalarOperandRef::Literal(PolicyValueRef::String(value)), .. } if value.len() == ATTR_VALUE_MAX_LEN)
             ),
             "exact-max must decode as Eq"
         );
@@ -929,7 +905,7 @@ mod operator_dto_tests {
         assert!(
             matches!(
                 dto.into_operator(),
-                Ok(Operator::Equality(ref op)) if matches!(op.operand(), EqualityOperand::Attribute(value) if value.attribute().as_str() == "principal.id")
+                Ok(operator) if matches!(operator.as_ref(), OperatorRef::Equality { operand: ScalarOperandRef::Attribute(value), .. } if value.as_str() == "principal.id")
             ),
             "PIP principal.id must decode"
         );
@@ -952,11 +928,12 @@ mod operator_dto_tests {
 
     #[test]
     fn operator_dto_round_trips_typed_membership() {
-        let operator = Operator::Membership(MembershipOperator::new(
-            MembershipPredicate::In,
-            PolicyValueSet::new(vec![PolicyValue::integer(2), PolicyValue::integer(1)])
-                .expect("set"),
-        ));
+        let operator = Operator::try_from(OperatorInput::Membership {
+            predicate: MembershipPredicate::In,
+            value_type: PolicyValueType::Integer,
+            values: vec![PolicyScalarInput::Integer(2), PolicyScalarInput::Integer(1)],
+        })
+        .expect("set");
         let dto = OperatorDto::from_operator(&operator).expect("encode");
         let json = serde_json::to_value(&dto).expect("json");
         assert_eq!(json["operand"]["values"], serde_json::json!([1, 2]));
@@ -971,58 +948,74 @@ mod operator_dto_tests {
 
     #[test]
     fn operator_dto_round_trips_complete_common_profile_matrix() {
-        let string = PolicyValue::string("团队Ops").expect("string");
-        let decimal = PolicyValue::decimal("1.25").expect("decimal");
+        let literal = |value_type, value| {
+            ScalarOperandInput::Literal(TypedPolicyValueInput::new(value_type, value))
+        };
+        let op = |input| Operator::try_from(input).expect("canonical operator");
         let operators = vec![
-            Operator::Equality(EqualityOperator::new(
-                EqualityPredicate::Eq,
-                EqualityOperand::Literal(string.clone()),
-            )),
-            Operator::Equality(EqualityOperator::new(
-                EqualityPredicate::Ne,
-                EqualityOperand::Literal(PolicyValue::boolean(true)),
-            )),
-            Operator::equal_attribute(PipAttributeKey::principal_id()),
-            Operator::Ordering(OrderingOperator::new(
-                OrderingPredicate::Gt,
-                OrderingOperand::literal(NumericValue::Integer(7)),
-            )),
-            Operator::Ordering(OrderingOperator::new(
-                OrderingPredicate::Ge,
-                OrderingOperand::literal(NumericValue::Decimal(
-                    identity::ports::DecimalValue::parse("1.25").expect("decimal"),
-                )),
-            )),
-            Operator::Ordering(OrderingOperator::new(
-                OrderingPredicate::Lt,
-                OrderingOperand::literal(NumericValue::Integer(-7)),
-            )),
-            Operator::Ordering(OrderingOperator::new(
-                OrderingPredicate::Le,
-                OrderingOperand::literal(NumericValue::Integer(0)),
-            )),
-            Operator::Membership(MembershipOperator::new(
-                MembershipPredicate::In,
-                PolicyValueSet::new(vec![string, PolicyValue::string("ops").expect("string")])
-                    .expect("string set"),
-            )),
-            Operator::Membership(MembershipOperator::new(
-                MembershipPredicate::NotIn,
-                PolicyValueSet::new(vec![
-                    PolicyValue::boolean(false),
-                    PolicyValue::boolean(true),
-                ])
-                .expect("bool set"),
-            )),
-            Operator::Membership(MembershipOperator::new(
-                MembershipPredicate::In,
-                PolicyValueSet::new(vec![PolicyValue::integer(1), PolicyValue::integer(2)])
-                    .expect("integer set"),
-            )),
-            Operator::Membership(MembershipOperator::new(
-                MembershipPredicate::NotIn,
-                PolicyValueSet::new(vec![decimal]).expect("decimal set"),
-            )),
+            op(OperatorInput::Equality {
+                predicate: EqualityPredicate::Eq,
+                operand: literal(
+                    PolicyValueType::String,
+                    PolicyScalarInput::String("团队Ops".into()),
+                ),
+            }),
+            op(OperatorInput::Equality {
+                predicate: EqualityPredicate::Ne,
+                operand: literal(PolicyValueType::Boolean, PolicyScalarInput::Boolean(true)),
+            }),
+            op(OperatorInput::Equality {
+                predicate: EqualityPredicate::Eq,
+                operand: ScalarOperandInput::Attribute {
+                    value_type: PolicyValueType::String,
+                    attribute: "principal.id".into(),
+                },
+            }),
+            op(OperatorInput::Ordering {
+                predicate: OrderingPredicate::Gt,
+                operand: literal(PolicyValueType::Integer, PolicyScalarInput::Integer(7)),
+            }),
+            op(OperatorInput::Ordering {
+                predicate: OrderingPredicate::Ge,
+                operand: literal(
+                    PolicyValueType::Decimal,
+                    PolicyScalarInput::String("1.25".into()),
+                ),
+            }),
+            op(OperatorInput::Ordering {
+                predicate: OrderingPredicate::Lt,
+                operand: literal(PolicyValueType::Integer, PolicyScalarInput::Integer(-7)),
+            }),
+            op(OperatorInput::Ordering {
+                predicate: OrderingPredicate::Le,
+                operand: literal(PolicyValueType::Integer, PolicyScalarInput::Integer(0)),
+            }),
+            op(OperatorInput::Membership {
+                predicate: MembershipPredicate::In,
+                value_type: PolicyValueType::String,
+                values: vec![
+                    PolicyScalarInput::String("团队Ops".into()),
+                    PolicyScalarInput::String("ops".into()),
+                ],
+            }),
+            op(OperatorInput::Membership {
+                predicate: MembershipPredicate::NotIn,
+                value_type: PolicyValueType::Boolean,
+                values: vec![
+                    PolicyScalarInput::Boolean(false),
+                    PolicyScalarInput::Boolean(true),
+                ],
+            }),
+            op(OperatorInput::Membership {
+                predicate: MembershipPredicate::In,
+                value_type: PolicyValueType::Integer,
+                values: vec![PolicyScalarInput::Integer(1), PolicyScalarInput::Integer(2)],
+            }),
+            op(OperatorInput::Membership {
+                predicate: MembershipPredicate::NotIn,
+                value_type: PolicyValueType::Decimal,
+                values: vec![PolicyScalarInput::String("1.25".into())],
+            }),
         ];
         let operators = operators.into_iter().chain(
             [
@@ -1039,7 +1032,10 @@ mod operator_dto_tests {
                 } else {
                     "团队*"
                 };
-                Operator::string(predicate, pattern).expect("pattern")
+                op(OperatorInput::String {
+                    predicate,
+                    pattern: pattern.into(),
+                })
             }),
         );
 

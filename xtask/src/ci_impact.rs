@@ -13,6 +13,7 @@ use crate::integration_shards::{
 };
 use crate::workspace_facts::CommandWorkspaceFacts;
 use anyhow::{Context, Result, bail};
+use assembly_schema::repository_contract::{ComponentGraph, ComponentId};
 use clap::{Args, ValueEnum};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -87,6 +88,7 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
     "docs/spec/007-l4-device-latent-production-loop/contracts/apply-device-certificate.command.schema.json",
     "docs/spec/007-l4-device-latent-production-loop/contracts/device-certificate-reported.event.schema.json",
     "docs/spec/007-l4-device-latent-production-loop/contracts/device-command-acked.event.schema.json",
+    "docs/spec/009-observability-priority-levels/contracts/structured-log-schema.json",
     "crates/assembly-schema/schemas/assembly-lock.schema.json",
     "crates/assembly-schema/schemas/runtime-plan.schema.json",
     "crates/assembly-schema/tests/fixtures/fingerprint-v2-vectors.json",
@@ -3365,6 +3367,11 @@ fn contract_package_impacts(
     status: DiffStatus,
     merge_base: &str,
 ) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
+    if changed_path.starts_with("contracts/components/") {
+        let component_id = ComponentId::from_repository_path(changed_path)?
+            .context("changed component path did not identify a schema component")?;
+        return component_package_impacts(root, &component_id, changed_path, status, merge_base);
+    }
     let manifest_path =
         contract_manifest_path(changed_path).context("contract path has no manifest")?;
     let absolute = root.join(&manifest_path);
@@ -3399,6 +3406,141 @@ fn contract_package_impacts(
         }
     }
     Ok(packages)
+}
+
+fn component_package_impacts(
+    root: &Path,
+    component_id: &ComponentId,
+    changed_path: &str,
+    status: DiffStatus,
+    merge_base: &str,
+) -> Result<BTreeMap<String, BTreeSet<PackageImpact>>> {
+    let working = match status {
+        DiffStatus::Added | DiffStatus::Modified => {
+            working_component_consumers(root, component_id)?
+        }
+        DiffStatus::Deleted if root.join(changed_path).is_file() => {
+            working_component_consumers(root, component_id)?
+        }
+        DiffStatus::Deleted => BTreeSet::new(),
+    };
+    let base = match status {
+        DiffStatus::Added => BTreeSet::new(),
+        DiffStatus::Modified | DiffStatus::Deleted => {
+            base_component_consumers(root, merge_base, component_id)?
+        }
+    };
+    if working.is_empty() && base.is_empty() {
+        bail!("changed contract component has no working or merge-base consumer");
+    }
+    let mut packages = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
+    for manifest_path in working {
+        let current = root.join(&manifest_path);
+        let source = fs::read_to_string(&current)
+            .with_context(|| format!("read working component consumer {}", current.display()))?;
+        merge_contract_impacts(root, &source, &mut packages)?;
+    }
+    for manifest_path in base {
+        let source = git_stdout(root, ["show", &format!("{merge_base}:{manifest_path}")])
+            .with_context(|| format!("read merge-base component consumer {manifest_path}"))?;
+        merge_contract_impacts(root, &source, &mut packages)?;
+    }
+    Ok(packages)
+}
+
+fn merge_contract_impacts(
+    root: &Path,
+    source: &str,
+    packages: &mut BTreeMap<String, BTreeSet<PackageImpact>>,
+) -> Result<()> {
+    for (package, reasons) in contract_manifest_impacts(root, source)? {
+        packages.entry(package).or_default().extend(reasons);
+    }
+    Ok(())
+}
+
+fn working_component_consumers(
+    root: &Path,
+    component_id: &ComponentId,
+) -> Result<BTreeSet<String>> {
+    let mut files = Vec::new();
+    collect_regular_files(&root.join("contracts"), &mut files)?;
+    let files = files
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(root)
+                .with_context(|| format!("schema path escaped workspace: {}", path.display()))?
+                .to_string_lossy()
+                .to_string();
+            let source = fs::read_to_string(&path)
+                .with_context(|| format!("read working component graph node {}", path.display()))?;
+            Ok((relative, source))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    component_consumers_from_files(component_id, files)
+}
+
+fn base_component_consumers(
+    root: &Path,
+    merge_base: &str,
+    component_id: &ComponentId,
+) -> Result<BTreeSet<String>> {
+    let listing = git_stdout(
+        root,
+        ["ls-tree", "-r", "--name-only", merge_base, "contracts"],
+    )?;
+    let files = listing
+        .lines()
+        .filter(|path| path.ends_with(".schema.json"))
+        .map(|path| {
+            let source = git_stdout(root, ["show", &format!("{merge_base}:{path}")])
+                .with_context(|| format!("read merge-base component graph node {path}"))?;
+            Ok((path.to_string(), source))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    component_consumers_from_files(component_id, files)
+}
+
+fn component_consumers_from_files(
+    component_id: &ComponentId,
+    files: impl IntoIterator<Item = (String, String)>,
+) -> Result<BTreeSet<String>> {
+    let documents = files
+        .into_iter()
+        .map(|(path, source)| {
+            let value: serde_json::Value = serde_json::from_str(&source)
+                .with_context(|| format!("parse component graph node {path}"))?;
+            Ok((path, value))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let manifests = ComponentGraph::from_documents(documents)?
+        .transitive_consumer_paths(component_id)?
+        .into_iter()
+        .filter_map(|path| contract_manifest_path(&path))
+        .collect();
+    Ok(manifests)
+}
+
+fn collect_regular_files(directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in fs::read_dir(directory)
+        .with_context(|| format!("read contract tree {}", directory.display()))?
+    {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            bail!(
+                "contract component graph rejects symlink {}",
+                entry.path().display()
+            );
+        }
+        if file_type.is_dir() {
+            collect_regular_files(&entry.path(), files)?;
+        } else if entry.path().to_string_lossy().ends_with(".schema.json") {
+            files.push(entry.path());
+        }
+    }
+    Ok(())
 }
 
 fn contract_manifest_impacts(
@@ -6457,35 +6599,34 @@ mod tests {
     }
 
     #[test]
-    fn shared_journey_sources_select_their_declared_critical_targets() -> Result<()> {
+    fn shared_journey_sources_follow_their_declared_execution_profiles() -> Result<()> {
         use IntegrationUnitId as Id;
-        let cases = [
-            (
-                "journeys/tests/common/mod.rs",
-                BTreeSet::from([
-                    Id::AmqpConsumerAtLeastOnceJourney,
-                    Id::IdentityLoginAuditDurableJourney,
-                ]),
-            ),
-            (
-                "journeys/tests/support/localtx_validation.rs",
-                BTreeSet::from([
-                    Id::AuditListTenantEntriesLocalTxJourney,
-                    Id::SettingsSecretPublishLocalTxJourney,
-                ]),
-            ),
-        ];
-        for (path, expected) in cases {
-            let ImpactSet::Selective(impact) = impact_entries(
-                &[DiffEntry::modified(path)],
+        assert!(matches!(
+            impact_entries(
+                &[DiffEntry::modified("journeys/tests/common/mod.rs")],
                 None,
                 &BTreeSet::new(),
                 &BTreeMap::new(),
-            ) else {
-                bail!("declared shared journey source must remain selective: {path}");
-            };
-            assert_eq!(impact.integration_units, expected, "{path}");
-        }
+            ),
+            ImpactSet::Escalated(EscalationCause::GlobalImpact)
+        ));
+
+        let localtx_path = "journeys/tests/support/localtx_validation.rs";
+        let ImpactSet::Selective(localtx) = impact_entries(
+            &[DiffEntry::modified(localtx_path)],
+            None,
+            &BTreeSet::new(),
+            &BTreeMap::new(),
+        ) else {
+            bail!("critical-only shared journey source must remain selective: {localtx_path}");
+        };
+        assert_eq!(
+            localtx.integration_units,
+            BTreeSet::from([
+                Id::AuditListTenantEntriesLocalTxJourney,
+                Id::SettingsSecretPublishLocalTxJourney,
+            ])
+        );
 
         let ImpactSet::Selective(manifest) = impact_entries(
             &[DiffEntry::modified("journeys/Cargo.toml")],
@@ -7201,6 +7342,202 @@ mod tests {
                 base.trim(),
             )?,
             BTreeSet::from(["audit".to_owned(), "identity".to_owned()])
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn component_change_fans_out_to_every_referencing_contract_owner() -> Result<()> {
+        let workspace = crate::workspace_root()?;
+        let component_path = "contracts/components/identity/v1/common-abac-operator.schema.json";
+        assert_eq!(
+            contract_packages(
+                &workspace,
+                component_path,
+                DiffStatus::Added,
+                "origin/develop",
+            )?,
+            BTreeSet::from(["identity".to_owned()])
+        );
+        let domains = local_impact_domains(component_path);
+        assert!(domains.contains(&LocalImpactDomain::ContractBinding));
+        assert!(
+            local_meta_gates(Some(&domains)).contains(&GateId::CodegenCheck),
+            "component changes must run generated output drift detection"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn component_graph_uses_exact_parsed_refs_and_follows_transitive_components() -> Result<()> {
+        let target = ComponentId::parse("rss://component/identity/v1/target")?;
+        let referrer = "rss://component/identity/v1/referrer";
+        let consumers = component_consumers_from_files(
+            &target,
+            [
+                (
+                    "contracts/components/identity/v1/target.schema.json".to_owned(),
+                    format!(r#"{{"$id":"{target}","title":"Target"}}"#),
+                ),
+                (
+                    "contracts/components/identity/v1/referrer.schema.json".to_owned(),
+                    format!(
+                        r#"{{"$id":"{referrer}","$ref":"rss:\/\/component\/identity\/v1\/target"}}"#
+                    ),
+                ),
+                (
+                    "contracts/http/alpha/v1/use/request.schema.json".to_owned(),
+                    format!(r#"{{"$ref":"{referrer}"}}"#),
+                ),
+                (
+                    "contracts/http/decoy/v1/use/request.schema.json".to_owned(),
+                    format!(r#"{{"description":"{target}"}}"#),
+                ),
+            ],
+        )?;
+        assert_eq!(
+            consumers,
+            BTreeSet::from(["contracts/http/alpha/v1/use/contract.toml".to_owned()])
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn component_graph_rejects_working_schema_symlinks() -> Result<()> {
+        use std::os::unix::fs::symlink;
+
+        let root = crate::testutil::unique_tmp("ci-impact-component-symlink");
+        let contract = root.join("contracts/http/identity/v1/consumer");
+        fs::create_dir_all(&contract)?;
+        fs::write(
+            root.join("outside.schema.json"),
+            r#"{"$ref":"rss://component/identity/v1/shared"}"#,
+        )?;
+        symlink(
+            root.join("outside.schema.json"),
+            contract.join("request.schema.json"),
+        )?;
+        let component = ComponentId::parse("rss://component/identity/v1/shared")?;
+        let error = working_component_consumers(&root, &component)
+            .expect_err("schema symlink must fail closed");
+        assert!(error.to_string().contains("rejects symlink"), "{error:#}");
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn component_change_unions_required_working_and_base_consumers() -> Result<()> {
+        fn write_consumer(root: &Path, domain: &str, subscriber: &str, schema: &str) -> Result<()> {
+            let directory = root.join(format!("contracts/event/{domain}/v1/changed"));
+            fs::create_dir_all(&directory)?;
+            fs::write(
+                directory.join("contract.toml"),
+                format!(
+                    r#"id = "{domain}.changed"
+kind = "event"
+domain = "{domain}"
+version = "v1"
+owner = "{domain}"
+consistencyLevel = "OutboxFact"
+lifecycle = "active"
+topic = "{domain}.changed"
+delivery = "at-least-once"
+[schemas]
+payload = "payload.schema.json"
+[[subscriptions]]
+consumer = "{subscriber}"
+group = "{subscriber}.changed"
+execution = "adapter-native"
+externalEffectPolicy = "transactional-only"
+[subscriptions.topology]
+partitionKey = "none"
+readiness = "required"
+"#,
+                ),
+            )?;
+            fs::write(directory.join("payload.schema.json"), schema)?;
+            Ok(())
+        }
+
+        let root = crate::testutil::unique_tmp("ci-impact-component-union");
+        let component = root.join("contracts/components/identity/v1");
+        fs::create_dir_all(&component)?;
+        fs::write(
+            component.join("shared.schema.json"),
+            r#"{"$id":"rss://component/identity/v1/shared","title":"Shared","type":"string"}"#,
+        )?;
+        write_consumer(
+            &root,
+            "baseowner",
+            "basesubscriber",
+            r#"{"$ref":"rss://component/identity/v1/shared"}"#,
+        )?;
+        for args in [
+            vec!["init"],
+            vec!["add", "."],
+            vec![
+                "-c",
+                "user.name=CI Impact",
+                "-c",
+                "user.email=ci-impact@example.invalid",
+                "commit",
+                "-m",
+                "base",
+            ],
+        ] {
+            let status =
+                external_cmd(ExternalProgram::SystemGit, &args, &[], Some(&root)).status()?;
+            if !status.success() {
+                bail!("failed to create component fanout fixture");
+            }
+        }
+        let base = git_stdout(&root, ["rev-parse", "HEAD"])?;
+        fs::write(
+            root.join("contracts/event/baseowner/v1/changed/payload.schema.json"),
+            "{}",
+        )?;
+        write_consumer(
+            &root,
+            "workingowner",
+            "workingsubscriber",
+            r#"{"$ref":"rss:\/\/component\/identity\/v1\/shared"}"#,
+        )?;
+        assert_eq!(
+            contract_packages(
+                &root,
+                "contracts/components/identity/v1/shared.schema.json",
+                DiffStatus::Modified,
+                base.trim(),
+            )?,
+            BTreeSet::from([
+                "baseowner".to_owned(),
+                "basesubscriber".to_owned(),
+                "workingowner".to_owned(),
+                "workingsubscriber".to_owned(),
+            ])
+        );
+        assert!(
+            contract_packages(
+                &root,
+                "contracts/components/identity/v1/shared.schema.json",
+                DiffStatus::Deleted,
+                "missing-base",
+            )
+            .is_err(),
+            "required merge-base reads must fail closed"
+        );
+        fs::remove_file(root.join("contracts/event/workingowner/v1/changed/contract.toml"))?;
+        assert!(
+            contract_packages(
+                &root,
+                "contracts/components/identity/v1/shared.schema.json",
+                DiffStatus::Added,
+                "unused",
+            )
+            .is_err(),
+            "a missing working consumer manifest must fail closed"
         );
         fs::remove_dir_all(root)?;
         Ok(())

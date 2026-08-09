@@ -944,13 +944,14 @@ impl GateId {
             | Self::TenancyCloseout => Policy::OnImpact(Domain::TenancyPostgres),
 
             Self::PdpAllowGuard => Policy::OnImpact(Domain::Pdp),
-            Self::ContractBindingGuard => Policy::OnImpact(Domain::ContractBinding),
+            Self::ContractBindingGuard | Self::CodegenCheck => {
+                Policy::OnImpact(Domain::ContractBinding)
+            }
             Self::CommandSymmetry => Policy::OnImpact(Domain::CommandSymmetry),
 
             Self::RuntimeBaseline
             | Self::L2AssuranceCheck
             | Self::ArchRules
-            | Self::CodegenCheck
             | Self::ProviderCapabilitiesCheck
             | Self::SourceSemanticGuard
             | Self::SagaDurableRecoveryGuard => Policy::FullOnly,
@@ -1335,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn local_meta_policy_is_exact_9_24_7_partition() {
+    fn local_meta_policy_is_exact_9_25_6_partition() {
         let labels = |policy: fn(LocalMetaPolicy) -> bool| {
             GateId::ALL
                 .iter()
@@ -1387,6 +1388,7 @@ mod tests {
                 "repo-scope-guard",
                 "tenancy-closeout",
                 "pdp-allow-guard",
+                "codegen-check",
                 "contract-binding-guard",
                 "command-symmetry",
             ])
@@ -1444,7 +1446,7 @@ mod tests {
             (LocalImpactDomain::Pdp, &["pdp-allow-guard"]),
             (
                 LocalImpactDomain::ContractBinding,
-                &["contract-binding-guard"],
+                &["codegen-check", "contract-binding-guard"],
             ),
             (LocalImpactDomain::CommandSymmetry, &["command-symmetry"]),
         ];
@@ -1461,15 +1463,14 @@ mod tests {
                 "runtime-baseline",
                 "l2-assurance-check",
                 "archrules",
-                "codegen-check",
                 "provider-capabilities-check",
                 "source-semantic-guard",
                 "saga-durable-recovery-guard",
             ])
         );
         assert_eq!(always.len(), 9);
-        assert_eq!(affected.len(), 24);
-        assert_eq!(full_only.len(), 7);
+        assert_eq!(affected.len(), 25);
+        assert_eq!(full_only.len(), 6);
         assert!(
             !GateId::ALL
                 .iter()

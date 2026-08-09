@@ -2,7 +2,7 @@
 
 ## 触发条件
 
-改动 contract schema、contract.toml、generated contract、event topic、command key、
+改动 contract schema、`contracts/components/**`、contract.toml、generated contract、event topic、command key、
 HTTP path、auth 语义、consistency level、subscription role 时，必须做扇出检查。
 
 DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不是跨域 wire contract，
@@ -14,6 +14,7 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 | 载体 | 必查内容 |
 |------|----------|
 | contract schema | request/response/payload 字段、required、enum、format |
+| schema component | base/working 引用并集的全部 consumer、owner/subscriber、resolved hash 与 breaking findings |
 | generated code | handler、client、types、registration glue |
 | 域 crate metadata | `Cargo.toml [dependencies]` + `contract.toml`（role、field、consistencyLevel、verify target） |
 | journey/fixture | 测试输入和验收路径是否仍匹配 |
@@ -22,6 +23,9 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 ## 规则
 
 - contract 是跨域通信单源，共享 Rust 类型不是单源。
+- component 是本仓库内 path-derived 的 authoring 单源，不是 registry。`assembly-schema` 的 typed
+  `ComponentId` + 纯 `ComponentGraph` 唯一拥有 ID/path/ref 语法与传递引用；working filesystem 和 Git base
+  reader 只负责提供文档 bytes。CI impact 必须沿 base/working 引用图的并集扇出，删除或改名不得丢失旧 consumer。
 - `active` 破坏式 wire 变更默认走新版本目录（`contracts/{kind}/{domain}/{version+1}/`，新 contract ID +
   新一份 `contract.toml` + `*.schema.json`），并完整保留旧 contract identity。#1696 仅将
   `LOCAL_ONLY_BOUNDARY_CHANGED`、`EFFECT_ADDED`、`EFFECT_REMOVED` 固定为 pre-ratchet review finding；

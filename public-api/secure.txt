@@ -904,6 +904,7 @@ pub fn secure::redaction::Redactor::redact(&self, &str) -> secure::redaction::Re
 pub fn secure::redaction::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
 pub fn secure::redaction::redact_field(&str, &str) -> secure::redaction::Redacted
 pub fn secure::redaction::redact_hash(secure::redaction::RedactValue<'_>, &secure::redaction::RedactionHashKey) -> secure::redaction::Redacted
+pub fn secure::redaction::redact_observation_field(&str, &str) -> secure::redaction::Redacted
 pub fn secure::redaction::redact_struct(&'static str, bool, secure::redaction::RedactScope, &[secure::redaction::FieldRedaction<'_>]) -> alloc::string::String
 pub fn secure::redaction::redact_url_credentials(&str) -> secure::redaction::Redacted
 pub fn secure::redaction::safe<R: secure::redaction::Redact + ?core::marker::Sized>(&R, secure::redaction::RedactScope) -> alloc::string::String
@@ -2262,6 +2263,7 @@ pub fn secure::is_safe_segment(&str) -> bool
 pub fn secure::redact_error(&dyn core::error::Error) -> secure::redaction::Redacted
 pub fn secure::redact_field(&str, &str) -> secure::redaction::Redacted
 pub fn secure::redact_hash(secure::redaction::RedactValue<'_>, &secure::redaction::RedactionHashKey) -> secure::redaction::Redacted
+pub fn secure::redact_observation_field(&str, &str) -> secure::redaction::Redacted
 pub fn secure::redact_struct(&'static str, bool, secure::redaction::RedactScope, &[secure::redaction::FieldRedaction<'_>]) -> alloc::string::String
 pub fn secure::redact_url_credentials(&str) -> secure::redaction::Redacted
 pub fn secure::safe<R: secure::redaction::Redact + ?core::marker::Sized>(&R, secure::redaction::RedactScope) -> alloc::string::String

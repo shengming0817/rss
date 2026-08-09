@@ -1705,11 +1705,10 @@ fn read_working_schema(contract: &super::GovernedContract, file: &str) -> Result
         .schema_path(file)
         .map(Path::to_path_buf)
         .unwrap_or_else(|| contract.dir().join(file));
-    let bytes = contract
-        .schema_bytes(file)
-        .ok_or_else(|| anyhow::anyhow!("读取 {} 失败: schema source missing", path.display()))?;
-    serde_json::from_slice(bytes)
-        .map_err(|error| anyhow::anyhow!("解析 {} 失败: {error}", path.display()))
+    contract
+        .resolved_schema(file)
+        .map(assembly_schema::repository_contract::ResolvedSchema::into_value)
+        .with_context(|| format!("解析 resolved schema {}", path.display()))
 }
 
 /// manifest 的 logical schema slot → 文件名映射（DRY，base/working 两侧同源构造 [`ContractSide`]）。
@@ -2460,6 +2459,31 @@ fn base_contract_side(
         )?;
         let v = serde_json::from_str(&schema_text)
             .map_err(|e| anyhow::anyhow!("解析 base schema {schema_rel} 失败: {e}"))?;
+        let v = assembly_schema::repository_contract::resolve_component_references(v, |id| {
+            let component_rel = Path::new("contracts").join(
+                assembly_schema::repository_contract::component_relative_path(id)?,
+            );
+            let component_rel = component_rel.to_string_lossy();
+            let component_text = require_git_text(
+                read_text_at_ref(root, against, component_rel.as_ref()),
+                format!(
+                    "base schema `{schema_rel}` 引用 component `{component_rel}` 不存在，fail-closed"
+                ),
+            )
+            .map_err(|error| {
+                assembly_schema::repository_contract::RepositoryContractError::Invalid(
+                    error.to_string(),
+                )
+            })?;
+            serde_json::from_str(&component_text).map_err(|error| {
+                assembly_schema::repository_contract::RepositoryContractError::SchemaJson {
+                    path: std::path::PathBuf::from(component_rel.as_ref()),
+                    source: error,
+                }
+            })
+        })
+        .map_err(anyhow::Error::new)?
+        .into_value();
         slots.insert(slot, (direction, v));
     }
     Ok(Some(ContractSide {
@@ -4741,6 +4765,61 @@ effects = ["read"]
         assert!(
             rules(&breaks).contains(&BreakingRule::EnumValueDeleted),
             "output enum narrowing changes the active response vocabulary: {breaks:?}"
+        );
+    }
+
+    #[test]
+    fn component_resolution_keeps_inline_migration_clean_and_detects_component_narrowing() {
+        let id = "rss://component/identity/v1/operator";
+        let inline = json!({
+            "type": "object",
+            "properties": {"operator": {"$ref": "#/definitions/IdentityPolicyOperator"}},
+            "definitions": {
+                "IdentityPolicyOperator": {
+                    "title": "IdentityPolicyOperator",
+                    "type": "object",
+                    "properties": {"family": {"type": "string"}}
+                }
+            }
+        });
+        let referenced = json!({
+            "type": "object",
+            "properties": {"operator": {"$ref": id}}
+        });
+        let component = |required: bool| {
+            let mut value = json!({
+                "$id": id,
+                "title": "IdentityPolicyOperator",
+                "type": "object",
+                "properties": {"family": {"type": "string"}}
+            });
+            if required {
+                value["required"] = json!(["family"]);
+            }
+            value
+        };
+        let working = assembly_schema::repository_contract::resolve_component_references(
+            referenced.clone(),
+            |_| Ok(component(false)),
+        )
+        .expect("resolved working schema")
+        .into_value();
+        assert!(compare_schemas(&inline, &working).is_empty());
+
+        let base = assembly_schema::repository_contract::resolve_component_references(
+            referenced.clone(),
+            |_| Ok(component(false)),
+        )
+        .expect("resolved base schema")
+        .into_value();
+        let narrowed =
+            assembly_schema::repository_contract::resolve_component_references(referenced, |_| {
+                Ok(component(true))
+            })
+            .expect("resolved narrowed schema")
+            .into_value();
+        assert!(
+            rules(&compare_schemas(&base, &narrowed)).contains(&BreakingRule::RequiredFieldAdded)
         );
     }
 

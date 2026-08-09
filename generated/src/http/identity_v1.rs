@@ -1654,21 +1654,7 @@ pub mod policies_create {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyCreateOperator",
-    ///                "oneOf": [
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
-    ///                  }
-    ///                ]
+    ///                "$ref": "#/definitions/IdentityPolicyOperator"
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -1799,21 +1785,7 @@ pub mod policies_create {
     ///                    "type": "string"
     ///                  },
     ///                  "operator": {
-    ///                    "title": "IdentityPolicyOperatorView",
-    ///                    "oneOf": [
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///                      }
-    ///                    ]
+    ///                    "$ref": "#/definitions/IdentityPolicyOperator"
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -1887,21 +1859,7 @@ pub mod policies_create {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyOperatorView",
-    ///      "oneOf": [
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///        }
-    ///      ]
+    ///      "$ref": "#/definitions/IdentityPolicyOperator"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -1914,7 +1872,7 @@ pub mod policies_create {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyOperatorView,
+        pub operator: IdentityPolicyOperator,
     }
     ///`IdentityPolicyCreateCondition`
     ///
@@ -1933,21 +1891,7 @@ pub mod policies_create {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyCreateOperator",
-    ///      "oneOf": [
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
-    ///        }
-    ///      ]
+    ///      "$ref": "#/definitions/IdentityPolicyOperator"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -1960,7 +1904,7 @@ pub mod policies_create {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyCreateOperator,
+        pub operator: IdentityPolicyOperator,
     }
     ///`IdentityPolicyCreateObligations`
     ///
@@ -2095,2263 +2039,6 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyCreateOperator`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperator",
-    ///  "oneOf": [
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
-    ///    },
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
-    ///    },
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
-    ///    },
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(untagged)]
-    pub enum IdentityPolicyCreateOperator {
-        EqualityFamily(IdentityPolicyCreateOperatorEqualityFamily),
-        OrderingFamily(IdentityPolicyCreateOperatorOrderingFamily),
-        MembershipFamily(IdentityPolicyCreateOperatorMembershipFamily),
-        StringFamily(IdentityPolicyCreateOperatorStringFamily),
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorEqualityFamily>
-        for IdentityPolicyCreateOperator
-    {
-        fn from(value: IdentityPolicyCreateOperatorEqualityFamily) -> Self {
-            Self::EqualityFamily(value)
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorOrderingFamily>
-        for IdentityPolicyCreateOperator
-    {
-        fn from(value: IdentityPolicyCreateOperatorOrderingFamily) -> Self {
-            Self::OrderingFamily(value)
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorMembershipFamily>
-        for IdentityPolicyCreateOperator
-    {
-        fn from(value: IdentityPolicyCreateOperatorMembershipFamily) -> Self {
-            Self::MembershipFamily(value)
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorStringFamily>
-        for IdentityPolicyCreateOperator
-    {
-        fn from(value: IdentityPolicyCreateOperatorStringFamily) -> Self {
-            Self::StringFamily(value)
-        }
-    }
-    ///`IdentityPolicyCreateOperatorAttributeOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorAttributeOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "attribute",
-    ///        "kind",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "principal.kind",
-    ///            "principal.id",
-    ///            "tenant.id",
-    ///            "contract.id",
-    ///            "permission",
-    ///            "resource.id"
-    ///          ]
-    ///        },
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "attribute"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "string"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(tag = "kind", deny_unknown_fields)]
-    pub enum IdentityPolicyCreateOperatorAttributeOperand {
-        #[serde(rename = "attribute")]
-        Attribute {
-            attribute: IdentityPolicyCreateOperatorAttributeOperandAttribute,
-            #[serde(rename = "valueType")]
-            value_type: IdentityPolicyCreateOperatorAttributeOperandValueType,
-        },
-    }
-    ///`IdentityPolicyCreateOperatorAttributeOperandAttribute`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "principal.kind",
-    ///    "principal.id",
-    ///    "tenant.id",
-    ///    "contract.id",
-    ///    "permission",
-    ///    "resource.id"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorAttributeOperandAttribute {
-        #[serde(rename = "principal.kind")]
-        PrincipalKind,
-        #[serde(rename = "principal.id")]
-        PrincipalId,
-        #[serde(rename = "tenant.id")]
-        TenantId,
-        #[serde(rename = "contract.id")]
-        ContractId,
-        #[serde(rename = "permission")]
-        Permission,
-        #[serde(rename = "resource.id")]
-        ResourceId,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorAttributeOperandAttribute {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::PrincipalKind => f.write_str("principal.kind"),
-                Self::PrincipalId => f.write_str("principal.id"),
-                Self::TenantId => f.write_str("tenant.id"),
-                Self::ContractId => f.write_str("contract.id"),
-                Self::Permission => f.write_str("permission"),
-                Self::ResourceId => f.write_str("resource.id"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorAttributeOperandAttribute {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "principal.kind" => Ok(Self::PrincipalKind),
-                "principal.id" => Ok(Self::PrincipalId),
-                "tenant.id" => Ok(Self::TenantId),
-                "contract.id" => Ok(Self::ContractId),
-                "permission" => Ok(Self::Permission),
-                "resource.id" => Ok(Self::ResourceId),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorAttributeOperandAttribute {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorAttributeOperandAttribute
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorAttributeOperandAttribute
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorAttributeOperandValueType`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "string"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorAttributeOperandValueType {
-        #[serde(rename = "string")]
-        String,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorAttributeOperandValueType {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::String => f.write_str("string"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorAttributeOperandValueType {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "string" => Ok(Self::String),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorAttributeOperandValueType {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorAttributeOperandValueType
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorAttributeOperandValueType
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorEqualityFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorEqualityFamily",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "family",
-    ///    "operand",
-    ///    "predicate"
-    ///  ],
-    ///  "properties": {
-    ///    "family": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "equality"
-    ///      ]
-    ///    },
-    ///    "operand": {
-    ///      "title": "IdentityPolicyCreateOperatorEqualityFamilyOperand",
-    ///      "oneOf": [
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorLiteralOperand"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyCreateOperatorAttributeOperand"
-    ///        }
-    ///      ]
-    ///    },
-    ///    "predicate": {
-    ///      "title": "IdentityPolicyCreateOperatorEqualityFamilyPredicate",
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "eq",
-    ///        "ne"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateOperatorEqualityFamily {
-        #[redact(sensitivity = public)]
-        pub family: IdentityPolicyCreateOperatorEqualityFamilyFamily,
-        #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyCreateOperatorEqualityFamilyOperand,
-        #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyCreateOperatorEqualityFamilyPredicate,
-    }
-    ///`IdentityPolicyCreateOperatorEqualityFamilyFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "equality"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorEqualityFamilyFamily {
-        #[serde(rename = "equality")]
-        Equality,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorEqualityFamilyFamily {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Equality => f.write_str("equality"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorEqualityFamilyFamily {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "equality" => Ok(Self::Equality),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorEqualityFamilyFamily {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorEqualityFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorEqualityFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorEqualityFamilyOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorEqualityFamilyOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorLiteralOperand"
-    ///    },
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorAttributeOperand"
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(untagged)]
-    pub enum IdentityPolicyCreateOperatorEqualityFamilyOperand {
-        LiteralOperand(IdentityPolicyCreateOperatorLiteralOperand),
-        AttributeOperand(IdentityPolicyCreateOperatorAttributeOperand),
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorLiteralOperand>
-        for IdentityPolicyCreateOperatorEqualityFamilyOperand
-    {
-        fn from(value: IdentityPolicyCreateOperatorLiteralOperand) -> Self {
-            Self::LiteralOperand(value)
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorAttributeOperand>
-        for IdentityPolicyCreateOperatorEqualityFamilyOperand
-    {
-        fn from(value: IdentityPolicyCreateOperatorAttributeOperand) -> Self {
-            Self::AttributeOperand(value)
-        }
-    }
-    ///`IdentityPolicyCreateOperatorEqualityFamilyPredicate`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorEqualityFamilyPredicate",
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "eq",
-    ///    "ne"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorEqualityFamilyPredicate {
-        #[serde(rename = "eq")]
-        Eq,
-        #[serde(rename = "ne")]
-        Ne,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorEqualityFamilyPredicate {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Eq => f.write_str("eq"),
-                Self::Ne => f.write_str("ne"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorEqualityFamilyPredicate {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "eq" => Ok(Self::Eq),
-                "ne" => Ok(Self::Ne),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorEqualityFamilyPredicate {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorEqualityFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorEqualityFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorLiteralOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorLiteralOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "string"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "boolean"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "boolean"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "integer",
-    ///          "format": "int64"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "integer"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "string",
-    ///          "maxLength": 64,
-    ///          "minLength": 1,
-    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "decimal"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyCreateOperatorLiteralOperand {
-        #[serde(rename = "string")]
-        String {
-            kind: IdentityPolicyCreateOperatorLiteralOperandKind,
-            value: IdentityPolicyCreateOperatorLiteralOperandValue,
-        },
-        #[serde(rename = "boolean")]
-        Boolean {
-            kind: IdentityPolicyCreateOperatorLiteralOperandKind,
-            value: bool,
-        },
-        #[serde(rename = "integer")]
-        Integer {
-            kind: IdentityPolicyCreateOperatorLiteralOperandKind,
-            value: i64,
-        },
-        #[serde(rename = "decimal")]
-        Decimal {
-            kind: IdentityPolicyCreateOperatorLiteralOperandKind,
-            value: IdentityPolicyCreateOperatorLiteralOperandValue,
-        },
-    }
-    ///`IdentityPolicyCreateOperatorLiteralOperandKind`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "literal"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorLiteralOperandKind {
-        #[serde(rename = "literal")]
-        Literal,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorLiteralOperandKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Literal => f.write_str("literal"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorLiteralOperandKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "literal" => Ok(Self::Literal),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorLiteralOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorLiteralOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorLiteralOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorLiteralOperandValue`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 256
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyCreateOperatorLiteralOperandValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyCreateOperatorLiteralOperandValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorLiteralOperandValue>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyCreateOperatorLiteralOperandValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorLiteralOperandValue {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorLiteralOperandValue {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorLiteralOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorLiteralOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorLiteralOperandValue {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyCreateOperatorMembershipFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorMembershipFamily",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "family",
-    ///    "operand",
-    ///    "predicate"
-    ///  ],
-    ///  "properties": {
-    ///    "family": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "membership"
-    ///      ]
-    ///    },
-    ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorSetOperand"
-    ///    },
-    ///    "predicate": {
-    ///      "title": "IdentityPolicyCreateOperatorMembershipFamilyPredicate",
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "in",
-    ///        "notIn"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateOperatorMembershipFamily {
-        #[redact(sensitivity = public)]
-        pub family: IdentityPolicyCreateOperatorMembershipFamilyFamily,
-        #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyCreateOperatorSetOperand,
-        #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyCreateOperatorMembershipFamilyPredicate,
-    }
-    ///`IdentityPolicyCreateOperatorMembershipFamilyFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "membership"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorMembershipFamilyFamily {
-        #[serde(rename = "membership")]
-        Membership,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorMembershipFamilyFamily {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Membership => f.write_str("membership"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorMembershipFamilyFamily {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "membership" => Ok(Self::Membership),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorMembershipFamilyFamily {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorMembershipFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorMembershipFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorMembershipFamilyPredicate`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorMembershipFamilyPredicate",
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "in",
-    ///    "notIn"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorMembershipFamilyPredicate {
-        #[serde(rename = "in")]
-        In,
-        #[serde(rename = "notIn")]
-        NotIn,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorMembershipFamilyPredicate {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::In => f.write_str("in"),
-                Self::NotIn => f.write_str("notIn"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorMembershipFamilyPredicate {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "in" => Ok(Self::In),
-                "notIn" => Ok(Self::NotIn),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorMembershipFamilyPredicate {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorMembershipFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorMembershipFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorNumericLiteralOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorNumericLiteralOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "integer",
-    ///          "format": "int64"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "integer"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "string",
-    ///          "maxLength": 64,
-    ///          "minLength": 1,
-    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "decimal"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyCreateOperatorNumericLiteralOperand {
-        #[serde(rename = "integer")]
-        Integer {
-            kind: IdentityPolicyCreateOperatorNumericLiteralOperandKind,
-            value: i64,
-        },
-        #[serde(rename = "decimal")]
-        Decimal {
-            kind: IdentityPolicyCreateOperatorNumericLiteralOperandKind,
-            value: IdentityPolicyCreateOperatorNumericLiteralOperandValue,
-        },
-    }
-    ///`IdentityPolicyCreateOperatorNumericLiteralOperandKind`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "literal"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorNumericLiteralOperandKind {
-        #[serde(rename = "literal")]
-        Literal,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorNumericLiteralOperandKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Literal => f.write_str("literal"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorNumericLiteralOperandKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "literal" => Ok(Self::Literal),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorNumericLiteralOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorNumericLiteralOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorNumericLiteralOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorNumericLiteralOperandValue`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 64,
-    ///  "minLength": 1,
-    ///  "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyCreateOperatorNumericLiteralOperandValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyCreateOperatorNumericLiteralOperandValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorNumericLiteralOperandValue>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyCreateOperatorNumericLiteralOperandValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorNumericLiteralOperandValue {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 64usize {
-                return Err("longer than 64 characters".into());
-            }
-            if value.chars().count() < 1usize {
-                return Err("shorter than 1 characters".into());
-            }
-            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
-                ::std::sync::LazyLock::new(|| {
-                    ::regress::Regex::new(
-                        "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$",
-                    )
-                    .unwrap()
-                });
-            if PATTERN.find(value).is_none() {
-                return Err(
-                "doesn't match pattern \"^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$\""
-                    .into(),
-            );
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorNumericLiteralOperandValue {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorNumericLiteralOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorNumericLiteralOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorNumericLiteralOperandValue {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyCreateOperatorOrderingFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorOrderingFamily",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "family",
-    ///    "operand",
-    ///    "predicate"
-    ///  ],
-    ///  "properties": {
-    ///    "family": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "ordering"
-    ///      ]
-    ///    },
-    ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorNumericLiteralOperand"
-    ///    },
-    ///    "predicate": {
-    ///      "title": "IdentityPolicyCreateOperatorOrderingFamilyPredicate",
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "gt",
-    ///        "ge",
-    ///        "lt",
-    ///        "le"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateOperatorOrderingFamily {
-        #[redact(sensitivity = public)]
-        pub family: IdentityPolicyCreateOperatorOrderingFamilyFamily,
-        #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyCreateOperatorNumericLiteralOperand,
-        #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyCreateOperatorOrderingFamilyPredicate,
-    }
-    ///`IdentityPolicyCreateOperatorOrderingFamilyFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "ordering"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorOrderingFamilyFamily {
-        #[serde(rename = "ordering")]
-        Ordering,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorOrderingFamilyFamily {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Ordering => f.write_str("ordering"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorOrderingFamilyFamily {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "ordering" => Ok(Self::Ordering),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorOrderingFamilyFamily {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorOrderingFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorOrderingFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorOrderingFamilyPredicate`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorOrderingFamilyPredicate",
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "gt",
-    ///    "ge",
-    ///    "lt",
-    ///    "le"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorOrderingFamilyPredicate {
-        #[serde(rename = "gt")]
-        Gt,
-        #[serde(rename = "ge")]
-        Ge,
-        #[serde(rename = "lt")]
-        Lt,
-        #[serde(rename = "le")]
-        Le,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorOrderingFamilyPredicate {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Gt => f.write_str("gt"),
-                Self::Ge => f.write_str("ge"),
-                Self::Lt => f.write_str("lt"),
-                Self::Le => f.write_str("le"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorOrderingFamilyPredicate {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "gt" => Ok(Self::Gt),
-                "ge" => Ok(Self::Ge),
-                "lt" => Ok(Self::Lt),
-                "le" => Ok(Self::Le),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorOrderingFamilyPredicate {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorOrderingFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorOrderingFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorPatternOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorPatternOperand",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "kind",
-    ///    "value",
-    ///    "valueType"
-    ///  ],
-    ///  "properties": {
-    ///    "kind": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "pattern"
-    ///      ]
-    ///    },
-    ///    "value": {
-    ///      "type": "string",
-    ///      "maxLength": 256,
-    ///      "minLength": 1
-    ///    },
-    ///    "valueType": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "string"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateOperatorPatternOperand {
-        #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyCreateOperatorPatternOperandKind,
-        #[redact(sensitivity = public)]
-        pub value: IdentityPolicyCreateOperatorPatternOperandValue,
-        #[serde(rename = "valueType")]
-        #[redact(sensitivity = public)]
-        pub value_type: IdentityPolicyCreateOperatorPatternOperandValueType,
-    }
-    ///`IdentityPolicyCreateOperatorPatternOperandKind`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "pattern"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorPatternOperandKind {
-        #[serde(rename = "pattern")]
-        Pattern,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorPatternOperandKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Pattern => f.write_str("pattern"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorPatternOperandKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "pattern" => Ok(Self::Pattern),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorPatternOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorPatternOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorPatternOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorPatternOperandValue`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 256,
-    ///  "minLength": 1
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyCreateOperatorPatternOperandValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyCreateOperatorPatternOperandValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorPatternOperandValue>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyCreateOperatorPatternOperandValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorPatternOperandValue {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
-            }
-            if value.chars().count() < 1usize {
-                return Err("shorter than 1 characters".into());
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorPatternOperandValue {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorPatternOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorPatternOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorPatternOperandValue {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyCreateOperatorPatternOperandValueType`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "string"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorPatternOperandValueType {
-        #[serde(rename = "string")]
-        String,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorPatternOperandValueType {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::String => f.write_str("string"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorPatternOperandValueType {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "string" => Ok(Self::String),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorPatternOperandValueType {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorPatternOperandValueType
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorPatternOperandValueType
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorSetOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorSetOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "valueType",
-    ///        "values"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "set"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "string"
-    ///          ]
-    ///        },
-    ///        "values": {
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "string",
-    ///            "maxLength": 256
-    ///          },
-    ///          "maxItems": 32,
-    ///          "minItems": 1,
-    ///          "uniqueItems": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "valueType",
-    ///        "values"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "set"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "boolean"
-    ///          ]
-    ///        },
-    ///        "values": {
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "boolean"
-    ///          },
-    ///          "maxItems": 32,
-    ///          "minItems": 1,
-    ///          "uniqueItems": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "valueType",
-    ///        "values"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "set"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "integer"
-    ///          ]
-    ///        },
-    ///        "values": {
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "integer",
-    ///            "format": "int64"
-    ///          },
-    ///          "maxItems": 32,
-    ///          "minItems": 1,
-    ///          "uniqueItems": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "valueType",
-    ///        "values"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "set"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "decimal"
-    ///          ]
-    ///        },
-    ///        "values": {
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "string",
-    ///            "maxLength": 64,
-    ///            "minLength": 1,
-    ///            "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
-    ///          },
-    ///          "maxItems": 32,
-    ///          "minItems": 1,
-    ///          "uniqueItems": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyCreateOperatorSetOperand {
-        #[serde(rename = "string")]
-        String {
-            kind: IdentityPolicyCreateOperatorSetOperandKind,
-            values: Vec<IdentityPolicyCreateOperatorSetOperandValuesItem>,
-        },
-        #[serde(rename = "boolean")]
-        Boolean {
-            kind: IdentityPolicyCreateOperatorSetOperandKind,
-            values: Vec<bool>,
-        },
-        #[serde(rename = "integer")]
-        Integer {
-            kind: IdentityPolicyCreateOperatorSetOperandKind,
-            values: Vec<i64>,
-        },
-        #[serde(rename = "decimal")]
-        Decimal {
-            kind: IdentityPolicyCreateOperatorSetOperandKind,
-            values: Vec<IdentityPolicyCreateOperatorSetOperandValuesItem>,
-        },
-    }
-    ///`IdentityPolicyCreateOperatorSetOperandKind`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "set"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorSetOperandKind {
-        #[serde(rename = "set")]
-        Set,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorSetOperandKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Set => f.write_str("set"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorSetOperandKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "set" => Ok(Self::Set),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorSetOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorSetOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyCreateOperatorSetOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorSetOperandValuesItem`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 256
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyCreateOperatorSetOperandValuesItem(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyCreateOperatorSetOperandValuesItem {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyCreateOperatorSetOperandValuesItem>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyCreateOperatorSetOperandValuesItem) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorSetOperandValuesItem {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorSetOperandValuesItem {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorSetOperandValuesItem
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorSetOperandValuesItem
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyCreateOperatorSetOperandValuesItem {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyCreateOperatorStringFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorStringFamily",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "family",
-    ///    "operand",
-    ///    "predicate"
-    ///  ],
-    ///  "properties": {
-    ///    "family": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "string"
-    ///      ]
-    ///    },
-    ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyCreateOperatorPatternOperand"
-    ///    },
-    ///    "predicate": {
-    ///      "title": "IdentityPolicyCreateOperatorStringFamilyPredicate",
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "startsWith",
-    ///        "endsWith",
-    ///        "contains",
-    ///        "glob",
-    ///        "regex"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyCreateOperatorStringFamily {
-        #[redact(sensitivity = public)]
-        pub family: IdentityPolicyCreateOperatorStringFamilyFamily,
-        #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyCreateOperatorPatternOperand,
-        #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyCreateOperatorStringFamilyPredicate,
-    }
-    ///`IdentityPolicyCreateOperatorStringFamilyFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "string"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorStringFamilyFamily {
-        #[serde(rename = "string")]
-        String,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorStringFamilyFamily {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::String => f.write_str("string"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorStringFamilyFamily {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "string" => Ok(Self::String),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorStringFamilyFamily {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorStringFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorStringFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyCreateOperatorStringFamilyPredicate`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyCreateOperatorStringFamilyPredicate",
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "startsWith",
-    ///    "endsWith",
-    ///    "contains",
-    ///    "glob",
-    ///    "regex"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyCreateOperatorStringFamilyPredicate {
-        #[serde(rename = "startsWith")]
-        StartsWith,
-        #[serde(rename = "endsWith")]
-        EndsWith,
-        #[serde(rename = "contains")]
-        Contains,
-        #[serde(rename = "glob")]
-        Glob,
-        #[serde(rename = "regex")]
-        Regex,
-    }
-    impl ::std::fmt::Display for IdentityPolicyCreateOperatorStringFamilyPredicate {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::StartsWith => f.write_str("startsWith"),
-                Self::EndsWith => f.write_str("endsWith"),
-                Self::Contains => f.write_str("contains"),
-                Self::Glob => f.write_str("glob"),
-                Self::Regex => f.write_str("regex"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyCreateOperatorStringFamilyPredicate {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "startsWith" => Ok(Self::StartsWith),
-                "endsWith" => Ok(Self::EndsWith),
-                "contains" => Ok(Self::Contains),
-                "glob" => Ok(Self::Glob),
-                "regex" => Ok(Self::Regex),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyCreateOperatorStringFamilyPredicate {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyCreateOperatorStringFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyCreateOperatorStringFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
     ///`IdentityPolicyCreateRule`
     ///
     /// <details><summary>JSON schema</summary>
@@ -4377,21 +2064,7 @@ pub mod policies_create {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyCreateOperator",
-    ///          "oneOf": [
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyCreateOperatorEqualityFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyCreateOperatorOrderingFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyCreateOperatorMembershipFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyCreateOperatorStringFamily"
-    ///            }
-    ///          ]
+    ///          "$ref": "#/definitions/IdentityPolicyOperator"
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -4646,25 +2319,25 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorView`
+    ///`IdentityPolicyOperator`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorView",
+    ///  "title": "IdentityPolicyOperator",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorEqualityFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorOrderingFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorMembershipFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorStringFamily"
     ///    }
     ///  ]
     ///}
@@ -4672,41 +2345,39 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
-    pub enum IdentityPolicyOperatorView {
-        EqualityFamily(IdentityPolicyOperatorViewEqualityFamily),
-        OrderingFamily(IdentityPolicyOperatorViewOrderingFamily),
-        MembershipFamily(IdentityPolicyOperatorViewMembershipFamily),
-        StringFamily(IdentityPolicyOperatorViewStringFamily),
+    pub enum IdentityPolicyOperator {
+        EqualityFamily(IdentityPolicyOperatorEqualityFamily),
+        OrderingFamily(IdentityPolicyOperatorOrderingFamily),
+        MembershipFamily(IdentityPolicyOperatorMembershipFamily),
+        StringFamily(IdentityPolicyOperatorStringFamily),
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewEqualityFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewEqualityFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorEqualityFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorEqualityFamily) -> Self {
             Self::EqualityFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewOrderingFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewOrderingFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorOrderingFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorOrderingFamily) -> Self {
             Self::OrderingFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewMembershipFamily>
-        for IdentityPolicyOperatorView
-    {
-        fn from(value: IdentityPolicyOperatorViewMembershipFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorMembershipFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorMembershipFamily) -> Self {
             Self::MembershipFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewStringFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewStringFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorStringFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorStringFamily) -> Self {
             Self::StringFamily(value)
         }
     }
-    ///`IdentityPolicyOperatorViewAttributeOperand`
+    ///`IdentityPolicyOperatorAttributeOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewAttributeOperand",
+    ///  "title": "IdentityPolicyOperatorAttributeOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -4748,15 +2419,15 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "kind", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewAttributeOperand {
+    pub enum IdentityPolicyOperatorAttributeOperand {
         #[serde(rename = "attribute")]
         Attribute {
-            attribute: IdentityPolicyOperatorViewAttributeOperandAttribute,
+            attribute: IdentityPolicyOperatorAttributeOperandAttribute,
             #[serde(rename = "valueType")]
-            value_type: IdentityPolicyOperatorViewAttributeOperandValueType,
+            value_type: IdentityPolicyOperatorAttributeOperandValueType,
         },
     }
-    ///`IdentityPolicyOperatorViewAttributeOperandAttribute`
+    ///`IdentityPolicyOperatorAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -4786,7 +2457,7 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewAttributeOperandAttribute {
+    pub enum IdentityPolicyOperatorAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -4800,7 +2471,7 @@ pub mod policies_create {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::fmt::Display for IdentityPolicyOperatorAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -4812,7 +2483,7 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::str::FromStr for IdentityPolicyOperatorAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -4826,14 +2497,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandAttribute
+        for IdentityPolicyOperatorAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -4843,7 +2514,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandAttribute
+        for IdentityPolicyOperatorAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -4852,7 +2523,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewAttributeOperandValueType`
+    ///`IdentityPolicyOperatorAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -4877,18 +2548,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewAttributeOperandValueType {
+    pub enum IdentityPolicyOperatorAttributeOperandValueType {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::fmt::Display for IdentityPolicyOperatorAttributeOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::str::FromStr for IdentityPolicyOperatorAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -4897,14 +2568,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandValueType
+        for IdentityPolicyOperatorAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -4914,7 +2585,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandValueType
+        for IdentityPolicyOperatorAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -4923,13 +2594,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamily`
+    ///`IdentityPolicyOperatorEqualityFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamily",
+    ///  "title": "IdentityPolicyOperatorEqualityFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -4944,18 +2615,18 @@ pub mod policies_create {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///      "title": "IdentityPolicyOperatorEqualityFamilyOperand",
     ///      "oneOf": [
     ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorLiteralOperand"
     ///        },
     ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorAttributeOperand"
     ///        }
     ///      ]
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorEqualityFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "eq",
@@ -4969,15 +2640,15 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewEqualityFamily {
+    pub struct IdentityPolicyOperatorEqualityFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewEqualityFamilyFamily,
+        pub family: IdentityPolicyOperatorEqualityFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewEqualityFamilyOperand,
+        pub operand: IdentityPolicyOperatorEqualityFamilyOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewEqualityFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorEqualityFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyFamily`
+    ///`IdentityPolicyOperatorEqualityFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5002,18 +2673,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyFamily {
+    pub enum IdentityPolicyOperatorEqualityFamilyFamily {
         #[serde(rename = "equality")]
         Equality,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorEqualityFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Equality => f.write_str("equality"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorEqualityFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5022,14 +2693,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyFamily
+        for IdentityPolicyOperatorEqualityFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5038,9 +2709,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -5048,19 +2717,19 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyOperand`
+    ///`IdentityPolicyOperatorEqualityFamilyOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///  "title": "IdentityPolicyOperatorEqualityFamilyOperand",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorLiteralOperand"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorAttributeOperand"
     ///    }
     ///  ]
     ///}
@@ -5068,31 +2737,31 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyOperand {
-        LiteralOperand(IdentityPolicyOperatorViewLiteralOperand),
-        AttributeOperand(IdentityPolicyOperatorViewAttributeOperand),
+    pub enum IdentityPolicyOperatorEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyOperatorLiteralOperand),
+        AttributeOperand(IdentityPolicyOperatorAttributeOperand),
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperand>
-        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    impl ::std::convert::From<IdentityPolicyOperatorLiteralOperand>
+        for IdentityPolicyOperatorEqualityFamilyOperand
     {
-        fn from(value: IdentityPolicyOperatorViewLiteralOperand) -> Self {
+        fn from(value: IdentityPolicyOperatorLiteralOperand) -> Self {
             Self::LiteralOperand(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewAttributeOperand>
-        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    impl ::std::convert::From<IdentityPolicyOperatorAttributeOperand>
+        for IdentityPolicyOperatorEqualityFamilyOperand
     {
-        fn from(value: IdentityPolicyOperatorViewAttributeOperand) -> Self {
+        fn from(value: IdentityPolicyOperatorAttributeOperand) -> Self {
             Self::AttributeOperand(value)
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyPredicate`
+    ///`IdentityPolicyOperatorEqualityFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorEqualityFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "eq",
@@ -5113,13 +2782,13 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    pub enum IdentityPolicyOperatorEqualityFamilyPredicate {
         #[serde(rename = "eq")]
         Eq,
         #[serde(rename = "ne")]
         Ne,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorEqualityFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Eq => f.write_str("eq"),
@@ -5127,7 +2796,7 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorEqualityFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5137,14 +2806,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorEqualityFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+        for IdentityPolicyOperatorEqualityFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5154,7 +2823,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+        for IdentityPolicyOperatorEqualityFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5163,13 +2832,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewLiteralOperand`
+    ///`IdentityPolicyOperatorLiteralOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewLiteralOperand",
+    ///  "title": "IdentityPolicyOperatorLiteralOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -5286,29 +2955,29 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewLiteralOperand {
+    pub enum IdentityPolicyOperatorLiteralOperand {
         #[serde(rename = "string")]
         String {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
-            value: IdentityPolicyOperatorViewLiteralOperandValue,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
+            value: IdentityPolicyOperatorLiteralOperandValue,
         },
         #[serde(rename = "boolean")]
         Boolean {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
             value: bool,
         },
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
             value: i64,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
-            value: IdentityPolicyOperatorViewLiteralOperandValue,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
+            value: IdentityPolicyOperatorLiteralOperandValue,
         },
     }
-    ///`IdentityPolicyOperatorViewLiteralOperandKind`
+    ///`IdentityPolicyOperatorLiteralOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5333,18 +3002,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewLiteralOperandKind {
+    pub enum IdentityPolicyOperatorLiteralOperandKind {
         #[serde(rename = "literal")]
         Literal,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorLiteralOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Literal => f.write_str("literal"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5353,15 +3022,13 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandKind
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -5369,9 +3036,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandKind
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -5379,7 +3044,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewLiteralOperandValue`
+    ///`IdentityPolicyOperatorLiteralOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5392,21 +3057,21 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewLiteralOperandValue(
+    pub struct IdentityPolicyOperatorLiteralOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorLiteralOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperandValue> for ::std::string::String {
-        fn from(value: IdentityPolicyOperatorViewLiteralOperandValue) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorLiteralOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorLiteralOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -5415,15 +3080,13 @@ pub mod policies_create {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandValue
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -5431,9 +3094,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandValue
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -5441,7 +3102,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -5453,13 +3114,13 @@ pub mod policies_create {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewMembershipFamily`
+    ///`IdentityPolicyOperatorMembershipFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewMembershipFamily",
+    ///  "title": "IdentityPolicyOperatorMembershipFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -5474,10 +3135,10 @@ pub mod policies_create {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewSetOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorSetOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorMembershipFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "in",
@@ -5491,15 +3152,15 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewMembershipFamily {
+    pub struct IdentityPolicyOperatorMembershipFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewMembershipFamilyFamily,
+        pub family: IdentityPolicyOperatorMembershipFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewSetOperand,
+        pub operand: IdentityPolicyOperatorSetOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewMembershipFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorMembershipFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewMembershipFamilyFamily`
+    ///`IdentityPolicyOperatorMembershipFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5524,18 +3185,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewMembershipFamilyFamily {
+    pub enum IdentityPolicyOperatorMembershipFamilyFamily {
         #[serde(rename = "membership")]
         Membership,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorMembershipFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Membership => f.write_str("membership"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorMembershipFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5544,14 +3205,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorMembershipFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyFamily
+        for IdentityPolicyOperatorMembershipFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5561,7 +3222,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyFamily
+        for IdentityPolicyOperatorMembershipFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5570,13 +3231,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewMembershipFamilyPredicate`
+    ///`IdentityPolicyOperatorMembershipFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorMembershipFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "in",
@@ -5597,13 +3258,13 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    pub enum IdentityPolicyOperatorMembershipFamilyPredicate {
         #[serde(rename = "in")]
         In,
         #[serde(rename = "notIn")]
         NotIn,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorMembershipFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::In => f.write_str("in"),
@@ -5611,7 +3272,7 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorMembershipFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5621,14 +3282,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorMembershipFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+        for IdentityPolicyOperatorMembershipFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5638,7 +3299,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+        for IdentityPolicyOperatorMembershipFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5647,13 +3308,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperand`
+    ///`IdentityPolicyOperatorNumericLiteralOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewNumericLiteralOperand",
+    ///  "title": "IdentityPolicyOperatorNumericLiteralOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -5717,19 +3378,19 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewNumericLiteralOperand {
+    pub enum IdentityPolicyOperatorNumericLiteralOperand {
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            kind: IdentityPolicyOperatorNumericLiteralOperandKind,
             value: i64,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
-            value: IdentityPolicyOperatorViewNumericLiteralOperandValue,
+            kind: IdentityPolicyOperatorNumericLiteralOperandKind,
+            value: IdentityPolicyOperatorNumericLiteralOperandValue,
         },
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperandKind`
+    ///`IdentityPolicyOperatorNumericLiteralOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5754,18 +3415,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    pub enum IdentityPolicyOperatorNumericLiteralOperandKind {
         #[serde(rename = "literal")]
         Literal,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorNumericLiteralOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Literal => f.write_str("literal"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorNumericLiteralOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5774,14 +3435,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorNumericLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+        for IdentityPolicyOperatorNumericLiteralOperandKind
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5791,7 +3452,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+        for IdentityPolicyOperatorNumericLiteralOperandKind
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5800,7 +3461,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperandValue`
+    ///`IdentityPolicyOperatorNumericLiteralOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5815,23 +3476,23 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewNumericLiteralOperandValue(
+    pub struct IdentityPolicyOperatorNumericLiteralOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewNumericLiteralOperandValue>
+    impl ::std::convert::From<IdentityPolicyOperatorNumericLiteralOperandValue>
         for ::std::string::String
     {
-        fn from(value: IdentityPolicyOperatorViewNumericLiteralOperandValue) -> Self {
+        fn from(value: IdentityPolicyOperatorNumericLiteralOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 64usize {
@@ -5856,14 +3517,14 @@ pub mod policies_create {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+        for IdentityPolicyOperatorNumericLiteralOperandValue
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5873,7 +3534,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+        for IdentityPolicyOperatorNumericLiteralOperandValue
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -5882,7 +3543,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorNumericLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -5894,13 +3555,13 @@ pub mod policies_create {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewOrderingFamily`
+    ///`IdentityPolicyOperatorOrderingFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewOrderingFamily",
+    ///  "title": "IdentityPolicyOperatorOrderingFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -5915,10 +3576,10 @@ pub mod policies_create {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewNumericLiteralOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorNumericLiteralOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorOrderingFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "gt",
@@ -5934,15 +3595,15 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewOrderingFamily {
+    pub struct IdentityPolicyOperatorOrderingFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewOrderingFamilyFamily,
+        pub family: IdentityPolicyOperatorOrderingFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewNumericLiteralOperand,
+        pub operand: IdentityPolicyOperatorNumericLiteralOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewOrderingFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorOrderingFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewOrderingFamilyFamily`
+    ///`IdentityPolicyOperatorOrderingFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -5967,18 +3628,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewOrderingFamilyFamily {
+    pub enum IdentityPolicyOperatorOrderingFamilyFamily {
         #[serde(rename = "ordering")]
         Ordering,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorOrderingFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Ordering => f.write_str("ordering"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorOrderingFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -5987,14 +3648,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorOrderingFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyFamily
+        for IdentityPolicyOperatorOrderingFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -6003,9 +3664,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorOrderingFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -6013,13 +3672,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewOrderingFamilyPredicate`
+    ///`IdentityPolicyOperatorOrderingFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorOrderingFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "gt",
@@ -6042,7 +3701,7 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    pub enum IdentityPolicyOperatorOrderingFamilyPredicate {
         #[serde(rename = "gt")]
         Gt,
         #[serde(rename = "ge")]
@@ -6052,7 +3711,7 @@ pub mod policies_create {
         #[serde(rename = "le")]
         Le,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorOrderingFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Gt => f.write_str("gt"),
@@ -6062,7 +3721,7 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorOrderingFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -6074,14 +3733,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorOrderingFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+        for IdentityPolicyOperatorOrderingFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -6091,7 +3750,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+        for IdentityPolicyOperatorOrderingFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -6100,13 +3759,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperand`
+    ///`IdentityPolicyOperatorPatternOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewPatternOperand",
+    ///  "title": "IdentityPolicyOperatorPatternOperand",
     ///  "type": "object",
     ///  "required": [
     ///    "kind",
@@ -6138,16 +3797,16 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewPatternOperand {
+    pub struct IdentityPolicyOperatorPatternOperand {
         #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyOperatorViewPatternOperandKind,
+        pub kind: IdentityPolicyOperatorPatternOperandKind,
         #[redact(sensitivity = public)]
-        pub value: IdentityPolicyOperatorViewPatternOperandValue,
+        pub value: IdentityPolicyOperatorPatternOperandValue,
         #[serde(rename = "valueType")]
         #[redact(sensitivity = public)]
-        pub value_type: IdentityPolicyOperatorViewPatternOperandValueType,
+        pub value_type: IdentityPolicyOperatorPatternOperandValueType,
     }
-    ///`IdentityPolicyOperatorViewPatternOperandKind`
+    ///`IdentityPolicyOperatorPatternOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -6172,18 +3831,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewPatternOperandKind {
+    pub enum IdentityPolicyOperatorPatternOperandKind {
         #[serde(rename = "pattern")]
         Pattern,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorPatternOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Pattern => f.write_str("pattern"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -6192,15 +3851,13 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandKind
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -6208,9 +3865,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandKind
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -6218,7 +3873,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperandValue`
+    ///`IdentityPolicyOperatorPatternOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -6232,21 +3887,21 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewPatternOperandValue(
+    pub struct IdentityPolicyOperatorPatternOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorPatternOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewPatternOperandValue> for ::std::string::String {
-        fn from(value: IdentityPolicyOperatorViewPatternOperandValue) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorPatternOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorPatternOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -6258,15 +3913,13 @@ pub mod policies_create {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValue
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -6274,9 +3927,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValue
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -6284,7 +3935,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewPatternOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorPatternOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -6296,7 +3947,7 @@ pub mod policies_create {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperandValueType`
+    ///`IdentityPolicyOperatorPatternOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -6321,18 +3972,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewPatternOperandValueType {
+    pub enum IdentityPolicyOperatorPatternOperandValueType {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::fmt::Display for IdentityPolicyOperatorPatternOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -6341,14 +3992,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValueType
+        for IdentityPolicyOperatorPatternOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -6358,7 +4009,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValueType
+        for IdentityPolicyOperatorPatternOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -6367,13 +4018,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewSetOperand`
+    ///`IdentityPolicyOperatorSetOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewSetOperand",
+    ///  "title": "IdentityPolicyOperatorSetOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -6514,29 +4165,29 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewSetOperand {
+    pub enum IdentityPolicyOperatorSetOperand {
         #[serde(rename = "string")]
         String {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
-            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+            kind: IdentityPolicyOperatorSetOperandKind,
+            values: Vec<IdentityPolicyOperatorSetOperandValuesItem>,
         },
         #[serde(rename = "boolean")]
         Boolean {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
+            kind: IdentityPolicyOperatorSetOperandKind,
             values: Vec<bool>,
         },
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
+            kind: IdentityPolicyOperatorSetOperandKind,
             values: Vec<i64>,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
-            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+            kind: IdentityPolicyOperatorSetOperandKind,
+            values: Vec<IdentityPolicyOperatorSetOperandValuesItem>,
         },
     }
-    ///`IdentityPolicyOperatorViewSetOperandKind`
+    ///`IdentityPolicyOperatorSetOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -6561,18 +4212,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewSetOperandKind {
+    pub enum IdentityPolicyOperatorSetOperandKind {
         #[serde(rename = "set")]
         Set,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorSetOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Set => f.write_str("set"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -6581,13 +4232,13 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -6595,7 +4246,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -6603,7 +4254,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewSetOperandValuesItem`
+    ///`IdentityPolicyOperatorSetOperandValuesItem`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -6616,23 +4267,21 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewSetOperandValuesItem(
+    pub struct IdentityPolicyOperatorSetOperandValuesItem(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::ops::Deref for IdentityPolicyOperatorSetOperandValuesItem {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewSetOperandValuesItem>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyOperatorViewSetOperandValuesItem) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorSetOperandValuesItem> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorSetOperandValuesItem) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandValuesItem {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -6641,14 +4290,14 @@ pub mod policies_create {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorSetOperandValuesItem {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewSetOperandValuesItem
+        for IdentityPolicyOperatorSetOperandValuesItem
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -6657,9 +4306,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewSetOperandValuesItem
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorSetOperandValuesItem {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -6667,7 +4314,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorSetOperandValuesItem {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -6679,13 +4326,13 @@ pub mod policies_create {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewStringFamily`
+    ///`IdentityPolicyOperatorStringFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewStringFamily",
+    ///  "title": "IdentityPolicyOperatorStringFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -6700,10 +4347,10 @@ pub mod policies_create {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewPatternOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorPatternOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorStringFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "startsWith",
@@ -6720,15 +4367,15 @@ pub mod policies_create {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewStringFamily {
+    pub struct IdentityPolicyOperatorStringFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewStringFamilyFamily,
+        pub family: IdentityPolicyOperatorStringFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewPatternOperand,
+        pub operand: IdentityPolicyOperatorPatternOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewStringFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorStringFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewStringFamilyFamily`
+    ///`IdentityPolicyOperatorStringFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -6753,18 +4400,18 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewStringFamilyFamily {
+    pub enum IdentityPolicyOperatorStringFamilyFamily {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorStringFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorStringFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -6773,15 +4420,13 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyFamily
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -6789,9 +4434,7 @@ pub mod policies_create {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -6799,13 +4442,13 @@ pub mod policies_create {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewStringFamilyPredicate`
+    ///`IdentityPolicyOperatorStringFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorStringFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "startsWith",
@@ -6829,7 +4472,7 @@ pub mod policies_create {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewStringFamilyPredicate {
+    pub enum IdentityPolicyOperatorStringFamilyPredicate {
         #[serde(rename = "startsWith")]
         StartsWith,
         #[serde(rename = "endsWith")]
@@ -6841,7 +4484,7 @@ pub mod policies_create {
         #[serde(rename = "regex")]
         Regex,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorStringFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::StartsWith => f.write_str("startsWith"),
@@ -6852,7 +4495,7 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorStringFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -6865,14 +4508,14 @@ pub mod policies_create {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorStringFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyPredicate
+        for IdentityPolicyOperatorStringFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -6882,7 +4525,7 @@ pub mod policies_create {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyPredicate
+        for IdentityPolicyOperatorStringFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -6916,21 +4559,7 @@ pub mod policies_create {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyOperatorView",
-    ///          "oneOf": [
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///            }
-    ///          ]
+    ///          "$ref": "#/definitions/IdentityPolicyOperator"
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -7108,21 +4737,7 @@ pub mod policies_create {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyOperatorView",
-    ///                "oneOf": [
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///                  }
-    ///                ]
+    ///                "$ref": "#/definitions/IdentityPolicyOperator"
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -7205,7 +4820,7 @@ pub mod policies_create {
         "identity",
         "identity.policies-create",
         "v1",
-        "sha256:d5a187116e817e2a5f37e7f1e8e6d72de861b6d7f9293935505245cbcb4807ed",
+        "sha256:3085cd85fb55a838f0d6abe97470f4bd9ba63b50b4702e7694de02afdc8024fd",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -7594,21 +5209,7 @@ pub mod policies_get {
     ///                    "type": "string"
     ///                  },
     ///                  "operator": {
-    ///                    "title": "IdentityPolicyOperatorView",
-    ///                    "oneOf": [
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///                      }
-    ///                    ]
+    ///                    "$ref": "#/definitions/IdentityPolicyOperator"
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -7682,21 +5283,7 @@ pub mod policies_get {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyOperatorView",
-    ///      "oneOf": [
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///        }
-    ///      ]
+    ///      "$ref": "#/definitions/IdentityPolicyOperator"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -7709,7 +5296,7 @@ pub mod policies_get {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyOperatorView,
+        pub operator: IdentityPolicyOperator,
     }
     ///`IdentityPolicyObligationsView`
     ///
@@ -7844,25 +5431,25 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorView`
+    ///`IdentityPolicyOperator`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorView",
+    ///  "title": "IdentityPolicyOperator",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorEqualityFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorOrderingFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorMembershipFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorStringFamily"
     ///    }
     ///  ]
     ///}
@@ -7870,41 +5457,39 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
-    pub enum IdentityPolicyOperatorView {
-        EqualityFamily(IdentityPolicyOperatorViewEqualityFamily),
-        OrderingFamily(IdentityPolicyOperatorViewOrderingFamily),
-        MembershipFamily(IdentityPolicyOperatorViewMembershipFamily),
-        StringFamily(IdentityPolicyOperatorViewStringFamily),
+    pub enum IdentityPolicyOperator {
+        EqualityFamily(IdentityPolicyOperatorEqualityFamily),
+        OrderingFamily(IdentityPolicyOperatorOrderingFamily),
+        MembershipFamily(IdentityPolicyOperatorMembershipFamily),
+        StringFamily(IdentityPolicyOperatorStringFamily),
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewEqualityFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewEqualityFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorEqualityFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorEqualityFamily) -> Self {
             Self::EqualityFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewOrderingFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewOrderingFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorOrderingFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorOrderingFamily) -> Self {
             Self::OrderingFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewMembershipFamily>
-        for IdentityPolicyOperatorView
-    {
-        fn from(value: IdentityPolicyOperatorViewMembershipFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorMembershipFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorMembershipFamily) -> Self {
             Self::MembershipFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewStringFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewStringFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorStringFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorStringFamily) -> Self {
             Self::StringFamily(value)
         }
     }
-    ///`IdentityPolicyOperatorViewAttributeOperand`
+    ///`IdentityPolicyOperatorAttributeOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewAttributeOperand",
+    ///  "title": "IdentityPolicyOperatorAttributeOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -7946,15 +5531,15 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "kind", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewAttributeOperand {
+    pub enum IdentityPolicyOperatorAttributeOperand {
         #[serde(rename = "attribute")]
         Attribute {
-            attribute: IdentityPolicyOperatorViewAttributeOperandAttribute,
+            attribute: IdentityPolicyOperatorAttributeOperandAttribute,
             #[serde(rename = "valueType")]
-            value_type: IdentityPolicyOperatorViewAttributeOperandValueType,
+            value_type: IdentityPolicyOperatorAttributeOperandValueType,
         },
     }
-    ///`IdentityPolicyOperatorViewAttributeOperandAttribute`
+    ///`IdentityPolicyOperatorAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -7984,7 +5569,7 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewAttributeOperandAttribute {
+    pub enum IdentityPolicyOperatorAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -7998,7 +5583,7 @@ pub mod policies_get {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::fmt::Display for IdentityPolicyOperatorAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -8010,7 +5595,7 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::str::FromStr for IdentityPolicyOperatorAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -8024,14 +5609,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandAttribute
+        for IdentityPolicyOperatorAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8041,7 +5626,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandAttribute
+        for IdentityPolicyOperatorAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8050,7 +5635,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewAttributeOperandValueType`
+    ///`IdentityPolicyOperatorAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -8075,18 +5660,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewAttributeOperandValueType {
+    pub enum IdentityPolicyOperatorAttributeOperandValueType {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::fmt::Display for IdentityPolicyOperatorAttributeOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::str::FromStr for IdentityPolicyOperatorAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -8095,14 +5680,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandValueType
+        for IdentityPolicyOperatorAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8112,7 +5697,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandValueType
+        for IdentityPolicyOperatorAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8121,13 +5706,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamily`
+    ///`IdentityPolicyOperatorEqualityFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamily",
+    ///  "title": "IdentityPolicyOperatorEqualityFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -8142,18 +5727,18 @@ pub mod policies_get {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///      "title": "IdentityPolicyOperatorEqualityFamilyOperand",
     ///      "oneOf": [
     ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorLiteralOperand"
     ///        },
     ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorAttributeOperand"
     ///        }
     ///      ]
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorEqualityFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "eq",
@@ -8167,15 +5752,15 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewEqualityFamily {
+    pub struct IdentityPolicyOperatorEqualityFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewEqualityFamilyFamily,
+        pub family: IdentityPolicyOperatorEqualityFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewEqualityFamilyOperand,
+        pub operand: IdentityPolicyOperatorEqualityFamilyOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewEqualityFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorEqualityFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyFamily`
+    ///`IdentityPolicyOperatorEqualityFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -8200,18 +5785,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyFamily {
+    pub enum IdentityPolicyOperatorEqualityFamilyFamily {
         #[serde(rename = "equality")]
         Equality,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorEqualityFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Equality => f.write_str("equality"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorEqualityFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -8220,14 +5805,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyFamily
+        for IdentityPolicyOperatorEqualityFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8236,9 +5821,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -8246,19 +5829,19 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyOperand`
+    ///`IdentityPolicyOperatorEqualityFamilyOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///  "title": "IdentityPolicyOperatorEqualityFamilyOperand",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorLiteralOperand"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorAttributeOperand"
     ///    }
     ///  ]
     ///}
@@ -8266,31 +5849,31 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyOperand {
-        LiteralOperand(IdentityPolicyOperatorViewLiteralOperand),
-        AttributeOperand(IdentityPolicyOperatorViewAttributeOperand),
+    pub enum IdentityPolicyOperatorEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyOperatorLiteralOperand),
+        AttributeOperand(IdentityPolicyOperatorAttributeOperand),
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperand>
-        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    impl ::std::convert::From<IdentityPolicyOperatorLiteralOperand>
+        for IdentityPolicyOperatorEqualityFamilyOperand
     {
-        fn from(value: IdentityPolicyOperatorViewLiteralOperand) -> Self {
+        fn from(value: IdentityPolicyOperatorLiteralOperand) -> Self {
             Self::LiteralOperand(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewAttributeOperand>
-        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    impl ::std::convert::From<IdentityPolicyOperatorAttributeOperand>
+        for IdentityPolicyOperatorEqualityFamilyOperand
     {
-        fn from(value: IdentityPolicyOperatorViewAttributeOperand) -> Self {
+        fn from(value: IdentityPolicyOperatorAttributeOperand) -> Self {
             Self::AttributeOperand(value)
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyPredicate`
+    ///`IdentityPolicyOperatorEqualityFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorEqualityFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "eq",
@@ -8311,13 +5894,13 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    pub enum IdentityPolicyOperatorEqualityFamilyPredicate {
         #[serde(rename = "eq")]
         Eq,
         #[serde(rename = "ne")]
         Ne,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorEqualityFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Eq => f.write_str("eq"),
@@ -8325,7 +5908,7 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorEqualityFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -8335,14 +5918,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorEqualityFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+        for IdentityPolicyOperatorEqualityFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8352,7 +5935,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+        for IdentityPolicyOperatorEqualityFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8361,13 +5944,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewLiteralOperand`
+    ///`IdentityPolicyOperatorLiteralOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewLiteralOperand",
+    ///  "title": "IdentityPolicyOperatorLiteralOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -8484,29 +6067,29 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewLiteralOperand {
+    pub enum IdentityPolicyOperatorLiteralOperand {
         #[serde(rename = "string")]
         String {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
-            value: IdentityPolicyOperatorViewLiteralOperandValue,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
+            value: IdentityPolicyOperatorLiteralOperandValue,
         },
         #[serde(rename = "boolean")]
         Boolean {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
             value: bool,
         },
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
             value: i64,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
-            value: IdentityPolicyOperatorViewLiteralOperandValue,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
+            value: IdentityPolicyOperatorLiteralOperandValue,
         },
     }
-    ///`IdentityPolicyOperatorViewLiteralOperandKind`
+    ///`IdentityPolicyOperatorLiteralOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -8531,18 +6114,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewLiteralOperandKind {
+    pub enum IdentityPolicyOperatorLiteralOperandKind {
         #[serde(rename = "literal")]
         Literal,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorLiteralOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Literal => f.write_str("literal"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -8551,15 +6134,13 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandKind
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -8567,9 +6148,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandKind
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -8577,7 +6156,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewLiteralOperandValue`
+    ///`IdentityPolicyOperatorLiteralOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -8590,21 +6169,21 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewLiteralOperandValue(
+    pub struct IdentityPolicyOperatorLiteralOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorLiteralOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperandValue> for ::std::string::String {
-        fn from(value: IdentityPolicyOperatorViewLiteralOperandValue) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorLiteralOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorLiteralOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -8613,15 +6192,13 @@ pub mod policies_get {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandValue
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -8629,9 +6206,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandValue
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -8639,7 +6214,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -8651,13 +6226,13 @@ pub mod policies_get {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewMembershipFamily`
+    ///`IdentityPolicyOperatorMembershipFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewMembershipFamily",
+    ///  "title": "IdentityPolicyOperatorMembershipFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -8672,10 +6247,10 @@ pub mod policies_get {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewSetOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorSetOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorMembershipFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "in",
@@ -8689,15 +6264,15 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewMembershipFamily {
+    pub struct IdentityPolicyOperatorMembershipFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewMembershipFamilyFamily,
+        pub family: IdentityPolicyOperatorMembershipFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewSetOperand,
+        pub operand: IdentityPolicyOperatorSetOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewMembershipFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorMembershipFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewMembershipFamilyFamily`
+    ///`IdentityPolicyOperatorMembershipFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -8722,18 +6297,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewMembershipFamilyFamily {
+    pub enum IdentityPolicyOperatorMembershipFamilyFamily {
         #[serde(rename = "membership")]
         Membership,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorMembershipFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Membership => f.write_str("membership"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorMembershipFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -8742,14 +6317,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorMembershipFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyFamily
+        for IdentityPolicyOperatorMembershipFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8759,7 +6334,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyFamily
+        for IdentityPolicyOperatorMembershipFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8768,13 +6343,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewMembershipFamilyPredicate`
+    ///`IdentityPolicyOperatorMembershipFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorMembershipFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "in",
@@ -8795,13 +6370,13 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    pub enum IdentityPolicyOperatorMembershipFamilyPredicate {
         #[serde(rename = "in")]
         In,
         #[serde(rename = "notIn")]
         NotIn,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorMembershipFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::In => f.write_str("in"),
@@ -8809,7 +6384,7 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorMembershipFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -8819,14 +6394,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorMembershipFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+        for IdentityPolicyOperatorMembershipFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8836,7 +6411,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+        for IdentityPolicyOperatorMembershipFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8845,13 +6420,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperand`
+    ///`IdentityPolicyOperatorNumericLiteralOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewNumericLiteralOperand",
+    ///  "title": "IdentityPolicyOperatorNumericLiteralOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -8915,19 +6490,19 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewNumericLiteralOperand {
+    pub enum IdentityPolicyOperatorNumericLiteralOperand {
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            kind: IdentityPolicyOperatorNumericLiteralOperandKind,
             value: i64,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
-            value: IdentityPolicyOperatorViewNumericLiteralOperandValue,
+            kind: IdentityPolicyOperatorNumericLiteralOperandKind,
+            value: IdentityPolicyOperatorNumericLiteralOperandValue,
         },
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperandKind`
+    ///`IdentityPolicyOperatorNumericLiteralOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -8952,18 +6527,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    pub enum IdentityPolicyOperatorNumericLiteralOperandKind {
         #[serde(rename = "literal")]
         Literal,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorNumericLiteralOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Literal => f.write_str("literal"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorNumericLiteralOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -8972,14 +6547,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorNumericLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+        for IdentityPolicyOperatorNumericLiteralOperandKind
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8989,7 +6564,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+        for IdentityPolicyOperatorNumericLiteralOperandKind
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -8998,7 +6573,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperandValue`
+    ///`IdentityPolicyOperatorNumericLiteralOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -9013,23 +6588,23 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewNumericLiteralOperandValue(
+    pub struct IdentityPolicyOperatorNumericLiteralOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewNumericLiteralOperandValue>
+    impl ::std::convert::From<IdentityPolicyOperatorNumericLiteralOperandValue>
         for ::std::string::String
     {
-        fn from(value: IdentityPolicyOperatorViewNumericLiteralOperandValue) -> Self {
+        fn from(value: IdentityPolicyOperatorNumericLiteralOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 64usize {
@@ -9054,14 +6629,14 @@ pub mod policies_get {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+        for IdentityPolicyOperatorNumericLiteralOperandValue
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -9071,7 +6646,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+        for IdentityPolicyOperatorNumericLiteralOperandValue
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -9080,7 +6655,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorNumericLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -9092,13 +6667,13 @@ pub mod policies_get {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewOrderingFamily`
+    ///`IdentityPolicyOperatorOrderingFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewOrderingFamily",
+    ///  "title": "IdentityPolicyOperatorOrderingFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -9113,10 +6688,10 @@ pub mod policies_get {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewNumericLiteralOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorNumericLiteralOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorOrderingFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "gt",
@@ -9132,15 +6707,15 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewOrderingFamily {
+    pub struct IdentityPolicyOperatorOrderingFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewOrderingFamilyFamily,
+        pub family: IdentityPolicyOperatorOrderingFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewNumericLiteralOperand,
+        pub operand: IdentityPolicyOperatorNumericLiteralOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewOrderingFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorOrderingFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewOrderingFamilyFamily`
+    ///`IdentityPolicyOperatorOrderingFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -9165,18 +6740,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewOrderingFamilyFamily {
+    pub enum IdentityPolicyOperatorOrderingFamilyFamily {
         #[serde(rename = "ordering")]
         Ordering,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorOrderingFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Ordering => f.write_str("ordering"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorOrderingFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -9185,14 +6760,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorOrderingFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyFamily
+        for IdentityPolicyOperatorOrderingFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -9201,9 +6776,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorOrderingFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -9211,13 +6784,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewOrderingFamilyPredicate`
+    ///`IdentityPolicyOperatorOrderingFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorOrderingFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "gt",
@@ -9240,7 +6813,7 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    pub enum IdentityPolicyOperatorOrderingFamilyPredicate {
         #[serde(rename = "gt")]
         Gt,
         #[serde(rename = "ge")]
@@ -9250,7 +6823,7 @@ pub mod policies_get {
         #[serde(rename = "le")]
         Le,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorOrderingFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Gt => f.write_str("gt"),
@@ -9260,7 +6833,7 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorOrderingFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -9272,14 +6845,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorOrderingFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+        for IdentityPolicyOperatorOrderingFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -9289,7 +6862,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+        for IdentityPolicyOperatorOrderingFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -9298,13 +6871,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperand`
+    ///`IdentityPolicyOperatorPatternOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewPatternOperand",
+    ///  "title": "IdentityPolicyOperatorPatternOperand",
     ///  "type": "object",
     ///  "required": [
     ///    "kind",
@@ -9336,16 +6909,16 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewPatternOperand {
+    pub struct IdentityPolicyOperatorPatternOperand {
         #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyOperatorViewPatternOperandKind,
+        pub kind: IdentityPolicyOperatorPatternOperandKind,
         #[redact(sensitivity = public)]
-        pub value: IdentityPolicyOperatorViewPatternOperandValue,
+        pub value: IdentityPolicyOperatorPatternOperandValue,
         #[serde(rename = "valueType")]
         #[redact(sensitivity = public)]
-        pub value_type: IdentityPolicyOperatorViewPatternOperandValueType,
+        pub value_type: IdentityPolicyOperatorPatternOperandValueType,
     }
-    ///`IdentityPolicyOperatorViewPatternOperandKind`
+    ///`IdentityPolicyOperatorPatternOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -9370,18 +6943,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewPatternOperandKind {
+    pub enum IdentityPolicyOperatorPatternOperandKind {
         #[serde(rename = "pattern")]
         Pattern,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorPatternOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Pattern => f.write_str("pattern"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -9390,15 +6963,13 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandKind
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -9406,9 +6977,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandKind
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -9416,7 +6985,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperandValue`
+    ///`IdentityPolicyOperatorPatternOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -9430,21 +6999,21 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewPatternOperandValue(
+    pub struct IdentityPolicyOperatorPatternOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorPatternOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewPatternOperandValue> for ::std::string::String {
-        fn from(value: IdentityPolicyOperatorViewPatternOperandValue) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorPatternOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorPatternOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -9456,15 +7025,13 @@ pub mod policies_get {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValue
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -9472,9 +7039,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValue
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -9482,7 +7047,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewPatternOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorPatternOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -9494,7 +7059,7 @@ pub mod policies_get {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperandValueType`
+    ///`IdentityPolicyOperatorPatternOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -9519,18 +7084,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewPatternOperandValueType {
+    pub enum IdentityPolicyOperatorPatternOperandValueType {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::fmt::Display for IdentityPolicyOperatorPatternOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -9539,14 +7104,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValueType
+        for IdentityPolicyOperatorPatternOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -9556,7 +7121,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValueType
+        for IdentityPolicyOperatorPatternOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -9565,13 +7130,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewSetOperand`
+    ///`IdentityPolicyOperatorSetOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewSetOperand",
+    ///  "title": "IdentityPolicyOperatorSetOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -9712,29 +7277,29 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewSetOperand {
+    pub enum IdentityPolicyOperatorSetOperand {
         #[serde(rename = "string")]
         String {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
-            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+            kind: IdentityPolicyOperatorSetOperandKind,
+            values: Vec<IdentityPolicyOperatorSetOperandValuesItem>,
         },
         #[serde(rename = "boolean")]
         Boolean {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
+            kind: IdentityPolicyOperatorSetOperandKind,
             values: Vec<bool>,
         },
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
+            kind: IdentityPolicyOperatorSetOperandKind,
             values: Vec<i64>,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
-            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+            kind: IdentityPolicyOperatorSetOperandKind,
+            values: Vec<IdentityPolicyOperatorSetOperandValuesItem>,
         },
     }
-    ///`IdentityPolicyOperatorViewSetOperandKind`
+    ///`IdentityPolicyOperatorSetOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -9759,18 +7324,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewSetOperandKind {
+    pub enum IdentityPolicyOperatorSetOperandKind {
         #[serde(rename = "set")]
         Set,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorSetOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Set => f.write_str("set"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -9779,13 +7344,13 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -9793,7 +7358,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -9801,7 +7366,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewSetOperandValuesItem`
+    ///`IdentityPolicyOperatorSetOperandValuesItem`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -9814,23 +7379,21 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewSetOperandValuesItem(
+    pub struct IdentityPolicyOperatorSetOperandValuesItem(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::ops::Deref for IdentityPolicyOperatorSetOperandValuesItem {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewSetOperandValuesItem>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyOperatorViewSetOperandValuesItem) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorSetOperandValuesItem> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorSetOperandValuesItem) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandValuesItem {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -9839,14 +7402,14 @@ pub mod policies_get {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorSetOperandValuesItem {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewSetOperandValuesItem
+        for IdentityPolicyOperatorSetOperandValuesItem
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -9855,9 +7418,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewSetOperandValuesItem
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorSetOperandValuesItem {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -9865,7 +7426,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorSetOperandValuesItem {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -9877,13 +7438,13 @@ pub mod policies_get {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewStringFamily`
+    ///`IdentityPolicyOperatorStringFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewStringFamily",
+    ///  "title": "IdentityPolicyOperatorStringFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -9898,10 +7459,10 @@ pub mod policies_get {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewPatternOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorPatternOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorStringFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "startsWith",
@@ -9918,15 +7479,15 @@ pub mod policies_get {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewStringFamily {
+    pub struct IdentityPolicyOperatorStringFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewStringFamilyFamily,
+        pub family: IdentityPolicyOperatorStringFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewPatternOperand,
+        pub operand: IdentityPolicyOperatorPatternOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewStringFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorStringFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewStringFamilyFamily`
+    ///`IdentityPolicyOperatorStringFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -9951,18 +7512,18 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewStringFamilyFamily {
+    pub enum IdentityPolicyOperatorStringFamilyFamily {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorStringFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorStringFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -9971,15 +7532,13 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyFamily
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -9987,9 +7546,7 @@ pub mod policies_get {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -9997,13 +7554,13 @@ pub mod policies_get {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewStringFamilyPredicate`
+    ///`IdentityPolicyOperatorStringFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorStringFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "startsWith",
@@ -10027,7 +7584,7 @@ pub mod policies_get {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewStringFamilyPredicate {
+    pub enum IdentityPolicyOperatorStringFamilyPredicate {
         #[serde(rename = "startsWith")]
         StartsWith,
         #[serde(rename = "endsWith")]
@@ -10039,7 +7596,7 @@ pub mod policies_get {
         #[serde(rename = "regex")]
         Regex,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorStringFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::StartsWith => f.write_str("startsWith"),
@@ -10050,7 +7607,7 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorStringFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -10063,14 +7620,14 @@ pub mod policies_get {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorStringFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyPredicate
+        for IdentityPolicyOperatorStringFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -10080,7 +7637,7 @@ pub mod policies_get {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyPredicate
+        for IdentityPolicyOperatorStringFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -10114,21 +7671,7 @@ pub mod policies_get {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyOperatorView",
-    ///          "oneOf": [
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///            }
-    ///          ]
+    ///          "$ref": "#/definitions/IdentityPolicyOperator"
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -10306,21 +7849,7 @@ pub mod policies_get {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyOperatorView",
-    ///                "oneOf": [
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///                  }
-    ///                ]
+    ///                "$ref": "#/definitions/IdentityPolicyOperator"
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -10403,7 +7932,7 @@ pub mod policies_get {
         "identity",
         "identity.policies-get",
         "v1",
-        "sha256:9438224af3ba135a4748a9539f7d00b06d8ed9f1f6c29d4d44828d1bb3331ffb",
+        "sha256:6318a5a723250bcc82141eaf1f030c25e66d98e77d6aea4f79735fe3261f4d12",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -10599,21 +8128,7 @@ pub mod policies_list {
     ///                      "type": "string"
     ///                    },
     ///                    "operator": {
-    ///                      "title": "IdentityPolicyOperatorView",
-    ///                      "oneOf": [
-    ///                        {
-    ///                          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///                        },
-    ///                        {
-    ///                          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///                        },
-    ///                        {
-    ///                          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///                        },
-    ///                        {
-    ///                          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///                        }
-    ///                      ]
+    ///                      "$ref": "#/definitions/IdentityPolicyOperator"
     ///                    }
     ///                  },
     ///                  "additionalProperties": false
@@ -10704,21 +8219,7 @@ pub mod policies_list {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyOperatorView",
-    ///      "oneOf": [
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///        }
-    ///      ]
+    ///      "$ref": "#/definitions/IdentityPolicyOperator"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -10731,7 +8232,7 @@ pub mod policies_list {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyOperatorView,
+        pub operator: IdentityPolicyOperator,
     }
     ///`IdentityPolicyObligationsView`
     ///
@@ -10866,25 +8367,25 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorView`
+    ///`IdentityPolicyOperator`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorView",
+    ///  "title": "IdentityPolicyOperator",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorEqualityFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorOrderingFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorMembershipFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorStringFamily"
     ///    }
     ///  ]
     ///}
@@ -10892,41 +8393,39 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
-    pub enum IdentityPolicyOperatorView {
-        EqualityFamily(IdentityPolicyOperatorViewEqualityFamily),
-        OrderingFamily(IdentityPolicyOperatorViewOrderingFamily),
-        MembershipFamily(IdentityPolicyOperatorViewMembershipFamily),
-        StringFamily(IdentityPolicyOperatorViewStringFamily),
+    pub enum IdentityPolicyOperator {
+        EqualityFamily(IdentityPolicyOperatorEqualityFamily),
+        OrderingFamily(IdentityPolicyOperatorOrderingFamily),
+        MembershipFamily(IdentityPolicyOperatorMembershipFamily),
+        StringFamily(IdentityPolicyOperatorStringFamily),
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewEqualityFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewEqualityFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorEqualityFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorEqualityFamily) -> Self {
             Self::EqualityFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewOrderingFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewOrderingFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorOrderingFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorOrderingFamily) -> Self {
             Self::OrderingFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewMembershipFamily>
-        for IdentityPolicyOperatorView
-    {
-        fn from(value: IdentityPolicyOperatorViewMembershipFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorMembershipFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorMembershipFamily) -> Self {
             Self::MembershipFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewStringFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewStringFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorStringFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorStringFamily) -> Self {
             Self::StringFamily(value)
         }
     }
-    ///`IdentityPolicyOperatorViewAttributeOperand`
+    ///`IdentityPolicyOperatorAttributeOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewAttributeOperand",
+    ///  "title": "IdentityPolicyOperatorAttributeOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -10968,15 +8467,15 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "kind", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewAttributeOperand {
+    pub enum IdentityPolicyOperatorAttributeOperand {
         #[serde(rename = "attribute")]
         Attribute {
-            attribute: IdentityPolicyOperatorViewAttributeOperandAttribute,
+            attribute: IdentityPolicyOperatorAttributeOperandAttribute,
             #[serde(rename = "valueType")]
-            value_type: IdentityPolicyOperatorViewAttributeOperandValueType,
+            value_type: IdentityPolicyOperatorAttributeOperandValueType,
         },
     }
-    ///`IdentityPolicyOperatorViewAttributeOperandAttribute`
+    ///`IdentityPolicyOperatorAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -11006,7 +8505,7 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewAttributeOperandAttribute {
+    pub enum IdentityPolicyOperatorAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -11020,7 +8519,7 @@ pub mod policies_list {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::fmt::Display for IdentityPolicyOperatorAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -11032,7 +8531,7 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::str::FromStr for IdentityPolicyOperatorAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -11046,14 +8545,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandAttribute
+        for IdentityPolicyOperatorAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11063,7 +8562,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandAttribute
+        for IdentityPolicyOperatorAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11072,7 +8571,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewAttributeOperandValueType`
+    ///`IdentityPolicyOperatorAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -11097,18 +8596,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewAttributeOperandValueType {
+    pub enum IdentityPolicyOperatorAttributeOperandValueType {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::fmt::Display for IdentityPolicyOperatorAttributeOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::str::FromStr for IdentityPolicyOperatorAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -11117,14 +8616,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandValueType
+        for IdentityPolicyOperatorAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11134,7 +8633,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandValueType
+        for IdentityPolicyOperatorAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11143,13 +8642,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamily`
+    ///`IdentityPolicyOperatorEqualityFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamily",
+    ///  "title": "IdentityPolicyOperatorEqualityFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -11164,18 +8663,18 @@ pub mod policies_list {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///      "title": "IdentityPolicyOperatorEqualityFamilyOperand",
     ///      "oneOf": [
     ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorLiteralOperand"
     ///        },
     ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorAttributeOperand"
     ///        }
     ///      ]
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorEqualityFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "eq",
@@ -11189,15 +8688,15 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewEqualityFamily {
+    pub struct IdentityPolicyOperatorEqualityFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewEqualityFamilyFamily,
+        pub family: IdentityPolicyOperatorEqualityFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewEqualityFamilyOperand,
+        pub operand: IdentityPolicyOperatorEqualityFamilyOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewEqualityFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorEqualityFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyFamily`
+    ///`IdentityPolicyOperatorEqualityFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -11222,18 +8721,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyFamily {
+    pub enum IdentityPolicyOperatorEqualityFamilyFamily {
         #[serde(rename = "equality")]
         Equality,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorEqualityFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Equality => f.write_str("equality"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorEqualityFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -11242,14 +8741,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyFamily
+        for IdentityPolicyOperatorEqualityFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11258,9 +8757,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -11268,19 +8765,19 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyOperand`
+    ///`IdentityPolicyOperatorEqualityFamilyOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///  "title": "IdentityPolicyOperatorEqualityFamilyOperand",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorLiteralOperand"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorAttributeOperand"
     ///    }
     ///  ]
     ///}
@@ -11288,31 +8785,31 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyOperand {
-        LiteralOperand(IdentityPolicyOperatorViewLiteralOperand),
-        AttributeOperand(IdentityPolicyOperatorViewAttributeOperand),
+    pub enum IdentityPolicyOperatorEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyOperatorLiteralOperand),
+        AttributeOperand(IdentityPolicyOperatorAttributeOperand),
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperand>
-        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    impl ::std::convert::From<IdentityPolicyOperatorLiteralOperand>
+        for IdentityPolicyOperatorEqualityFamilyOperand
     {
-        fn from(value: IdentityPolicyOperatorViewLiteralOperand) -> Self {
+        fn from(value: IdentityPolicyOperatorLiteralOperand) -> Self {
             Self::LiteralOperand(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewAttributeOperand>
-        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    impl ::std::convert::From<IdentityPolicyOperatorAttributeOperand>
+        for IdentityPolicyOperatorEqualityFamilyOperand
     {
-        fn from(value: IdentityPolicyOperatorViewAttributeOperand) -> Self {
+        fn from(value: IdentityPolicyOperatorAttributeOperand) -> Self {
             Self::AttributeOperand(value)
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyPredicate`
+    ///`IdentityPolicyOperatorEqualityFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorEqualityFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "eq",
@@ -11333,13 +8830,13 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    pub enum IdentityPolicyOperatorEqualityFamilyPredicate {
         #[serde(rename = "eq")]
         Eq,
         #[serde(rename = "ne")]
         Ne,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorEqualityFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Eq => f.write_str("eq"),
@@ -11347,7 +8844,7 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorEqualityFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -11357,14 +8854,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorEqualityFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+        for IdentityPolicyOperatorEqualityFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11374,7 +8871,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+        for IdentityPolicyOperatorEqualityFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11383,13 +8880,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewLiteralOperand`
+    ///`IdentityPolicyOperatorLiteralOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewLiteralOperand",
+    ///  "title": "IdentityPolicyOperatorLiteralOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -11506,29 +9003,29 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewLiteralOperand {
+    pub enum IdentityPolicyOperatorLiteralOperand {
         #[serde(rename = "string")]
         String {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
-            value: IdentityPolicyOperatorViewLiteralOperandValue,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
+            value: IdentityPolicyOperatorLiteralOperandValue,
         },
         #[serde(rename = "boolean")]
         Boolean {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
             value: bool,
         },
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
             value: i64,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
-            value: IdentityPolicyOperatorViewLiteralOperandValue,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
+            value: IdentityPolicyOperatorLiteralOperandValue,
         },
     }
-    ///`IdentityPolicyOperatorViewLiteralOperandKind`
+    ///`IdentityPolicyOperatorLiteralOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -11553,18 +9050,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewLiteralOperandKind {
+    pub enum IdentityPolicyOperatorLiteralOperandKind {
         #[serde(rename = "literal")]
         Literal,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorLiteralOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Literal => f.write_str("literal"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -11573,15 +9070,13 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandKind
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -11589,9 +9084,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandKind
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -11599,7 +9092,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewLiteralOperandValue`
+    ///`IdentityPolicyOperatorLiteralOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -11612,21 +9105,21 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewLiteralOperandValue(
+    pub struct IdentityPolicyOperatorLiteralOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorLiteralOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperandValue> for ::std::string::String {
-        fn from(value: IdentityPolicyOperatorViewLiteralOperandValue) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorLiteralOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorLiteralOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -11635,15 +9128,13 @@ pub mod policies_list {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandValue
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -11651,9 +9142,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandValue
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -11661,7 +9150,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -11673,13 +9162,13 @@ pub mod policies_list {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewMembershipFamily`
+    ///`IdentityPolicyOperatorMembershipFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewMembershipFamily",
+    ///  "title": "IdentityPolicyOperatorMembershipFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -11694,10 +9183,10 @@ pub mod policies_list {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewSetOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorSetOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorMembershipFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "in",
@@ -11711,15 +9200,15 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewMembershipFamily {
+    pub struct IdentityPolicyOperatorMembershipFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewMembershipFamilyFamily,
+        pub family: IdentityPolicyOperatorMembershipFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewSetOperand,
+        pub operand: IdentityPolicyOperatorSetOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewMembershipFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorMembershipFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewMembershipFamilyFamily`
+    ///`IdentityPolicyOperatorMembershipFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -11744,18 +9233,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewMembershipFamilyFamily {
+    pub enum IdentityPolicyOperatorMembershipFamilyFamily {
         #[serde(rename = "membership")]
         Membership,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorMembershipFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Membership => f.write_str("membership"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorMembershipFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -11764,14 +9253,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorMembershipFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyFamily
+        for IdentityPolicyOperatorMembershipFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11781,7 +9270,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyFamily
+        for IdentityPolicyOperatorMembershipFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11790,13 +9279,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewMembershipFamilyPredicate`
+    ///`IdentityPolicyOperatorMembershipFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorMembershipFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "in",
@@ -11817,13 +9306,13 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    pub enum IdentityPolicyOperatorMembershipFamilyPredicate {
         #[serde(rename = "in")]
         In,
         #[serde(rename = "notIn")]
         NotIn,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorMembershipFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::In => f.write_str("in"),
@@ -11831,7 +9320,7 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorMembershipFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -11841,14 +9330,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorMembershipFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+        for IdentityPolicyOperatorMembershipFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11858,7 +9347,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+        for IdentityPolicyOperatorMembershipFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -11867,13 +9356,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperand`
+    ///`IdentityPolicyOperatorNumericLiteralOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewNumericLiteralOperand",
+    ///  "title": "IdentityPolicyOperatorNumericLiteralOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -11937,19 +9426,19 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewNumericLiteralOperand {
+    pub enum IdentityPolicyOperatorNumericLiteralOperand {
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            kind: IdentityPolicyOperatorNumericLiteralOperandKind,
             value: i64,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
-            value: IdentityPolicyOperatorViewNumericLiteralOperandValue,
+            kind: IdentityPolicyOperatorNumericLiteralOperandKind,
+            value: IdentityPolicyOperatorNumericLiteralOperandValue,
         },
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperandKind`
+    ///`IdentityPolicyOperatorNumericLiteralOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -11974,18 +9463,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    pub enum IdentityPolicyOperatorNumericLiteralOperandKind {
         #[serde(rename = "literal")]
         Literal,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorNumericLiteralOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Literal => f.write_str("literal"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorNumericLiteralOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -11994,14 +9483,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorNumericLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+        for IdentityPolicyOperatorNumericLiteralOperandKind
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12011,7 +9500,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+        for IdentityPolicyOperatorNumericLiteralOperandKind
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12020,7 +9509,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperandValue`
+    ///`IdentityPolicyOperatorNumericLiteralOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -12035,23 +9524,23 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewNumericLiteralOperandValue(
+    pub struct IdentityPolicyOperatorNumericLiteralOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewNumericLiteralOperandValue>
+    impl ::std::convert::From<IdentityPolicyOperatorNumericLiteralOperandValue>
         for ::std::string::String
     {
-        fn from(value: IdentityPolicyOperatorViewNumericLiteralOperandValue) -> Self {
+        fn from(value: IdentityPolicyOperatorNumericLiteralOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 64usize {
@@ -12076,14 +9565,14 @@ pub mod policies_list {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+        for IdentityPolicyOperatorNumericLiteralOperandValue
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12093,7 +9582,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+        for IdentityPolicyOperatorNumericLiteralOperandValue
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12102,7 +9591,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorNumericLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -12114,13 +9603,13 @@ pub mod policies_list {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewOrderingFamily`
+    ///`IdentityPolicyOperatorOrderingFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewOrderingFamily",
+    ///  "title": "IdentityPolicyOperatorOrderingFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -12135,10 +9624,10 @@ pub mod policies_list {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewNumericLiteralOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorNumericLiteralOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorOrderingFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "gt",
@@ -12154,15 +9643,15 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewOrderingFamily {
+    pub struct IdentityPolicyOperatorOrderingFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewOrderingFamilyFamily,
+        pub family: IdentityPolicyOperatorOrderingFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewNumericLiteralOperand,
+        pub operand: IdentityPolicyOperatorNumericLiteralOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewOrderingFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorOrderingFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewOrderingFamilyFamily`
+    ///`IdentityPolicyOperatorOrderingFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -12187,18 +9676,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewOrderingFamilyFamily {
+    pub enum IdentityPolicyOperatorOrderingFamilyFamily {
         #[serde(rename = "ordering")]
         Ordering,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorOrderingFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Ordering => f.write_str("ordering"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorOrderingFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -12207,14 +9696,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorOrderingFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyFamily
+        for IdentityPolicyOperatorOrderingFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12223,9 +9712,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorOrderingFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -12233,13 +9720,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewOrderingFamilyPredicate`
+    ///`IdentityPolicyOperatorOrderingFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorOrderingFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "gt",
@@ -12262,7 +9749,7 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    pub enum IdentityPolicyOperatorOrderingFamilyPredicate {
         #[serde(rename = "gt")]
         Gt,
         #[serde(rename = "ge")]
@@ -12272,7 +9759,7 @@ pub mod policies_list {
         #[serde(rename = "le")]
         Le,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorOrderingFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Gt => f.write_str("gt"),
@@ -12282,7 +9769,7 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorOrderingFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -12294,14 +9781,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorOrderingFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+        for IdentityPolicyOperatorOrderingFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12311,7 +9798,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+        for IdentityPolicyOperatorOrderingFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12320,13 +9807,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperand`
+    ///`IdentityPolicyOperatorPatternOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewPatternOperand",
+    ///  "title": "IdentityPolicyOperatorPatternOperand",
     ///  "type": "object",
     ///  "required": [
     ///    "kind",
@@ -12358,16 +9845,16 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewPatternOperand {
+    pub struct IdentityPolicyOperatorPatternOperand {
         #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyOperatorViewPatternOperandKind,
+        pub kind: IdentityPolicyOperatorPatternOperandKind,
         #[redact(sensitivity = public)]
-        pub value: IdentityPolicyOperatorViewPatternOperandValue,
+        pub value: IdentityPolicyOperatorPatternOperandValue,
         #[serde(rename = "valueType")]
         #[redact(sensitivity = public)]
-        pub value_type: IdentityPolicyOperatorViewPatternOperandValueType,
+        pub value_type: IdentityPolicyOperatorPatternOperandValueType,
     }
-    ///`IdentityPolicyOperatorViewPatternOperandKind`
+    ///`IdentityPolicyOperatorPatternOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -12392,18 +9879,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewPatternOperandKind {
+    pub enum IdentityPolicyOperatorPatternOperandKind {
         #[serde(rename = "pattern")]
         Pattern,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorPatternOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Pattern => f.write_str("pattern"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -12412,15 +9899,13 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandKind
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -12428,9 +9913,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandKind
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -12438,7 +9921,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperandValue`
+    ///`IdentityPolicyOperatorPatternOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -12452,21 +9935,21 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewPatternOperandValue(
+    pub struct IdentityPolicyOperatorPatternOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorPatternOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewPatternOperandValue> for ::std::string::String {
-        fn from(value: IdentityPolicyOperatorViewPatternOperandValue) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorPatternOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorPatternOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -12478,15 +9961,13 @@ pub mod policies_list {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValue
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -12494,9 +9975,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValue
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -12504,7 +9983,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewPatternOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorPatternOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -12516,7 +9995,7 @@ pub mod policies_list {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperandValueType`
+    ///`IdentityPolicyOperatorPatternOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -12541,18 +10020,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewPatternOperandValueType {
+    pub enum IdentityPolicyOperatorPatternOperandValueType {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::fmt::Display for IdentityPolicyOperatorPatternOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -12561,14 +10040,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValueType
+        for IdentityPolicyOperatorPatternOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12578,7 +10057,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValueType
+        for IdentityPolicyOperatorPatternOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12587,13 +10066,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewSetOperand`
+    ///`IdentityPolicyOperatorSetOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewSetOperand",
+    ///  "title": "IdentityPolicyOperatorSetOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -12734,29 +10213,29 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewSetOperand {
+    pub enum IdentityPolicyOperatorSetOperand {
         #[serde(rename = "string")]
         String {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
-            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+            kind: IdentityPolicyOperatorSetOperandKind,
+            values: Vec<IdentityPolicyOperatorSetOperandValuesItem>,
         },
         #[serde(rename = "boolean")]
         Boolean {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
+            kind: IdentityPolicyOperatorSetOperandKind,
             values: Vec<bool>,
         },
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
+            kind: IdentityPolicyOperatorSetOperandKind,
             values: Vec<i64>,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
-            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+            kind: IdentityPolicyOperatorSetOperandKind,
+            values: Vec<IdentityPolicyOperatorSetOperandValuesItem>,
         },
     }
-    ///`IdentityPolicyOperatorViewSetOperandKind`
+    ///`IdentityPolicyOperatorSetOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -12781,18 +10260,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewSetOperandKind {
+    pub enum IdentityPolicyOperatorSetOperandKind {
         #[serde(rename = "set")]
         Set,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorSetOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Set => f.write_str("set"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -12801,13 +10280,13 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -12815,7 +10294,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -12823,7 +10302,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewSetOperandValuesItem`
+    ///`IdentityPolicyOperatorSetOperandValuesItem`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -12836,23 +10315,21 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewSetOperandValuesItem(
+    pub struct IdentityPolicyOperatorSetOperandValuesItem(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::ops::Deref for IdentityPolicyOperatorSetOperandValuesItem {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewSetOperandValuesItem>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyOperatorViewSetOperandValuesItem) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorSetOperandValuesItem> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorSetOperandValuesItem) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandValuesItem {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -12861,14 +10338,14 @@ pub mod policies_list {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorSetOperandValuesItem {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewSetOperandValuesItem
+        for IdentityPolicyOperatorSetOperandValuesItem
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -12877,9 +10354,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewSetOperandValuesItem
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorSetOperandValuesItem {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -12887,7 +10362,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorSetOperandValuesItem {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -12899,13 +10374,13 @@ pub mod policies_list {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewStringFamily`
+    ///`IdentityPolicyOperatorStringFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewStringFamily",
+    ///  "title": "IdentityPolicyOperatorStringFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -12920,10 +10395,10 @@ pub mod policies_list {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewPatternOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorPatternOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorStringFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "startsWith",
@@ -12940,15 +10415,15 @@ pub mod policies_list {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewStringFamily {
+    pub struct IdentityPolicyOperatorStringFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewStringFamilyFamily,
+        pub family: IdentityPolicyOperatorStringFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewPatternOperand,
+        pub operand: IdentityPolicyOperatorPatternOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewStringFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorStringFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewStringFamilyFamily`
+    ///`IdentityPolicyOperatorStringFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -12973,18 +10448,18 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewStringFamilyFamily {
+    pub enum IdentityPolicyOperatorStringFamilyFamily {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorStringFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorStringFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -12993,15 +10468,13 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyFamily
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -13009,9 +10482,7 @@ pub mod policies_list {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -13019,13 +10490,13 @@ pub mod policies_list {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewStringFamilyPredicate`
+    ///`IdentityPolicyOperatorStringFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorStringFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "startsWith",
@@ -13049,7 +10520,7 @@ pub mod policies_list {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewStringFamilyPredicate {
+    pub enum IdentityPolicyOperatorStringFamilyPredicate {
         #[serde(rename = "startsWith")]
         StartsWith,
         #[serde(rename = "endsWith")]
@@ -13061,7 +10532,7 @@ pub mod policies_list {
         #[serde(rename = "regex")]
         Regex,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorStringFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::StartsWith => f.write_str("startsWith"),
@@ -13072,7 +10543,7 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorStringFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -13085,14 +10556,14 @@ pub mod policies_list {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorStringFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyPredicate
+        for IdentityPolicyOperatorStringFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -13102,7 +10573,7 @@ pub mod policies_list {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyPredicate
+        for IdentityPolicyOperatorStringFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -13136,21 +10607,7 @@ pub mod policies_list {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyOperatorView",
-    ///          "oneOf": [
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///            }
-    ///          ]
+    ///          "$ref": "#/definitions/IdentityPolicyOperator"
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -13328,21 +10785,7 @@ pub mod policies_list {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyOperatorView",
-    ///                "oneOf": [
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///                  }
-    ///                ]
+    ///                "$ref": "#/definitions/IdentityPolicyOperator"
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -13436,7 +10879,7 @@ pub mod policies_list {
         "identity",
         "identity.policies-list",
         "v1",
-        "sha256:d1ab0c7aaf9ddc5a6a88b761f62fd891deb074fe1632521ba7d8931ed5794863",
+        "sha256:72d8bdcce36c69a8267b231ec701778606bd7c1b2c780f8fe1010c1b4e17449d",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -13581,21 +11024,7 @@ pub mod policies_update {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyUpdateOperator",
-    ///                "oneOf": [
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyUpdateOperatorEqualityFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyUpdateOperatorOrderingFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyUpdateOperatorMembershipFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyUpdateOperatorStringFamily"
-    ///                  }
-    ///                ]
+    ///                "$ref": "#/definitions/IdentityPolicyOperator"
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -13726,21 +11155,7 @@ pub mod policies_update {
     ///                    "type": "string"
     ///                  },
     ///                  "operator": {
-    ///                    "title": "IdentityPolicyOperatorView",
-    ///                    "oneOf": [
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///                      },
-    ///                      {
-    ///                        "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///                      }
-    ///                    ]
+    ///                    "$ref": "#/definitions/IdentityPolicyOperator"
     ///                  }
     ///                },
     ///                "additionalProperties": false
@@ -13814,21 +11229,7 @@ pub mod policies_update {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyOperatorView",
-    ///      "oneOf": [
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///        }
-    ///      ]
+    ///      "$ref": "#/definitions/IdentityPolicyOperator"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -13841,7 +11242,7 @@ pub mod policies_update {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyOperatorView,
+        pub operator: IdentityPolicyOperator,
     }
     ///`IdentityPolicyObligationsView`
     ///
@@ -13976,25 +11377,25 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorView`
+    ///`IdentityPolicyOperator`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorView",
+    ///  "title": "IdentityPolicyOperator",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorEqualityFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorOrderingFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorMembershipFamily"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorStringFamily"
     ///    }
     ///  ]
     ///}
@@ -14002,41 +11403,39 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
-    pub enum IdentityPolicyOperatorView {
-        EqualityFamily(IdentityPolicyOperatorViewEqualityFamily),
-        OrderingFamily(IdentityPolicyOperatorViewOrderingFamily),
-        MembershipFamily(IdentityPolicyOperatorViewMembershipFamily),
-        StringFamily(IdentityPolicyOperatorViewStringFamily),
+    pub enum IdentityPolicyOperator {
+        EqualityFamily(IdentityPolicyOperatorEqualityFamily),
+        OrderingFamily(IdentityPolicyOperatorOrderingFamily),
+        MembershipFamily(IdentityPolicyOperatorMembershipFamily),
+        StringFamily(IdentityPolicyOperatorStringFamily),
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewEqualityFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewEqualityFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorEqualityFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorEqualityFamily) -> Self {
             Self::EqualityFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewOrderingFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewOrderingFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorOrderingFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorOrderingFamily) -> Self {
             Self::OrderingFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewMembershipFamily>
-        for IdentityPolicyOperatorView
-    {
-        fn from(value: IdentityPolicyOperatorViewMembershipFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorMembershipFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorMembershipFamily) -> Self {
             Self::MembershipFamily(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewStringFamily> for IdentityPolicyOperatorView {
-        fn from(value: IdentityPolicyOperatorViewStringFamily) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorStringFamily> for IdentityPolicyOperator {
+        fn from(value: IdentityPolicyOperatorStringFamily) -> Self {
             Self::StringFamily(value)
         }
     }
-    ///`IdentityPolicyOperatorViewAttributeOperand`
+    ///`IdentityPolicyOperatorAttributeOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewAttributeOperand",
+    ///  "title": "IdentityPolicyOperatorAttributeOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -14078,15 +11477,15 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "kind", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewAttributeOperand {
+    pub enum IdentityPolicyOperatorAttributeOperand {
         #[serde(rename = "attribute")]
         Attribute {
-            attribute: IdentityPolicyOperatorViewAttributeOperandAttribute,
+            attribute: IdentityPolicyOperatorAttributeOperandAttribute,
             #[serde(rename = "valueType")]
-            value_type: IdentityPolicyOperatorViewAttributeOperandValueType,
+            value_type: IdentityPolicyOperatorAttributeOperandValueType,
         },
     }
-    ///`IdentityPolicyOperatorViewAttributeOperandAttribute`
+    ///`IdentityPolicyOperatorAttributeOperandAttribute`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -14116,7 +11515,7 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewAttributeOperandAttribute {
+    pub enum IdentityPolicyOperatorAttributeOperandAttribute {
         #[serde(rename = "principal.kind")]
         PrincipalKind,
         #[serde(rename = "principal.id")]
@@ -14130,7 +11529,7 @@ pub mod policies_update {
         #[serde(rename = "resource.id")]
         ResourceId,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::fmt::Display for IdentityPolicyOperatorAttributeOperandAttribute {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::PrincipalKind => f.write_str("principal.kind"),
@@ -14142,7 +11541,7 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::str::FromStr for IdentityPolicyOperatorAttributeOperandAttribute {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -14156,14 +11555,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandAttribute {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorAttributeOperandAttribute {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandAttribute
+        for IdentityPolicyOperatorAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14173,7 +11572,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandAttribute
+        for IdentityPolicyOperatorAttributeOperandAttribute
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14182,7 +11581,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewAttributeOperandValueType`
+    ///`IdentityPolicyOperatorAttributeOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -14207,18 +11606,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewAttributeOperandValueType {
+    pub enum IdentityPolicyOperatorAttributeOperandValueType {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::fmt::Display for IdentityPolicyOperatorAttributeOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::str::FromStr for IdentityPolicyOperatorAttributeOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -14227,14 +11626,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewAttributeOperandValueType {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorAttributeOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandValueType
+        for IdentityPolicyOperatorAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14244,7 +11643,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewAttributeOperandValueType
+        for IdentityPolicyOperatorAttributeOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14253,13 +11652,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamily`
+    ///`IdentityPolicyOperatorEqualityFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamily",
+    ///  "title": "IdentityPolicyOperatorEqualityFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -14274,18 +11673,18 @@ pub mod policies_update {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///      "title": "IdentityPolicyOperatorEqualityFamilyOperand",
     ///      "oneOf": [
     ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorLiteralOperand"
     ///        },
     ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///          "$ref": "#/definitions/IdentityPolicyOperatorAttributeOperand"
     ///        }
     ///      ]
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorEqualityFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "eq",
@@ -14299,15 +11698,15 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewEqualityFamily {
+    pub struct IdentityPolicyOperatorEqualityFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewEqualityFamilyFamily,
+        pub family: IdentityPolicyOperatorEqualityFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewEqualityFamilyOperand,
+        pub operand: IdentityPolicyOperatorEqualityFamilyOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewEqualityFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorEqualityFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyFamily`
+    ///`IdentityPolicyOperatorEqualityFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -14332,18 +11731,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyFamily {
+    pub enum IdentityPolicyOperatorEqualityFamilyFamily {
         #[serde(rename = "equality")]
         Equality,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorEqualityFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Equality => f.write_str("equality"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorEqualityFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -14352,14 +11751,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyFamily
+        for IdentityPolicyOperatorEqualityFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14368,9 +11767,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorEqualityFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -14378,19 +11775,19 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyOperand`
+    ///`IdentityPolicyOperatorEqualityFamilyOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyOperand",
+    ///  "title": "IdentityPolicyOperatorEqualityFamilyOperand",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewLiteralOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorLiteralOperand"
     ///    },
     ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewAttributeOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorAttributeOperand"
     ///    }
     ///  ]
     ///}
@@ -14398,31 +11795,31 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyOperand {
-        LiteralOperand(IdentityPolicyOperatorViewLiteralOperand),
-        AttributeOperand(IdentityPolicyOperatorViewAttributeOperand),
+    pub enum IdentityPolicyOperatorEqualityFamilyOperand {
+        LiteralOperand(IdentityPolicyOperatorLiteralOperand),
+        AttributeOperand(IdentityPolicyOperatorAttributeOperand),
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperand>
-        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    impl ::std::convert::From<IdentityPolicyOperatorLiteralOperand>
+        for IdentityPolicyOperatorEqualityFamilyOperand
     {
-        fn from(value: IdentityPolicyOperatorViewLiteralOperand) -> Self {
+        fn from(value: IdentityPolicyOperatorLiteralOperand) -> Self {
             Self::LiteralOperand(value)
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewAttributeOperand>
-        for IdentityPolicyOperatorViewEqualityFamilyOperand
+    impl ::std::convert::From<IdentityPolicyOperatorAttributeOperand>
+        for IdentityPolicyOperatorEqualityFamilyOperand
     {
-        fn from(value: IdentityPolicyOperatorViewAttributeOperand) -> Self {
+        fn from(value: IdentityPolicyOperatorAttributeOperand) -> Self {
             Self::AttributeOperand(value)
         }
     }
-    ///`IdentityPolicyOperatorViewEqualityFamilyPredicate`
+    ///`IdentityPolicyOperatorEqualityFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewEqualityFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorEqualityFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "eq",
@@ -14443,13 +11840,13 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    pub enum IdentityPolicyOperatorEqualityFamilyPredicate {
         #[serde(rename = "eq")]
         Eq,
         #[serde(rename = "ne")]
         Ne,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorEqualityFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Eq => f.write_str("eq"),
@@ -14457,7 +11854,7 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorEqualityFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -14467,14 +11864,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewEqualityFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorEqualityFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+        for IdentityPolicyOperatorEqualityFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14484,7 +11881,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewEqualityFamilyPredicate
+        for IdentityPolicyOperatorEqualityFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14493,13 +11890,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewLiteralOperand`
+    ///`IdentityPolicyOperatorLiteralOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewLiteralOperand",
+    ///  "title": "IdentityPolicyOperatorLiteralOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -14616,29 +12013,29 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewLiteralOperand {
+    pub enum IdentityPolicyOperatorLiteralOperand {
         #[serde(rename = "string")]
         String {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
-            value: IdentityPolicyOperatorViewLiteralOperandValue,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
+            value: IdentityPolicyOperatorLiteralOperandValue,
         },
         #[serde(rename = "boolean")]
         Boolean {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
             value: bool,
         },
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
             value: i64,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewLiteralOperandKind,
-            value: IdentityPolicyOperatorViewLiteralOperandValue,
+            kind: IdentityPolicyOperatorLiteralOperandKind,
+            value: IdentityPolicyOperatorLiteralOperandValue,
         },
     }
-    ///`IdentityPolicyOperatorViewLiteralOperandKind`
+    ///`IdentityPolicyOperatorLiteralOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -14663,18 +12060,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewLiteralOperandKind {
+    pub enum IdentityPolicyOperatorLiteralOperandKind {
         #[serde(rename = "literal")]
         Literal,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorLiteralOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Literal => f.write_str("literal"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -14683,15 +12080,13 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandKind
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -14699,9 +12094,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandKind
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -14709,7 +12102,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewLiteralOperandValue`
+    ///`IdentityPolicyOperatorLiteralOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -14722,21 +12115,21 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewLiteralOperandValue(
+    pub struct IdentityPolicyOperatorLiteralOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorLiteralOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewLiteralOperandValue> for ::std::string::String {
-        fn from(value: IdentityPolicyOperatorViewLiteralOperandValue) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorLiteralOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorLiteralOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -14745,15 +12138,13 @@ pub mod policies_update {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandValue
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -14761,9 +12152,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewLiteralOperandValue
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -14771,7 +12160,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewLiteralOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -14783,13 +12172,13 @@ pub mod policies_update {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewMembershipFamily`
+    ///`IdentityPolicyOperatorMembershipFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewMembershipFamily",
+    ///  "title": "IdentityPolicyOperatorMembershipFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -14804,10 +12193,10 @@ pub mod policies_update {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewSetOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorSetOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorMembershipFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "in",
@@ -14821,15 +12210,15 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewMembershipFamily {
+    pub struct IdentityPolicyOperatorMembershipFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewMembershipFamilyFamily,
+        pub family: IdentityPolicyOperatorMembershipFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewSetOperand,
+        pub operand: IdentityPolicyOperatorSetOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewMembershipFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorMembershipFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewMembershipFamilyFamily`
+    ///`IdentityPolicyOperatorMembershipFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -14854,18 +12243,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewMembershipFamilyFamily {
+    pub enum IdentityPolicyOperatorMembershipFamilyFamily {
         #[serde(rename = "membership")]
         Membership,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorMembershipFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Membership => f.write_str("membership"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorMembershipFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -14874,14 +12263,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorMembershipFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyFamily
+        for IdentityPolicyOperatorMembershipFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14891,7 +12280,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyFamily
+        for IdentityPolicyOperatorMembershipFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14900,13 +12289,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewMembershipFamilyPredicate`
+    ///`IdentityPolicyOperatorMembershipFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewMembershipFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorMembershipFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "in",
@@ -14927,13 +12316,13 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    pub enum IdentityPolicyOperatorMembershipFamilyPredicate {
         #[serde(rename = "in")]
         In,
         #[serde(rename = "notIn")]
         NotIn,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorMembershipFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::In => f.write_str("in"),
@@ -14941,7 +12330,7 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorMembershipFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -14951,14 +12340,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewMembershipFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorMembershipFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+        for IdentityPolicyOperatorMembershipFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14968,7 +12357,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewMembershipFamilyPredicate
+        for IdentityPolicyOperatorMembershipFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -14977,13 +12366,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperand`
+    ///`IdentityPolicyOperatorNumericLiteralOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewNumericLiteralOperand",
+    ///  "title": "IdentityPolicyOperatorNumericLiteralOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -15047,19 +12436,19 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewNumericLiteralOperand {
+    pub enum IdentityPolicyOperatorNumericLiteralOperand {
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
+            kind: IdentityPolicyOperatorNumericLiteralOperandKind,
             value: i64,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewNumericLiteralOperandKind,
-            value: IdentityPolicyOperatorViewNumericLiteralOperandValue,
+            kind: IdentityPolicyOperatorNumericLiteralOperandKind,
+            value: IdentityPolicyOperatorNumericLiteralOperandValue,
         },
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperandKind`
+    ///`IdentityPolicyOperatorNumericLiteralOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -15084,18 +12473,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    pub enum IdentityPolicyOperatorNumericLiteralOperandKind {
         #[serde(rename = "literal")]
         Literal,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorNumericLiteralOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Literal => f.write_str("literal"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorNumericLiteralOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -15104,14 +12493,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorNumericLiteralOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+        for IdentityPolicyOperatorNumericLiteralOperandKind
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15121,7 +12510,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandKind
+        for IdentityPolicyOperatorNumericLiteralOperandKind
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15130,7 +12519,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewNumericLiteralOperandValue`
+    ///`IdentityPolicyOperatorNumericLiteralOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -15145,23 +12534,23 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewNumericLiteralOperandValue(
+    pub struct IdentityPolicyOperatorNumericLiteralOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewNumericLiteralOperandValue>
+    impl ::std::convert::From<IdentityPolicyOperatorNumericLiteralOperandValue>
         for ::std::string::String
     {
-        fn from(value: IdentityPolicyOperatorViewNumericLiteralOperandValue) -> Self {
+        fn from(value: IdentityPolicyOperatorNumericLiteralOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 64usize {
@@ -15186,14 +12575,14 @@ pub mod policies_update {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorNumericLiteralOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+        for IdentityPolicyOperatorNumericLiteralOperandValue
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15203,7 +12592,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewNumericLiteralOperandValue
+        for IdentityPolicyOperatorNumericLiteralOperandValue
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15212,7 +12601,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewNumericLiteralOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorNumericLiteralOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -15224,13 +12613,13 @@ pub mod policies_update {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewOrderingFamily`
+    ///`IdentityPolicyOperatorOrderingFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewOrderingFamily",
+    ///  "title": "IdentityPolicyOperatorOrderingFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -15245,10 +12634,10 @@ pub mod policies_update {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewNumericLiteralOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorNumericLiteralOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorOrderingFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "gt",
@@ -15264,15 +12653,15 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewOrderingFamily {
+    pub struct IdentityPolicyOperatorOrderingFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewOrderingFamilyFamily,
+        pub family: IdentityPolicyOperatorOrderingFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewNumericLiteralOperand,
+        pub operand: IdentityPolicyOperatorNumericLiteralOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewOrderingFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorOrderingFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewOrderingFamilyFamily`
+    ///`IdentityPolicyOperatorOrderingFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -15297,18 +12686,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewOrderingFamilyFamily {
+    pub enum IdentityPolicyOperatorOrderingFamilyFamily {
         #[serde(rename = "ordering")]
         Ordering,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorOrderingFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Ordering => f.write_str("ordering"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorOrderingFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -15317,14 +12706,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorOrderingFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyFamily
+        for IdentityPolicyOperatorOrderingFamilyFamily
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15333,9 +12722,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorOrderingFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -15343,13 +12730,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewOrderingFamilyPredicate`
+    ///`IdentityPolicyOperatorOrderingFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewOrderingFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorOrderingFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "gt",
@@ -15372,7 +12759,7 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    pub enum IdentityPolicyOperatorOrderingFamilyPredicate {
         #[serde(rename = "gt")]
         Gt,
         #[serde(rename = "ge")]
@@ -15382,7 +12769,7 @@ pub mod policies_update {
         #[serde(rename = "le")]
         Le,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorOrderingFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Gt => f.write_str("gt"),
@@ -15392,7 +12779,7 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorOrderingFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -15404,14 +12791,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewOrderingFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorOrderingFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+        for IdentityPolicyOperatorOrderingFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15421,7 +12808,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewOrderingFamilyPredicate
+        for IdentityPolicyOperatorOrderingFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15430,13 +12817,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperand`
+    ///`IdentityPolicyOperatorPatternOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewPatternOperand",
+    ///  "title": "IdentityPolicyOperatorPatternOperand",
     ///  "type": "object",
     ///  "required": [
     ///    "kind",
@@ -15468,16 +12855,16 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewPatternOperand {
+    pub struct IdentityPolicyOperatorPatternOperand {
         #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyOperatorViewPatternOperandKind,
+        pub kind: IdentityPolicyOperatorPatternOperandKind,
         #[redact(sensitivity = public)]
-        pub value: IdentityPolicyOperatorViewPatternOperandValue,
+        pub value: IdentityPolicyOperatorPatternOperandValue,
         #[serde(rename = "valueType")]
         #[redact(sensitivity = public)]
-        pub value_type: IdentityPolicyOperatorViewPatternOperandValueType,
+        pub value_type: IdentityPolicyOperatorPatternOperandValueType,
     }
-    ///`IdentityPolicyOperatorViewPatternOperandKind`
+    ///`IdentityPolicyOperatorPatternOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -15502,18 +12889,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewPatternOperandKind {
+    pub enum IdentityPolicyOperatorPatternOperandKind {
         #[serde(rename = "pattern")]
         Pattern,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorPatternOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Pattern => f.write_str("pattern"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -15522,15 +12909,13 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandKind
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -15538,9 +12923,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandKind
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorPatternOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -15548,7 +12931,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperandValue`
+    ///`IdentityPolicyOperatorPatternOperandValue`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -15562,21 +12945,21 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewPatternOperandValue(
+    pub struct IdentityPolicyOperatorPatternOperandValue(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::ops::Deref for IdentityPolicyOperatorPatternOperandValue {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewPatternOperandValue> for ::std::string::String {
-        fn from(value: IdentityPolicyOperatorViewPatternOperandValue) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorPatternOperandValue> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorPatternOperandValue) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValue {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -15588,15 +12971,13 @@ pub mod policies_update {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValue {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValue
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -15604,9 +12985,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValue
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorPatternOperandValue {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -15614,7 +12993,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewPatternOperandValue {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorPatternOperandValue {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -15626,7 +13005,7 @@ pub mod policies_update {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewPatternOperandValueType`
+    ///`IdentityPolicyOperatorPatternOperandValueType`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -15651,18 +13030,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewPatternOperandValueType {
+    pub enum IdentityPolicyOperatorPatternOperandValueType {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::fmt::Display for IdentityPolicyOperatorPatternOperandValueType {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::str::FromStr for IdentityPolicyOperatorPatternOperandValueType {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -15671,14 +13050,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewPatternOperandValueType {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorPatternOperandValueType {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValueType
+        for IdentityPolicyOperatorPatternOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15688,7 +13067,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewPatternOperandValueType
+        for IdentityPolicyOperatorPatternOperandValueType
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15697,13 +13076,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewSetOperand`
+    ///`IdentityPolicyOperatorSetOperand`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewSetOperand",
+    ///  "title": "IdentityPolicyOperatorSetOperand",
     ///  "oneOf": [
     ///    {
     ///      "type": "object",
@@ -15844,29 +13223,29 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyOperatorViewSetOperand {
+    pub enum IdentityPolicyOperatorSetOperand {
         #[serde(rename = "string")]
         String {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
-            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+            kind: IdentityPolicyOperatorSetOperandKind,
+            values: Vec<IdentityPolicyOperatorSetOperandValuesItem>,
         },
         #[serde(rename = "boolean")]
         Boolean {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
+            kind: IdentityPolicyOperatorSetOperandKind,
             values: Vec<bool>,
         },
         #[serde(rename = "integer")]
         Integer {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
+            kind: IdentityPolicyOperatorSetOperandKind,
             values: Vec<i64>,
         },
         #[serde(rename = "decimal")]
         Decimal {
-            kind: IdentityPolicyOperatorViewSetOperandKind,
-            values: Vec<IdentityPolicyOperatorViewSetOperandValuesItem>,
+            kind: IdentityPolicyOperatorSetOperandKind,
+            values: Vec<IdentityPolicyOperatorSetOperandValuesItem>,
         },
     }
-    ///`IdentityPolicyOperatorViewSetOperandKind`
+    ///`IdentityPolicyOperatorSetOperandKind`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -15891,18 +13270,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewSetOperandKind {
+    pub enum IdentityPolicyOperatorSetOperandKind {
         #[serde(rename = "set")]
         Set,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::fmt::Display for IdentityPolicyOperatorSetOperandKind {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Set => f.write_str("set"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandKind {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -15911,13 +13290,13 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -15925,7 +13304,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorViewSetOperandKind {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorSetOperandKind {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -15933,7 +13312,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewSetOperandValuesItem`
+    ///`IdentityPolicyOperatorSetOperandValuesItem`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -15946,23 +13325,21 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct IdentityPolicyOperatorViewSetOperandValuesItem(
+    pub struct IdentityPolicyOperatorSetOperandValuesItem(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::ops::Deref for IdentityPolicyOperatorSetOperandValuesItem {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<IdentityPolicyOperatorViewSetOperandValuesItem>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyOperatorViewSetOperandValuesItem) -> Self {
+    impl ::std::convert::From<IdentityPolicyOperatorSetOperandValuesItem> for ::std::string::String {
+        fn from(value: IdentityPolicyOperatorSetOperandValuesItem) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::str::FromStr for IdentityPolicyOperatorSetOperandValuesItem {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() > 256usize {
@@ -15971,14 +13348,14 @@ pub mod policies_update {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorSetOperandValuesItem {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewSetOperandValuesItem
+        for IdentityPolicyOperatorSetOperandValuesItem
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -15987,9 +13364,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewSetOperandValuesItem
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorSetOperandValuesItem {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -15997,7 +13372,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorViewSetOperandValuesItem {
+    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyOperatorSetOperandValuesItem {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -16009,13 +13384,13 @@ pub mod policies_update {
                 })
         }
     }
-    ///`IdentityPolicyOperatorViewStringFamily`
+    ///`IdentityPolicyOperatorStringFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewStringFamily",
+    ///  "title": "IdentityPolicyOperatorStringFamily",
     ///  "type": "object",
     ///  "required": [
     ///    "family",
@@ -16030,10 +13405,10 @@ pub mod policies_update {
     ///      ]
     ///    },
     ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyOperatorViewPatternOperand"
+    ///      "$ref": "#/definitions/IdentityPolicyOperatorPatternOperand"
     ///    },
     ///    "predicate": {
-    ///      "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///      "title": "IdentityPolicyOperatorStringFamilyPredicate",
     ///      "type": "string",
     ///      "enum": [
     ///        "startsWith",
@@ -16050,15 +13425,15 @@ pub mod policies_update {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyOperatorViewStringFamily {
+    pub struct IdentityPolicyOperatorStringFamily {
         #[redact(sensitivity = public)]
-        pub family: IdentityPolicyOperatorViewStringFamilyFamily,
+        pub family: IdentityPolicyOperatorStringFamilyFamily,
         #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyOperatorViewPatternOperand,
+        pub operand: IdentityPolicyOperatorPatternOperand,
         #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyOperatorViewStringFamilyPredicate,
+        pub predicate: IdentityPolicyOperatorStringFamilyPredicate,
     }
-    ///`IdentityPolicyOperatorViewStringFamilyFamily`
+    ///`IdentityPolicyOperatorStringFamilyFamily`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -16083,18 +13458,18 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewStringFamilyFamily {
+    pub enum IdentityPolicyOperatorStringFamilyFamily {
         #[serde(rename = "string")]
         String,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::fmt::Display for IdentityPolicyOperatorStringFamilyFamily {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::String => f.write_str("string"),
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::str::FromStr for IdentityPolicyOperatorStringFamilyFamily {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -16103,15 +13478,13 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyFamily {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyFamily
-    {
+    impl ::std::convert::TryFrom<&::std::string::String> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -16119,9 +13492,7 @@ pub mod policies_update {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyFamily
-    {
+    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyOperatorStringFamilyFamily {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -16129,13 +13500,13 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyOperatorViewStringFamilyPredicate`
+    ///`IdentityPolicyOperatorStringFamilyPredicate`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "IdentityPolicyOperatorViewStringFamilyPredicate",
+    ///  "title": "IdentityPolicyOperatorStringFamilyPredicate",
     ///  "type": "string",
     ///  "enum": [
     ///    "startsWith",
@@ -16159,7 +13530,7 @@ pub mod policies_update {
         PartialEq,
         PartialOrd,
     )]
-    pub enum IdentityPolicyOperatorViewStringFamilyPredicate {
+    pub enum IdentityPolicyOperatorStringFamilyPredicate {
         #[serde(rename = "startsWith")]
         StartsWith,
         #[serde(rename = "endsWith")]
@@ -16171,7 +13542,7 @@ pub mod policies_update {
         #[serde(rename = "regex")]
         Regex,
     }
-    impl ::std::fmt::Display for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::fmt::Display for IdentityPolicyOperatorStringFamilyPredicate {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::StartsWith => f.write_str("startsWith"),
@@ -16182,7 +13553,7 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::str::FromStr for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::str::FromStr for IdentityPolicyOperatorStringFamilyPredicate {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -16195,14 +13566,14 @@ pub mod policies_update {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorViewStringFamilyPredicate {
+    impl ::std::convert::TryFrom<&str> for IdentityPolicyOperatorStringFamilyPredicate {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyPredicate
+        for IdentityPolicyOperatorStringFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -16212,7 +13583,7 @@ pub mod policies_update {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyOperatorViewStringFamilyPredicate
+        for IdentityPolicyOperatorStringFamilyPredicate
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -16246,21 +13617,7 @@ pub mod policies_update {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyOperatorView",
-    ///          "oneOf": [
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///            }
-    ///          ]
+    ///          "$ref": "#/definitions/IdentityPolicyOperator"
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -16399,21 +13756,7 @@ pub mod policies_update {
     ///      "type": "string"
     ///    },
     ///    "operator": {
-    ///      "title": "IdentityPolicyUpdateOperator",
-    ///      "oneOf": [
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorEqualityFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorOrderingFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorMembershipFamily"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorStringFamily"
-    ///        }
-    ///      ]
+    ///      "$ref": "#/definitions/IdentityPolicyOperator"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -16426,7 +13769,7 @@ pub mod policies_update {
         #[redact(sensitivity = public)]
         pub attribute: ::std::string::String,
         #[redact(sensitivity = public)]
-        pub operator: IdentityPolicyUpdateOperator,
+        pub operator: IdentityPolicyOperator,
     }
     ///`IdentityPolicyUpdateObligations`
     ///
@@ -16561,2263 +13904,6 @@ pub mod policies_update {
             value.parse()
         }
     }
-    ///`IdentityPolicyUpdateOperator`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperator",
-    ///  "oneOf": [
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorEqualityFamily"
-    ///    },
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorOrderingFamily"
-    ///    },
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorMembershipFamily"
-    ///    },
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorStringFamily"
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(untagged)]
-    pub enum IdentityPolicyUpdateOperator {
-        EqualityFamily(IdentityPolicyUpdateOperatorEqualityFamily),
-        OrderingFamily(IdentityPolicyUpdateOperatorOrderingFamily),
-        MembershipFamily(IdentityPolicyUpdateOperatorMembershipFamily),
-        StringFamily(IdentityPolicyUpdateOperatorStringFamily),
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorEqualityFamily>
-        for IdentityPolicyUpdateOperator
-    {
-        fn from(value: IdentityPolicyUpdateOperatorEqualityFamily) -> Self {
-            Self::EqualityFamily(value)
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorOrderingFamily>
-        for IdentityPolicyUpdateOperator
-    {
-        fn from(value: IdentityPolicyUpdateOperatorOrderingFamily) -> Self {
-            Self::OrderingFamily(value)
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorMembershipFamily>
-        for IdentityPolicyUpdateOperator
-    {
-        fn from(value: IdentityPolicyUpdateOperatorMembershipFamily) -> Self {
-            Self::MembershipFamily(value)
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorStringFamily>
-        for IdentityPolicyUpdateOperator
-    {
-        fn from(value: IdentityPolicyUpdateOperatorStringFamily) -> Self {
-            Self::StringFamily(value)
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorAttributeOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorAttributeOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "attribute",
-    ///        "kind",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "attribute": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "principal.kind",
-    ///            "principal.id",
-    ///            "tenant.id",
-    ///            "contract.id",
-    ///            "permission",
-    ///            "resource.id"
-    ///          ]
-    ///        },
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "attribute"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "string"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(tag = "kind", deny_unknown_fields)]
-    pub enum IdentityPolicyUpdateOperatorAttributeOperand {
-        #[serde(rename = "attribute")]
-        Attribute {
-            attribute: IdentityPolicyUpdateOperatorAttributeOperandAttribute,
-            #[serde(rename = "valueType")]
-            value_type: IdentityPolicyUpdateOperatorAttributeOperandValueType,
-        },
-    }
-    ///`IdentityPolicyUpdateOperatorAttributeOperandAttribute`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "principal.kind",
-    ///    "principal.id",
-    ///    "tenant.id",
-    ///    "contract.id",
-    ///    "permission",
-    ///    "resource.id"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorAttributeOperandAttribute {
-        #[serde(rename = "principal.kind")]
-        PrincipalKind,
-        #[serde(rename = "principal.id")]
-        PrincipalId,
-        #[serde(rename = "tenant.id")]
-        TenantId,
-        #[serde(rename = "contract.id")]
-        ContractId,
-        #[serde(rename = "permission")]
-        Permission,
-        #[serde(rename = "resource.id")]
-        ResourceId,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorAttributeOperandAttribute {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::PrincipalKind => f.write_str("principal.kind"),
-                Self::PrincipalId => f.write_str("principal.id"),
-                Self::TenantId => f.write_str("tenant.id"),
-                Self::ContractId => f.write_str("contract.id"),
-                Self::Permission => f.write_str("permission"),
-                Self::ResourceId => f.write_str("resource.id"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorAttributeOperandAttribute {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "principal.kind" => Ok(Self::PrincipalKind),
-                "principal.id" => Ok(Self::PrincipalId),
-                "tenant.id" => Ok(Self::TenantId),
-                "contract.id" => Ok(Self::ContractId),
-                "permission" => Ok(Self::Permission),
-                "resource.id" => Ok(Self::ResourceId),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorAttributeOperandAttribute {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorAttributeOperandAttribute
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorAttributeOperandAttribute
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorAttributeOperandValueType`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "string"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorAttributeOperandValueType {
-        #[serde(rename = "string")]
-        String,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorAttributeOperandValueType {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::String => f.write_str("string"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorAttributeOperandValueType {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "string" => Ok(Self::String),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorAttributeOperandValueType {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorAttributeOperandValueType
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorAttributeOperandValueType
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorEqualityFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorEqualityFamily",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "family",
-    ///    "operand",
-    ///    "predicate"
-    ///  ],
-    ///  "properties": {
-    ///    "family": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "equality"
-    ///      ]
-    ///    },
-    ///    "operand": {
-    ///      "title": "IdentityPolicyUpdateOperatorEqualityFamilyOperand",
-    ///      "oneOf": [
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorLiteralOperand"
-    ///        },
-    ///        {
-    ///          "$ref": "#/definitions/IdentityPolicyUpdateOperatorAttributeOperand"
-    ///        }
-    ///      ]
-    ///    },
-    ///    "predicate": {
-    ///      "title": "IdentityPolicyUpdateOperatorEqualityFamilyPredicate",
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "eq",
-    ///        "ne"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateOperatorEqualityFamily {
-        #[redact(sensitivity = public)]
-        pub family: IdentityPolicyUpdateOperatorEqualityFamilyFamily,
-        #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyUpdateOperatorEqualityFamilyOperand,
-        #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyUpdateOperatorEqualityFamilyPredicate,
-    }
-    ///`IdentityPolicyUpdateOperatorEqualityFamilyFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "equality"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorEqualityFamilyFamily {
-        #[serde(rename = "equality")]
-        Equality,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorEqualityFamilyFamily {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Equality => f.write_str("equality"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorEqualityFamilyFamily {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "equality" => Ok(Self::Equality),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorEqualityFamilyFamily {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorEqualityFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorEqualityFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorEqualityFamilyOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorEqualityFamilyOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorLiteralOperand"
-    ///    },
-    ///    {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorAttributeOperand"
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(untagged)]
-    pub enum IdentityPolicyUpdateOperatorEqualityFamilyOperand {
-        LiteralOperand(IdentityPolicyUpdateOperatorLiteralOperand),
-        AttributeOperand(IdentityPolicyUpdateOperatorAttributeOperand),
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorLiteralOperand>
-        for IdentityPolicyUpdateOperatorEqualityFamilyOperand
-    {
-        fn from(value: IdentityPolicyUpdateOperatorLiteralOperand) -> Self {
-            Self::LiteralOperand(value)
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorAttributeOperand>
-        for IdentityPolicyUpdateOperatorEqualityFamilyOperand
-    {
-        fn from(value: IdentityPolicyUpdateOperatorAttributeOperand) -> Self {
-            Self::AttributeOperand(value)
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorEqualityFamilyPredicate`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorEqualityFamilyPredicate",
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "eq",
-    ///    "ne"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorEqualityFamilyPredicate {
-        #[serde(rename = "eq")]
-        Eq,
-        #[serde(rename = "ne")]
-        Ne,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorEqualityFamilyPredicate {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Eq => f.write_str("eq"),
-                Self::Ne => f.write_str("ne"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorEqualityFamilyPredicate {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "eq" => Ok(Self::Eq),
-                "ne" => Ok(Self::Ne),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorEqualityFamilyPredicate {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorEqualityFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorEqualityFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorLiteralOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorLiteralOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "string",
-    ///          "maxLength": 256
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "string"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "boolean"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "boolean"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "integer",
-    ///          "format": "int64"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "integer"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "string",
-    ///          "maxLength": 64,
-    ///          "minLength": 1,
-    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "decimal"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyUpdateOperatorLiteralOperand {
-        #[serde(rename = "string")]
-        String {
-            kind: IdentityPolicyUpdateOperatorLiteralOperandKind,
-            value: IdentityPolicyUpdateOperatorLiteralOperandValue,
-        },
-        #[serde(rename = "boolean")]
-        Boolean {
-            kind: IdentityPolicyUpdateOperatorLiteralOperandKind,
-            value: bool,
-        },
-        #[serde(rename = "integer")]
-        Integer {
-            kind: IdentityPolicyUpdateOperatorLiteralOperandKind,
-            value: i64,
-        },
-        #[serde(rename = "decimal")]
-        Decimal {
-            kind: IdentityPolicyUpdateOperatorLiteralOperandKind,
-            value: IdentityPolicyUpdateOperatorLiteralOperandValue,
-        },
-    }
-    ///`IdentityPolicyUpdateOperatorLiteralOperandKind`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "literal"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorLiteralOperandKind {
-        #[serde(rename = "literal")]
-        Literal,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorLiteralOperandKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Literal => f.write_str("literal"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorLiteralOperandKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "literal" => Ok(Self::Literal),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorLiteralOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorLiteralOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorLiteralOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorLiteralOperandValue`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 256
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyUpdateOperatorLiteralOperandValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorLiteralOperandValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorLiteralOperandValue>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyUpdateOperatorLiteralOperandValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorLiteralOperandValue {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorLiteralOperandValue {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorLiteralOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorLiteralOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorLiteralOperandValue {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorMembershipFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorMembershipFamily",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "family",
-    ///    "operand",
-    ///    "predicate"
-    ///  ],
-    ///  "properties": {
-    ///    "family": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "membership"
-    ///      ]
-    ///    },
-    ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorSetOperand"
-    ///    },
-    ///    "predicate": {
-    ///      "title": "IdentityPolicyUpdateOperatorMembershipFamilyPredicate",
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "in",
-    ///        "notIn"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateOperatorMembershipFamily {
-        #[redact(sensitivity = public)]
-        pub family: IdentityPolicyUpdateOperatorMembershipFamilyFamily,
-        #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyUpdateOperatorSetOperand,
-        #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyUpdateOperatorMembershipFamilyPredicate,
-    }
-    ///`IdentityPolicyUpdateOperatorMembershipFamilyFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "membership"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorMembershipFamilyFamily {
-        #[serde(rename = "membership")]
-        Membership,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorMembershipFamilyFamily {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Membership => f.write_str("membership"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorMembershipFamilyFamily {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "membership" => Ok(Self::Membership),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorMembershipFamilyFamily {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorMembershipFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorMembershipFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorMembershipFamilyPredicate`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorMembershipFamilyPredicate",
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "in",
-    ///    "notIn"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorMembershipFamilyPredicate {
-        #[serde(rename = "in")]
-        In,
-        #[serde(rename = "notIn")]
-        NotIn,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorMembershipFamilyPredicate {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::In => f.write_str("in"),
-                Self::NotIn => f.write_str("notIn"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorMembershipFamilyPredicate {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "in" => Ok(Self::In),
-                "notIn" => Ok(Self::NotIn),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorMembershipFamilyPredicate {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorMembershipFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorMembershipFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorNumericLiteralOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorNumericLiteralOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "integer",
-    ///          "format": "int64"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "integer"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "value",
-    ///        "valueType"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "literal"
-    ///          ]
-    ///        },
-    ///        "value": {
-    ///          "type": "string",
-    ///          "maxLength": 64,
-    ///          "minLength": 1,
-    ///          "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "decimal"
-    ///          ]
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyUpdateOperatorNumericLiteralOperand {
-        #[serde(rename = "integer")]
-        Integer {
-            kind: IdentityPolicyUpdateOperatorNumericLiteralOperandKind,
-            value: i64,
-        },
-        #[serde(rename = "decimal")]
-        Decimal {
-            kind: IdentityPolicyUpdateOperatorNumericLiteralOperandKind,
-            value: IdentityPolicyUpdateOperatorNumericLiteralOperandValue,
-        },
-    }
-    ///`IdentityPolicyUpdateOperatorNumericLiteralOperandKind`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "literal"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorNumericLiteralOperandKind {
-        #[serde(rename = "literal")]
-        Literal,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorNumericLiteralOperandKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Literal => f.write_str("literal"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorNumericLiteralOperandKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "literal" => Ok(Self::Literal),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorNumericLiteralOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorNumericLiteralOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorNumericLiteralOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorNumericLiteralOperandValue`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 64,
-    ///  "minLength": 1,
-    ///  "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyUpdateOperatorNumericLiteralOperandValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorNumericLiteralOperandValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorNumericLiteralOperandValue>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyUpdateOperatorNumericLiteralOperandValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorNumericLiteralOperandValue {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 64usize {
-                return Err("longer than 64 characters".into());
-            }
-            if value.chars().count() < 1usize {
-                return Err("shorter than 1 characters".into());
-            }
-            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
-                ::std::sync::LazyLock::new(|| {
-                    ::regress::Regex::new(
-                        "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$",
-                    )
-                    .unwrap()
-                });
-            if PATTERN.find(value).is_none() {
-                return Err(
-                "doesn't match pattern \"^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$\""
-                    .into(),
-            );
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorNumericLiteralOperandValue {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorNumericLiteralOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorNumericLiteralOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorNumericLiteralOperandValue {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorOrderingFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorOrderingFamily",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "family",
-    ///    "operand",
-    ///    "predicate"
-    ///  ],
-    ///  "properties": {
-    ///    "family": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "ordering"
-    ///      ]
-    ///    },
-    ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorNumericLiteralOperand"
-    ///    },
-    ///    "predicate": {
-    ///      "title": "IdentityPolicyUpdateOperatorOrderingFamilyPredicate",
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "gt",
-    ///        "ge",
-    ///        "lt",
-    ///        "le"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateOperatorOrderingFamily {
-        #[redact(sensitivity = public)]
-        pub family: IdentityPolicyUpdateOperatorOrderingFamilyFamily,
-        #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyUpdateOperatorNumericLiteralOperand,
-        #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyUpdateOperatorOrderingFamilyPredicate,
-    }
-    ///`IdentityPolicyUpdateOperatorOrderingFamilyFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "ordering"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorOrderingFamilyFamily {
-        #[serde(rename = "ordering")]
-        Ordering,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorOrderingFamilyFamily {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Ordering => f.write_str("ordering"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorOrderingFamilyFamily {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "ordering" => Ok(Self::Ordering),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorOrderingFamilyFamily {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorOrderingFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorOrderingFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorOrderingFamilyPredicate`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorOrderingFamilyPredicate",
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "gt",
-    ///    "ge",
-    ///    "lt",
-    ///    "le"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorOrderingFamilyPredicate {
-        #[serde(rename = "gt")]
-        Gt,
-        #[serde(rename = "ge")]
-        Ge,
-        #[serde(rename = "lt")]
-        Lt,
-        #[serde(rename = "le")]
-        Le,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorOrderingFamilyPredicate {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Gt => f.write_str("gt"),
-                Self::Ge => f.write_str("ge"),
-                Self::Lt => f.write_str("lt"),
-                Self::Le => f.write_str("le"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorOrderingFamilyPredicate {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "gt" => Ok(Self::Gt),
-                "ge" => Ok(Self::Ge),
-                "lt" => Ok(Self::Lt),
-                "le" => Ok(Self::Le),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorOrderingFamilyPredicate {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorOrderingFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorOrderingFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorPatternOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorPatternOperand",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "kind",
-    ///    "value",
-    ///    "valueType"
-    ///  ],
-    ///  "properties": {
-    ///    "kind": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "pattern"
-    ///      ]
-    ///    },
-    ///    "value": {
-    ///      "type": "string",
-    ///      "maxLength": 256,
-    ///      "minLength": 1
-    ///    },
-    ///    "valueType": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "string"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateOperatorPatternOperand {
-        #[redact(sensitivity = public)]
-        pub kind: IdentityPolicyUpdateOperatorPatternOperandKind,
-        #[redact(sensitivity = public)]
-        pub value: IdentityPolicyUpdateOperatorPatternOperandValue,
-        #[serde(rename = "valueType")]
-        #[redact(sensitivity = public)]
-        pub value_type: IdentityPolicyUpdateOperatorPatternOperandValueType,
-    }
-    ///`IdentityPolicyUpdateOperatorPatternOperandKind`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "pattern"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorPatternOperandKind {
-        #[serde(rename = "pattern")]
-        Pattern,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorPatternOperandKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Pattern => f.write_str("pattern"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorPatternOperandKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "pattern" => Ok(Self::Pattern),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorPatternOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorPatternOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorPatternOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorPatternOperandValue`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 256,
-    ///  "minLength": 1
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyUpdateOperatorPatternOperandValue(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorPatternOperandValue {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorPatternOperandValue>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyUpdateOperatorPatternOperandValue) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorPatternOperandValue {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
-            }
-            if value.chars().count() < 1usize {
-                return Err("shorter than 1 characters".into());
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorPatternOperandValue {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorPatternOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorPatternOperandValue
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorPatternOperandValue {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorPatternOperandValueType`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "string"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorPatternOperandValueType {
-        #[serde(rename = "string")]
-        String,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorPatternOperandValueType {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::String => f.write_str("string"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorPatternOperandValueType {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "string" => Ok(Self::String),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorPatternOperandValueType {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorPatternOperandValueType
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorPatternOperandValueType
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorSetOperand`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorSetOperand",
-    ///  "oneOf": [
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "valueType",
-    ///        "values"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "set"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "string"
-    ///          ]
-    ///        },
-    ///        "values": {
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "string",
-    ///            "maxLength": 256
-    ///          },
-    ///          "maxItems": 32,
-    ///          "minItems": 1,
-    ///          "uniqueItems": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "valueType",
-    ///        "values"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "set"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "boolean"
-    ///          ]
-    ///        },
-    ///        "values": {
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "boolean"
-    ///          },
-    ///          "maxItems": 32,
-    ///          "minItems": 1,
-    ///          "uniqueItems": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "valueType",
-    ///        "values"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "set"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "integer"
-    ///          ]
-    ///        },
-    ///        "values": {
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "integer",
-    ///            "format": "int64"
-    ///          },
-    ///          "maxItems": 32,
-    ///          "minItems": 1,
-    ///          "uniqueItems": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    },
-    ///    {
-    ///      "type": "object",
-    ///      "required": [
-    ///        "kind",
-    ///        "valueType",
-    ///        "values"
-    ///      ],
-    ///      "properties": {
-    ///        "kind": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "set"
-    ///          ]
-    ///        },
-    ///        "valueType": {
-    ///          "type": "string",
-    ///          "enum": [
-    ///            "decimal"
-    ///          ]
-    ///        },
-    ///        "values": {
-    ///          "type": "array",
-    ///          "items": {
-    ///            "type": "string",
-    ///            "maxLength": 64,
-    ///            "minLength": 1,
-    ///            "pattern": "^(?:0|-?[1-9][0-9]*|(?:-?0|-?[1-9][0-9]*)\\.[0-9]*[1-9])$"
-    ///          },
-    ///          "maxItems": 32,
-    ///          "minItems": 1,
-    ///          "uniqueItems": true
-    ///        }
-    ///      },
-    ///      "additionalProperties": false
-    ///    }
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
-    #[serde(tag = "valueType", deny_unknown_fields)]
-    pub enum IdentityPolicyUpdateOperatorSetOperand {
-        #[serde(rename = "string")]
-        String {
-            kind: IdentityPolicyUpdateOperatorSetOperandKind,
-            values: Vec<IdentityPolicyUpdateOperatorSetOperandValuesItem>,
-        },
-        #[serde(rename = "boolean")]
-        Boolean {
-            kind: IdentityPolicyUpdateOperatorSetOperandKind,
-            values: Vec<bool>,
-        },
-        #[serde(rename = "integer")]
-        Integer {
-            kind: IdentityPolicyUpdateOperatorSetOperandKind,
-            values: Vec<i64>,
-        },
-        #[serde(rename = "decimal")]
-        Decimal {
-            kind: IdentityPolicyUpdateOperatorSetOperandKind,
-            values: Vec<IdentityPolicyUpdateOperatorSetOperandValuesItem>,
-        },
-    }
-    ///`IdentityPolicyUpdateOperatorSetOperandKind`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "set"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorSetOperandKind {
-        #[serde(rename = "set")]
-        Set,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorSetOperandKind {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::Set => f.write_str("set"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorSetOperandKind {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "set" => Ok(Self::Set),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorSetOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorSetOperandKind
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String> for IdentityPolicyUpdateOperatorSetOperandKind {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorSetOperandValuesItem`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "maxLength": 256
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
-    #[serde(transparent)]
-    pub struct IdentityPolicyUpdateOperatorSetOperandValuesItem(
-        #[redact(sensitivity = public)] ::std::string::String,
-    );
-    impl ::std::ops::Deref for IdentityPolicyUpdateOperatorSetOperandValuesItem {
-        type Target = ::std::string::String;
-        fn deref(&self) -> &::std::string::String {
-            &self.0
-        }
-    }
-    impl ::std::convert::From<IdentityPolicyUpdateOperatorSetOperandValuesItem>
-        for ::std::string::String
-    {
-        fn from(value: IdentityPolicyUpdateOperatorSetOperandValuesItem) -> Self {
-            value.0
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorSetOperandValuesItem {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            if value.chars().count() > 256usize {
-                return Err("longer than 256 characters".into());
-            }
-            Ok(Self(value.to_string()))
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorSetOperandValuesItem {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorSetOperandValuesItem
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorSetOperandValuesItem
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl<'de> ::serde::Deserialize<'de> for IdentityPolicyUpdateOperatorSetOperandValuesItem {
-        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
-        where
-            D: ::serde::Deserializer<'de>,
-        {
-            ::std::string::String::deserialize(deserializer)?
-                .parse()
-                .map_err(|e: self::error::ConversionError| {
-                    <D::Error as ::serde::de::Error>::custom(e.to_string())
-                })
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorStringFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorStringFamily",
-    ///  "type": "object",
-    ///  "required": [
-    ///    "family",
-    ///    "operand",
-    ///    "predicate"
-    ///  ],
-    ///  "properties": {
-    ///    "family": {
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "string"
-    ///      ]
-    ///    },
-    ///    "operand": {
-    ///      "$ref": "#/definitions/IdentityPolicyUpdateOperatorPatternOperand"
-    ///    },
-    ///    "predicate": {
-    ///      "title": "IdentityPolicyUpdateOperatorStringFamilyPredicate",
-    ///      "type": "string",
-    ///      "enum": [
-    ///        "startsWith",
-    ///        "endsWith",
-    ///        "contains",
-    ///        "glob",
-    ///        "regex"
-    ///      ]
-    ///    }
-    ///  },
-    ///  "additionalProperties": false
-    ///}
-    /// ```
-    /// </details>
-    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
-    #[serde(deny_unknown_fields)]
-    pub struct IdentityPolicyUpdateOperatorStringFamily {
-        #[redact(sensitivity = public)]
-        pub family: IdentityPolicyUpdateOperatorStringFamilyFamily,
-        #[redact(sensitivity = public)]
-        pub operand: IdentityPolicyUpdateOperatorPatternOperand,
-        #[redact(sensitivity = public)]
-        pub predicate: IdentityPolicyUpdateOperatorStringFamilyPredicate,
-    }
-    ///`IdentityPolicyUpdateOperatorStringFamilyFamily`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "string"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorStringFamilyFamily {
-        #[serde(rename = "string")]
-        String,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorStringFamilyFamily {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::String => f.write_str("string"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorStringFamilyFamily {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "string" => Ok(Self::String),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorStringFamilyFamily {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorStringFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorStringFamilyFamily
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    ///`IdentityPolicyUpdateOperatorStringFamilyPredicate`
-    ///
-    /// <details><summary>JSON schema</summary>
-    ///
-    /// ```json
-    ///{
-    ///  "title": "IdentityPolicyUpdateOperatorStringFamilyPredicate",
-    ///  "type": "string",
-    ///  "enum": [
-    ///    "startsWith",
-    ///    "endsWith",
-    ///    "contains",
-    ///    "glob",
-    ///    "regex"
-    ///  ]
-    ///}
-    /// ```
-    /// </details>
-    #[derive(
-        ::serde::Deserialize,
-        ::serde::Serialize,
-        Clone,
-        Copy,
-        Debug,
-        Eq,
-        Hash,
-        Ord,
-        PartialEq,
-        PartialOrd,
-    )]
-    pub enum IdentityPolicyUpdateOperatorStringFamilyPredicate {
-        #[serde(rename = "startsWith")]
-        StartsWith,
-        #[serde(rename = "endsWith")]
-        EndsWith,
-        #[serde(rename = "contains")]
-        Contains,
-        #[serde(rename = "glob")]
-        Glob,
-        #[serde(rename = "regex")]
-        Regex,
-    }
-    impl ::std::fmt::Display for IdentityPolicyUpdateOperatorStringFamilyPredicate {
-        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-            match *self {
-                Self::StartsWith => f.write_str("startsWith"),
-                Self::EndsWith => f.write_str("endsWith"),
-                Self::Contains => f.write_str("contains"),
-                Self::Glob => f.write_str("glob"),
-                Self::Regex => f.write_str("regex"),
-            }
-        }
-    }
-    impl ::std::str::FromStr for IdentityPolicyUpdateOperatorStringFamilyPredicate {
-        type Err = self::error::ConversionError;
-        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            match value {
-                "startsWith" => Ok(Self::StartsWith),
-                "endsWith" => Ok(Self::EndsWith),
-                "contains" => Ok(Self::Contains),
-                "glob" => Ok(Self::Glob),
-                "regex" => Ok(Self::Regex),
-                _ => Err("invalid value".into()),
-            }
-        }
-    }
-    impl ::std::convert::TryFrom<&str> for IdentityPolicyUpdateOperatorStringFamilyPredicate {
-        type Error = self::error::ConversionError;
-        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<&::std::string::String>
-        for IdentityPolicyUpdateOperatorStringFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: &::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
-    impl ::std::convert::TryFrom<::std::string::String>
-        for IdentityPolicyUpdateOperatorStringFamilyPredicate
-    {
-        type Error = self::error::ConversionError;
-        fn try_from(
-            value: ::std::string::String,
-        ) -> ::std::result::Result<Self, self::error::ConversionError> {
-            value.parse()
-        }
-    }
     ///`IdentityPolicyUpdateRule`
     ///
     /// <details><summary>JSON schema</summary>
@@ -18843,21 +13929,7 @@ pub mod policies_update {
     ///          "type": "string"
     ///        },
     ///        "operator": {
-    ///          "title": "IdentityPolicyUpdateOperator",
-    ///          "oneOf": [
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyUpdateOperatorEqualityFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyUpdateOperatorOrderingFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyUpdateOperatorMembershipFamily"
-    ///            },
-    ///            {
-    ///              "$ref": "#/definitions/IdentityPolicyUpdateOperatorStringFamily"
-    ///            }
-    ///          ]
+    ///          "$ref": "#/definitions/IdentityPolicyOperator"
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -19035,21 +14107,7 @@ pub mod policies_update {
     ///                "type": "string"
     ///              },
     ///              "operator": {
-    ///                "title": "IdentityPolicyOperatorView",
-    ///                "oneOf": [
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewEqualityFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewOrderingFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewMembershipFamily"
-    ///                  },
-    ///                  {
-    ///                    "$ref": "#/definitions/IdentityPolicyOperatorViewStringFamily"
-    ///                  }
-    ///                ]
+    ///                "$ref": "#/definitions/IdentityPolicyOperator"
     ///              }
     ///            },
     ///            "additionalProperties": false
@@ -19132,7 +14190,7 @@ pub mod policies_update {
         "identity",
         "identity.policies-update",
         "v1",
-        "sha256:75f6631ddc6f7070bf9007eda2f8610ff2b8fb35ccc04402e3efa82299f1ae57",
+        "sha256:8e48356808570578d678ef8ef5b643921d40b53012146a52d0a0540af046d6c5",
     );
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。

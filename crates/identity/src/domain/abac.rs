@@ -11,10 +11,15 @@
 //!
 //! ref: casbin/casbin-rs src/effector.rs@fc425d4（`EffectKind{Allow,Indeterminate,Deny}`，
 //! `DefaultEffectStream::push_effect` 中 Deny 压过 Allow）。
+//! ref: casbin/casbin-rs src/model/function_map.rs@52bc1ad57371aef1b16399cc0b5f338c4b484539
+//! （动态 function registry）；RSS 明确拒绝该扩展面，operator 保持 closed enum + exhaustive seam。
 
 use std::time::SystemTime;
 
-use super::{AttributeKey, DecimalValue, IdentityError, PolicyId, PolicyValue, PolicyValueType};
+use super::{
+    AttributeKey, DecimalValue, IdentityError, PolicyId, PolicyValue, PolicyValueError,
+    PolicyValueRef, PolicyValueType,
+};
 use vocab::RoutePermissionId;
 
 const GLOB_MAX_LEN: usize = 256;
@@ -255,6 +260,136 @@ pub enum OperatorError {
     InvalidRegex,
 }
 
+/// Untrusted scalar carrier shared by HTTP and persistence hydration. String also carries the
+/// exact decimal wire representation; the declared [`PolicyValueType`] selects its parser.
+#[derive(Clone, PartialEq, Eq)]
+pub enum PolicyScalarInput {
+    String(String),
+    Boolean(bool),
+    Integer(i64),
+}
+
+impl std::fmt::Debug for PolicyScalarInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PolicyScalarInput(<redacted>)")
+    }
+}
+
+/// Declared ABAC type plus the untrusted scalar shape observed at a serde boundary.
+#[derive(Clone, PartialEq, Eq)]
+pub struct TypedPolicyValueInput {
+    value_type: PolicyValueType,
+    value: PolicyScalarInput,
+}
+
+impl TypedPolicyValueInput {
+    pub const fn new(value_type: PolicyValueType, value: PolicyScalarInput) -> Self {
+        Self { value_type, value }
+    }
+}
+
+impl std::fmt::Debug for TypedPolicyValueInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TypedPolicyValueInput")
+            .field("value_type", &self.value_type)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+#[derive(Clone, PartialEq, Eq)]
+pub enum ScalarOperandInput {
+    Literal(TypedPolicyValueInput),
+    Attribute {
+        value_type: PolicyValueType,
+        attribute: String,
+    },
+}
+
+impl std::fmt::Debug for ScalarOperandInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ScalarOperandInput(<redacted>)")
+    }
+}
+
+/// Closed, serde-free operator hydration input. It deliberately permits wire-invalid scalar/type
+/// combinations so every adapter must pass through the same fallible domain funnel.
+#[derive(Clone, PartialEq, Eq)]
+pub enum OperatorInput {
+    Equality {
+        predicate: EqualityPredicate,
+        operand: ScalarOperandInput,
+    },
+    Ordering {
+        predicate: OrderingPredicate,
+        operand: ScalarOperandInput,
+    },
+    Membership {
+        predicate: MembershipPredicate,
+        value_type: PolicyValueType,
+        values: Vec<PolicyScalarInput>,
+    },
+    String {
+        predicate: StringPredicate,
+        pattern: String,
+    },
+}
+
+impl std::fmt::Debug for OperatorInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OperatorInput(<redacted>)")
+    }
+}
+
+/// Stable, non-sensitive reasons emitted by the unique untrusted operator hydration funnel.
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum OperatorInputError {
+    #[error("policy scalar shape does not match its declared type")]
+    ScalarKindMismatch,
+    #[error("operator family and operand combination is invalid")]
+    InvalidCombination,
+    #[error("attribute operand is not a supported PIP key")]
+    InvalidPipAttribute,
+    #[error("attribute value exceeds max length")]
+    ValueTooLong,
+    #[error("decimal value is not canonical")]
+    InvalidDecimal,
+    #[error("policy value set must not be empty")]
+    EmptySet,
+    #[error("policy value set exceeds 32 items")]
+    SetTooLarge,
+    #[error("policy value set must be homogeneous")]
+    MixedSet,
+    #[error("policy value set contains a duplicate")]
+    DuplicateSetValue,
+    #[error("string pattern is invalid")]
+    InvalidPattern,
+    #[error("regular expression is invalid")]
+    InvalidRegex,
+}
+
+impl From<PolicyValueError> for OperatorInputError {
+    fn from(value: PolicyValueError) -> Self {
+        match value {
+            PolicyValueError::TooLong => Self::ValueTooLong,
+            PolicyValueError::InvalidDecimal => Self::InvalidDecimal,
+        }
+    }
+}
+
+impl From<OperatorError> for OperatorInputError {
+    fn from(value: OperatorError) -> Self {
+        match value {
+            OperatorError::EmptySet => Self::EmptySet,
+            OperatorError::SetTooLarge => Self::SetTooLarge,
+            OperatorError::MixedSet => Self::MixedSet,
+            OperatorError::DuplicateSetValue => Self::DuplicateSetValue,
+            OperatorError::InvalidPattern => Self::InvalidPattern,
+            OperatorError::InvalidRegex => Self::InvalidRegex,
+        }
+    }
+}
+
 /// Exact equality predicates. `Ne` never turns a missing or ill-typed value into a match.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EqualityPredicate {
@@ -325,13 +460,6 @@ pub enum NumericValue {
 }
 
 impl NumericValue {
-    pub const fn value_type(&self) -> PolicyValueType {
-        match self {
-            Self::Integer(_) => PolicyValueType::Integer,
-            Self::Decimal(_) => PolicyValueType::Decimal,
-        }
-    }
-
     pub fn into_policy_value(self) -> PolicyValue {
         match self {
             Self::Integer(value) => PolicyValue::integer(value),
@@ -509,45 +637,213 @@ impl StringOperator {
 }
 
 /// RSS Common ABAC Profile：family 与 operand 的非法组合在类型层不可表达。
+#[derive(Clone, PartialEq, Eq)]
+pub struct Operator(OperatorKind);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Operator {
+enum OperatorKind {
     Equality(EqualityOperator),
     Ordering(OrderingOperator),
     Membership(MembershipOperator),
     StringMatch(StringOperator),
 }
 
+impl std::fmt::Debug for Operator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Operator(<redacted>)")
+    }
+}
+
+pub enum ScalarOperandRef<'a> {
+    Literal(PolicyValueRef<'a>),
+    Attribute(&'a PipAttributeKey),
+}
+
+pub enum OperatorRef<'a> {
+    Equality {
+        predicate: EqualityPredicate,
+        operand: ScalarOperandRef<'a>,
+    },
+    Ordering {
+        predicate: OrderingPredicate,
+        value: PolicyValueRef<'a>,
+    },
+    Membership {
+        predicate: MembershipPredicate,
+        value_type: PolicyValueType,
+        values: &'a [PolicyValue],
+    },
+    String {
+        predicate: StringPredicate,
+        pattern: &'a str,
+    },
+}
+
 impl Operator {
-    pub const fn equal(value: PolicyValue) -> Self {
+    #[allow(non_snake_case)]
+    pub(crate) const fn Equality(value: EqualityOperator) -> Self {
+        Self(OperatorKind::Equality(value))
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) const fn Ordering(value: OrderingOperator) -> Self {
+        Self(OperatorKind::Ordering(value))
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) const fn Membership(value: MembershipOperator) -> Self {
+        Self(OperatorKind::Membership(value))
+    }
+
+    #[allow(non_snake_case)]
+    pub(crate) const fn StringMatch(value: StringOperator) -> Self {
+        Self(OperatorKind::StringMatch(value))
+    }
+
+    #[allow(dead_code)]
+    pub(crate) const fn equal(value: PolicyValue) -> Self {
         Self::Equality(EqualityOperator::new(
             EqualityPredicate::Eq,
             EqualityOperand::Literal(value),
         ))
     }
 
-    pub const fn not_equal(value: PolicyValue) -> Self {
+    #[allow(dead_code)]
+    pub(crate) const fn not_equal(value: PolicyValue) -> Self {
         Self::Equality(EqualityOperator::new(
             EqualityPredicate::Ne,
             EqualityOperand::Literal(value),
         ))
     }
 
-    pub const fn equal_attribute(attribute: PipAttributeKey) -> Self {
+    #[allow(dead_code)]
+    pub(crate) const fn equal_attribute(attribute: PipAttributeKey) -> Self {
         Self::Equality(EqualityOperator::new(
             EqualityPredicate::Eq,
             EqualityOperand::Attribute(TypedAttributeOperand::new(attribute)),
         ))
     }
 
-    pub const fn ordering(predicate: OrderingPredicate, value: NumericValue) -> Self {
+    #[allow(dead_code)]
+    pub(crate) const fn ordering(predicate: OrderingPredicate, value: NumericValue) -> Self {
         Self::Ordering(OrderingOperator::new(
             predicate,
             OrderingOperand::literal(value),
         ))
     }
 
-    pub fn string(predicate: StringPredicate, pattern: &str) -> Result<Self, OperatorError> {
+    #[allow(dead_code)]
+    pub(crate) fn string(predicate: StringPredicate, pattern: &str) -> Result<Self, OperatorError> {
         StringOperator::parse(predicate, pattern).map(Self::StringMatch)
+    }
+
+    pub fn as_ref(&self) -> OperatorRef<'_> {
+        match &self.0 {
+            OperatorKind::Equality(operator) => OperatorRef::Equality {
+                predicate: operator.predicate(),
+                operand: match operator.operand() {
+                    EqualityOperand::Literal(value) => ScalarOperandRef::Literal(value.as_ref()),
+                    EqualityOperand::Attribute(value) => {
+                        ScalarOperandRef::Attribute(value.attribute())
+                    }
+                },
+            },
+            OperatorKind::Ordering(operator) => OperatorRef::Ordering {
+                predicate: operator.predicate(),
+                value: match operator.operand().value() {
+                    NumericValue::Integer(value) => PolicyValueRef::Integer(*value),
+                    NumericValue::Decimal(value) => PolicyValueRef::Decimal(value),
+                },
+            },
+            OperatorKind::Membership(operator) => OperatorRef::Membership {
+                predicate: operator.predicate(),
+                value_type: operator.operand().value_type(),
+                values: operator.operand().values(),
+            },
+            OperatorKind::StringMatch(operator) => OperatorRef::String {
+                predicate: operator.predicate(),
+                pattern: operator.pattern(),
+            },
+        }
+    }
+}
+
+impl TryFrom<TypedPolicyValueInput> for PolicyValue {
+    type Error = OperatorInputError;
+
+    fn try_from(input: TypedPolicyValueInput) -> Result<Self, Self::Error> {
+        match (input.value_type, input.value) {
+            (PolicyValueType::String, PolicyScalarInput::String(value)) => {
+                Self::string(&value).map_err(Into::into)
+            }
+            (PolicyValueType::Decimal, PolicyScalarInput::String(value)) => {
+                Self::decimal(&value).map_err(Into::into)
+            }
+            (PolicyValueType::Boolean, PolicyScalarInput::Boolean(value)) => {
+                Ok(Self::boolean(value))
+            }
+            (PolicyValueType::Integer, PolicyScalarInput::Integer(value)) => {
+                Ok(Self::integer(value))
+            }
+            _ => Err(OperatorInputError::ScalarKindMismatch),
+        }
+    }
+}
+
+impl TryFrom<OperatorInput> for Operator {
+    type Error = OperatorInputError;
+
+    fn try_from(input: OperatorInput) -> Result<Self, Self::Error> {
+        match input {
+            OperatorInput::Equality { predicate, operand } => {
+                let operand = match operand {
+                    ScalarOperandInput::Literal(value) => {
+                        EqualityOperand::Literal(value.try_into()?)
+                    }
+                    ScalarOperandInput::Attribute {
+                        value_type,
+                        attribute,
+                    } => {
+                        if value_type != PolicyValueType::String {
+                            return Err(OperatorInputError::InvalidCombination);
+                        }
+                        let attribute = PipAttributeKey::parse(&attribute)
+                            .map_err(|_| OperatorInputError::InvalidPipAttribute)?;
+                        EqualityOperand::Attribute(TypedAttributeOperand::new(attribute))
+                    }
+                };
+                Ok(Self::Equality(EqualityOperator::new(predicate, operand)))
+            }
+            OperatorInput::Ordering { predicate, operand } => {
+                let ScalarOperandInput::Literal(value) = operand else {
+                    return Err(OperatorInputError::InvalidCombination);
+                };
+                let value = PolicyValue::try_from(value)?;
+                let value = NumericValue::from_policy_value(value)
+                    .ok_or(OperatorInputError::InvalidCombination)?;
+                Ok(Self::Ordering(OrderingOperator::new(
+                    predicate,
+                    OrderingOperand::literal(value),
+                )))
+            }
+            OperatorInput::Membership {
+                predicate,
+                value_type,
+                values,
+            } => {
+                let values = values
+                    .into_iter()
+                    .map(|value| TypedPolicyValueInput::new(value_type, value).try_into())
+                    .collect::<Result<Vec<PolicyValue>, OperatorInputError>>()?;
+                let values = PolicyValueSet::new(values).map_err(OperatorInputError::from)?;
+                Ok(Self::Membership(MembershipOperator::new(predicate, values)))
+            }
+            OperatorInput::String { predicate, pattern } => {
+                StringOperator::parse(predicate, &pattern)
+                    .map(Self::StringMatch)
+                    .map_err(OperatorInputError::from)
+            }
+        }
     }
 }
 
@@ -853,10 +1149,10 @@ fn rule_matches(rule: &PolicyRule, attrs: &[AbacAttribute]) -> bool {
     let Some(actual) = find_attr(attrs, rule.attribute_key()) else {
         return false;
     };
-    match rule.operator() {
-        Operator::Equality(operator) => equality_matches(operator, actual, attrs),
-        Operator::Ordering(operator) => ordering_matches(operator, actual, attrs),
-        Operator::Membership(operator) => {
+    match &rule.operator().0 {
+        OperatorKind::Equality(operator) => equality_matches(operator, actual, attrs),
+        OperatorKind::Ordering(operator) => ordering_matches(operator, actual, attrs),
+        OperatorKind::Membership(operator) => {
             let contains = operator.operand().contains(actual);
             match operator.predicate() {
                 MembershipPredicate::In => contains,
@@ -865,7 +1161,7 @@ fn rule_matches(rule: &PolicyRule, attrs: &[AbacAttribute]) -> bool {
                 }
             }
         }
-        Operator::StringMatch(operator) => string_matches(operator, actual),
+        OperatorKind::StringMatch(operator) => string_matches(operator, actual),
     }
 }
 
@@ -979,8 +1275,8 @@ mod tests {
 
     use super::{
         AbacAttribute, EqualityOperand, EqualityOperator, EqualityPredicate, MembershipOperator,
-        MembershipPredicate, NumericValue, Operator, OrderingOperand, OrderingOperator,
-        OrderingPredicate, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
+        MembershipPredicate, NumericValue, Operator, OperatorRef, OrderingOperand,
+        OrderingOperator, OrderingPredicate, POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION,
         POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
         POLICY_ATTR_TENANT_ID, POLICY_VALUE_SET_MAX_ITEMS, PipAttributeKey, PipAttributeKeyError,
         Policy, PolicyCondition, PolicyEffect, PolicyEvaluation, PolicyObligations,
@@ -1087,7 +1383,10 @@ mod tests {
 
         let r = rule("dept", eq(aval("eng")), PolicyEffect::Allow);
         assert_eq!(r.attribute_key().as_str(), "dept");
-        assert!(matches!(r.operator(), Operator::Equality(_)));
+        assert!(matches!(
+            r.operator().as_ref(),
+            OperatorRef::Equality { .. }
+        ));
         assert_eq!(r.effect(), PolicyEffect::Allow);
         assert!(r.obligations().is_empty());
 
@@ -1112,6 +1411,55 @@ mod tests {
             Err(crate::domain::IdentityError::InvalidPolicy)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn canonical_operator_funnel_classifies_errors_and_redacts_debug() {
+        use super::{
+            OperatorInput, OperatorInputError, PolicyScalarInput, ScalarOperandInput,
+            TypedPolicyValueInput,
+        };
+        use crate::domain::PolicyValueType;
+
+        let mismatch = OperatorInput::Equality {
+            predicate: EqualityPredicate::Eq,
+            operand: ScalarOperandInput::Literal(TypedPolicyValueInput::new(
+                PolicyValueType::Boolean,
+                PolicyScalarInput::String("secret".to_string()),
+            )),
+        };
+        assert_eq!(
+            Operator::try_from(mismatch.clone()),
+            Err(OperatorInputError::ScalarKindMismatch)
+        );
+        assert_eq!(format!("{mismatch:?}"), "OperatorInput(<redacted>)");
+
+        let duplicate = OperatorInput::Membership {
+            predicate: MembershipPredicate::In,
+            value_type: PolicyValueType::String,
+            values: vec![
+                PolicyScalarInput::String("secret".to_string()),
+                PolicyScalarInput::String("secret".to_string()),
+            ],
+        };
+        assert_eq!(
+            Operator::try_from(duplicate),
+            Err(OperatorInputError::DuplicateSetValue)
+        );
+
+        let operator = Operator::try_from(OperatorInput::String {
+            predicate: StringPredicate::Contains,
+            pattern: "secret-pattern".to_string(),
+        })
+        .expect("valid canonical operator");
+        assert_eq!(format!("{operator:?}"), "Operator(<redacted>)");
+        assert!(matches!(
+            operator.as_ref(),
+            OperatorRef::String {
+                predicate: StringPredicate::Contains,
+                pattern: "secret-pattern"
+            }
+        ));
     }
 
     #[rstest]

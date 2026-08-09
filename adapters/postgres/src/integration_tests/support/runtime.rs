@@ -342,7 +342,7 @@ pub(in super::super) fn projection_conformance_definition(
     fixture: ProjectionConformanceFixture,
 ) -> Result<eventexec::ProjectionTargetDefinition, eventexec::ProjectionTargetConfigError> {
     eventexec::ProjectionTargetDefinition::new(
-        vocab::ContractBinding::from_static(
+        test_contract_binding(
             fixture.definition_domain(),
             fixture.projection_id(),
             fixture.definition_version(),

@@ -184,10 +184,14 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::AssemblyTopology
 pub assembly_schema::DiportPort::AckableSubscriber
 pub assembly_schema::DiportPort::AuditSink
 pub assembly_schema::DiportPort::Cas
+pub assembly_schema::DiportPort::CertificateArtifactSource
+pub assembly_schema::DiportPort::CertificateReconcileRepository
+pub assembly_schema::DiportPort::DeviceCommandStore
 pub assembly_schema::DiportPort::DlxArchiveStore
 pub assembly_schema::DiportPort::DlxLifecycleRepository
 pub assembly_schema::DiportPort::KeyProvider
 pub assembly_schema::DiportPort::Lock
+pub assembly_schema::DiportPort::MqttSession
 pub assembly_schema::DiportPort::ObjectStore
 pub assembly_schema::DiportPort::Pdp
 pub assembly_schema::DiportPort::Publisher
@@ -446,9 +450,13 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProjectionCapabil
 #[repr(u8)] pub enum assembly_schema::ProviderConstructor
 pub assembly_schema::ProviderConstructor::AmqpPublisher
 pub assembly_schema::ProviderConstructor::AmqpSubscriber
+pub assembly_schema::ProviderConstructor::IdentityDraftArtifactSimulator
+pub assembly_schema::ProviderConstructor::MqttSession
 pub assembly_schema::ProviderConstructor::OidcProvider
 pub assembly_schema::ProviderConstructor::PostgresAuthAuditSink
 pub assembly_schema::ProviderConstructor::PostgresCasStore
+pub assembly_schema::ProviderConstructor::PostgresDeviceCertificateRepository
+pub assembly_schema::ProviderConstructor::PostgresDeviceCommandStore
 pub assembly_schema::ProviderConstructor::PostgresDlxLifecycleRepository
 pub assembly_schema::ProviderConstructor::PostgresRevocationStore
 pub assembly_schema::ProviderConstructor::PostgresServiceTokenReplayStore
@@ -585,6 +593,10 @@ pub assembly_schema::ProviderFactorySymbol::EventexecVaultHotKeyProvider
 pub assembly_schema::ProviderFactorySymbol::HttpserveGovernorRateLimiter
 pub assembly_schema::ProviderFactorySymbol::HttpserveOidcPdp
 pub assembly_schema::ProviderFactorySymbol::HttpservePostgresAuthAuditSink
+pub assembly_schema::ProviderFactorySymbol::IdentityDraftArtifactSimulator
+pub assembly_schema::ProviderFactorySymbol::IdentityMqttSession
+pub assembly_schema::ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore
+pub assembly_schema::ProviderFactorySymbol::IdentityPostgresDeviceCommandStore
 pub assembly_schema::ProviderFactorySymbol::IdentityVaultSigner
 pub assembly_schema::ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore
 pub assembly_schema::ProviderFactorySymbol::RuntimeS3ObjectStore
@@ -695,6 +707,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ProviderLifecy
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ProviderLifecycle
 #[repr(u8)] pub enum assembly_schema::ProviderRole
 pub assembly_schema::ProviderRole::AuthAuditSink
+pub assembly_schema::ProviderRole::DeviceCertificateStore
+pub assembly_schema::ProviderRole::DeviceCommandStore
+pub assembly_schema::ProviderRole::DeviceDraftArtifactSource
+pub assembly_schema::ProviderRole::DeviceMqttSession
 pub assembly_schema::ProviderRole::DeviceRevocationStore
 pub assembly_schema::ProviderRole::DistributedCasStore
 pub assembly_schema::ProviderRole::DistributedCasStoreAlternative
@@ -889,18 +905,20 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::SagaCapabilityReq
 pub enum assembly_schema::WorkflowActivation
 pub assembly_schema::WorkflowActivation::Projection
 pub assembly_schema::WorkflowActivation::Projection::activation: assembly_schema::ProjectionActivation
-pub assembly_schema::WorkflowActivation::Projection::definition_schema_digest: alloc::string::String
+pub assembly_schema::WorkflowActivation::Projection::definition_schema_digest: vocab::digest::CanonicalSha256Digest
 pub assembly_schema::WorkflowActivation::Projection::definition_version: alloc::string::String
 pub assembly_schema::WorkflowActivation::Projection::id: alloc::string::String
+pub assembly_schema::WorkflowActivation::Projection::target_generation: alloc::string::String
 pub assembly_schema::WorkflowActivation::Saga
 pub assembly_schema::WorkflowActivation::Saga::activation: assembly_schema::SagaActivation
-pub assembly_schema::WorkflowActivation::Saga::definition_schema_digest: alloc::string::String
+pub assembly_schema::WorkflowActivation::Saga::definition_schema_digest: vocab::digest::CanonicalSha256Digest
 pub assembly_schema::WorkflowActivation::Saga::definition_version: alloc::string::String
 pub assembly_schema::WorkflowActivation::Saga::id: alloc::string::String
 impl assembly_schema::WorkflowActivation
 pub fn assembly_schema::WorkflowActivation::definition_schema_digest(&self) -> &str
 pub fn assembly_schema::WorkflowActivation::definition_version(&self) -> &str
 pub fn assembly_schema::WorkflowActivation::id(&self) -> &str
+pub fn assembly_schema::WorkflowActivation::projection_target_generation(&self) -> core::option::Option<&str>
 impl core::clone::Clone for assembly_schema::WorkflowActivation
 pub fn assembly_schema::WorkflowActivation::clone(&self) -> assembly_schema::WorkflowActivation
 impl core::cmp::Eq for assembly_schema::WorkflowActivation
@@ -922,9 +940,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::WorkflowActiva
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::WorkflowActivation
 pub struct assembly_schema::AssemblyDigests
 impl assembly_schema::AssemblyDigests
-pub fn assembly_schema::AssemblyDigests::contracts(&self) -> &str
-pub fn assembly_schema::AssemblyDigests::generated(&self) -> &str
-pub fn assembly_schema::AssemblyDigests::manifest(&self) -> &str
+pub const fn assembly_schema::AssemblyDigests::contracts(&self) -> &vocab::digest::CanonicalSha256Digest
+pub const fn assembly_schema::AssemblyDigests::generated(&self) -> &vocab::digest::CanonicalSha256Digest
+pub const fn assembly_schema::AssemblyDigests::manifest(&self) -> &vocab::digest::CanonicalSha256Digest
 impl schemars::JsonSchema for assembly_schema::AssemblyDigests
 pub fn assembly_schema::AssemblyDigests::json_schema(&mut schemars::gen::SchemaGenerator) -> schemars::schema::Schema
 pub fn assembly_schema::AssemblyDigests::schema_id() -> alloc::borrow::Cow<'static, str>
@@ -1044,6 +1062,7 @@ pub assembly_schema::AssemblyManifest::name: alloc::string::String
 pub assembly_schema::AssemblyManifest::profile: assembly_schema::AssemblyProfile
 pub assembly_schema::AssemblyManifest::schema_version: assembly_schema::AssemblyManifestSchemaVersion
 pub assembly_schema::AssemblyManifest::topology: assembly_schema::AssemblyTopology
+pub assembly_schema::AssemblyManifest::typed_domain_inputs: bool
 pub assembly_schema::AssemblyManifest::workflow_activations: alloc::vec::Vec<assembly_schema::WorkflowActivation>
 impl assembly_schema::AssemblyManifest
 pub fn assembly_schema::AssemblyManifest::basic_validation_errors(&self) -> alloc::vec::Vec<assembly_schema::ManifestValidationError>
@@ -1091,11 +1110,12 @@ pub fn assembly_schema::CanonicalAssemblyManifestV2::diport_providers(&self) -> 
 pub fn assembly_schema::CanonicalAssemblyManifestV2::domains(&self) -> &[assembly_schema::AssemblyDomain]
 pub fn assembly_schema::CanonicalAssemblyManifestV2::framework_contracts(&self) -> &[assembly_schema::FrameworkContractMount]
 pub fn assembly_schema::CanonicalAssemblyManifestV2::listeners(&self) -> &[assembly_schema::AssemblyListener]
-pub fn assembly_schema::CanonicalAssemblyManifestV2::manifest_digest(&self) -> &str
+pub const fn assembly_schema::CanonicalAssemblyManifestV2::manifest_digest(&self) -> &vocab::digest::CanonicalSha256Digest
 pub fn assembly_schema::CanonicalAssemblyManifestV2::name(&self) -> &str
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::profile(&self) -> assembly_schema::AssemblyProfile
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::schema_version(&self) -> assembly_schema::AssemblyManifestSchemaVersion
 pub const fn assembly_schema::CanonicalAssemblyManifestV2::topology(&self) -> assembly_schema::AssemblyTopology
+pub const fn assembly_schema::CanonicalAssemblyManifestV2::typed_domain_inputs(&self) -> bool
 pub fn assembly_schema::CanonicalAssemblyManifestV2::workflow_activations(&self) -> &[assembly_schema::WorkflowActivation]
 impl core::clone::Clone for assembly_schema::CanonicalAssemblyManifestV2
 pub fn assembly_schema::CanonicalAssemblyManifestV2::clone(&self) -> assembly_schema::CanonicalAssemblyManifestV2

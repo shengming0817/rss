@@ -647,6 +647,11 @@ fn render_contract_body(
     let mut redaction_policies: StructPolicies = BTreeMap::new();
     let mut protection_policies: StructProtectionPolicies = BTreeMap::new();
     let mut deferred_string_lengths: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    // ref: typify-impl/src/{lib.rs,convert.rs}@01153fa2fea45d660400e3060d91fa2e102976d8
+    // `add_ref_types` is the narrow upstream seam for registering resolved shared definitions
+    // before roots; RSS keeps resolution local and deterministic instead of adding a registry.
+    let mut shared_definitions = BTreeMap::new();
+    let mut roots = Vec::new();
     let schema_files = c.manifest().declared_schema_files();
     for schema_file in schema_files {
         // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
@@ -655,11 +660,9 @@ fn render_contract_body(
         let path = c
             .schema_path(schema_file)
             .with_context(|| format!("契约 {source} 未捕获 schema 路径: {schema_file}"))?;
-        let bytes = c
-            .schema_bytes(schema_file)
-            .with_context(|| format!("读 snapshot schema {}", path.display()))?;
-        let value: serde_json::Value = serde_json::from_slice(bytes)
-            .with_context(|| format!("解析 schema {}", path.display()))?;
+        let value = c
+            .resolved_schema(schema_file)
+            .with_context(|| format!("解析 resolved schema {}", path.display()))?;
         merge_deferred_string_lengths(
             &mut deferred_string_lengths,
             collect_deferred_string_lengths(&value).with_context(|| {
@@ -701,11 +704,26 @@ fn render_contract_body(
                 )
             })?;
         protection_policies.extend(schema_protection_policies);
-        let root: RootSchema = serde_json::from_value(value)
+        let mut root: RootSchema = serde_json::from_value(value.into_value())
             .with_context(|| format!("解析 schema {}", path.display()))?;
+        for (name, definition) in std::mem::take(&mut root.definitions) {
+            if let Some(existing) = shared_definitions.get(&name) {
+                if existing != &definition {
+                    bail!("契约 {source} 的 resolved definition {name:?} 在多个 schema 中冲突");
+                }
+            } else {
+                shared_definitions.insert(name, definition);
+            }
+        }
+        roots.push((path.to_path_buf(), root));
+    }
+    space
+        .add_ref_types(shared_definitions)
+        .map_err(|error| anyhow::anyhow!("typify 派生契约 {source} 的共享 definitions: {error}"))?;
+    for (path, root) in roots {
         space
             .add_root_schema(root)
-            .map_err(|e| anyhow::anyhow!("typify 派生 {}: {e}", path.display()))?;
+            .map_err(|error| anyhow::anyhow!("typify 派生 {}: {error}", path.display()))?;
     }
     let mut parsed =
         syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
@@ -1276,11 +1294,9 @@ fn render_http_query_parameters(c: &GovernedContract, method: &str) -> Result<St
     let Some(schema_file) = c.manifest().schemas.request.as_deref() else {
         return Ok(String::new());
     };
-    let schema_bytes = c
-        .schema_bytes(schema_file)
-        .with_context(|| format!("HTTP request schema {schema_file} was not loaded"))?;
-    let schema: serde_json::Value = serde_json::from_slice(schema_bytes)
-        .with_context(|| format!("parse HTTP request schema {schema_file}"))?;
+    let schema = c
+        .resolved_schema(schema_file)
+        .with_context(|| format!("parse resolved HTTP request schema {schema_file}"))?;
     let properties = schema
         .get("properties")
         .and_then(serde_json::Value::as_object)
@@ -1816,11 +1832,12 @@ fn validate_device_generation_epoch_v1_schema(c: &GovernedContract) -> Result<()
     let path = c
         .schema_path(schema_file)
         .with_context(|| format!("fenced command request schema 未捕获: {schema_file}"))?;
-    let bytes = c
-        .schema_bytes(schema_file)
-        .with_context(|| format!("读 fenced command request schema {}", path.display()))?;
-    let schema: serde_json::Value = serde_json::from_slice(bytes)
-        .with_context(|| format!("解析 fenced command request schema {}", path.display()))?;
+    let schema = c.resolved_schema(schema_file).with_context(|| {
+        format!(
+            "解析 resolved fenced command request schema {}",
+            path.display()
+        )
+    })?;
     if schema.get("type").and_then(serde_json::Value::as_str) != Some("object")
         || schema
             .get("additionalProperties")
@@ -1917,11 +1934,9 @@ fn schema_root_type_name(
     let path = c
         .schema_path(schema_file)
         .with_context(|| format!("{label} 未捕获 schema 路径: {schema_file}"))?;
-    let bytes = c
-        .schema_bytes(schema_file)
-        .with_context(|| format!("读 snapshot {label} {}", path.display()))?;
-    let value: serde_json::Value = serde_json::from_slice(bytes)
-        .with_context(|| format!("解析 {label} {}", path.display()))?;
+    let value = c
+        .resolved_schema(schema_file)
+        .with_context(|| format!("解析 resolved {label} {}", path.display()))?;
     let title = value
         .get("title")
         .and_then(serde_json::Value::as_str)

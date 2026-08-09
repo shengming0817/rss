@@ -44,11 +44,12 @@ use httpserve::ProducerMarker;
 use httpserve::{RouteAuthorizationDecision, RouteAuthorizationRequest, RouteResource};
 use identity::ports::{
     AttributeKey, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
-    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, MembershipOperator,
-    MembershipPredicate, Operator, POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition,
-    PolicyEffect, PolicyLifecycle, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyValue,
-    PolicyValueSet, ResourceAttribute, ResourceAttributeKey, ResourceAttributeResourceId,
-    ResourceAttributeWriteRepo, TenantId, TenantRepoScope,
+    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, EqualityPredicate,
+    MembershipPredicate, Operator, OperatorInput, POLICY_ATTR_PRINCIPAL_KIND, Policy,
+    PolicyCondition, PolicyEffect, PolicyLifecycle, PolicyObligations, PolicyRouteScope,
+    PolicyRule, PolicyScalarInput, PolicyValue, PolicyValueType, ResourceAttribute,
+    ResourceAttributeKey, ResourceAttributeResourceId, ResourceAttributeWriteRepo,
+    ScalarOperandInput, TenantId, TenantRepoScope, TypedPolicyValueInput,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
@@ -1001,10 +1002,11 @@ async fn event_transport_durable_e2e() -> Result<()> {
         vec![PolicyRule::with_obligations(
             PolicyCondition::new(
                 AttributeKey::parse("resource.clearance")?,
-                Operator::Membership(MembershipOperator::new(
-                    MembershipPredicate::In,
-                    PolicyValueSet::new(vec![PolicyValue::integer(7)])?,
-                )),
+                Operator::try_from(OperatorInput::Membership {
+                    predicate: MembershipPredicate::In,
+                    value_type: PolicyValueType::Integer,
+                    values: vec![PolicyScalarInput::Integer(7)],
+                })?,
             ),
             PolicyEffect::Allow,
             PolicyObligations::empty(),
@@ -1054,7 +1056,13 @@ async fn event_transport_durable_e2e() -> Result<()> {
         vec![PolicyRule::with_obligations(
             PolicyCondition::new(
                 AttributeKey::parse(POLICY_ATTR_PRINCIPAL_KIND)?,
-                Operator::equal(PolicyValue::parse("admin")?),
+                Operator::try_from(OperatorInput::Equality {
+                    predicate: EqualityPredicate::Eq,
+                    operand: ScalarOperandInput::Literal(TypedPolicyValueInput::new(
+                        PolicyValueType::String,
+                        PolicyScalarInput::String("admin".to_string()),
+                    )),
+                })?,
             ),
             PolicyEffect::Allow,
             PolicyObligations::empty(),
