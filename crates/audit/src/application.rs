@@ -1,8 +1,9 @@
 //! audit 应用层：session→链 append 订阅 handler + 跨租户 admin 读 handler + bootstrap 生命周期。
 //!
 //! 消费 identity 域 `identity.session-created` event（跨域只经 contract）→ 构造域 [`AuditRecord`] →
-//! 经注入的 [`InMemAuditRepo`] **原子封链** append（domain hash chain，#1014 RW-W 写实，取代 G1 的 flat
-//! `diport::AuditSink` 路径）。admin 读 handler（`GET /api/v1/audit/entries`，Admin listener）按已认证
+//! 经注入的 [`AuditWriteRepo`](crate::ports::AuditWriteRepo) **原子封链** append（domain hash chain，
+//! #1014 RW-W 写实，取代 G1 的 flat `diport::AuditSink` 路径）。admin 读 handler
+//! （`GET /api/v1/audit/entries`，Admin listener）按已认证
 //! 租户分页列出审计条目；独立 target-tenant 路由只允许已验证 SuperAdmin 在 durable cross-tenant audit
 //! append 成功后读取目标租户审计链。
 //!
@@ -176,6 +177,12 @@ pub enum AuditEventRecordError {
     Action(#[source] vocab::ActionError),
     #[error("audit event session parse failed")]
     Session(#[source] ids::IdParseError),
+    #[error("audit event id parse failed")]
+    EventId(#[source] uuid::Error),
+    #[error("audit event id must be a canonical UUID v4")]
+    EventIdVersion,
+    #[error("audit event id must be independent from the bearer session id")]
+    EventIdReusesSession,
     #[error("audit security event kind is not auditable")]
     SecurityKind,
     #[error("audit event timestamp is outside the Unix int64 range")]
@@ -336,15 +343,45 @@ fn session_created_record_from_message(
     let action = vocab::Action::parse(ACTION_LOGIN).map_err(AuditEventRecordError::Action)?;
     let session =
         ids::SessionId::parse(&payload.session_id).map_err(AuditEventRecordError::Session)?;
+    let resource_id = SessionAuditResourceId::from_message(&message.id, &session)?;
     Ok(AuditRecord {
         tenant,
         actor: ids::UserId::new(payload.subject),
         actor_kind: vocab::PrincipalKind::User,
         action,
-        resource: ResourceRef::new(RESOURCE_KIND_SESSION, session.as_uuid().to_string()),
+        resource: ResourceRef::new(RESOURCE_KIND_SESSION, resource_id.into_string()),
         outcome: AuditOutcome::Success,
         recorded_at: from_unix_secs(payload.occurred_at)?,
     })
+}
+
+/// Session audit resources are derived only from an independent canonical event identity. The
+/// private field prevents the bearer SessionId from being passed directly to `ResourceRef`.
+struct SessionAuditResourceId(String);
+
+impl SessionAuditResourceId {
+    fn from_message(
+        message_id: &diport::MessageId,
+        session: &ids::SessionId,
+    ) -> Result<Self, AuditEventRecordError> {
+        let event_id =
+            uuid::Uuid::parse_str(message_id.as_str()).map_err(AuditEventRecordError::EventId)?;
+        let canonical = event_id.to_string();
+        if event_id.get_version() != Some(uuid::Version::Random)
+            || event_id.get_variant() != uuid::Variant::RFC4122
+            || canonical != message_id.as_str()
+        {
+            return Err(AuditEventRecordError::EventIdVersion);
+        }
+        if event_id.as_bytes() == session.as_uuid().as_bytes() {
+            return Err(AuditEventRecordError::EventIdReusesSession);
+        }
+        Ok(Self(format!("event:{canonical}")))
+    }
+
+    fn into_string(self) -> String {
+        self.0
+    }
 }
 
 fn role_assigned_record_from_message(
@@ -1199,14 +1236,15 @@ mod tests {
     use tower::ServiceExt as _;
 
     use crate::domain::AuditChainHasher;
-    use crate::domain::test_support::{TestKeyedHasher, keyed_hasher};
-    use crate::internal::mem::InMemAuditRepo;
     use crate::ports::AuditLedgerVerifyReport;
+    use crate::test_support::{InMemAuditRepo, TestKeyedHasher, keyed_hasher};
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const CANON_SUBJECT: &str = "11111111-2222-4333-8444-555555555555";
-    /// canonical UUID session_id（审计 resource id 是 typed `ids::SessionId`，非 uuid 被 fail-closed 拒，F3）。
+    /// canonical UUID session_id bearer（必须解析，但不得进入审计 resource/canonical bytes）。
     const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
+    /// identity producer 独立 mint 的 canonical UUID v4 EventId。
+    const CANON_EVENT_ID: &str = "33333333-4444-4555-8666-777777777777";
     const ROLE_ID: &str = "tenant-admin";
     const POLICY_ID: &str = "policy-admin-read";
     /// contract.toml 声明的完整路径（= `AUDIT_ROUTE_PREFIX` ‖ `AUDIT_ENTRIES_SUBPATH`）；测试据此断言
@@ -1918,7 +1956,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m-1", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .await
         .expect("handle ok");
@@ -1937,11 +1975,77 @@ mod tests {
         assert_eq!(entry.seq(), 0);
         assert_eq!(entry.action().as_str(), ACTION_LOGIN);
         assert_eq!(entry.resource().kind(), RESOURCE_KIND_SESSION);
-        assert_eq!(entry.resource().id(), CANON_SESSION);
+        assert_eq!(entry.resource().id(), format!("event:{CANON_EVENT_ID}"));
+        assert!(!entry.resource().id().contains(CANON_SESSION));
         assert_eq!(entry.actor().as_uuid().to_string(), CANON_SUBJECT);
         // 落库链条可被同 key hasher 验证完整。
         let verifier: AuditChainHasher<TestKeyedHasher> = keyed_hasher(0x5a);
         assert!(verifier.verify(&listed.entries).is_ok());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_created_rejects_non_uuid_event_id() {
+        let error = audit_record_from_event_message(
+            AuditEventKind::SessionCreated,
+            &Message::new(
+                "not-an-event-uuid",
+                payload_bytes(CANON_SUBJECT, CANON_TENANT),
+            ),
+        )
+        .err()
+        .expect("session audit EventId must be a canonical UUID v4");
+
+        assert!(matches!(error, AuditEventRecordError::EventId(_)));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_created_rejects_non_v4_event_id() {
+        let error = audit_record_from_event_message(
+            AuditEventKind::SessionCreated,
+            &Message::new(
+                "33333333-4444-1555-8666-777777777777",
+                payload_bytes(CANON_SUBJECT, CANON_TENANT),
+            ),
+        )
+        .err()
+        .expect("session audit EventId must be UUID v4");
+
+        assert!(matches!(error, AuditEventRecordError::EventIdVersion));
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_created_rejects_noncanonical_or_non_rfc_v4_event_id() {
+        for event_id in [
+            "33333333-4444-4555-8666-77777777777A",
+            "33333333444445558666777777777777",
+            "33333333-4444-4555-7666-777777777777",
+            "33333333-4444-4555-c666-777777777777",
+            "33333333-4444-4555-e666-777777777777",
+        ] {
+            let error = audit_record_from_event_message(
+                AuditEventKind::SessionCreated,
+                &Message::new(event_id, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            )
+            .err()
+            .expect("session audit EventId must be canonical UUID v4 in the RFC variant");
+            assert!(matches!(error, AuditEventRecordError::EventIdVersion));
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn session_created_rejects_event_id_equal_to_session_id() {
+        let error = audit_record_from_event_message(
+            AuditEventKind::SessionCreated,
+            &Message::new(CANON_SESSION, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+        )
+        .err()
+        .expect("EventId must be independent from the bearer session id");
+
+        assert!(matches!(error, AuditEventRecordError::EventIdReusesSession));
     }
 
     #[tokio::test]
@@ -2315,17 +2419,24 @@ mod tests {
             "production error logs must use secure::redact_error"
         );
         let error_logs = production.matches("tracing::error!(").count();
+        let error_chain_logs = production.matches("error_chain = %").count();
         assert_eq!(
             production.matches("secure::redact_error(").count(),
-            error_logs,
-            "every production error log must use the secure redaction funnel"
+            error_chain_logs,
+            "every logged error chain must use the secure redaction funnel"
         );
         assert_eq!(
             production.matches("domain = AUDIT_DOMAIN").count(),
             error_logs,
             "every production error log must carry the audit domain"
         );
-        assert_eq!(production.matches("GeneratedEndpoint::new(").count(), 2);
+        assert_eq!(
+            production.matches("GeneratedEndpoint::new(").count()
+                + production
+                    .matches("GeneratedEndpoint::new_declared(")
+                    .count(),
+            2
+        );
         assert_eq!(production.matches(".mount(").count(), 2);
         assert!(!production.contains("axum::routing::on("));
     }
@@ -2669,7 +2780,7 @@ mod tests {
             append_event_for_test(
                 repo.clone(),
                 AuditEventKind::SessionCreated,
-                Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+                Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
             )
             .await
             .expect("append");
@@ -2704,7 +2815,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .await
         .expect("append");
@@ -2745,7 +2856,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .await
         .expect("append");
@@ -3230,7 +3341,7 @@ mod tests {
         append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+            Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
         )
         .await
         .expect("append");
@@ -3285,7 +3396,7 @@ mod tests {
             append_event_for_test(
                 repo.clone(),
                 AuditEventKind::SessionCreated,
-                Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+                Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
             )
             .await
             .expect("append");
@@ -3733,7 +3844,7 @@ mod tests {
             append_event_for_test(
                 repo.clone(),
                 AuditEventKind::SessionCreated,
-                Message::new("m", payload_bytes(CANON_SUBJECT, CANON_TENANT)),
+                Message::new(CANON_EVENT_ID, payload_bytes(CANON_SUBJECT, CANON_TENANT)),
             )
             .await
             .expect("append");

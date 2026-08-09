@@ -1156,7 +1156,7 @@ fn test_audit_repo() -> TestAuditRepos {
         MacKey::from_bytes(vec![0x5a; 32]),
     )
     .expect("audit chain hasher");
-    let provider = Arc::new(audit::InMemAuditRepo::new(hasher));
+    let provider = Arc::new(audit::test_support::InMemAuditRepo::new(hasher));
     TestAuditRepos {
         read: Arc::from(audit::ports::DynAuditReadRepo::new_box(Arc::clone(
             &provider,

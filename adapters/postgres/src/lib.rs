@@ -528,14 +528,12 @@ mod smoke {
         assert_secret_uow(PhantomData::<super::PgSecretUnitOfWork>);
         // `PgRefreshTokenStore: RefreshTokenStore` 真实 impl——哈希存储 + CAS rotation + 谱系级联撤销 + RLS（#1325）。
         assert_refresh_token_store(PhantomData::<super::PgRefreshTokenStore>);
-        // `PgAuditRepo<TestVerifier>` 真实 read/write impl——append-only per-tenant keyed-HMAC chain + RLS（#1230）。
-        // TestVerifier 是本地确定性 FNV-1a verifier（MacVerifier impl），足以证明 trait 满足；不执行 body。
-        assert_audit_repo(
-            PhantomData::<super::PgAuditRepo<super::audit_repo::test_support::TestVerifier>>,
-        );
+        // `PgAuditRepo<TestKeyedHasher>` 真实 read/write impl——append-only per-tenant keyed-HMAC chain + RLS（#1230）。
+        // verifier 由 audit::test_support 单源提供，足以证明 trait 满足；不执行 body。
+        assert_audit_repo(PhantomData::<super::PgAuditRepo<audit::test_support::TestKeyedHasher>>);
         // 真实 durable audit subscriber 的具体类型只能经 policy-bound `into_handler` 激活。
         assert_send_sync(
-            PhantomData::<super::PgAuditConsumerTx<super::audit_repo::test_support::TestVerifier>>,
+            PhantomData::<super::PgAuditConsumerTx<audit::test_support::TestKeyedHasher>>,
         );
         // `PgAuthGrantSweeper` 是 concrete postgres maintenance 能力，不 impl identity 域端口；Send+Sync smoke
         // 锁住可进入 runtime worker 的形状。

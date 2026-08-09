@@ -1106,7 +1106,6 @@ impl PgFaultMatrixHarness {
         tenant: vocab::TenantId,
         event_id: &str,
         group: &str,
-        session_id: uuid::Uuid,
     ) -> FaultMatrixResult<FaultMatrixSessionCreatedEffectObservation> {
         let business_mutations: i64 = sqlx::query_scalar(
             "SELECT count(*)::bigint FROM audit_entries \
@@ -1114,7 +1113,7 @@ impl PgFaultMatrixHarness {
                AND resource_kind = 'session' AND resource_id = $2 AND outcome = 'success'",
         )
         .bind(tenant.to_string())
-        .bind(session_id.to_string())
+        .bind(format!("event:{event_id}"))
         .fetch_one(&self.owner_pool)
         .await?;
         let inbox_done_rows: i64 = sqlx::query_scalar(

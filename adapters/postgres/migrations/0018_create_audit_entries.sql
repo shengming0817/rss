@@ -11,6 +11,8 @@
 --     canonical_message 以 secs(u64 BE) + nanos(u32 BE) 为输入（INVARIANT: AUDIT-LEDGER-BYTES-01），
 --     timestamptz 往返会改变 nanos → 重算 entry_hash 不匹配 → verify 假阳。两列编码与哈希输入精确对称。
 --   * **actor_kind / outcome 闭值集 CHECK**：DB 层防止未知变体落库，与 Rust actor_kind_to_db / AuditOutcome::to_db 对齐。
+--   * **session audit resource = independent EventId**：identity:login/session 只接受 `event:<canonical UUID v4>`；
+--     bearer session UUID 原值、非 v4 与非 canonical 形态均由 DB 层硬拒。
 --   * **seq CHECK >= 0**：映射 Rust u64，非负；回读 i64 → u64 via try_from fail-closed。
 --
 -- 索引设计：PRIMARY KEY (tenant_id, seq)——按租户 + seq 唯一，是 append 尾读（ORDER BY seq DESC LIMIT 1）
@@ -33,6 +35,11 @@ CREATE TABLE audit_entries (
     action              text        NOT NULL,
     resource_kind       text        NOT NULL,
     resource_id         text        NOT NULL,
+    CONSTRAINT audit_entries_session_event_resource_check CHECK (
+        action <> 'identity:login'
+        OR resource_kind <> 'session'
+        OR resource_id ~ '^event:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$'
+    ),
     outcome             text        NOT NULL CHECK (outcome IN ('success','denied','error')),
     recorded_at_secs    bigint      NOT NULL CHECK (recorded_at_secs >= 0),
     recorded_at_nanos   integer     NOT NULL CHECK (recorded_at_nanos >= 0 AND recorded_at_nanos < 1000000000),

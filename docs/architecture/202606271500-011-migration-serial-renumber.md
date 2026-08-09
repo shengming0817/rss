@@ -2,7 +2,7 @@
 
 - **状态**：Accepted（#1998 修订：连续性 / 固定四位假门退役；唯一性上移 inventory Hard SoT；`MIGRATION-SERIAL-UNIQUE-01` Medium 门删除）
 - **日期**：2026-06-27
-- **关联**：issue #1134 [infra-deploy]（容器化交付时 E2E 首次对真实 PG 跑 `run_migrations` 暴露本 bug）；issue #1998（假连续性门清理 + Migrator 同源 inventory）；issue #2060（未部署 migration 中 Projection source SQL 归位）
+- **关联**：issue #1134 [infra-deploy]（容器化交付时 E2E 首次对真实 PG 跑 `run_migrations` 暴露本 bug）；issue #1457 / #1458（未部署 audit schema 真源硬化）；issue #1998（假连续性门清理 + Migrator 同源 inventory）；issue #2060（未部署 migration 中 Projection source SQL 归位）
 - **归属**：framework（持久化基座 / 迁移治理，provider-agnostic）
 - **AI-robust 评级**：序号唯一性 + version/checksum 同源 = **Hard**（`postgres-migration-inventory` build.rs 调用 `sqlx_core::migrate::resolve_blocking`，INVARIANT `POSTGRES-MIGRATION-INVENTORY-01`）
 
@@ -77,6 +77,16 @@ Projection apply funnel 之外后置覆盖 `0088` 的 scoped read 与 high-water
 
 该决定不建立历史 migration 内容可任意改写的通用许可，只覆盖这次 owner 归位与错误覆盖删除；一旦出现部署 DB、
 旧 checksum 或 GA 发布，本例外立即失效，后续修正必须恢复严格 forward-only。
+
+### 2.6 #1457 / #1458 窄例外：未部署 audit session resource 真源硬化
+
+用户确认项目没有历史部署、`_sqlx_migrations` ledger 或历史数据。#1457 / #1458 因而直接修正尚未部署的
+`0018_create_audit_entries.sql`：`identity:login/session` 的 `resource_id` 只接受由独立 EventId 派生的
+`event:<canonical UUID v4>`，数据库拒绝 bearer SessionId、非 RFC variant、非 v4 与非 canonical 形态。
+
+该例外只覆盖本次 fresh-install audit schema 真源修正，不授权改写其他 migration，也不引入 backfill、兼容
+reader、双写或后置 migration。一旦出现任何部署、migration checksum ledger、历史行或 GA 发布，窗口立即
+失效；后续 SQL 语义修正必须恢复严格 forward-only。
 
 ## 3. 备选与否决
 

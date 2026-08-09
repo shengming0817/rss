@@ -562,8 +562,8 @@ impl AuditError {
 
 /// 跨模块共享的确定性测试 verifier（domain / internal / application 单测复用；非加密，仅确定性 + key/msg 敏感）。
 /// 域单测不依赖 adapter crate（rust-standards.md §命名），真实 sha2/hmac 是 follow-up adapter。
-#[cfg(test)]
-pub(crate) mod test_support {
+#[cfg(any(test, feature = "test-support"))]
+pub mod test_support {
     use super::AuditChainHasher;
     use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier, constant_time_eq};
 
@@ -571,7 +571,7 @@ pub(crate) mod test_support {
     const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
 
     /// keyed FNV-1a 折叠 verifier（4 lane → 32B，混 key+message ⇒ 对二者均敏感）。
-    pub(crate) struct TestKeyedHasher;
+    pub struct TestKeyedHasher;
     impl MacVerifier for TestKeyedHasher {
         fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
             let mut lanes = [
@@ -602,7 +602,7 @@ pub(crate) mod test_support {
 
     /// 取定长 key（`key_byte` 重复 32 次）的 hasher（32B 满足 `MIN_KEY_LEN`，构造必 `Some`）。
     #[allow(clippy::expect_used)]
-    pub(crate) fn keyed_hasher(key_byte: u8) -> AuditChainHasher<TestKeyedHasher> {
+    pub fn keyed_hasher(key_byte: u8) -> AuditChainHasher<TestKeyedHasher> {
         AuditChainHasher::new(TestKeyedHasher, MacKey::from_bytes(vec![key_byte; 32]))
             .expect("32B test key satisfies MIN_KEY_LEN")
     }

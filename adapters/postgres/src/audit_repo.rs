@@ -26,9 +26,8 @@ use std::sync::Arc;
 use audit::ports::{
     AuditAdminRepo, AuditChainHasher, AuditError, AuditLedgerVerifyReport, AuditListResult,
     AuditPage, AuditReadRepo, AuditRecord, AuditWriteRepo, CrossTenantReadScope, TenantId,
-    TenantRepoScope,
+    TenantRepoScope, decode_sequence_cursor,
 };
-use base64::Engine as _;
 use primitives::MacVerifier;
 
 #[cfg(test)]
@@ -141,19 +140,6 @@ fn storage(e: sqlx::Error) -> AuditError {
 }
 
 // ---------------------------------------------------------------------------
-// 游标 encode / decode（base64url, URL_SAFE_NO_PAD）
-// ---------------------------------------------------------------------------
-
-/// 解码游标回 u64 seq（fail-closed：非法 base64url / 非 UTF-8 / 非数字 → `InvalidCursor`）。
-fn decode_cursor(cursor: &vocab::Cursor) -> Result<u64, AuditError> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(cursor.as_str())
-        .map_err(|_| AuditError::InvalidCursor)?;
-    let s = std::str::from_utf8(&bytes).map_err(|_| AuditError::InvalidCursor)?;
-    s.parse::<u64>().map_err(|_| AuditError::InvalidCursor)
-}
-
-// ---------------------------------------------------------------------------
 // AuditWriteRepo / AuditReadRepo impl
 // ---------------------------------------------------------------------------
 
@@ -202,7 +188,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditReadRepo for PgAuditRepo<M> {
         page: AuditPage,
     ) -> Result<AuditListResult, AuditError> {
         let start_seq = match page.cursor.as_ref() {
-            Some(c) => decode_cursor(c)?,
+            Some(c) => decode_sequence_cursor(c)?,
             None => 0u64,
         };
         let limit = usize::from(page.limit.get());
@@ -238,7 +224,7 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditAdminRepo for PgAuditAdminRepo
     ) -> Result<AuditListResult, AuditError> {
         let tenant = scope.target();
         let start_seq = match page.cursor.as_ref() {
-            Some(c) => decode_cursor(c)?,
+            Some(c) => decode_sequence_cursor(c)?,
             None => 0u64,
         };
         let limit = usize::from(page.limit.get());
@@ -270,82 +256,9 @@ impl<M: MacVerifier + Send + Sync + 'static> AuditAdminRepo for PgAuditAdminRepo
     }
 }
 
-// ---------------------------------------------------------------------------
-// 测试辅助（#[cfg(test)]）
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-pub(crate) mod test_support {
-    //! 本地测试 MacVerifier——keyed FNV-1a 折叠（32B，key+message 均敏感；非加密，
-    //! 仅用于集成测试链完整性验证，与 audit::domain::test_support::TestKeyedHasher 同语义）。
-    //! 无需 dev-dep crypto-adapter（deny.toml crypto-adapter wrappers 不含 postgres）。
-
-    use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier, constant_time_eq};
-
-    const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    /// keyed FNV-1a 折叠 verifier（4 lane → 32B）。
-    pub(crate) struct TestVerifier;
-
-    impl MacVerifier for TestVerifier {
-        fn sign(&self, key: &MacKey, _algorithm: MacAlgorithm, message: &[u8]) -> Mac {
-            let mut lanes = [
-                FNV_OFFSET,
-                FNV_OFFSET ^ 0x1111_1111_1111_1111,
-                FNV_OFFSET ^ 0x2222_2222_2222_2222,
-                FNV_OFFSET ^ 0x3333_3333_3333_3333,
-            ];
-            for (i, &b) in key.as_bytes().iter().chain(message).enumerate() {
-                let lane = i % 4;
-                lanes[lane] ^= u64::from(b);
-                lanes[lane] = lanes[lane].wrapping_mul(FNV_PRIME);
-            }
-            let mut out = [0u8; 32];
-            for (lane, chunk) in lanes.iter().zip(out.chunks_mut(8)) {
-                chunk.copy_from_slice(&lane.to_be_bytes());
-            }
-            Mac::from_bytes(out.to_vec())
-        }
-
-        fn verify(&self, key: &MacKey, algorithm: MacAlgorithm, message: &[u8], tag: &Mac) -> bool {
-            constant_time_eq(
-                self.sign(key, algorithm, message).as_bytes(),
-                tag.as_bytes(),
-            )
-        }
-    }
-
-    /// 构造带固定 key 的 hasher（key_byte 重复 32 次，满足 MinKeyLen=32B）。
-    #[allow(clippy::expect_used, dead_code)]
-    // reason: 集成测试 helper——32B key 满足 MIN_KEY_LEN 构造不失败；item-level carve-out。
-    // dead_code: 仅 integration feature 下被 integration_tests 使用，非 integration 构建静默即可。
-    pub(crate) fn test_hasher(key_byte: u8) -> audit::ports::AuditChainHasher<TestVerifier> {
-        audit::ports::AuditChainHasher::new(
-            TestVerifier,
-            primitives::MacKey::from_bytes(vec![key_byte; 32]),
-        )
-        .expect("32B test key satisfies MIN_KEY_LEN")
-    }
-}
-
 #[cfg(test)]
 mod unit_tests {
     use super::*;
-
-    // invalid cursor → InvalidCursor
-    #[test]
-    fn decode_cursor_invalid_returns_invalid_cursor() {
-        // base64url of "not-a-number"
-        let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b"not-a-number");
-        #[allow(clippy::unwrap_used)]
-        // reason: unit test — valid base64url parse succeeds; unwrap is intentional in test.
-        let cursor = vocab::Cursor::parse(&raw).unwrap();
-        assert!(
-            matches!(decode_cursor(&cursor), Err(AuditError::InvalidCursor)),
-            "semantic invalid cursor must return InvalidCursor"
-        );
-    }
 
     // advisory_lock_key is deterministic and distinct across tenants
     #[test]

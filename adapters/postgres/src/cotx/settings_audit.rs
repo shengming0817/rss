@@ -26,9 +26,8 @@ use std::time::{Duration, UNIX_EPOCH};
 use audit::ports::{
     AuditChainHasher, AuditEntry, AuditError, AuditLedgerVerifyReport, AuditListResult,
     AuditOutcome, AuditRecord, EntryHash, ResourceRef, actor_kind_from_db, actor_kind_to_db,
+    encode_sequence_cursor,
 };
-#[cfg(feature = "domain-audit")]
-use base64::Engine as _;
 #[cfg(feature = "domain-audit")]
 use primitives::MacVerifier;
 #[cfg(feature = "domain-audit")]
@@ -483,7 +482,7 @@ impl AuditReadTx<'_> {
         }
         hasher.verify_window(predecessor.as_ref(), &entries)?;
         let next_cursor = if has_more {
-            Some(encode_audit_cursor(start_sequence + limit as u64)?)
+            Some(encode_sequence_cursor(start_sequence + limit as u64)?)
         } else {
             None
         };
@@ -679,13 +678,6 @@ fn invalid_audit_data(message: &'static str) -> AuditError {
         std::io::ErrorKind::InvalidData,
         message,
     ))
-}
-
-#[cfg(feature = "domain-audit")]
-fn encode_audit_cursor(next_sequence: u64) -> Result<vocab::Cursor, AuditError> {
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(next_sequence.to_string());
-    vocab::Cursor::parse(&raw)
-        .map_err(|_| AuditError::storage(std::io::Error::other("cursor encode failed")))
 }
 
 #[cfg(feature = "domain-audit")]

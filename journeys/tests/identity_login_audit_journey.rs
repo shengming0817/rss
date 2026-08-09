@@ -47,13 +47,14 @@ use bootstrap::replaydeps::resolve;
 use bootstrap::shutdown::ShutdownStack;
 use bootstrap::{IdempotencyConfig, ResolvedIdempotency, SubscriberCapability, Topology};
 use common::{
-    CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, SESSION_CREATED_TOPIC, TTL_SECS,
-    audit_domain, fail_closed_credential_security, identity_domain, memory_tenant_signer,
-    session_created_subscription, signed_metadata, tenant_authority,
+    CANON_TENANT, CANON_USER, LOGIN_USERNAME, NOW_SECS, PASSWORD, RecordingInboxStore,
+    SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, fail_closed_credential_security,
+    identity_domain, memory_tenant_signer, session_created_subscription, signed_metadata,
+    tenant_authority,
 };
 use consistency::{
-    EngineError, EventEntry, EventTopic, HandleResult, IdemKey, InboxReceiptContext, InboxStore,
-    LeaseOutcome, LeaseToken, OutboxPayload, PermanentError, PermanentErrorKind, SeenState,
+    EngineError, EventEntry, EventTopic, HandleResult, IdemKey, InboxStore, OutboxPayload,
+    PermanentError, PermanentErrorKind,
 };
 use diport::{
     DynDeadLetterStore, DynManagedResource, EnvelopeSubjectId, Message, MessageId, OpaqueActorId,
@@ -72,7 +73,7 @@ use testkit::{await_delay, await_map};
 use tokio_util::sync::CancellationToken;
 use vocab::TenantId;
 
-/// 手造 relay payload 的 session_id——审计 resource id 是 typed `ids::SessionId`（canonical uuid）。
+/// 手造 relay payload 的 session_id——它是 bearer，只用于证明审计链不会持久化该值。
 const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
 const WAIT_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -116,75 +117,10 @@ fn audit_consumer_handler(
     }
 }
 
-/// 记录型幂等 claimer（F5 可观测替身）：包内层 claimer，计 `try_claim` 调用次数 + `Duplicate` 命中次数，
-/// 让重投测试可等待「第二条同 EventId 已被 consumer 读取并判 Duplicate」这一**中间事实**（claim_count==2 &&
-/// duplicate_count==1），替代固定 sleep 的假阳性（review #274 F5/C5）。
-struct RecordingClaimer<S> {
-    inner: S,
-    claim_count: Arc<AtomicU32>,
-    duplicate_count: Arc<AtomicU32>,
-}
-
-impl<S> RecordingClaimer<S> {
-    fn new(inner: S) -> Self {
-        Self {
-            inner,
-            claim_count: Arc::new(AtomicU32::new(0)),
-            duplicate_count: Arc::new(AtomicU32::new(0)),
-        }
-    }
-    fn claim_count(&self) -> Arc<AtomicU32> {
-        self.claim_count.clone()
-    }
-    fn duplicate_count(&self) -> Arc<AtomicU32> {
-        self.duplicate_count.clone()
-    }
-}
-
-impl<S: InboxStore + Send + Sync> InboxStore for RecordingClaimer<S> {
-    async fn try_claim(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<SeenState, EngineError> {
-        let state = self.inner.try_claim(ctx, key, lease).await?;
-        self.claim_count.fetch_add(1, Ordering::SeqCst);
-        if matches!(state, SeenState::Duplicate) {
-            self.duplicate_count.fetch_add(1, Ordering::SeqCst);
-        }
-        Ok(state)
-    }
-    async fn extend(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<LeaseOutcome, EngineError> {
-        self.inner.extend(ctx, key, lease).await
-    }
-    async fn commit(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<LeaseOutcome, EngineError> {
-        self.inner.commit(ctx, key, lease).await
-    }
-    async fn release(
-        &self,
-        ctx: &InboxReceiptContext,
-        key: &IdemKey,
-        lease: &LeaseToken,
-    ) -> Result<(), EngineError> {
-        self.inner.release(ctx, key, lease).await
-    }
-}
-
 /// Demo 拓扑 consumer worker 接线（#1171）：MemBus **先**订阅（先于发布，token 与 stream 同源）→ spawn
 /// `ConsumerWorker`（专用线程驱动 `run_consumer`）→ `register_detached` 进 `ShutdownStack`。返回 worker 的
 /// health 句柄供断言（worker 已 move 进 stack）。`claimer` 由调用方经 [`demo_claimer`] 决策绑定构造（F6），
-/// 重投测试可传 [`RecordingClaimer`] 观测幂等中间事实（F5）。
+/// 重投测试可传 [`RecordingInboxStore`] 观测幂等中间事实（F5）。
 ///
 /// `register_detached`（非 `register_with_token`）：subscribe 在 callsite 先于 spawn、token 须与 stream 同源，
 /// worker 后台线程监听自持 token、于 `ManagedResource::shutdown` 自取消（不依赖 stack 阶段 1 广播）。
@@ -372,9 +308,10 @@ async fn login_emits_event_audited_end_to_end() -> Result<()> {
     assert_eq!(audited.len(), 1, "恰一次审计链 append 闭环");
     let message = &audited[0];
     let contains = |needle: &[u8]| message.windows(needle.len()).any(|w| w == needle);
+    assert!(contains(b"event:"), "审计链仅持久化 typed event resource");
     assert!(
-        contains(response.data.session_id.as_bytes()),
-        "会话 id 贯穿闭环（进审计链 canonical 输入）"
+        !contains(response.data.session_id.as_bytes()),
+        "bearer session id 不得进入审计链 canonical 输入"
     );
     assert!(contains(b"identity:login"), "登录动作贯穿闭环");
     // F9：tenant / actor 的 16B 原始 UUID 字节贯穿到审计链 canonical 输入。#1277 F1：actor = canonical
@@ -425,9 +362,9 @@ async fn relay_redelivery_audits_once() -> Result<()> {
 
     let token = CancellationToken::new();
     let mut stack = ShutdownStack::new(CancellationToken::new());
-    // F5：RecordingClaimer 包决策绑定的 demo claimer，暴露 try_claim/duplicate 计数供可观测等待（去固定 sleep）。
+    // F5：RecordingInboxStore 包决策绑定的 demo claimer，暴露 claim/duplicate 计数供可观测等待。
     let consumer_group = group.clone();
-    let recording = Arc::new(RecordingClaimer::new(demo_claimer()?));
+    let recording = Arc::new(RecordingInboxStore::new(demo_claimer()?));
     let claim_count = recording.claim_count();
     let duplicate_count = recording.duplicate_count();
     wire_demo_consumer(
@@ -444,7 +381,7 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     .await?;
 
     // 同一 EventId（idem_key）的 entry 发两次 = relay 崩溃重启重投同一 outbox entry。
-    const EVENT_ID: &str = "evt-redeliver-fixed";
+    const EVENT_ID: &str = "44444444-5555-4666-8777-888888888888";
     let payload = format!(
         r#"{{"sessionId":"{CANON_SESSION}","subject":"{CANON_USER}","tenantId":"{CANON_TENANT}","occurredAt":{NOW_SECS}}}"#
     )
@@ -611,7 +548,7 @@ async fn demo_handler_error_writes_dead_letter() -> Result<()> {
     .await?;
 
     // 发一条 session-created → handler reject → DLX 写一条。
-    let message_id = "evt-dlx-fixed";
+    let message_id = "55555555-6666-4777-8888-999999999999";
     bus.publisher()
         .publish(
             PublishRequest::new(

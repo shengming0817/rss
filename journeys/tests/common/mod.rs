@@ -6,13 +6,18 @@
 //! is the standard Rust idiom for shared integration-test helper modules.
 #![allow(dead_code)]
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
+use audit::AuditDomain;
 use audit::ports::{
     AuditChainHasher, AuditListTenantAppender, DynAuditReadRepo, DynAuditWriteRepo,
 };
-use audit::{AuditDomain, InMemAuditRepo};
+use audit::test_support::InMemAuditRepo;
+use consistency::{
+    EngineError, IdemKey, InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, SeenState,
+};
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, KeyName, KeyProvider, KeyProviderError,
     KeyRef, KeyVersion, OutboxEmitError, RedactedBytes,
@@ -60,6 +65,75 @@ pub const AUDIT_KEY: [u8; 32] = [0x5a; 32];
 pub const NOW_SECS: u64 = 1_000;
 /// 会话 ttl（确定性断言）。
 pub const TTL_SECS: u64 = 3_600;
+
+/// Deterministic observation wrapper for the inbox claim boundary. It records only successful
+/// provider responses, so a duplicate count proves the redelivery reached durable idempotency.
+pub struct RecordingInboxStore<S> {
+    inner: S,
+    claim_count: Arc<AtomicU32>,
+    duplicate_count: Arc<AtomicU32>,
+}
+
+impl<S> RecordingInboxStore<S> {
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            claim_count: Arc::new(AtomicU32::new(0)),
+            duplicate_count: Arc::new(AtomicU32::new(0)),
+        }
+    }
+
+    pub fn claim_count(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.claim_count)
+    }
+
+    pub fn duplicate_count(&self) -> Arc<AtomicU32> {
+        Arc::clone(&self.duplicate_count)
+    }
+}
+
+impl<S: InboxStore + Send + Sync> InboxStore for RecordingInboxStore<S> {
+    async fn try_claim(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<SeenState, EngineError> {
+        let state = self.inner.try_claim(ctx, key, lease).await?;
+        self.claim_count.fetch_add(1, Ordering::SeqCst);
+        if matches!(state, SeenState::Duplicate) {
+            self.duplicate_count.fetch_add(1, Ordering::SeqCst);
+        }
+        Ok(state)
+    }
+
+    async fn extend(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, EngineError> {
+        self.inner.extend(ctx, key, lease).await
+    }
+
+    async fn commit(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<LeaseOutcome, EngineError> {
+        self.inner.commit(ctx, key, lease).await
+    }
+
+    async fn release(
+        &self,
+        ctx: &InboxReceiptContext,
+        key: &IdemKey,
+        lease: &LeaseToken,
+    ) -> Result<(), EngineError> {
+        self.inner.release(ctx, key, lease).await
+    }
+}
 
 const BLOCKED_PASSWORD_DIGEST: [u8; 32] = [
     0x2e, 0x2b, 0x24, 0xf8, 0xee, 0x40, 0xbb, 0x84, 0x7f, 0xe8, 0x5b, 0xb2, 0x33, 0x36, 0xa3, 0x9e,

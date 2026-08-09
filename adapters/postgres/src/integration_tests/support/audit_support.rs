@@ -11,20 +11,17 @@ pub(in super::super) use base64::Engine as _;
 /// 构造审计仓储（共享 pool，固定 0x5a key hasher）。
 pub(in super::super) fn make_audit_repo(
     store: &PgStore,
-) -> crate::PgAuditRepo<crate::audit_repo::test_support::TestVerifier> {
-    crate::PgAuditRepo::from_unverified_for_test(
-        store,
-        crate::audit_repo::test_support::test_hasher(0x5a),
-    )
+) -> crate::PgAuditRepo<audit::test_support::TestKeyedHasher> {
+    crate::PgAuditRepo::from_unverified_for_test(store, audit::test_support::keyed_hasher(0x5a))
 }
 
 /// 构造 audit admin 只读仓储（固定 0x5a key hasher）。
 pub(in super::super) fn make_audit_admin_repo(
     store: &PgStore,
-) -> crate::PgAuditAdminRepo<crate::audit_repo::test_support::TestVerifier> {
+) -> crate::PgAuditAdminRepo<audit::test_support::TestKeyedHasher> {
     crate::PgAuditAdminRepo::from_unverified_for_test(
         store,
-        crate::audit_repo::test_support::test_hasher(0x5a),
+        audit::test_support::keyed_hasher(0x5a),
     )
 }
 

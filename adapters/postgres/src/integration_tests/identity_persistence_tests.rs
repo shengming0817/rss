@@ -385,7 +385,7 @@ async fn credential_security_event_consumer_appends_current_and_all_without_iden
     );
     let handler = std::sync::Arc::new(crate::consumer_tx::PgAuditConsumerTx::security_event(
         stores.writer_capability(),
-        crate::audit_repo::test_support::test_hasher(0x5a),
+        audit::test_support::keyed_hasher(0x5a),
     ));
     let group = ConsumerGroup::parse(&format!("audit-security-{}", uuid::Uuid::new_v4())).unwrap();
     let ctx = InboxReceiptContext::new(

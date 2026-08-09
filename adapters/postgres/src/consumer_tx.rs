@@ -175,9 +175,9 @@ where
         let command = match security_audit_command_from_message(&message) {
             Ok(command) if command.tenant() == ctx.tenant_id() => command,
             Ok(command) => {
-                return reject_audit_tenant_mismatch(&message, command.tenant(), &ctx);
+                return reject_audit_tenant_mismatch(command.tenant(), &ctx);
             }
-            Err(error) => return reject_audit_payload(&message, &error),
+            Err(error) => return reject_audit_payload(&error),
         };
         pg_consumer_tx_outcome(
             "audit-security-event",
@@ -233,9 +233,9 @@ where
     ) -> Result<AuditRecord, PgConsumerTxOutcome> {
         let record = self
             .record_from_message(message)
-            .map_err(|error| reject_audit_payload(message, &error))?;
+            .map_err(|error| reject_audit_payload(&error))?;
         if record.tenant != ctx.tenant_id() {
-            return Err(reject_audit_tenant_mismatch(message, record.tenant, ctx));
+            return Err(reject_audit_tenant_mismatch(record.tenant, ctx));
         }
         Ok(record)
     }
@@ -353,12 +353,8 @@ fn pg_consumer_tx_outcome(
 }
 
 #[cfg(feature = "domain-audit")]
-fn reject_audit_payload(
-    message: &diport::Message,
-    error: &AuditEventRecordError,
-) -> PgConsumerTxOutcome {
+fn reject_audit_payload(error: &AuditEventRecordError) -> PgConsumerTxOutcome {
     tracing::warn!(
-        message_id = message.id.as_str(),
         error = %secure::redact_error(error),
         "consumer-tx: audit payload rejected"
     );
@@ -369,12 +365,10 @@ fn reject_audit_payload(
 
 #[cfg(feature = "domain-audit")]
 fn reject_audit_tenant_mismatch(
-    message: &diport::Message,
     payload_tenant: vocab::TenantId,
     ctx: &InboxReceiptContext,
 ) -> PgConsumerTxOutcome {
     tracing::warn!(
-        message_id = message.id.as_str(),
         payload_tenant = %payload_tenant,
         receipt_tenant = %ctx.tenant_id(),
         "consumer-tx: audit payload tenant does not match verified envelope tenant"
@@ -408,11 +402,16 @@ enum PgConsumerTxError {
 
 #[cfg(all(test, feature = "domain-audit"))]
 mod tests {
+    use std::collections::BTreeMap;
     use std::error::Error;
+    use std::sync::Mutex;
     use std::time::{Duration, UNIX_EPOCH};
 
     use super::*;
     use audit::ports::AuditOutcome;
+    use tracing::field::Visit;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const USER: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -422,7 +421,93 @@ mod tests {
     type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
     fn message(payload: impl Into<Vec<u8>>) -> diport::Message {
-        diport::Message::new("evt-consumer-tx", payload.into())
+        diport::Message::new("33333333-4444-4555-8666-777777777777", payload.into())
+    }
+
+    #[derive(Default)]
+    struct CapturedFields(BTreeMap<String, String>);
+
+    impl Visit for CapturedFields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn core::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct WarnCapture {
+        records: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    impl Subscriber for WarnCapture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            *metadata.level() == tracing::Level::WARN
+        }
+
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(fields.0);
+        }
+
+        fn enter(&self, _: &Id) {}
+
+        fn exit(&self, _: &Id) {}
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn tenant_mismatch_log_does_not_expose_transport_message_id() -> TestResult {
+        const OTHER_SESSION_BEARER: &str = "37d9f310-5860-4e59-8423-983a2f7b6bc2";
+        let transport_message = diport::Message::new(OTHER_SESSION_BEARER, Vec::new());
+        assert_eq!(transport_message.id.as_str(), OTHER_SESSION_BEARER);
+        let ctx = InboxReceiptContext::new(
+            vocab::TenantId::parse(TENANT)?,
+            consistency::ConsumerGroup::parse("audit-log-redaction")?,
+            "audit",
+            "identity.session-created.v1",
+            "identity.session-created.v1",
+            "v1",
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            None,
+            None,
+        )?;
+        let capture = WarnCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let _ = reject_audit_tenant_mismatch(
+            vocab::TenantId::parse("550e8400-e29b-41d4-a716-446655440000")?,
+            &ctx,
+        );
+
+        let records = records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fields = records.first().expect("tenant mismatch warning is logged");
+        assert!(
+            !fields
+                .values()
+                .any(|value| value.contains(OTHER_SESSION_BEARER)),
+            "transport message id must not cross the log boundary: {fields:?}"
+        );
+        assert!(!fields.contains_key("message_id"));
+        Ok(())
     }
 
     #[test]
@@ -446,7 +531,10 @@ mod tests {
         assert_eq!(record.actor_kind, vocab::PrincipalKind::User);
         assert_eq!(record.action.as_str(), "identity:login");
         assert_eq!(record.resource.kind(), "session");
-        assert_eq!(record.resource.id(), SESSION);
+        assert_eq!(
+            record.resource.id(),
+            "event:33333333-4444-4555-8666-777777777777"
+        );
         assert_eq!(record.outcome, AuditOutcome::Success);
         assert_eq!(record.recorded_at, UNIX_EPOCH + Duration::from_secs(123));
         Ok(())

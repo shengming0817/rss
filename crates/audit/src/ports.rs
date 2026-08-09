@@ -21,6 +21,7 @@
 
 use std::time::SystemTime;
 
+use base64::Engine as _;
 use dynosaur::dynosaur;
 use generated::http::audit_v1::list_tenant_entries::{
     LOCAL_TX as AUDIT_LIST_TENANT_LOCAL_TX, ROUTE as AUDIT_LIST_TENANT_ROUTE,
@@ -235,6 +236,25 @@ pub struct AuditListResult {
     pub has_more: bool,
 }
 
+/// Encode the next audit sequence as the single opaque cursor representation shared by every
+/// repository provider.
+pub fn encode_sequence_cursor(sequence: u64) -> Result<vocab::Cursor, AuditError> {
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(sequence.to_string());
+    vocab::Cursor::parse(&raw)
+        .map_err(|_| AuditError::storage(std::io::Error::other("cursor encode failed")))
+}
+
+/// Decode an opaque audit cursor into its sequence, rejecting every malformed semantic value.
+pub fn decode_sequence_cursor(cursor: &vocab::Cursor) -> Result<u64, AuditError> {
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(cursor.as_str())
+        .map_err(|_| AuditError::InvalidCursor)?;
+    std::str::from_utf8(&bytes)
+        .map_err(|_| AuditError::InvalidCursor)?
+        .parse::<u64>()
+        .map_err(|_| AuditError::InvalidCursor)
+}
+
 /// 单租户审计链全链验证报告。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuditLedgerVerifyReport {
@@ -381,7 +401,38 @@ pub trait AuditAdminRepoLocal: Send + Sync {
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine as _;
+
     use super::TenantId;
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn sequence_cursor_round_trips_boundaries() {
+        for sequence in [0, 1, u64::MAX] {
+            let cursor = super::encode_sequence_cursor(sequence).expect("encode cursor");
+            assert_eq!(
+                super::decode_sequence_cursor(&cursor).expect("decode cursor"),
+                sequence
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn sequence_cursor_rejects_invalid_semantics() {
+        for bytes in [
+            b"not-a-number".as_slice(),
+            &[0xff, 0xfe],
+            b"18446744073709551616",
+        ] {
+            let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+            let cursor = vocab::Cursor::parse(&raw).expect("base64url cursor shape");
+            assert!(matches!(
+                super::decode_sequence_cursor(&cursor),
+                Err(super::AuditError::InvalidCursor)
+            ));
+        }
+    }
 
     #[test]
     #[allow(clippy::expect_used)] // reason: fixed canonical UUID fixtures must parse.

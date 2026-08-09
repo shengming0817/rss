@@ -3,7 +3,7 @@
 //! This package intentionally has no `sqlx` dependency. Postgres setup, typed observers, and
 //! privileged fixture seeding are only reachable through `postgres::fault_matrix`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -358,6 +358,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
 struct RunScope {
     tenant: vocab::TenantId,
     suffix: String,
+    event_ids: BTreeMap<&'static str, String>,
 }
 
 impl RunScope {
@@ -365,11 +366,15 @@ impl RunScope {
         Ok(Self {
             tenant: vocab::TenantId::parse(&Uuid::new_v4().to_string())?,
             suffix: Uuid::new_v4().simple().to_string(),
+            event_ids: READY_CASE_RUNNERS
+                .iter()
+                .map(|runner| (runner.id, Uuid::new_v4().to_string()))
+                .collect(),
         })
     }
 
     fn event_id(&self, case: &CrashCase) -> String {
-        format!("{}-{}", case.id(), self.suffix)
+        self.event_ids[case.id()].clone()
     }
 
     fn name(&self, prefix: &str) -> String {
@@ -637,7 +642,7 @@ async fn rabbit_unsettled_redelivers_through_consumer_tx(
         redelivery.acker.settle(AckAction::Ack).await?;
         let effect = pg
             .harness
-            .session_created_effect_observation(scope.tenant, event_id, group, session_id)
+            .session_created_effect_observation(scope.tenant, event_id, group)
             .await?;
         assert_consumer_duplicate_effect_conformance(
             &ids,
@@ -858,7 +863,7 @@ fn run_outbox_confirm_lost_channel_close<'a>(
             let mut deliveries = subscriber
                 .subscribe_ackable(topic.clone(), token.clone())
                 .await?;
-            let stale_message_id = scope.name("stale-confirm-lost-delivery");
+            let stale_message_id = Uuid::new_v4().to_string();
             Publisher::publish(
                 publisher.as_ref(),
                 PublishRequest::new(
@@ -942,7 +947,7 @@ fn run_outbox_confirm_lost_channel_close<'a>(
             let ids = EventingIds::new(&event_id, &event_id, &group, "confirm-lost-lease");
             let effect = pg
                 .harness
-                .session_created_effect_observation(scope.tenant, &event_id, &group, session_id)
+                .session_created_effect_observation(scope.tenant, &event_id, &group)
                 .await?;
             let duplicate_conformance = assert_consumer_duplicate_effect_conformance(
                 &ids,

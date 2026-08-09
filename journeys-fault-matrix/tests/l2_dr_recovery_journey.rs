@@ -232,7 +232,6 @@ async fn consume_committed_then_duplicate(
     deliveries: &mut diport::DeliveryStream,
     event_id: &str,
     consumer_group: &str,
-    session_id: Uuid,
 ) -> Result<()> {
     for expected in [
         FaultMatrixConsumerDelivery::Committed,
@@ -255,7 +254,7 @@ async fn consume_committed_then_duplicate(
     }
     let effect = harness
         .pg
-        .session_created_effect_observation(harness.tenant, event_id, consumer_group, session_id)
+        .session_created_effect_observation(harness.tenant, event_id, consumer_group)
         .await?;
     let ids = EventingIds::new(event_id, event_id, consumer_group, "l2-dr-recovery-lease");
     assert_consumer_duplicate_effect_conformance(
@@ -283,7 +282,7 @@ fn assert_published_unchanged(
 }
 
 async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
-    let event_id = harness.name("broker-ahead-event");
+    let event_id = Uuid::new_v4().to_string();
     let group = harness.name("broker-ahead-consumer");
     let session_id = Uuid::new_v4();
     let topic = Topic::new(generated::event::identity_v1::session_created::TOPIC);
@@ -341,8 +340,7 @@ async fn broker_ahead_database_earlier(harness: &JourneyHarness) -> Result<()> {
     let mut deliveries = subscriber
         .subscribe_ackable(topic.clone(), token.clone())
         .await?;
-    consume_committed_then_duplicate(harness, &mut deliveries, &event_id, &group, session_id)
-        .await?;
+    consume_committed_then_duplicate(harness, &mut deliveries, &event_id, &group).await?;
 
     token.cancel();
     AckableSubscriber::shutdown(&subscriber).await?;
@@ -360,11 +358,10 @@ struct DatabaseAheadFixture {
     event_id: String,
     epoch: RecoveryEpochId,
     group: String,
-    session_id: Uuid,
 }
 
 async fn arm_database_ahead_redrive(harness: &JourneyHarness) -> Result<DatabaseAheadFixture> {
-    let event_id = harness.name("database-ahead-event");
+    let event_id = Uuid::new_v4().to_string();
     let group = harness.name("database-ahead-consumer");
     let session_id = Uuid::new_v4();
     let before = harness
@@ -473,7 +470,6 @@ async fn arm_database_ahead_redrive(harness: &JourneyHarness) -> Result<Database
         event_id,
         epoch,
         group,
-        session_id,
     })
 }
 
@@ -520,14 +516,8 @@ async fn deliver_database_ahead_redrive(
     );
     let token = CancellationToken::new();
     let mut deliveries = subscriber.subscribe_ackable(topic, token.clone()).await?;
-    consume_committed_then_duplicate(
-        harness,
-        &mut deliveries,
-        &fixture.event_id,
-        &fixture.group,
-        fixture.session_id,
-    )
-    .await?;
+    consume_committed_then_duplicate(harness, &mut deliveries, &fixture.event_id, &fixture.group)
+        .await?;
 
     token.cancel();
     AckableSubscriber::shutdown(&subscriber).await?;
@@ -537,8 +527,8 @@ async fn deliver_database_ahead_redrive(
 }
 
 async fn invalid_exact_set_is_atomic(harness: &JourneyHarness) -> Result<()> {
-    let event_id = harness.name("atomic-valid-event");
-    let missing_event_id = harness.name("atomic-missing-event");
+    let event_id = Uuid::new_v4().to_string();
+    let missing_event_id = Uuid::new_v4().to_string();
     let before = harness
         .pg
         .seed_and_settle_session_created_published(FaultMatrixSessionCreatedInput::new(

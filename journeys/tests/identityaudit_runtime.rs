@@ -152,8 +152,14 @@ async fn wait_for_session_created_hash_chain(pool: &PgPool, login: &LoginReceipt
         .fetch_all(pool)
         .await?;
         let matched = rows.iter().any(|row| {
-            row.try_get::<String, _>("resource_id")
-                .is_ok_and(|resource| resource == session_id)
+            row.try_get::<String, _>("action")
+                .is_ok_and(|action| action == "identity:login")
+                && row
+                    .try_get::<String, _>("resource_kind")
+                    .is_ok_and(|kind| kind == "session")
+                && row
+                    .try_get::<String, _>("resource_id")
+                    .is_ok_and(|resource| resource.starts_with("event:") && resource != session_id)
         });
         Ok::<Option<Vec<sqlx::postgres::PgRow>>, anyhow::Error>(matched.then_some(rows))
     })
@@ -208,10 +214,15 @@ async fn wait_for_session_created_hash_chain(pool: &PgPool, login: &LoginReceipt
     hasher.verify(&entries)?;
     let session = entries
         .iter()
-        .find(|entry| entry.resource().id() == login.session_id())
+        .find(|entry| {
+            entry.action().as_str() == "identity:login"
+                && entry.resource().kind() == "session"
+                && entry.resource().id().starts_with("event:")
+        })
         .context("session-created audit entry is missing after chain verification")?;
     ensure!(session.action().as_str() == "identity:login");
     ensure!(session.resource().kind() == "session");
+    ensure!(session.resource().id() != login.session_id());
     ensure!(session.outcome() == AuditOutcome::Success);
     Ok(())
 }

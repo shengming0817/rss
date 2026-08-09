@@ -3,6 +3,68 @@
 use super::support::*;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn migration_0018_pins_session_audit_resource_to_event_uuid_v4() -> TestResult {
+    let (_pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+
+    let constraint: Option<String> = sqlx::query_scalar(
+        "SELECT pg_get_constraintdef(oid) \
+         FROM pg_catalog.pg_constraint \
+         WHERE conrelid = 'public.audit_entries'::regclass \
+           AND conname = 'audit_entries_session_event_resource_check'",
+    )
+    .fetch_optional(&owner.pool)
+    .await?;
+    let constraint = constraint.expect("0018 must install the session EventId CHECK");
+    assert!(constraint.contains("identity:login"));
+    assert!(constraint.contains("event:"));
+
+    let tenant = uuid::Uuid::new_v4();
+    for invalid_resource in [
+        "22222222-3333-4444-8555-666666666666",
+        "event:33333333-4444-1555-8666-777777777777",
+        "event:33333333-4444-4555-7666-777777777777",
+        "event:33333333-4444-4555-c666-777777777777",
+        "event:33333333-4444-4555-e666-777777777777",
+        "event:33333333-4444-4555-8666-77777777777A",
+    ] {
+        let insert = sqlx::query(
+            "INSERT INTO audit_entries \
+             (tenant_id, seq, prev_hash, entry_hash, actor, actor_kind, action, resource_kind, \
+              resource_id, outcome, recorded_at_secs, recorded_at_nanos, key_id) \
+             VALUES ($1::uuid, 0, $2, $2, $3::uuid, 'user', 'identity:login', 'session', $4, \
+                     'success', 0, 0, 1)",
+        )
+        .bind(tenant.to_string())
+        .bind(vec![0u8; 32])
+        .bind(uuid::Uuid::new_v4().to_string())
+        .bind(invalid_resource)
+        .execute(&owner.pool)
+        .await;
+        assert!(
+            insert.is_err(),
+            "0018 must reject invalid session audit resource {invalid_resource:?}"
+        );
+    }
+
+    sqlx::query(
+        "INSERT INTO audit_entries \
+         (tenant_id, seq, prev_hash, entry_hash, actor, actor_kind, action, resource_kind, \
+          resource_id, outcome, recorded_at_secs, recorded_at_nanos, key_id) \
+         VALUES ($1::uuid, 0, $2, $2, $3::uuid, 'user', 'identity:login', 'session', \
+                 'event:33333333-4444-4555-8666-777777777777', 'success', 0, 0, 1)",
+    )
+    .bind(tenant.to_string())
+    .bind(vec![0u8; 32])
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&owner.pool)
+    .await?;
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn migration_0083_rejects_every_legacy_saga_durable_row() -> TestResult {
     let (_pg, owner) = connect_pg().await?;
     migrations_through(82).run(&owner.pool).await?;

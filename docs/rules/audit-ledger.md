@@ -57,7 +57,14 @@ entry_hash = HMAC-SHA256(key, prev_hash ‖ canonical(entry_content))
 
 ## 持久化与跨租户读
 
-本 crate 以 in-mem 每租户子链 store 实现 `AuditWriteRepo` + `AuditReadRepo`（`InMemAuditRepo` in `internal/mem`）+ 确定性测试 verifier。
+`identity.session-created` 的 `sessionId` 是 bearer，不得进入审计链。该事件的 session resource id 只由
+独立、canonical UUID v4 `MessageId` 构造，冻结为 `event:<lowercase-uuid-v4>`；EventId 与 SessionId 相等、
+非 v4 或非 canonical 时消费 fail-closed。`0018` 的
+`audit_entries_session_event_resource_check` 在数据库层重复固定该形态。resource id 继续进入上述 V1
+canonical bytes，但其内容不再携带 bearer。
+
+in-mem 每租户子链 store 与确定性 verifier 只经 `audit::test_support` 暴露；默认生产 feature graph 无
+`InMemAuditRepo` 构造面。
 生产持久化由 `adapters/postgres` provider 承载：每租户 genesis、advisory-lock 串行 append、FORCE RLS、
 `(tenant_id, seq)` 唯一，读路径复用同一 keyed HMAC 链验证语义。
 普通仓储入口通过共享 `Arc<PgAuditRepo>` 分别擦除为 `DynAuditWriteRepo` / `DynAuditReadRepo`；生产事件

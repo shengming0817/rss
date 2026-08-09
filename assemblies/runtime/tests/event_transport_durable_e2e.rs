@@ -18,10 +18,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context as _, Result};
+use audit::AuditDomain;
 use audit::ports::{
     AuditChainHasher, AuditListTenantAppend, AuditListTenantAppender, DynAuditReadRepo,
 };
-use audit::{AuditDomain, InMemAuditRepo};
+use audit::test_support::InMemAuditRepo;
 use consistency::IdemKey;
 use diport::{
     DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName, KeyProvider,
@@ -452,7 +453,7 @@ async fn outbox_session_event(
     }))
 }
 
-async fn audit_login_count(pool: &sqlx::PgPool, tenant: TenantId, session_id: &str) -> Result<i64> {
+async fn audit_login_count(pool: &sqlx::PgPool, tenant: TenantId, event_id: &str) -> Result<i64> {
     let mut tx = pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
         .bind(tenant.to_string())
@@ -470,7 +471,7 @@ async fn audit_login_count(pool: &sqlx::PgPool, tenant: TenantId, session_id: &s
         "#,
     )
     .bind(tenant.to_string())
-    .bind(session_id)
+    .bind(format!("event:{event_id}"))
     .fetch_one(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -1167,14 +1168,15 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // Fresh → audit append。20s timeout 覆盖 2s relay 间隔 + AMQP 投递 + consumer 处理延迟。
     testkit::await_try(Duration::from_secs(20), async || {
         Ok::<Option<()>, anyhow::Error>(
-            (audit_login_count(&assertion_pool, tenant, &session_id).await? >= 1).then_some(()),
+            (audit_login_count(&assertion_pool, tenant, &captured_event_id).await? >= 1)
+                .then_some(()),
         )
     })
     .await
     .context("等待 audit 收到 session-created 事件失败（至少一次断言 A）")?;
 
     assert_eq!(
-        audit_login_count(&assertion_pool, tenant, &session_id).await?,
+        audit_login_count(&assertion_pool, tenant, &captured_event_id).await?,
         1,
         "断言 A：login → outbox → relay → AMQP → consumer → audit，仅 append 一次"
     );
@@ -1242,7 +1244,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     )
     .await?;
 
-    let tracer_id = format!("{captured_event_id}-tracer");
+    let tracer_id = uuid::Uuid::new_v4().to_string();
     let mut tracer_payload: IdentitySessionCreatedPayload =
         serde_json::from_slice(&captured_payload)?;
     let tracer_session_id = uuid::Uuid::new_v4().to_string();
@@ -1260,11 +1262,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     )
     .await?;
 
-    // 正向见证：tracer 新 session 被 audit，证明排在它之前的 same-ID duplicate 已被消费并 settle。
+    // 正向见证：tracer 新 event 被 audit，证明排在它之前的 same-ID duplicate 已被消费并 settle。
     testkit::await_try(Duration::from_secs(20), async || {
         Ok::<Option<()>, anyhow::Error>(
-            (audit_login_count(&assertion_pool, tenant, &tracer_session_id).await? == 1)
-                .then_some(()),
+            (audit_login_count(&assertion_pool, tenant, &tracer_id).await? == 1).then_some(()),
         )
     })
     .await
@@ -1273,7 +1274,8 @@ async fn event_transport_durable_e2e() -> Result<()> {
     // 去重失效会让 duplicate 对 original session 再 append。再观察 2s：升到 2 即 fail-fast。
     let leaked_dup = testkit::await_try(Duration::from_secs(2), async || {
         Ok::<Option<()>, anyhow::Error>(
-            (audit_login_count(&assertion_pool, tenant, &session_id).await? >= 2).then_some(()),
+            (audit_login_count(&assertion_pool, tenant, &captured_event_id).await? >= 2)
+                .then_some(()),
         )
     })
     .await;
@@ -1291,12 +1293,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
         }
     }
     assert_eq!(
-        audit_login_count(&assertion_pool, tenant, &session_id).await?,
+        audit_login_count(&assertion_pool, tenant, &captured_event_id).await?,
         1,
         "断言 B：close/same-ID retry 构造的 duplicate 经 PG inbox/ConsumerTx 后不得重复 original session 业务 mutation"
     );
     assert_eq!(
-        audit_login_count(&assertion_pool, tenant, &tracer_session_id).await?,
+        audit_login_count(&assertion_pool, tenant, &tracer_id).await?,
         1,
         "断言 B：独立 tracer 必须产生一次业务 mutation"
     );

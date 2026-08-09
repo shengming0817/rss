@@ -19,6 +19,7 @@ mod common;
 
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::{Context as _, Result};
@@ -29,8 +30,8 @@ use audit::ports::{
 use bootstrap::SubscriberCapability;
 use common::{
     CANON_TENANT, CANON_USER, CapturingVerifier, LOGIN_USERNAME, NOW_SECS, PASSWORD,
-    SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector, identity_domain,
-    password_policy, session_created_subscription,
+    RecordingInboxStore, SESSION_CREATED_TOPIC, TTL_SECS, audit_domain, dlx_payload_protector,
+    identity_domain, password_policy, session_created_subscription,
 };
 use consistency::{
     Disposition, EngineError, EngineErrorKind, HandleResult, OutboxRelay, PermanentError,
@@ -338,7 +339,12 @@ async fn login_audit_durable_topology() -> Result<()> {
         let event_domain = event_topic.split('.').next().unwrap_or(event_topic);
 
         // 消费侧：PgInboxStore 幂等 claimer（durable，group 自 binding 单源；非 identity 域资源）。
-        let claimer = Arc::new(pg_handle.infra().inbox());
+        let inbox = pg_handle.infra().inbox();
+        let lease_ttl = inbox.lease_ttl();
+        let recording = Arc::new(RecordingInboxStore::new(inbox));
+        let claim_count = recording.claim_count();
+        let duplicate_count = recording.duplicate_count();
+        let claimer = Arc::clone(&recording);
         let token = CancellationToken::new();
         let stream = bus
             .subscriber()
@@ -361,7 +367,7 @@ async fn login_audit_durable_topology() -> Result<()> {
             meta,
             consumer_handler(audit_repo, captured.clone()),
             // 续租间隔派生自 PgInboxStore 后端 claim TTL（同源，杜绝 mismatch footgun，#1213 review #3）。
-            LeaseConfig::from_ttl(claimer.lease_ttl()),
+            LeaseConfig::from_ttl(lease_ttl),
         );
 
         // 生产侧：login → PgAuthGrantLifecycle **co-tx**（grant + initial refresh + outbox）durable 落库；relay
@@ -479,7 +485,12 @@ async fn login_audit_durable_topology() -> Result<()> {
                     )?),
                 )
                 .await?;
-            await_delay(Duration::from_millis(50)).await;
+            await_map(Duration::from_secs(5), async || {
+                (claim_count.load(Ordering::SeqCst) == 2
+                    && duplicate_count.load(Ordering::SeqCst) == 1)
+                    .then_some(())
+            })
+            .await?;
             anyhow::Ok(())
         };
 
@@ -495,6 +506,15 @@ async fn login_audit_durable_topology() -> Result<()> {
             () = &mut consume => Err(anyhow::anyhow!("consumer 在 durable drive 完成前退出")),
         };
         driven?;
+
+        anyhow::ensure!(
+            claim_count.load(Ordering::SeqCst) == 2,
+            "durable：首投与重投必须各进入一次 PgInbox claim"
+        );
+        anyhow::ensure!(
+            duplicate_count.load(Ordering::SeqCst) == 1,
+            "durable：重投必须恰一次命中 PgInbox Duplicate"
+        );
 
         anyhow::ensure!(
             audit.audited().len() == 1,

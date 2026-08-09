@@ -434,14 +434,17 @@ async fn audit_dyn_read_write_wrappers_share_postgres_provider() -> TestResult {
     let read: Arc<audit::ports::DynAuditReadRepo<'static>> =
         Arc::from(audit::ports::DynAuditReadRepo::new_box(provider));
 
-    write
-        .append(audit_scope(tenant), make_audit_record(tenant, 7))
-        .await?;
+    let event_resource = "event:33333333-4444-4555-8666-777777777777";
+    let mut record = make_audit_record(tenant, 7);
+    record.action = vocab::Action::parse("identity:login")?;
+    record.resource = audit::ports::ResourceRef::new("session", event_resource);
+    write.append(audit_scope(tenant), record).await?;
     let result = read
         .list(audit_scope(tenant), audit_page(500, None))
         .await?;
     assert_eq!(result.entries.len(), 1);
     assert_eq!(result.entries[0].tenant(), tenant);
+    assert_eq!(result.entries[0].resource().id(), event_resource);
     read.verify_tail(audit_scope(tenant), 1).await?;
 
     store.shutdown().await?;

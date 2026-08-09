@@ -7,12 +7,12 @@
 use std::collections::HashMap;
 use std::sync::Mutex;
 
-use base64::Engine as _;
 use primitives::MacVerifier;
 
 use crate::domain::{AuditChainHasher, AuditEntry, AuditError, EntryHash};
 use crate::ports::{
     AuditListResult, AuditPage, AuditReadRepo, AuditRecord, AuditWriteRepo, TenantRepoScope,
+    decode_sequence_cursor, encode_sequence_cursor,
 };
 
 /// in-mem 状态：每租户 append-only 子链。
@@ -65,32 +65,6 @@ impl<M: MacVerifier> InMemAuditRepo<M> {
             chain[0] = tampered;
         }
     }
-}
-
-/// 把全局子链下标编码成不透明游标（base64url，对齐 [`vocab::Cursor`]）。
-///
-/// # Errors
-/// base64url(十进制数字串) 始终满足 `Cursor::parse` 格式约束，`Err` 分支防御性 fail-closed（不可达）。
-// reason: base64url(decimal) 始终合法，Err 分支不可达；返回 Result 防止静默产出 next_cursor=None + has_more=true
-// 的矛盾分页响应（broken pagination fail-closed 优于 silent drop）。
-fn encode_cursor(index: usize) -> Result<vocab::Cursor, AuditError> {
-    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(index.to_string());
-    vocab::Cursor::parse(&raw)
-        .map_err(|_| AuditError::storage(std::io::Error::other("cursor encode failed")))
-}
-
-/// 解码游标回子链下标。
-///
-/// fail-closed：base64url 合法但**语义无效**（解码后非 UTF-8 / 非数字）即 `Err(InvalidCursor)`——
-/// **不**静默回退首页（否则客户端续页时拿到重复首页，[F4]）。handler 将 `InvalidCursor` 映射 400。
-fn decode_cursor(cursor: &vocab::Cursor) -> Result<usize, AuditError> {
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(cursor.as_str())
-        .map_err(|_| AuditError::InvalidCursor)?;
-    std::str::from_utf8(&bytes)
-        .map_err(|_| AuditError::InvalidCursor)?
-        .parse()
-        .map_err(|_| AuditError::InvalidCursor)
 }
 
 // 域形 repo ports 实现（ADR-005 Option 2，#1230）。futures 在 `M: Send + Sync` 下为 `Send`。
@@ -170,7 +144,8 @@ where
         self.hasher.verify(chain)?;
         // 续页游标语义无效即 fail-closed（不静默回退首页，防重复页，F4）。
         let start = match page.cursor.as_ref() {
-            Some(cursor) => decode_cursor(cursor)?,
+            Some(cursor) => usize::try_from(decode_sequence_cursor(cursor)?)
+                .map_err(|_| AuditError::InvalidCursor)?,
             None => 0,
         };
         let limit = usize::from(page.limit.get());
@@ -178,7 +153,9 @@ where
         let entries = chain.get(start..end).unwrap_or(&[]).to_vec();
         let has_more = end < chain.len();
         let next_cursor = if has_more {
-            Some(encode_cursor(end)?)
+            Some(encode_sequence_cursor(
+                u64::try_from(end).map_err(|_| AuditError::InvalidCursor)?,
+            )?)
         } else {
             None
         };
@@ -211,6 +188,8 @@ where
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, SystemTime};
+
+    use base64::Engine as _;
 
     use super::*;
     use crate::domain::test_support::{TestKeyedHasher, keyed_hasher};

@@ -102,6 +102,11 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 - `0015` `credentials`、`0017` `refresh_tokens`：补全 DML（tenant 表）。
 - append-only 表只授 SELECT + INSERT（无 UPDATE/DELETE）：`0018` `audit_entries`、`0019` `auth_audit_events`（+ 其 id 序列）、`0021` `dead_letter`。`0030` 的历史 retention-only 删除面已由 `0063` 破坏式移除；当前 `rss_app` 不可执行任何 DLX lifecycle 函数，HOT 删除只能由独立 `rss_dlx_archiver` 经 archive-before-purge 固定函数完成。
 
+`0018` 同时把 `identity:login/session` 审计资源固定为 `event:<canonical UUID v4>`。identity producer 独立
+mint EventId，audit consumer 以私有 typed funnel 拒绝非 v4、非 canonical 或与 bearer SessionId 相同的
+MessageId；数据库命名 CHECK 再次拒绝 raw session UUID。当前没有历史部署、migration ledger 或数据，故该
+pre-GA schema 真源直接修正，不提供 backfill、兼容 reader、双写或后置 migration。
+
 生产 `rss_app` LOGIN 凭据 out-of-band 注入，committed SQL 不含密码。后续新增 tenant / append-only 表须在其
 建表迁移内为 `rss_app` 补最小授权（tenant 表 DML、append-only 表 SELECT+INSERT），与上表同范式。
 
