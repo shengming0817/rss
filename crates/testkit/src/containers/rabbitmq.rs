@@ -5,7 +5,6 @@ use std::time::Duration;
 
 use testcontainers::core::{CmdWaitFor, ExecCommand, IntoContainerPort, WaitFor};
 use testcontainers::{ContainerAsync, GenericImage, ImageExt};
-use testcontainers_modules::rabbitmq::RabbitMq;
 use url::{Host, Url};
 
 use super::runtime::run_container_command;
@@ -28,7 +27,7 @@ pub struct RabbitFixture {
 pub(super) enum RabbitInner {
     /// 自起容器：持句柄；`vhost_url` 经 rabbitmqctl 在该 broker 建 vhost。
     Container {
-        container: Box<ContainerAsync<RabbitMq>>,
+        container: Box<ContainerAsync<GenericImage>>,
         host: String,
         port: u16,
         /// 已建 vhost 缓存（幂等：同一 vhost 多次 `vhost_url` 不重复调 rabbitmqctl）。
@@ -106,6 +105,64 @@ impl RabbitFixture {
             }
             RabbitInner::Env { .. } => Err(anyhow::anyhow!(
                 "broker-originated connection close requires a managed RabbitMQ container"
+            )),
+        }
+    }
+
+    /// Managed-broker receipt for total queue depth, including at-least-once dead letters retained
+    /// inside a source quorum queue while its target is unavailable. AMQP's passive queue-declare
+    /// count exposes only ready messages, so this deliberately narrow fault-observation seam uses
+    /// `rabbitmqctl list_queues` without exposing a raw management or broker handle.
+    pub async fn broker_queue_total_depth(&self, vhost: &str, queue: &str) -> Result<u32> {
+        validate_rabbit_vhost(vhost)?;
+        if queue.is_empty()
+            || queue.len() > 255
+            || !queue.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+            })
+        {
+            return Err(anyhow::anyhow!(
+                "RabbitMQ queue observation name is invalid"
+            ));
+        }
+        match &self.inner {
+            RabbitInner::Container {
+                container, created, ..
+            } => {
+                let exists = created
+                    .lock()
+                    .map_err(|error| anyhow::anyhow!("vhost cache mutex poisoned: {error}"))?
+                    .contains(vhost);
+                if !exists {
+                    return Err(anyhow::anyhow!(
+                        "managed RabbitMQ vhost '{vhost}' must be created before queue observation"
+                    ));
+                }
+                let output = run_rabbitmqctl_output(
+                    container,
+                    &[
+                        "list_queues",
+                        "-p",
+                        vhost,
+                        "name",
+                        "messages",
+                        "--formatter",
+                        "json",
+                    ],
+                )
+                .await?;
+                let rows: serde_json::Value = serde_json::from_str(&output)?;
+                rows.as_array()
+                    .into_iter()
+                    .flatten()
+                    .find(|row| row.get("name").and_then(serde_json::Value::as_str) == Some(queue))
+                    .and_then(|row| row.get("messages"))
+                    .and_then(serde_json::Value::as_u64)
+                    .and_then(|depth| u32::try_from(depth).ok())
+                    .ok_or_else(|| anyhow::anyhow!("RabbitMQ queue observation was absent"))
+            }
+            RabbitInner::Env { .. } => Err(anyhow::anyhow!(
+                "total quorum queue depth observation requires a managed RabbitMQ container"
             )),
         }
     }
@@ -194,7 +251,13 @@ pub async fn env_or_rabbitmq() -> Result<RabbitFixture> {
             inner: RabbitInner::Env { base },
         });
     }
-    let container = runtime::start(RabbitMq::default(), ContainerService::RabbitMq).await?;
+    // Quorum queue TTL and at-least-once dead-lettering require RabbitMQ >= 3.10. Keep the plain
+    // fixture on the exact same broker version as the private-CA fixture instead of inheriting the
+    // testcontainers module's obsolete 3.8 default.
+    let image = GenericImage::new("rabbitmq", "3.13.6-management-alpine")
+        .with_exposed_port(AMQP_PORT.tcp())
+        .with_wait_for(WaitFor::message_on_stdout("Server startup complete"));
+    let container = runtime::start(image, ContainerService::RabbitMq).await?;
     let host = container.get_host().await?.to_string();
     let port = container.get_host_port_ipv4(AMQP_PORT).await?;
     Ok(RabbitFixture {
@@ -224,7 +287,11 @@ pub struct RabbitTlsFixture {
     pub(super) ca_pem: String,
     pub(super) wrong_ca_pem: String,
     pub(super) queue_pattern: String,
+    pub(super) subscriber_configure_pattern: String,
+    pub(super) subscriber_write_pattern: String,
     pub(super) subscriber_read_pattern: String,
+    pub(super) subscriber_topic_write_pattern: String,
+    pub(super) subscriber_topic_read_pattern: String,
 }
 
 impl RabbitTlsFixture {
@@ -279,14 +346,18 @@ impl RabbitTlsFixture {
                 && line.split_whitespace().collect::<Vec<_>>()
                     == [
                         TLS_VHOST,
-                        self.queue_pattern.as_str(),
-                        self.queue_pattern.as_str(),
+                        self.subscriber_configure_pattern.as_str(),
+                        self.subscriber_write_pattern.as_str(),
                         self.subscriber_read_pattern.as_str(),
                     ]
         });
         Ok(resource_exact
             && self
-                .topic_permissions_are_exact(TLS_SUBSCRIBER_USER, "^$", &self.queue_pattern)
+                .topic_permissions_are_exact(
+                    TLS_SUBSCRIBER_USER,
+                    &self.subscriber_topic_write_pattern,
+                    &self.subscriber_topic_read_pattern,
+                )
                 .await?)
     }
 
@@ -371,7 +442,11 @@ pub(super) async fn provision_adjacent_rabbit_queue<I: testcontainers::Image>(
 pub(super) async fn provision_rabbit_tls_permissions<I: testcontainers::Image>(
     container: &ContainerAsync<I>,
     queue_pattern: &str,
+    subscriber_configure_pattern: &str,
+    subscriber_write_pattern: &str,
     subscriber_read_pattern: &str,
+    subscriber_topic_write_pattern: &str,
+    subscriber_topic_read_pattern: &str,
 ) -> Result<()> {
     run_rabbitmqctl(
         container,
@@ -416,8 +491,8 @@ pub(super) async fn provision_rabbit_tls_permissions<I: testcontainers::Image>(
             "-p",
             TLS_VHOST,
             TLS_SUBSCRIBER_USER,
-            queue_pattern,
-            queue_pattern,
+            subscriber_configure_pattern,
+            subscriber_write_pattern,
             subscriber_read_pattern,
         ],
     )
@@ -430,8 +505,8 @@ pub(super) async fn provision_rabbit_tls_permissions<I: testcontainers::Image>(
             TLS_VHOST,
             TLS_SUBSCRIBER_USER,
             "amq.topic",
-            "^$",
-            queue_pattern,
+            subscriber_topic_write_pattern,
+            subscriber_topic_read_pattern,
         ],
     )
     .await?;
@@ -482,7 +557,14 @@ pub async fn rabbitmq_tls(
     validate_exact_queue_name(queue_name)?;
     let escaped_queue = queue_name.replace('.', "\\.");
     let queue_pattern = format!("^{escaped_queue}$");
+    let subscriber_configure_pattern = format!("^({escaped_queue}|{escaped_queue}\\.dlq)$");
+    // queue.bind needs write on both queues; x-dead-letter-exchange=amq.topic validation needs
+    // exchange write. Exact topic permission below restricts that exchange write to only the DLQ
+    // routing key, while DLQ consume/read remains absent.
+    let subscriber_write_pattern = format!("^(amq\\.topic|{escaped_queue}|{escaped_queue}\\.dlq)$");
     let subscriber_read_pattern = format!("^(amq\\.topic|{escaped_queue})$");
+    let subscriber_topic_write_pattern = format!("^{escaped_queue}\\.dlq$");
+    let subscriber_topic_read_pattern = format!("^({escaped_queue}|{escaped_queue}\\.dlq)$");
     let adjacent_queue = format!("{queue_name}.adjacent");
     let material = tls_material(attachment.dns_name)?;
     let config = format!(
@@ -500,7 +582,16 @@ pub async fn rabbitmq_tls(
     run_rabbitmqctl(&container, &["await_startup"]).await?;
     run_rabbitmqctl(&container, &["add_vhost", TLS_VHOST]).await?;
     provision_adjacent_rabbit_queue(&container, &adjacent_queue).await?;
-    provision_rabbit_tls_permissions(&container, &queue_pattern, &subscriber_read_pattern).await?;
+    provision_rabbit_tls_permissions(
+        &container,
+        &queue_pattern,
+        &subscriber_configure_pattern,
+        &subscriber_write_pattern,
+        &subscriber_read_pattern,
+        &subscriber_topic_write_pattern,
+        &subscriber_topic_read_pattern,
+    )
+    .await?;
     let host = container.get_host().await?.to_string();
     let port = container.get_host_port_ipv4(AMQPS_PORT).await?;
     Ok(RabbitTlsFixture {
@@ -517,7 +608,11 @@ pub async fn rabbitmq_tls(
         ca_pem: material.ca_pem,
         wrong_ca_pem: material.wrong_ca_pem,
         queue_pattern,
+        subscriber_configure_pattern,
+        subscriber_write_pattern,
         subscriber_read_pattern,
+        subscriber_topic_write_pattern,
+        subscriber_topic_read_pattern,
     })
 }
 
@@ -535,7 +630,10 @@ pub(super) fn validate_exact_queue_name(queue_name: &str) -> Result<()> {
 }
 
 /// 在运行中的 rabbitmq 容器内建 `vhost` + 给默认 `guest` 用户全权限（per-domain 隔离）。
-pub(super) async fn create_vhost(container: &ContainerAsync<RabbitMq>, vhost: &str) -> Result<()> {
+pub(super) async fn create_vhost(
+    container: &ContainerAsync<GenericImage>,
+    vhost: &str,
+) -> Result<()> {
     run_rabbitmqctl(container, &["await_startup"]).await?;
     run_rabbitmqctl(container, &["add_vhost", vhost]).await?;
     run_rabbitmqctl(

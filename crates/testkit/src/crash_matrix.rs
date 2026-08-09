@@ -891,9 +891,12 @@ runner = "postgres-rabbitmq"
                 Some(expected)
             );
             assert_eq!(expected.expected_runner(), CrashRunner::PostgresRedis);
-            let exported = expected.saga_case().expect("Saga catalog metadata");
-            assert!(exported.fixture_id.starts_with("saga-"));
-            assert_eq!(exported.contract_id, "billing.checkout");
+            assert!(matches!(
+                expected.saga_case(),
+                Some(exported)
+                    if exported.fixture_id.starts_with("saga-")
+                        && exported.contract_id == "billing.checkout"
+            ));
         }
         assert_eq!(
             CrashFaultSpec::ALL

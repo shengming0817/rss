@@ -23,6 +23,15 @@
 //!   `Reject`→basic_nack(requeue=false)）。在途消息于消费者崩溃窗口 broker 自动 requeue——
 //!   channel close 即重投，兑现 **at-least-once**。
 //!   prefetch=1（channel 级单在途 delivery，保证排空期间不领取下一条消息）。
+//! - subscriber 为每个 source topic 声明 durable quorum `<topic>.dlq`（`.dlq` 是保留后缀），source
+//!   quorum queue 通过现有 `amq.topic`
+//!   exchange 的 exact `<topic>.dlq` key 把 `Reject` 路由到该 queue；subscriber topic permission 只允许
+//!   写该 quarantine key，不能向 source/adjacent queue 发布。source 使用 RabbitMQ at-least-once
+//!   dead-letter strategy；source 与 broker quarantine 各固定 256 MiB、overflow=reject-publish，quarantine
+//!   固定保留 24 小时。参数漂移由 durable queue 声明 fail-fast；不使用外部 policy、兼容 topology 或
+//!   custom DLX exchange。
+//! - broker DLQ 只承接 ConsumerBase 的 fail-closed transport Reject，不是 app DLX 或 replay API。
+//!   handler 永久 Reject 仍由 ConsumerBase 写入加密 app DLX，成功后 broker Ack，避免双 owner。
 //!
 //! at-most-once 仅 demo 拓扑的 MemBus（`diport::Subscriber`）；AMQP 不实现该 trait。
 //!
@@ -45,7 +54,8 @@
 //! 签名冻结壳（`todo!()` body），保 ADAPTER-PORT-FREEZE-01 默认 `cargo test` / `verify` 绿、不拉
 //! broker 客户端树。`backend` feature 使用 lapin rustls + ring + webpki roots；native-tls / OpenSSL /
 //! aws-lc provider 由 workspace feature 选择和 `deny.toml` bans 防漂移。
-//! `integration-test-support` 只额外暴露确定性 post-send close 与只读 generation evidence seam，不引容器；
+//! `integration-test-support` 只额外暴露确定性 post-send close、只读 generation evidence 与 typed broker
+//! quarantine observation seam，不引容器或 raw lapin handle；
 //! `integration` 才叠加 testcontainers fixture。两者都不属于默认生产 surface。
 //!
 //! ref: lapin examples/pubsub.rs@main（connect → create_channel → queue_declare → basic_publish →
@@ -87,6 +97,8 @@ pub use conn::{AmqpConnectError, AmqpPrivateCa, AmqpPrivateCaError};
 pub use publisher::AmqpPublisher;
 #[cfg(feature = "backend")]
 pub use subscriber::AmqpSubscriber;
+#[cfg(feature = "integration-test-support")]
+pub use subscriber::BrokerDeadLetterObservation;
 
 #[cfg(not(feature = "backend"))]
 pub use fallback::{AmqpPublisher, AmqpSubscriber};

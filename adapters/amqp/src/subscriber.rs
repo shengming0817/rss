@@ -7,6 +7,8 @@
 //! at-most-once 仅 demo 拓扑的 MemBus。
 //! ref: lapin examples/pubsub.rs@main；rabbitmq docs/confirms。
 
+#[cfg(feature = "integration-test-support")]
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,12 +19,12 @@ use diport::{
 };
 use futures::StreamExt;
 use lapin::message::Delivery;
-#[cfg(feature = "integration-test-support")]
-use lapin::options::QueuePurgeOptions;
 use lapin::options::{
     BasicAckOptions, BasicCancelOptions, BasicConsumeOptions, BasicNackOptions, BasicQosOptions,
     QueueBindOptions, QueueDeclareOptions,
 };
+#[cfg(feature = "integration-test-support")]
+use lapin::options::{BasicGetOptions, BasicPublishOptions, QueueDeleteOptions, QueuePurgeOptions};
 use lapin::types::{AMQPValue, FieldTable};
 use lapin::{Channel, Connection};
 use tokio_util::sync::CancellationToken;
@@ -36,6 +38,205 @@ use crate::settle::{SettleMode, settle_mode};
 // in-flight while the first transaction is blocked during graceful shutdown.
 const PREFETCH: u16 = 1;
 
+/// Broker quarantine is deliberately short-lived and is not the application replay/audit store.
+/// The value is an application-owned queue argument, not runtime configuration or broker policy.
+const BROKER_DLQ_TTL_MS: u32 = 24 * 60 * 60 * 1_000;
+/// Per-topic broker storage is deliberately bounded. 256 MiB admits multiple RabbitMQ
+/// maximum-sized messages while preventing one source or plaintext quarantine from consuming an
+/// unbounded share of broker disk during a poison flood.
+const BROKER_SOURCE_MAX_BYTES: u32 = 256 * 1024 * 1024;
+const BROKER_DLQ_MAX_BYTES: u32 = 256 * 1024 * 1024;
+const MAX_AMQP_SHORT_STRING_BYTES: usize = 255;
+const DEAD_LETTER_QUEUE_SUFFIX: &str = ".dlq";
+
+#[derive(Clone, Copy)]
+struct BrokerQueueLimits {
+    dead_letter_ttl_ms: u32,
+    source_max_bytes: u32,
+    dead_letter_max_bytes: u32,
+}
+
+impl BrokerQueueLimits {
+    const PRODUCTION: Self = Self {
+        dead_letter_ttl_ms: BROKER_DLQ_TTL_MS,
+        source_max_bytes: BROKER_SOURCE_MAX_BYTES,
+        dead_letter_max_bytes: BROKER_DLQ_MAX_BYTES,
+    };
+}
+
+/// The sole construction funnel for subscriber-owned RabbitMQ queues.
+///
+/// Private fields prevent callers from declaring a source queue without its quarantine arguments.
+/// RabbitMQ enforces argument equivalence on every durable declaration and closes the channel with
+/// PRECONDITION_FAILED when an existing queue drifts from this topology.
+#[derive(Clone)]
+struct BrokerQueueTopology {
+    source_queue: String,
+    dead_letter_queue: String,
+    source_arguments: FieldTable,
+    dead_letter_arguments: FieldTable,
+}
+
+impl BrokerQueueTopology {
+    fn production(topic_name: &str) -> Result<Self, SubscriberError> {
+        Self::with_limits(topic_name, BrokerQueueLimits::PRODUCTION)
+    }
+
+    fn with_limits(topic_name: &str, limits: BrokerQueueLimits) -> Result<Self, SubscriberError> {
+        if topic_name.is_empty()
+            || topic_name.ends_with(DEAD_LETTER_QUEUE_SUFFIX)
+            || limits.dead_letter_ttl_ms == 0
+            || limits.source_max_bytes == 0
+            || limits.dead_letter_max_bytes == 0
+        {
+            return Err(invalid_topology("AMQP broker queue topology is invalid"));
+        }
+        let dead_letter_queue = format!("{topic_name}{DEAD_LETTER_QUEUE_SUFFIX}");
+        if dead_letter_queue.len() > MAX_AMQP_SHORT_STRING_BYTES {
+            return Err(invalid_topology("AMQP broker queue name is too long"));
+        }
+
+        let mut source_arguments = FieldTable::default();
+        source_arguments.insert(
+            "x-dead-letter-exchange".into(),
+            AMQPValue::LongString(crate::EVENT_EXCHANGE.as_bytes().to_vec().into()),
+        );
+        source_arguments.insert(
+            "x-dead-letter-routing-key".into(),
+            AMQPValue::LongString(dead_letter_queue.as_bytes().to_vec().into()),
+        );
+        insert_queue_string(&mut source_arguments, "x-queue-type", "quorum");
+        insert_queue_string(
+            &mut source_arguments,
+            "x-dead-letter-strategy",
+            "at-least-once",
+        );
+        insert_queue_string(&mut source_arguments, "x-overflow", "reject-publish");
+        source_arguments.insert(
+            "x-max-length-bytes".into(),
+            AMQPValue::LongLongInt(i64::from(limits.source_max_bytes)),
+        );
+        let mut dead_letter_arguments = FieldTable::default();
+        insert_queue_string(&mut dead_letter_arguments, "x-queue-type", "quorum");
+        insert_queue_string(&mut dead_letter_arguments, "x-overflow", "reject-publish");
+        dead_letter_arguments.insert(
+            "x-max-length-bytes".into(),
+            AMQPValue::LongLongInt(i64::from(limits.dead_letter_max_bytes)),
+        );
+        dead_letter_arguments.insert(
+            "x-message-ttl".into(),
+            AMQPValue::LongUInt(limits.dead_letter_ttl_ms),
+        );
+        Ok(Self {
+            source_queue: topic_name.to_string(),
+            dead_letter_queue,
+            source_arguments,
+            dead_letter_arguments,
+        })
+    }
+
+    fn source_queue(&self) -> &str {
+        &self.source_queue
+    }
+
+    fn dead_letter_queue(&self) -> &str {
+        &self.dead_letter_queue
+    }
+
+    fn source_arguments(&self) -> &FieldTable {
+        &self.source_arguments
+    }
+
+    fn dead_letter_arguments(&self) -> &FieldTable {
+        &self.dead_letter_arguments
+    }
+}
+
+fn insert_queue_string(arguments: &mut FieldTable, key: &'static str, value: &'static str) {
+    arguments.insert(
+        key.into(),
+        AMQPValue::LongString(value.as_bytes().to_vec().into()),
+    );
+}
+
+fn invalid_topology(message: &'static str) -> SubscriberError {
+    SubscriberError::new(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        message,
+    ))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrokerTopologyStage {
+    DeclareDeadLetter,
+    DeclareSource,
+    BindDeadLetter,
+    BindSource,
+}
+
+impl BrokerTopologyStage {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::DeclareDeadLetter => "declare_dead_letter_queue",
+            Self::DeclareSource => "declare_source_queue",
+            Self::BindDeadLetter => "bind_dead_letter_queue",
+            Self::BindSource => "bind_source_queue",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrokerTopologyFailureKind {
+    Precondition,
+    Permission,
+    Transport,
+    Protocol,
+    Client,
+}
+
+impl BrokerTopologyFailureKind {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Precondition => "precondition",
+            Self::Permission => "permission",
+            Self::Transport => "transport",
+            Self::Protocol => "protocol",
+            Self::Client => "client",
+        }
+    }
+}
+
+fn classify_topology_failure(error: &lapin::Error) -> BrokerTopologyFailureKind {
+    match error.kind() {
+        lapin::ErrorKind::ProtocolError(error) => match error.get_id() {
+            406 => BrokerTopologyFailureKind::Precondition,
+            403 => BrokerTopologyFailureKind::Permission,
+            _ => BrokerTopologyFailureKind::Protocol,
+        },
+        _ if error.is_io_error() => BrokerTopologyFailureKind::Transport,
+        _ => BrokerTopologyFailureKind::Client,
+    }
+}
+
+fn topology_rpc_error(
+    resource: &str,
+    topology: &BrokerQueueTopology,
+    stage: BrokerTopologyStage,
+    error: lapin::Error,
+) -> SubscriberError {
+    let kind = classify_topology_failure(&error);
+    tracing::error!(
+        target: "amqp",
+        resource,
+        source_queue = topology.source_queue(),
+        dead_letter_queue = topology.dead_letter_queue(),
+        stage = stage.as_str(),
+        kind = kind.as_str(),
+        "amqp broker queue topology declaration failed"
+    );
+    SubscriberError::new(error)
+}
+
 /// AMQP 事件订阅 adapter（lapin）。raw `Arc<Connection>` **私有**——仅本 adapter 内部使用，不向 crate 内
 /// 其它模块暴露 raw 连接。impl `AckableSubscriber` + `ManagedResource`。
 ///
@@ -47,6 +248,7 @@ pub struct AmqpSubscriber {
     channels: std::sync::Mutex<Vec<Channel>>,
     operational: AtomicBool,
     name: String,
+    broker_queue_limits: BrokerQueueLimits,
 }
 
 impl AmqpSubscriber {
@@ -66,7 +268,27 @@ impl AmqpSubscriber {
             channels: std::sync::Mutex::new(Vec::new()),
             operational: AtomicBool::new(true),
             name,
+            broker_queue_limits: BrokerQueueLimits::PRODUCTION,
         })
+    }
+
+    /// Integration-only queue-limit override. Production construction always uses the fixed 24h
+    /// quarantine and 256 MiB per-queue bounds, with no environment/configuration seam.
+    #[cfg(feature = "integration-test-support")]
+    pub async fn connect_with_broker_queue_limits_for_test(
+        endpoint: &secure::AmqpEndpoint,
+        name: impl Into<String>,
+        dead_letter_ttl_ms: NonZeroU32,
+        source_max_bytes: NonZeroU32,
+        dead_letter_max_bytes: NonZeroU32,
+    ) -> Result<Self, conn::AmqpConnectError> {
+        let mut subscriber = Self::connect(endpoint, name).await?;
+        subscriber.broker_queue_limits = BrokerQueueLimits {
+            dead_letter_ttl_ms: dead_letter_ttl_ms.get(),
+            source_max_bytes: source_max_bytes.get(),
+            dead_letter_max_bytes: dead_letter_max_bytes.get(),
+        };
+        Ok(subscriber)
     }
 
     pub(crate) async fn connect_with_private_ca(
@@ -81,6 +303,7 @@ impl AmqpSubscriber {
             channels: std::sync::Mutex::new(Vec::new()),
             operational: AtomicBool::new(true),
             name,
+            broker_queue_limits: BrokerQueueLimits::PRODUCTION,
         })
     }
 
@@ -92,11 +315,12 @@ impl AmqpSubscriber {
             })
     }
 
-    /// Purge the durable queue owned by one generated topic before an integration run.
+    /// Purge the durable source queue and its derived broker quarantine before an integration run.
     ///
     /// Long-lived test brokers retain durable messages, and closing a manual-ack channel
     /// requeues every unsettled delivery. Fault-injection tests use this typed, test-only seam
-    /// before subscribing so a failed prior run cannot enter the next run's ConsumerTx.
+    /// before subscribing so a failed prior run cannot enter the next run's ConsumerTx or DLQ
+    /// assertions. The return value remains the number removed from the source queue.
     #[cfg(feature = "integration-test-support")]
     pub async fn purge_durable_queue_for_test(
         &self,
@@ -107,9 +331,17 @@ impl AmqpSubscriber {
             .create_channel()
             .await
             .map_err(SubscriberError::new)?;
-        declare_durable_queue(&channel, topic.as_str()).await?;
+        let topology = self.broker_queue_topology(topic)?;
+        declare_broker_queue_topology(&channel, &topology, &self.name).await?;
         let purged = channel
-            .queue_purge(topic.as_str().into(), QueuePurgeOptions::default())
+            .queue_purge(topology.source_queue().into(), QueuePurgeOptions::default())
+            .await
+            .map_err(SubscriberError::new)?;
+        channel
+            .queue_purge(
+                topology.dead_letter_queue().into(),
+                QueuePurgeOptions::default(),
+            )
             .await
             .map_err(SubscriberError::new)?;
         channel
@@ -118,33 +350,325 @@ impl AmqpSubscriber {
             .map_err(SubscriberError::new)?;
         Ok(purged)
     }
+
+    /// Remove only the broker quarantine after the full topology has been declared. This narrow
+    /// fault seam lets a live test prove that the source quorum queue retains a rejected message
+    /// while its target is unavailable; the next typed declaration restores the same topology.
+    #[cfg(feature = "integration-test-support")]
+    pub async fn delete_broker_dead_letter_for_test(
+        &self,
+        topic: &Topic,
+    ) -> Result<(), SubscriberError> {
+        let channel = self
+            .conn
+            .create_channel()
+            .await
+            .map_err(SubscriberError::new)?;
+        let topology = self.broker_queue_topology(topic)?;
+        declare_broker_queue_topology(&channel, &topology, &self.name).await?;
+        channel
+            .queue_delete(
+                topology.dead_letter_queue().into(),
+                QueueDeleteOptions::default(),
+            )
+            .await
+            .map_err(SubscriberError::new)?;
+        channel
+            .close(REPLY_SUCCESS, "test DLQ target removal complete".into())
+            .await
+            .map_err(SubscriberError::new)?;
+        Ok(())
+    }
+
+    #[cfg(feature = "integration-test-support")]
+    pub async fn broker_dead_letter_depth_for_test(
+        &self,
+        topic: &Topic,
+    ) -> Result<u32, SubscriberError> {
+        let topology = self.broker_queue_topology(topic)?;
+        let channel = self
+            .conn
+            .create_channel()
+            .await
+            .map_err(SubscriberError::new)?;
+        let dead_letter_message_count =
+            declare_broker_queue_topology(&channel, &topology, &self.name).await?;
+        channel
+            .close(REPLY_SUCCESS, "test DLQ depth complete".into())
+            .await
+            .map_err(SubscriberError::new)?;
+        Ok(dead_letter_message_count)
+    }
+
+    #[cfg(feature = "integration-test-support")]
+    pub async fn take_broker_dead_letter_for_test(
+        &self,
+        topic: &Topic,
+    ) -> Result<Option<BrokerDeadLetterObservation>, SubscriberError> {
+        let topology = self.broker_queue_topology(topic)?;
+        let channel = self
+            .conn
+            .create_channel()
+            .await
+            .map_err(SubscriberError::new)?;
+        declare_broker_queue_topology(&channel, &topology, &self.name).await?;
+        let observation = take_broker_dead_letter(&channel, &topology).await;
+        let close = channel
+            .close(REPLY_SUCCESS, "test DLQ observation complete".into())
+            .await;
+        match observation {
+            Ok(observation) => {
+                close.map_err(SubscriberError::new)?;
+                Ok(observation)
+            }
+            Err(error) => {
+                // Closing a channel with an unsettled basic.get delivery makes RabbitMQ requeue
+                // malformed evidence. Preserve the primary observation error if close also fails.
+                let _ = close;
+                Err(error)
+            }
+        }
+    }
+
+    /// Fixed negative ACL probe: attempts one publish through RabbitMQ's default exchange and uses
+    /// an ordered RPC as the broker-response barrier. No exchange/channel or payload is exposed to
+    /// callers; a correctly provisioned subscriber credential must return `true`.
+    #[cfg(feature = "integration-test-support")]
+    pub async fn default_exchange_publish_is_denied_for_test(
+        &self,
+        routing_key: &Topic,
+    ) -> Result<bool, SubscriberError> {
+        let channel = self
+            .conn
+            .create_channel()
+            .await
+            .map_err(SubscriberError::new)?;
+        let publish = channel
+            .basic_publish(
+                "".into(),
+                routing_key.as_str().into(),
+                BasicPublishOptions::default(),
+                b"acl-negative-probe",
+                lapin::BasicProperties::default(),
+            )
+            .await;
+        let denied = match publish {
+            Err(_) => true,
+            Ok(_) => channel
+                .basic_qos(PREFETCH, BasicQosOptions::default())
+                .await
+                .is_err(),
+        };
+        let _ = channel
+            .close(REPLY_SUCCESS, "default exchange ACL probe complete".into())
+            .await;
+        Ok(denied)
+    }
+
+    fn broker_queue_topology(&self, topic: &Topic) -> Result<BrokerQueueTopology, SubscriberError> {
+        if self.broker_queue_limits.dead_letter_ttl_ms == BROKER_DLQ_TTL_MS
+            && self.broker_queue_limits.source_max_bytes == BROKER_SOURCE_MAX_BYTES
+            && self.broker_queue_limits.dead_letter_max_bytes == BROKER_DLQ_MAX_BYTES
+        {
+            BrokerQueueTopology::production(topic.as_str())
+        } else {
+            BrokerQueueTopology::with_limits(topic.as_str(), self.broker_queue_limits)
+        }
+    }
 }
 
-/// 在给定 channel 上声明 durable queue，并绑定 production topic exchange 的 exact routing key。
-/// `subscribe_ackable`（manual-ack）在其 per-subscription channel 上调用。
-async fn declare_durable_queue(channel: &Channel, topic_name: &str) -> Result<(), SubscriberError> {
-    channel
+/// Narrow integration receipt for one broker-quarantined message. Raw lapin connection/channel
+/// handles and arbitrary broker operations remain private to the adapter.
+#[cfg(feature = "integration-test-support")]
+pub struct BrokerDeadLetterObservation {
+    message_id: Option<String>,
+    payload: Vec<u8>,
+    death_reason: String,
+    death_count: u64,
+    source_queue: String,
+    source_exchange: String,
+}
+
+#[cfg(feature = "integration-test-support")]
+impl BrokerDeadLetterObservation {
+    pub fn message_id(&self) -> Option<&str> {
+        self.message_id.as_deref()
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+
+    pub fn death_reason(&self) -> &str {
+        &self.death_reason
+    }
+
+    pub fn death_count(&self) -> u64 {
+        self.death_count
+    }
+
+    pub fn source_queue(&self) -> &str {
+        &self.source_queue
+    }
+
+    pub fn source_exchange(&self) -> &str {
+        &self.source_exchange
+    }
+
+    fn try_from(message: &lapin::message::BasicGetMessage) -> Result<Self, SubscriberError> {
+        let headers = message
+            .properties
+            .headers()
+            .as_ref()
+            .ok_or_else(|| invalid_topology("broker dead-letter is missing x-death headers"))?;
+        let deaths = match headers.inner().get("x-death") {
+            Some(AMQPValue::FieldArray(deaths)) => deaths,
+            _ => {
+                return Err(invalid_topology(
+                    "broker dead-letter has invalid x-death headers",
+                ));
+            }
+        };
+        let death = match deaths.as_slice().first() {
+            Some(AMQPValue::FieldTable(death)) => death,
+            _ => return Err(invalid_topology("broker dead-letter has no x-death entry")),
+        };
+        let death_reason = x_death_string(death, "reason")?;
+        let source_queue = x_death_string(death, "queue")?;
+        let source_exchange = x_death_string(death, "exchange")?;
+        let death_count = match death.inner().get("count") {
+            Some(AMQPValue::LongLongInt(count)) if *count >= 0 => *count as u64,
+            Some(AMQPValue::LongUInt(count)) => u64::from(*count),
+            _ => {
+                return Err(invalid_topology(
+                    "broker dead-letter has invalid x-death count",
+                ));
+            }
+        };
+        Ok(Self {
+            message_id: message
+                .properties
+                .message_id()
+                .as_ref()
+                .map(ToString::to_string),
+            payload: message.data.clone(),
+            death_reason,
+            death_count,
+            source_queue,
+            source_exchange,
+        })
+    }
+}
+
+#[cfg(feature = "integration-test-support")]
+async fn take_broker_dead_letter(
+    channel: &Channel,
+    topology: &BrokerQueueTopology,
+) -> Result<Option<BrokerDeadLetterObservation>, SubscriberError> {
+    let Some(message) = channel
+        .basic_get(
+            topology.dead_letter_queue().into(),
+            BasicGetOptions { no_ack: false },
+        )
+        .await
+        .map_err(SubscriberError::new)?
+    else {
+        return Ok(None);
+    };
+    let observation = BrokerDeadLetterObservation::try_from(&message)?;
+    message
+        .acker
+        .ack(BasicAckOptions::default())
+        .await
+        .map_err(SubscriberError::new)?;
+    Ok(Some(observation))
+}
+
+#[cfg(feature = "integration-test-support")]
+fn x_death_string(table: &FieldTable, key: &'static str) -> Result<String, SubscriberError> {
+    match table.inner().get(key) {
+        Some(AMQPValue::LongString(value)) => Ok(value.to_string()),
+        Some(AMQPValue::ShortString(value)) => Ok(value.to_string()),
+        _ => Err(invalid_topology(
+            "broker dead-letter has invalid x-death text",
+        )),
+    }
+}
+
+/// Declare the terminal quarantine first, then the source queue that routes rejected messages to
+/// it through the existing topic exchange and an exact `<topic>.dlq` routing key. Topic permissions
+/// keep the subscriber credential from publishing to source or adjacent queues.
+async fn declare_broker_queue_topology(
+    channel: &Channel,
+    topology: &BrokerQueueTopology,
+    resource: &str,
+) -> Result<u32, SubscriberError> {
+    let dead_letter = channel
         .queue_declare(
-            topic_name.into(),
+            topology.dead_letter_queue().into(),
             QueueDeclareOptions {
                 durable: true,
                 ..Default::default()
             },
-            FieldTable::default(),
+            topology.dead_letter_arguments().clone(),
         )
         .await
-        .map_err(SubscriberError::new)?;
+        .map_err(|error| {
+            topology_rpc_error(
+                resource,
+                topology,
+                BrokerTopologyStage::DeclareDeadLetter,
+                error,
+            )
+        })?;
+    channel
+        .queue_declare(
+            topology.source_queue().into(),
+            QueueDeclareOptions {
+                durable: true,
+                ..Default::default()
+            },
+            topology.source_arguments().clone(),
+        )
+        .await
+        .map_err(|error| {
+            topology_rpc_error(
+                resource,
+                topology,
+                BrokerTopologyStage::DeclareSource,
+                error,
+            )
+        })?;
     channel
         .queue_bind(
-            topic_name.into(),
+            topology.dead_letter_queue().into(),
             crate::EVENT_EXCHANGE.into(),
-            topic_name.into(),
+            topology.dead_letter_queue().into(),
             QueueBindOptions::default(),
             FieldTable::default(),
         )
         .await
-        .map(|_| ())
-        .map_err(SubscriberError::new)
+        .map_err(|error| {
+            topology_rpc_error(
+                resource,
+                topology,
+                BrokerTopologyStage::BindDeadLetter,
+                error,
+            )
+        })?;
+    channel
+        .queue_bind(
+            topology.source_queue().into(),
+            crate::EVENT_EXCHANGE.into(),
+            topology.source_queue().into(),
+            QueueBindOptions::default(),
+            FieldTable::default(),
+        )
+        .await
+        .map_err(|error| {
+            topology_rpc_error(resource, topology, BrokerTopologyStage::BindSource, error)
+        })?;
+    Ok(dead_letter.message_count())
 }
 
 /// 两阶段排空的 admission stop：token cancel 后以稳定 tag 发送 `basic.cancel`，并等待
@@ -336,7 +860,8 @@ impl AckableSubscriber for AmqpSubscriber {
             .basic_qos(PREFETCH, BasicQosOptions::default())
             .await
             .map_err(SubscriberError::new)?;
-        declare_durable_queue(&channel, topic_name).await?;
+        let topology = self.broker_queue_topology(&topic)?;
+        declare_broker_queue_topology(&channel, &topology, &self.name).await?;
         let consumer = channel
             .basic_consume(
                 topic_name.into(),
@@ -427,7 +952,217 @@ impl AckableSubscriber for AmqpSubscriber {
 
 #[cfg(test)]
 mod tests {
-    use super::pick_message_id;
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use lapin::types::AMQPValue;
+    use tracing::field::{Field, Visit};
+    use tracing::{Event, Subscriber};
+    use tracing_subscriber::Layer;
+    use tracing_subscriber::layer::{Context, SubscriberExt as _};
+
+    use super::{
+        BROKER_DLQ_TTL_MS, BrokerQueueTopology, BrokerTopologyFailureKind, BrokerTopologyStage,
+        classify_topology_failure, pick_message_id, topology_rpc_error,
+    };
+
+    #[derive(Clone, Default)]
+    struct CaptureLayer {
+        events: Arc<Mutex<Vec<(String, HashMap<String, String>)>>>,
+    }
+
+    struct CaptureVisitor {
+        fields: HashMap<String, String>,
+    }
+
+    impl Visit for CaptureVisitor {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    impl<S> Layer<S> for CaptureLayer
+    where
+        S: Subscriber,
+    {
+        fn on_event(&self, event: &Event<'_>, _context: Context<'_, S>) {
+            let mut visitor = CaptureVisitor {
+                fields: HashMap::new(),
+            };
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push((event.metadata().target().to_string(), visitor.fields));
+        }
+    }
+
+    #[test]
+    fn broker_queue_topology_owns_exact_dead_letter_arguments() {
+        let topology =
+            BrokerQueueTopology::production("rss.events.settings").expect("valid topic topology");
+
+        assert_eq!(topology.source_queue(), "rss.events.settings");
+        assert_eq!(topology.dead_letter_queue(), "rss.events.settings.dlq");
+        assert_eq!(
+            topology
+                .source_arguments()
+                .inner()
+                .get("x-dead-letter-exchange"),
+            Some(&AMQPValue::LongString(b"amq.topic".to_vec().into()))
+        );
+        assert_eq!(
+            topology
+                .source_arguments()
+                .inner()
+                .get("x-dead-letter-routing-key"),
+            Some(&AMQPValue::LongString(
+                b"rss.events.settings.dlq".to_vec().into()
+            ))
+        );
+        for (key, value) in [
+            ("x-queue-type", "quorum"),
+            ("x-dead-letter-strategy", "at-least-once"),
+            ("x-overflow", "reject-publish"),
+        ] {
+            assert_eq!(
+                topology.source_arguments().inner().get(key),
+                Some(&AMQPValue::LongString(value.as_bytes().to_vec().into()))
+            );
+        }
+        assert_eq!(
+            topology
+                .source_arguments()
+                .inner()
+                .get("x-max-length-bytes"),
+            Some(&AMQPValue::LongLongInt(256 * 1024 * 1024))
+        );
+        assert_eq!(
+            topology
+                .dead_letter_arguments()
+                .inner()
+                .get("x-message-ttl"),
+            Some(&AMQPValue::LongUInt(BROKER_DLQ_TTL_MS))
+        );
+        for (key, value) in [("x-queue-type", "quorum"), ("x-overflow", "reject-publish")] {
+            assert_eq!(
+                topology.dead_letter_arguments().inner().get(key),
+                Some(&AMQPValue::LongString(value.as_bytes().to_vec().into()))
+            );
+        }
+        assert_eq!(
+            topology
+                .dead_letter_arguments()
+                .inner()
+                .get("x-max-length-bytes"),
+            Some(&AMQPValue::LongLongInt(256 * 1024 * 1024))
+        );
+        assert!(
+            !topology
+                .dead_letter_arguments()
+                .contains_key("x-dead-letter-exchange"),
+            "the quarantine queue must terminate the broker dead-letter chain"
+        );
+    }
+
+    #[test]
+    fn broker_queue_topology_rejects_empty_or_overlong_names() {
+        assert!(BrokerQueueTopology::production("").is_err());
+        assert!(BrokerQueueTopology::production("rss.events.settings.dlq").is_err());
+        assert!(BrokerQueueTopology::production(&"x".repeat(252)).is_err());
+        assert!(BrokerQueueTopology::production(&"x".repeat(251)).is_ok());
+    }
+
+    #[test]
+    fn broker_topology_failure_categories_are_closed_and_safe() {
+        let protocol_error = |reply_code| {
+            let error =
+                lapin::protocol::AMQPError::from_id(reply_code, "hidden broker text".into())
+                    .expect("known AMQP reply code");
+            lapin::Error::from(lapin::ErrorKind::ProtocolError(error))
+        };
+        assert_eq!(
+            classify_topology_failure(&protocol_error(406)),
+            BrokerTopologyFailureKind::Precondition
+        );
+        assert_eq!(
+            classify_topology_failure(&protocol_error(403)),
+            BrokerTopologyFailureKind::Permission
+        );
+        assert_eq!(
+            classify_topology_failure(&protocol_error(404)),
+            BrokerTopologyFailureKind::Protocol
+        );
+        assert_eq!(
+            classify_topology_failure(&lapin::Error::from(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "hidden transport text",
+            ))),
+            BrokerTopologyFailureKind::Transport
+        );
+    }
+
+    #[test]
+    fn broker_topology_diagnostic_emits_only_closed_safe_fields() {
+        let layer = CaptureLayer::default();
+        let events = Arc::clone(&layer.events);
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            let error = lapin::protocol::AMQPError::from_id(
+                406,
+                "hidden broker topology and credential text".into(),
+            )
+            .expect("known AMQP reply code");
+            let topology = BrokerQueueTopology::production("rss.events.settings")
+                .expect("valid topic topology");
+            let _ = topology_rpc_error(
+                "settings-subscriber",
+                &topology,
+                BrokerTopologyStage::DeclareSource,
+                lapin::Error::from(lapin::ErrorKind::ProtocolError(error)),
+            );
+        });
+
+        let events = events
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(events.len(), 1);
+        let (target, fields) = &events[0];
+        assert_eq!(target, "amqp");
+        assert_eq!(
+            fields.get("resource").map(String::as_str),
+            Some("settings-subscriber")
+        );
+        assert_eq!(
+            fields.get("source_queue").map(String::as_str),
+            Some("rss.events.settings")
+        );
+        assert_eq!(
+            fields.get("dead_letter_queue").map(String::as_str),
+            Some("rss.events.settings.dlq")
+        );
+        assert_eq!(
+            fields.get("message").map(String::as_str),
+            Some("amqp broker queue topology declaration failed")
+        );
+        assert_eq!(
+            fields.get("stage").map(String::as_str),
+            Some("declare_source_queue")
+        );
+        assert_eq!(fields.get("kind").map(String::as_str), Some("precondition"));
+        assert!(
+            fields
+                .values()
+                .all(|value| !value.contains("hidden broker topology")),
+            "raw broker text must not be recorded"
+        );
+    }
 
     #[test]
     fn prefers_non_empty_message_id() {

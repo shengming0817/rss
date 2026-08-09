@@ -262,6 +262,14 @@ impl AmqpRuntimeDeps {
         self.publisher.as_ref()
     }
 
+    /// Integration-only access to the typed subscriber quarantine observation seam. It exposes
+    /// neither the underlying connection/channel nor arbitrary queue operations.
+    #[cfg(feature = "integration-test-support")]
+    #[must_use]
+    pub fn subscriber_for_integration_test(&self) -> &AmqpSubscriber {
+        self.subscriber.as_ref()
+    }
+
     /// **单源** managed-resource/rollback 派生：组合根
     /// `module.resources.extend(deps.amqp.runtime_resources())` 即装配该 vhost 全部受管连接
     /// （publisher-guard + subscriber-guard，各关其 connection），杜绝逐 channel 手写 `register_detached`（D5）。

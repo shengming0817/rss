@@ -176,6 +176,40 @@ pub(super) fn connect_options(
         .ssl_mode(ssl_mode)
 }
 
+#[derive(sqlx::FromRow)]
+struct ExternalRolePosture {
+    current_user: String,
+    can_login: bool,
+    superuser: bool,
+    create_db: bool,
+    create_role: bool,
+    replication: bool,
+    bypass_rls: bool,
+    inherit: bool,
+    credential_valid: bool,
+    membership_isolated: bool,
+}
+
+impl ExternalRolePosture {
+    fn violations(&self, expected_user: &str) -> Vec<&'static str> {
+        [
+            (self.current_user != expected_user, "CURRENT_USER"),
+            (!self.can_login, "LOGIN"),
+            (self.superuser, "NOSUPERUSER"),
+            (self.create_db, "NOCREATEDB"),
+            (self.create_role, "NOCREATEROLE"),
+            (self.replication, "NOREPLICATION"),
+            (self.bypass_rls, "NOBYPASSRLS"),
+            (self.inherit, "NOINHERIT"),
+            (!self.credential_valid, "CREDENTIAL_VALID"),
+            (!self.membership_isolated, "NO_ROLE_MEMBERSHIPS"),
+        ]
+        .into_iter()
+        .filter_map(|(violated, label)| violated.then_some(label))
+        .collect()
+    }
+}
+
 pub(super) async fn verify_external_app_role(params: &PgConnParams) -> Result<()> {
     use sqlx::postgres::PgPoolOptions;
 
@@ -184,66 +218,26 @@ pub(super) async fn verify_external_app_role(params: &PgConnParams) -> Result<()
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(connect_options(params, sqlx::postgres::PgSslMode::Prefer))
         .await?;
-    let posture: Option<(String, bool, bool, bool, bool, bool, bool, bool, bool, bool)> =
-        sqlx::query_as(
-            "SELECT current_user, role.rolcanlogin, role.rolsuper, role.rolcreatedb, \
-         role.rolcreaterole, role.rolreplication, role.rolbypassrls, role.rolinherit, \
-         role.rolvaliduntil IS NULL OR role.rolvaliduntil > clock_timestamp(), \
+    let posture: Option<ExternalRolePosture> = sqlx::query_as(
+        "SELECT current_user, role.rolcanlogin AS can_login, role.rolsuper AS superuser, \
+         role.rolcreatedb AS create_db, role.rolcreaterole AS create_role, \
+         role.rolreplication AS replication, role.rolbypassrls AS bypass_rls, \
+         role.rolinherit AS inherit, \
+         role.rolvaliduntil IS NULL OR role.rolvaliduntil > clock_timestamp() AS credential_valid, \
          NOT EXISTS (SELECT 1 FROM pg_auth_members AS membership \
                      WHERE membership.roleid = role.oid OR membership.member = role.oid) \
+             AS membership_isolated \
          FROM pg_roles AS role WHERE role.rolname = current_user",
-        )
-        .fetch_optional(&pool)
-        .await?;
+    )
+    .fetch_optional(&pool)
+    .await?;
     pool.close().await;
-    let Some((
-        current_user,
-        can_login,
-        superuser,
-        create_db,
-        create_role,
-        replication,
-        bypass_rls,
-        inherit,
-        credential_valid,
-        membership_isolated,
-    )) = posture
-    else {
+    let Some(posture) = posture else {
         return Err(anyhow::anyhow!(
             "external postgres app role posture is unavailable"
         ));
     };
-    let mut violations = Vec::new();
-    if current_user != params.username {
-        violations.push("CURRENT_USER");
-    }
-    if !can_login {
-        violations.push("LOGIN");
-    }
-    if superuser {
-        violations.push("NOSUPERUSER");
-    }
-    if create_db {
-        violations.push("NOCREATEDB");
-    }
-    if create_role {
-        violations.push("NOCREATEROLE");
-    }
-    if replication {
-        violations.push("NOREPLICATION");
-    }
-    if bypass_rls {
-        violations.push("NOBYPASSRLS");
-    }
-    if inherit {
-        violations.push("NOINHERIT");
-    }
-    if !credential_valid {
-        violations.push("CREDENTIAL_VALID");
-    }
-    if !membership_isolated {
-        violations.push("NO_ROLE_MEMBERSHIPS");
-    }
+    let violations = posture.violations(&params.username);
     if !violations.is_empty() {
         return Err(anyhow::anyhow!(
             "external postgres app role '{}' violates fixed posture: {}",
@@ -259,19 +253,16 @@ pub(super) async fn verify_external_app_role(params: &PgConnParams) -> Result<()
     };
     let mut invalid = params.clone();
     invalid.password = alternate_password.to_owned();
-    match PgPoolOptions::new()
+    if let Ok(invalid_pool) = PgPoolOptions::new()
         .max_connections(1)
         .acquire_timeout(Duration::from_secs(5))
         .connect_with(connect_options(&invalid, sqlx::postgres::PgSslMode::Prefer))
         .await
     {
-        Ok(invalid_pool) => {
-            invalid_pool.close().await;
-            return Err(anyhow::anyhow!(
-                "external postgres app role authentication does not require the supplied credential"
-            ));
-        }
-        Err(_) => {}
+        invalid_pool.close().await;
+        return Err(anyhow::anyhow!(
+            "external postgres app role authentication does not require the supplied credential"
+        ));
     }
     Ok(())
 }

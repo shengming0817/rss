@@ -41,6 +41,7 @@ use tokio_util::sync::CancellationToken;
 
 /// 消费 topic（subscribe_ackable 据此声明 durable queue）。
 const TOPIC: &str = "rss.it.consumer-alo";
+const REJECT_TOPIC: &str = "rss.it.consumer-alo-reject";
 /// 去重锚点 EventId（两次发布同此 id 验幂等）。
 const EVENT_ID: &str = "evt-consumer-alo";
 const TEST_PUBLISH_TIMEOUT: Duration = Duration::from_secs(40);
@@ -165,6 +166,11 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
         drive,
     );
     driven?;
+    assert_eq!(
+        sub.broker_dead_letter_depth_for_test(&topic).await?,
+        0,
+        "ConsumerBase Ack must not enter broker quarantine"
+    );
     AckableSubscriber::shutdown(&sub).await?;
 
     // 单条消费断言。
@@ -192,6 +198,89 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
 
     token2.cancel();
     AckableSubscriber::shutdown(&sub2).await?;
+    Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
+/// A message without the trusted transport envelope is rejected before the handler. This is a
+/// legal ConsumerBase fail-closed path and proves the complete
+/// `ConsumerBase -> AmqpAcker -> RabbitMQ DLQ` settlement chain without changing the application
+/// `HandleResult::reject` contract (which remains app-DLX + broker Ack).
+#[tokio::test(flavor = "multi_thread")]
+async fn run_consumer_ackable_quarantines_untrusted_envelope_in_broker_dlq()
+-> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_consumer_alo_reject").await?;
+    let topic = Topic::new(REJECT_TOPIC);
+    let sub = connect_subscriber(&url, "alo-reject-sub").await?;
+    sub.purge_durable_queue_for_test(&topic).await?;
+    let token = CancellationToken::new();
+    let stream = sub.subscribe_ackable(topic.clone(), token.clone()).await?;
+    let publisher = connect_publisher(&url, "alo-reject-pub").await?;
+
+    let group = ConsumerGroup::parse("audit.consumer-alo-reject")
+        .map_err(|_| anyhow!("consumer group parse"))?;
+    let claimer = Arc::new(demo_claimer()?);
+    let handler_calls = Arc::new(Mutex::new(0_u32));
+    let calls_for_handler = Arc::clone(&handler_calls);
+    let handler = move |_message: Message| -> BoxFuture<'static, HandleResult> {
+        let calls = Arc::clone(&calls_for_handler);
+        Box::pin(async move {
+            *calls.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+            HandleResult::ack()
+        })
+    };
+    let meta = ConsumerMeta::new(
+        "audit",
+        REJECT_TOPIC.split('.').next().unwrap_or(REJECT_TOPIC),
+        REJECT_TOPIC,
+        REJECT_TOPIC,
+        group.as_str(),
+        common::tenant_authority(),
+    );
+    let drive = async {
+        publisher
+            .publish(PublishRequest::new(
+                topic.clone(),
+                MessageId::new("evt-consumer-alo-untrusted"),
+                b"untrusted-envelope".to_vec(),
+            ))
+            .await?;
+        await_map(Duration::from_secs(10), async || {
+            (sub.broker_dead_letter_depth_for_test(&topic).await.ok() == Some(1)).then_some(())
+        })
+        .await
+        .map_err(|_| anyhow!("timeout waiting for ConsumerBase broker quarantine"))?;
+        token.cancel();
+        anyhow::Ok(())
+    };
+    let dlx = DynDeadLetterStore::new_box(MemDeadLetterStore::new());
+    let (_, driven) = tokio::join!(
+        run_consumer_ackable(
+            stream,
+            claimer,
+            dlx.as_ref(),
+            &meta,
+            &handler,
+            LeaseConfig::from_ttl(Duration::from_secs(60)),
+        ),
+        drive,
+    );
+    driven?;
+    assert_eq!(
+        *handler_calls.lock().unwrap_or_else(|e| e.into_inner()),
+        0,
+        "untrusted envelope must be rejected before handler invocation"
+    );
+    let dead_letter = sub
+        .take_broker_dead_letter_for_test(&topic)
+        .await?
+        .ok_or_else(|| anyhow!("ConsumerBase broker quarantine was empty"))?;
+    assert_eq!(dead_letter.message_id(), Some("evt-consumer-alo-untrusted"));
+    assert_eq!(dead_letter.death_reason(), "rejected");
+    assert_eq!(dead_letter.death_count(), 1);
+
+    AckableSubscriber::shutdown(&sub).await?;
     Publisher::shutdown(&publisher).await?;
     Ok(())
 }

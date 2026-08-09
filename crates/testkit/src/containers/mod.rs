@@ -33,7 +33,7 @@ use testcontainers::{ContainerAsync, CopyTargetOptions, GenericImage};
 use url::Url;
 
 #[cfg(test)]
-use testcontainers_modules::redis::{REDIS_PORT, Redis};
+use testcontainers_modules::redis::REDIS_PORT;
 
 /// fixture 错误（容器起停 / 坐标解析 / env 解析）——dev/test 用，anyhow 以与任意测试返回类型组合。
 pub type FixtureError = anyhow::Error;
@@ -229,7 +229,6 @@ const MINIO_WORKLOAD_PASSWORD: &str = "rss-settingsonly-workload-password";
 const MINIO_ARCHIVE_BUCKET: &str = "rss-settingsonly-dlx";
 const MINIO_NEIGHBOR_BUCKET: &str = "rss-settingsonly-neighbor";
 const MINIO_POLICY_NAME: &str = "rss-settingsonly-archive";
-/// 容器路径 postgres db 名：含 `test` 以满足 adapters/postgres 毁灭性-DDL 守卫。
 
 /// rabbitmqctl exec 有界重试（broker 起后 rabbitmqctl/epmd 短暂不可用窗口）。
 const RABBITMQCTL_MAX_ATTEMPTS: u32 = 12;

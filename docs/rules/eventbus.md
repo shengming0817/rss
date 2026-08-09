@@ -316,6 +316,25 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
 | 幂等键 malformed | 不 commit | `Reject` |
 | 未知状态 | 不 commit / 不 release | `Requeue` |
 
+AMQP broker quarantine 规则：
+
+- adapter 为每个 source topic 唯一派生 durable quorum `<topic>.dlq`，`.dlq` 是 source topic 保留后缀；
+  source queue 固定 `x-queue-type=quorum`、`x-dead-letter-strategy=at-least-once`、
+  `x-overflow=reject-publish`，并以
+  `x-dead-letter-exchange="amq.topic"`、`x-dead-letter-routing-key=<topic>.dlq` 进入同一 topic exchange，
+  DLQ 只绑定 exact `<topic>.dlq` key。subscriber credential 的 topic-write permission 只允许该 quarantine
+  key，禁止默认 exchange、source key与相邻 key发布；publisher credential 也不得写 quarantine key。
+  topology 由代码内 typed funnel 单源声明，不依赖 broker policy、custom exchange 或兼容 fallback；已有
+  queue 参数不等价时声明必须 fail-fast。
+- source 与 broker DLQ 各固定 `x-max-length-bytes=268435456`（256 MiB）及
+  `x-overflow=reject-publish`；DLQ 同为 quorum queue，另固定 `x-message-ttl=86400000`（24 小时），不配置
+  二级 DLX。目标不可用时 source quorum queue 保留 dead-letter，目标确认后才删除；容量满时 publisher
+  confirm nack 向 outbox relay 施加背压。broker DLQ 是可能含明文 payload 的有界短期 fail-closed transport
+  quarantine；生产 subscriber 无 DLQ read/replay 权限。
+- handler 永久 `Reject` 成功写入加密 app DLX 后仍 broker `Ack`。只有上表明确产生 `AckAction::Reject` 的
+  malformed、claim 永久失败或 app-DLX/release 双失败路径进入 broker DLQ，禁止 app/broker 双写和直接
+  broker replay；长期审计与 replay 真源仍是 app `dead_letter`。
+
 崩溃安全：settle 前崩溃由 broker 自动 requeue，重投经幂等 claim 去重，达成 at-least-once。
 
 ## 订阅注册

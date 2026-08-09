@@ -7,7 +7,7 @@ pub(super) struct TlsMaterial {
     pub(super) server_key_pem: String,
 }
 
-pub(super) fn tls_dns_names<'a>(dns_name: &'a str) -> [&'a str; 2] {
+pub(super) fn tls_dns_names(dns_name: &str) -> [&str; 2] {
     ["localhost", dns_name]
 }
 

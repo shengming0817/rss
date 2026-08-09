@@ -182,8 +182,10 @@ fn provider_consumers_are_owned_before_migration_or_role_ddl()
                         "{} must exhaustively split PostgreSQL ownership before mutation",
                         path.display()
                     );
-                    let external = braced_arm(&source, "PgFixture::External(")
-                        .expect("external fixture arm must have a closed body");
+                    let external =
+                        braced_arm(&source, "PgFixture::External(").ok_or_else(|| {
+                            std::io::Error::other("external fixture arm must have a closed body")
+                        })?;
                     assert!(
                         !migration_or_role_mutation(external),
                         "{} routes external PostgreSQL into migration/role DDL",
@@ -208,9 +210,10 @@ fn provider_consumers_are_owned_before_migration_or_role_ddl()
 }
 
 #[test]
-fn synthetic_external_mutation_bait_is_rejected() {
+fn synthetic_external_mutation_bait_is_rejected() -> Result<(), Box<dyn std::error::Error>> {
     let bait = "testkit::PgFixture::External(_) => { store.run_migrations().await?; }";
-    let external = braced_arm(bait, "PgFixture::External(").expect("synthetic external arm");
+    let external = braced_arm(bait, "PgFixture::External(")
+        .ok_or_else(|| std::io::Error::other("synthetic external arm"))?;
     assert!(migration_or_role_mutation(external));
     let laundered = "PgRuntimeDeps::setup_owned_test_fixture(&arbitrary_config, rest).await?;";
     assert!(calls_owner_mutation_entrypoint(laundered));
@@ -219,6 +222,7 @@ fn synthetic_external_mutation_bait_is_rejected() {
         "sqlx::query(\"ALTER ROLE rss_app PASSWORD 'bait'\")"
     ));
     assert!(!role_ddl("fixture.resolve_app_roles(specs).await?"));
+    Ok(())
 }
 
 #[cfg(feature = "containers")]

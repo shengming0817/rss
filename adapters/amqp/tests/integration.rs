@@ -123,7 +123,7 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
     );
     assert!(
         fixture.subscriber_permissions_are_exact().await?,
-        "subscriber broker permissions must allow only configure/read on the generated queue"
+        "subscriber permissions must declare source/DLQ but read only the generated source queue"
     );
 
     let publisher_raw = secure::AmqpEndpoint::parse(
@@ -147,6 +147,15 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
     let infra = deps.infra();
     let subscriber = infra.subscriber();
     let publisher = infra.publisher();
+    assert!(
+        deps.subscriber_for_integration_test()
+            .default_exchange_publish_is_denied_for_test(&Topic::new(format!(
+                "{}.adjacent",
+                generated::event::settings_v1::TOPIC
+            )))
+            .await?,
+        "subscriber credential must not publish through the default exchange"
+    );
     let mut stream = subscriber
         .subscribe_ackable(topic.clone(), token.clone())
         .await?;
@@ -161,7 +170,42 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
         .await?
         .ok_or_else(|| anyhow!("private-CA ACL stream closed without a delivery"))?;
     assert_eq!(delivery.message.payload.as_bytes(), b"acl-roundtrip");
-    delivery.acker.settle(AckAction::Ack).await?;
+    delivery.acker.settle(AckAction::Reject).await?;
+    assert!(
+        deps.subscriber_for_integration_test()
+            .take_broker_dead_letter_for_test(&topic)
+            .await
+            .is_err(),
+        "runtime subscriber identity must not consume or replay broker quarantine"
+    );
+    let shared_raw =
+        secure::AmqpEndpoint::parse(fixture.shared_url(), secure::PlaintextEndpointPolicy::Deny)?;
+    let observer = AmqpRuntimeDeps::connect_with_private_ca(
+        &AmqpPublisherEndpoint::new(shared_raw.clone()),
+        &AmqpSubscriberEndpoint::new(shared_raw),
+        ca.clone(),
+        "amqp-private-ca-dlq-observer",
+        TEST_PUBLISH_TIMEOUT,
+    )
+    .await?;
+    testkit::await_map(Duration::from_secs(5), async || {
+        (observer
+            .subscriber_for_integration_test()
+            .broker_dead_letter_depth_for_test(&topic)
+            .await
+            .ok()
+            == Some(1))
+        .then_some(())
+    })
+    .await
+    .map_err(|_| anyhow!("restricted broker Reject did not reach its exact DLQ routing key"))?;
+    let dead_letter = observer
+        .subscriber_for_integration_test()
+        .take_broker_dead_letter_for_test(&topic)
+        .await?
+        .ok_or_else(|| anyhow!("shared observer found no broker dead-letter"))?;
+    assert_eq!(dead_letter.message_id(), Some("evt-private-ca-acl-1"));
+    assert_eq!(dead_letter.death_reason(), "rejected");
     assert!(
         publisher
             .publish(PublishRequest::new(
@@ -226,6 +270,8 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
     );
 
     token.cancel();
+    AckableSubscriber::shutdown(observer.subscriber_for_integration_test()).await?;
+    Publisher::shutdown(observer.publisher_for_integration_test()).await?;
     publisher.shutdown().await?;
     subscriber.shutdown().await?;
     Ok(())
@@ -248,9 +294,67 @@ async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscri
     Ok(AmqpSubscriber::connect(&endpoint, name).await?)
 }
 
+async fn connect_subscriber_with_dlq_ttl(
+    url: &str,
+    name: &str,
+    ttl: Duration,
+) -> anyhow::Result<AmqpSubscriber> {
+    connect_subscriber_with_queue_limits(url, name, ttl, 256 * 1024 * 1024, 256 * 1024 * 1024).await
+}
+
+async fn connect_subscriber_with_queue_limits(
+    url: &str,
+    name: &str,
+    ttl: Duration,
+    source_max_bytes: u32,
+    dead_letter_max_bytes: u32,
+) -> anyhow::Result<AmqpSubscriber> {
+    let endpoint = amqp_endpoint(url)?;
+    let ttl_ms = u32::try_from(ttl.as_millis())?;
+    let ttl_ms = std::num::NonZeroU32::new(ttl_ms)
+        .ok_or_else(|| anyhow!("broker DLQ test TTL must be non-zero"))?;
+    let source_max_bytes = std::num::NonZeroU32::new(source_max_bytes)
+        .ok_or_else(|| anyhow!("source queue test byte limit must be non-zero"))?;
+    let dead_letter_max_bytes = std::num::NonZeroU32::new(dead_letter_max_bytes)
+        .ok_or_else(|| anyhow!("broker DLQ test byte limit must be non-zero"))?;
+    Ok(AmqpSubscriber::connect_with_broker_queue_limits_for_test(
+        &endpoint,
+        name,
+        ttl_ms,
+        source_max_bytes,
+        dead_letter_max_bytes,
+    )
+    .await?)
+}
+
 async fn connect_runtime_deps(url: &str, name: &str) -> anyhow::Result<AmqpRuntimeDeps> {
     let endpoint = amqp_endpoint(url)?;
     Ok(AmqpRuntimeDeps::connect(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
+}
+
+async fn assert_queue_limit_backpressures(
+    publisher: &AmqpPublisher,
+    topic: &Topic,
+    message_id_prefix: &str,
+) -> anyhow::Result<()> {
+    let payload = vec![b'x'; 32 * 1024];
+    for index in 0..64 {
+        match publisher
+            .publish(PublishRequest::new(
+                topic.clone(),
+                MessageId::new(format!("{message_id_prefix}-{index}")),
+                payload.clone(),
+            ))
+            .await
+        {
+            Ok(()) => {}
+            Err(error) if error.kind() == PublishErrorKind::Transient => return Ok(()),
+            Err(error) => return Err(anyhow!("unexpected queue-limit publish error: {error}")),
+        }
+    }
+    Err(anyhow!(
+        "queue accepted 2 MiB despite its fixed 64 KiB byte limit"
+    ))
 }
 
 /// 连接失败：错误面安全（Display 是常量，无 URL/凭据）+ source 保留。**无需 broker**（连不可达端口）。
@@ -525,6 +629,11 @@ async fn integration_ackable_ack_removes_message() -> Result<(), FixtureError> {
         .settle(AckAction::Ack)
         .await
         .map_err(|e| anyhow!("settle failed: {e}"))?;
+    assert_eq!(
+        sub1.broker_dead_letter_depth_for_test(&topic).await?,
+        0,
+        "Ack must not copy the message into the broker quarantine"
+    );
 
     // 关闭第一个 consumer。
     token1.cancel();
@@ -542,6 +651,283 @@ async fn integration_ackable_ack_removes_message() -> Result<(), FixtureError> {
     token2.cancel();
     AckableSubscriber::shutdown(&sub2).await?;
     Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
+/// Manual Reject is a transport quarantine action: RabbitMQ dead-letters the original payload and
+/// message-id exactly once, and records the broker-owned rejection receipt in `x-death`.
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_ackable_reject_enters_broker_dead_letter_queue() -> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_ack_reject").await?;
+    let topic = Topic::new("rss.it.ack-reject");
+    let subscriber = connect_subscriber(&url, "amqp-it-reject-sub").await?;
+    subscriber.purge_durable_queue_for_test(&topic).await?;
+    let token = CancellationToken::new();
+    let mut stream = subscriber
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
+    let publisher = connect_publisher(&url, "amqp-it-reject-pub").await?;
+    publisher
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-reject-dlx"),
+            b"reject-payload".to_vec(),
+        ))
+        .await?;
+
+    let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for reject delivery"))?
+        .ok_or_else(|| anyhow!("reject delivery stream closed"))?;
+    delivery.acker.settle(AckAction::Reject).await?;
+
+    testkit::await_map(Duration::from_secs(5), async || {
+        (subscriber
+            .broker_dead_letter_depth_for_test(&topic)
+            .await
+            .ok()
+            == Some(1))
+        .then_some(())
+    })
+    .await
+    .map_err(|_| anyhow!("timeout waiting for broker dead-letter"))?;
+    let dead_letter = subscriber
+        .take_broker_dead_letter_for_test(&topic)
+        .await?
+        .ok_or_else(|| anyhow!("broker dead-letter queue was empty"))?;
+    assert_eq!(dead_letter.message_id(), Some("evt-reject-dlx"));
+    assert_eq!(dead_letter.payload(), b"reject-payload");
+    assert_eq!(dead_letter.death_reason(), "rejected");
+    assert_eq!(dead_letter.death_count(), 1);
+    assert_eq!(dead_letter.source_queue(), topic.as_str());
+    assert_eq!(dead_letter.source_exchange(), "amq.topic");
+
+    token.cancel();
+    AckableSubscriber::shutdown(&subscriber).await?;
+    Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
+/// Quorum `at-least-once` dead lettering retains a rejected message in the source while the target
+/// queue is absent. The normal Reject test separately proves delivery when that target is present.
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_broker_dead_letter_target_unavailable_retains_in_source()
+-> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let vhost = "rss_ack_dlx_target_restore";
+    let url = rmq.vhost_url(vhost).await?;
+    let topic = Topic::new("rss.it.ack-dlx-target-restore");
+    let subscriber = connect_subscriber(&url, "amqp-it-dlx-target-restore-sub").await?;
+    subscriber.purge_durable_queue_for_test(&topic).await?;
+    let token = CancellationToken::new();
+    let mut stream = subscriber
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
+    subscriber
+        .delete_broker_dead_letter_for_test(&topic)
+        .await?;
+
+    let publisher = connect_publisher(&url, "amqp-it-dlx-target-restore-pub").await?;
+    publisher
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-dlx-target-restored"),
+            b"retained-while-target-absent".to_vec(),
+        ))
+        .await?;
+    let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for target-absence delivery"))?
+        .ok_or_else(|| anyhow!("target-absence delivery stream closed"))?;
+    delivery.acker.settle(AckAction::Reject).await?;
+
+    testkit::await_map(Duration::from_secs(10), async || {
+        (rmq.broker_queue_total_depth(vhost, topic.as_str())
+            .await
+            .ok()
+            == Some(1))
+        .then_some(())
+    })
+    .await
+    .map_err(|_| anyhow!("missing DLQ target caused the rejected message to be lost"))?;
+
+    token.cancel();
+    AckableSubscriber::shutdown(&subscriber).await?;
+    Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
+/// Both source and plaintext quarantine reject new publishes once their fixed byte budgets are
+/// exhausted. Publisher confirms surface the pressure as transient so the outbox relay retries.
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_broker_source_and_dead_letter_byte_limits_backpressure_publishers()
+-> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_ack_dlx_byte_limits").await?;
+    let topic = Topic::new("rss.it.ack-dlx-byte-limits");
+    let subscriber = connect_subscriber_with_queue_limits(
+        &url,
+        "amqp-it-dlx-byte-limits-sub",
+        Duration::from_secs(60),
+        64 * 1024,
+        64 * 1024,
+    )
+    .await?;
+    subscriber.purge_durable_queue_for_test(&topic).await?;
+
+    let source_publisher = connect_publisher(&url, "amqp-it-source-byte-limit-pub").await?;
+    assert_queue_limit_backpressures(&source_publisher, &topic, "evt-source-limit").await?;
+    Publisher::shutdown(&source_publisher).await?;
+    subscriber.purge_durable_queue_for_test(&topic).await?;
+
+    let dead_letter_publisher = connect_publisher(&url, "amqp-it-dlq-byte-limit-pub").await?;
+    let dead_letter_topic = Topic::new(format!("{}.dlq", topic.as_str()));
+    assert_queue_limit_backpressures(&dead_letter_publisher, &dead_letter_topic, "evt-dlq-limit")
+        .await?;
+    Publisher::shutdown(&dead_letter_publisher).await?;
+    subscriber.purge_durable_queue_for_test(&topic).await?;
+    AckableSubscriber::shutdown(&subscriber).await?;
+    Ok(())
+}
+
+/// Observation must never destroy malformed quarantine evidence. A direct message deliberately
+/// lacks `x-death`; parsing fails, the manual-get channel closes, and RabbitMQ requeues it.
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_malformed_broker_dead_letter_observation_requeues_evidence()
+-> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_ack_dlx_observation").await?;
+    let topic = Topic::new("rss.it.ack-dlx-observation");
+    let subscriber = connect_subscriber(&url, "amqp-it-dlx-observation-sub").await?;
+    subscriber.purge_durable_queue_for_test(&topic).await?;
+    let publisher = connect_publisher(&url, "amqp-it-dlx-observation-pub").await?;
+    publisher
+        .publish(PublishRequest::new(
+            Topic::new(format!("{}.dlq", topic.as_str())),
+            MessageId::new("evt-malformed-dlq-evidence"),
+            b"malformed-dlq-evidence".to_vec(),
+        ))
+        .await?;
+    testkit::await_map(Duration::from_secs(5), async || {
+        (subscriber
+            .broker_dead_letter_depth_for_test(&topic)
+            .await
+            .ok()
+            == Some(1))
+        .then_some(())
+    })
+    .await
+    .map_err(|_| anyhow!("malformed DLQ evidence was not routed"))?;
+
+    assert!(
+        subscriber
+            .take_broker_dead_letter_for_test(&topic)
+            .await
+            .is_err(),
+        "missing x-death must fail typed observation"
+    );
+    testkit::await_map(Duration::from_secs(5), async || {
+        (subscriber
+            .broker_dead_letter_depth_for_test(&topic)
+            .await
+            .ok()
+            == Some(1))
+        .then_some(())
+    })
+    .await
+    .map_err(|_| anyhow!("malformed DLQ evidence was destroyed instead of requeued"))?;
+
+    subscriber.purge_durable_queue_for_test(&topic).await?;
+    AckableSubscriber::shutdown(&subscriber).await?;
+    Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
+/// Production always uses the fixed 24h quarantine TTL. The integration-only constructor varies
+/// only that value so the same declaration path can prove RabbitMQ actually expires quarantined
+/// messages without turning retention into production configuration.
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_broker_dead_letter_ttl_expires_quarantined_message() -> Result<(), FixtureError>
+{
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_ack_dlx_ttl").await?;
+    let topic = Topic::new("rss.it.ack-dlx-ttl");
+    let subscriber =
+        connect_subscriber_with_dlq_ttl(&url, "amqp-it-dlx-ttl-sub", Duration::from_millis(250))
+            .await?;
+    subscriber.purge_durable_queue_for_test(&topic).await?;
+    let token = CancellationToken::new();
+    let mut stream = subscriber
+        .subscribe_ackable(topic.clone(), token.clone())
+        .await?;
+    let publisher = connect_publisher(&url, "amqp-it-dlx-ttl-pub").await?;
+    publisher
+        .publish(PublishRequest::new(
+            topic.clone(),
+            MessageId::new("evt-reject-expiring"),
+            b"expiring-quarantine".to_vec(),
+        ))
+        .await?;
+    let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
+        .await
+        .map_err(|_| anyhow!("timeout waiting for expiring reject delivery"))?
+        .ok_or_else(|| anyhow!("expiring reject delivery stream closed"))?;
+    delivery.acker.settle(AckAction::Reject).await?;
+
+    testkit::await_map(Duration::from_secs(5), async || {
+        (subscriber
+            .broker_dead_letter_depth_for_test(&topic)
+            .await
+            .ok()
+            == Some(1))
+        .then_some(())
+    })
+    .await
+    .map_err(|_| anyhow!("quarantined message never became observable"))?;
+    testkit::await_map(Duration::from_secs(5), async || {
+        (subscriber
+            .broker_dead_letter_depth_for_test(&topic)
+            .await
+            .ok()
+            == Some(0))
+        .then_some(())
+    })
+    .await
+    .map_err(|_| anyhow!("broker dead-letter TTL did not expire the message"))?;
+
+    token.cancel();
+    AckableSubscriber::shutdown(&subscriber).await?;
+    Publisher::shutdown(&publisher).await?;
+    Ok(())
+}
+
+/// Durable queue arguments are application-owned. A queue created with different retention must
+/// make a later production declaration fail loudly instead of accepting legacy topology or
+/// silently dropping Rejects.
+#[tokio::test(flavor = "multi_thread")]
+async fn integration_broker_dead_letter_topology_drift_fails_loudly() -> Result<(), FixtureError> {
+    let rmq = testkit::env_or_rabbitmq().await?;
+    let url = rmq.vhost_url("rss_ack_dlx_drift").await?;
+    let topic = Topic::new("rss.it.ack-dlx-drift");
+    let drifted = connect_subscriber_with_dlq_ttl(
+        &url,
+        "amqp-it-dlx-drift-setup",
+        Duration::from_millis(250),
+    )
+    .await?;
+    drifted.purge_durable_queue_for_test(&topic).await?;
+    AckableSubscriber::shutdown(&drifted).await?;
+
+    let production = connect_subscriber(&url, "amqp-it-dlx-drift-production").await?;
+    let result = production
+        .subscribe_ackable(topic, CancellationToken::new())
+        .await;
+    assert!(
+        result.is_err(),
+        "production topology must reject an existing queue with different immutable arguments"
+    );
+    AckableSubscriber::shutdown(&production).await?;
     Ok(())
 }
 
@@ -600,6 +986,11 @@ async fn integration_ackable_requeue_redelivers_message() -> Result<(), FixtureE
         .settle(AckAction::Ack)
         .await
         .map_err(|e| anyhow!("settle ack failed: {e}"))?;
+    assert_eq!(
+        sub2.broker_dead_letter_depth_for_test(&topic).await?,
+        0,
+        "Requeue and the final Ack must not enter broker quarantine"
+    );
 
     token2.cancel();
     AckableSubscriber::shutdown(&sub2).await?;
