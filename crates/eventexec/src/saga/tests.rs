@@ -891,13 +891,6 @@ impl SagaOperatorStore for FakeDurableStore {
             .push(label);
         Ok(SagaOperatorCasOutcome::Applied)
     }
-
-    async fn terminate(
-        &self,
-        _authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
-    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
-        Ok(SagaOperatorCasOutcome::Applied)
-    }
 }
 
 #[derive(Default)]

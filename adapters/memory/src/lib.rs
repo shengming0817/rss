@@ -2349,8 +2349,11 @@ impl SagaOperatorStore for MemSagaDurableStore {
         });
         Ok(outcome)
     }
+}
 
-    async fn terminate(
+impl MemSagaDurableStore {
+    /// Apply the in-memory control-plane termination used by tests and local tooling.
+    pub async fn terminate(
         &self,
         authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
     ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {

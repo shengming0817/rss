@@ -127,10 +127,6 @@ trait SagaRuntimeOperatorControl: Send + Sync {
         &self,
         authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
     ) -> futures::future::BoxFuture<'static, crate::SagaOperatorRecoveryOutcome>;
-    fn terminate(
-        &self,
-        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
-    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>;
 }
 
 impl<S> SagaRuntimeOperatorControl for crate::SagaOperatorService<S>
@@ -158,14 +154,6 @@ where
         authorization: SagaOperatorAuthorization<saga_operator_action::Repair>,
     ) -> futures::future::BoxFuture<'static, crate::SagaOperatorRecoveryOutcome> {
         crate::SagaOperatorService::repair(self, authorization)
-    }
-
-    fn terminate(
-        &self,
-        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
-    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>
-    {
-        crate::SagaOperatorService::terminate(self, authorization)
     }
 }
 
@@ -1279,14 +1267,6 @@ impl SagaRuntimeOperatorTarget {
     ) -> futures::future::BoxFuture<'static, crate::SagaOperatorRecoveryOutcome> {
         self.control.repair(authorization)
     }
-
-    pub fn terminate(
-        &self,
-        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
-    ) -> futures::future::BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>>
-    {
-        self.control.terminate(authorization)
-    }
 }
 
 impl SagaRuntimeSpawner {
@@ -2008,13 +1988,6 @@ mod tests {
             &self,
             _claim: Self::RepairClaim,
             _decision: diport::SagaOperatorRepair,
-        ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
-            Ok(SagaOperatorCasOutcome::Missing)
-        }
-
-        async fn terminate(
-            &self,
-            _authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
         ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
             Ok(SagaOperatorCasOutcome::Missing)
         }

@@ -1635,11 +1635,6 @@ pub trait SagaOperatorStoreLocal {
         claim: Self::RepairClaim,
         decision: SagaOperatorRepair,
     ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError>;
-
-    async fn terminate(
-        &self,
-        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
-    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError>;
 }
 
 /// Stable keyset cursor for runnable-tenant discovery.

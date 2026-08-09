@@ -12,6 +12,7 @@ use diport::{
 };
 
 use crate::pool::VerifiedPgWriteStore;
+use crate::saga::{SagaStorageStage, storage_error};
 
 const MAX_TENANT_PAGE_SIZE: usize = 10_000;
 
@@ -32,13 +33,6 @@ impl PgSagaCandidateSource {
     pub(crate) fn new(store: &VerifiedPgWriteStore) -> Self {
         Self {
             pool: store.pool().clone(),
-        }
-    }
-
-    #[cfg(all(test, feature = "integration"))]
-    pub(crate) fn from_unverified_for_test(store: &crate::PgStore) -> Self {
-        Self {
-            pool: store.pool.clone(),
         }
     }
 
@@ -76,7 +70,7 @@ impl PgSagaCandidateSource {
         .bind(fetch_limit)
         .fetch_all(&self.pool)
         .await
-        .map_err(|error| SagaDurableStoreError::new(SagaDurableStoreErrorKind::Storage, error))?;
+        .map_err(storage_error(SagaStorageStage::ListCandidateTenants))?;
         let mut tenants = rows
             .into_iter()
             .map(|(tenant,)| {
@@ -108,7 +102,7 @@ impl PgSagaCandidateSource {
         .bind(identity.contract_id().as_str())
         .fetch_one(&self.pool)
         .await
-        .map_err(|error| SagaDurableStoreError::new(SagaDurableStoreErrorKind::Storage, error))?;
+        .map_err(storage_error(SagaStorageStage::ObserveUnresolved))?;
         let operator_required = unresolved_count(row.operator_required_count)?;
         let degraded = unresolved_count(row.degraded_count)?;
         let compensation_failed = unresolved_count(row.compensation_failed_count)?;

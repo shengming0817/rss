@@ -122,6 +122,10 @@ transient retry/backoff。完整性、保护、格式/upcast 失败同样是 typ
 的 `Ready` instance；fenced store 必须再次校验状态与 journal basis 后转为 `Terminated`，运行中、补偿中、blocked
 或已有 effect 证据的 instance 均不得 terminate。
 
+PostgreSQL `terminate` 只经独立、function-only operator control session 执行，不属于 serving runtime 的
+`SagaOperatorStore` repair port，也不在 `SagaRuntimeOperatorTarget` 上暴露。serving writer 无 operator mutation
+函数权限；不得为了复用 runtime store 恢复该 grant，或在 serving transaction façade 中保留 terminate SQL 路径。
+
 operator inspection/repair authorization 必须由受信 assembly capability 签发并绑定 caller、worker identity、tenant、
 start-audit ID；repair authorization 还必须绑定 instance、expected reason 与 change ticket。provider 独占并按值消费
 move-only claim，executor 不得取得或复制底层 `SagaLease`，也不得把裸 target 与另一份 proof 混配。

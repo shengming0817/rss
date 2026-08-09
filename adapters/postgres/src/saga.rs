@@ -31,8 +31,6 @@ use secure::{
 use vocab::StepName;
 use zeroize::Zeroizing;
 
-#[cfg(all(test, feature = "integration"))]
-use crate::PgStore;
 use crate::cotx::eventing::{
     SagaInstanceRow, SagaJournalExistingRow, SagaJournalRow, SagaLeaseMutation,
     SagaOperatorDecisionRow, SagaOperatorStatusRow, SagaReceiptRow, SagaRunnableRow,
@@ -43,6 +41,180 @@ use crate::saga_candidates::PgSagaCandidateSource;
 use crate::saga_receipt_capability::SagaReceiptCapabilityReceipt;
 
 const HOLDER_ID_MAX_BYTES: usize = 256;
+
+/// Closed, low-cardinality PostgreSQL operation stages for durable Saga diagnostics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SagaStorageStage {
+    Register,
+    Get,
+    ListRunnable,
+    ListCandidateTenants,
+    ObserveUnresolved,
+    Claim,
+    LeaseMutation,
+    JournalMutation,
+    JournalCommitUnknownReadback,
+    LifecycleMutation,
+    RecoverySnapshot,
+    TerminalReceipt,
+    CompletionMutation,
+    CompletionCommitUnknownReadback,
+    OperatorStatus,
+    OperatorRetryCompensation,
+    OperatorRepairClaim,
+}
+
+impl SagaStorageStage {
+    pub(crate) const fn as_label(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::Get => "get",
+            Self::ListRunnable => "list_runnable",
+            Self::ListCandidateTenants => "list_candidate_tenants",
+            Self::ObserveUnresolved => "observe_unresolved",
+            Self::Claim => "claim",
+            Self::LeaseMutation => "lease_mutation",
+            Self::JournalMutation => "journal_mutation",
+            Self::JournalCommitUnknownReadback => "journal_commit_unknown_readback",
+            Self::LifecycleMutation => "lifecycle_mutation",
+            Self::RecoverySnapshot => "recovery_snapshot",
+            Self::TerminalReceipt => "terminal_receipt",
+            Self::CompletionMutation => "completion_mutation",
+            Self::CompletionCommitUnknownReadback => "completion_commit_unknown_readback",
+            Self::OperatorStatus => "operator_status",
+            Self::OperatorRetryCompensation => "operator_retry_compensation",
+            Self::OperatorRepairClaim => "operator_repair_claim",
+        }
+    }
+
+    const fn operation(self) -> SagaStorageOperation {
+        match self {
+            Self::JournalMutation
+            | Self::JournalCommitUnknownReadback
+            | Self::LifecycleMutation
+            | Self::CompletionMutation
+            | Self::CompletionCommitUnknownReadback => SagaStorageOperation::Mutate,
+            Self::Register => SagaStorageOperation::Register,
+            Self::Get => SagaStorageOperation::Get,
+            Self::ListRunnable => SagaStorageOperation::ListRunnable,
+            Self::ListCandidateTenants => SagaStorageOperation::ListCandidateTenants,
+            Self::ObserveUnresolved => SagaStorageOperation::ObserveUnresolved,
+            Self::Claim => SagaStorageOperation::Claim,
+            Self::LeaseMutation => SagaStorageOperation::LeaseMutation,
+            Self::RecoverySnapshot => SagaStorageOperation::RecoverySnapshot,
+            Self::TerminalReceipt => SagaStorageOperation::TerminalReceipt,
+            Self::OperatorStatus => SagaStorageOperation::OperatorStatus,
+            Self::OperatorRetryCompensation => SagaStorageOperation::OperatorRetryCompensation,
+            Self::OperatorRepairClaim => SagaStorageOperation::OperatorRepairClaim,
+        }
+    }
+}
+
+/// Closed outer operations. Unlike [`SagaStorageStage`], this identifies caller intent rather than
+/// the inner SQL phase that happened to fail.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SagaStorageOperation {
+    Register,
+    Get,
+    ListRunnable,
+    ListCandidateTenants,
+    ObserveUnresolved,
+    Claim,
+    LeaseMutation,
+    Mutate,
+    RecoverySnapshot,
+    TerminalReceipt,
+    OperatorStatus,
+    OperatorRetryCompensation,
+    OperatorRepairClaim,
+    OperatorRepairCommit,
+}
+
+impl SagaStorageOperation {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Register => "register",
+            Self::Get => "get",
+            Self::ListRunnable => "list_runnable",
+            Self::ListCandidateTenants => "list_candidate_tenants",
+            Self::ObserveUnresolved => "observe_unresolved",
+            Self::Claim => "claim",
+            Self::LeaseMutation => "lease_mutation",
+            Self::Mutate => "mutate",
+            Self::RecoverySnapshot => "recovery_snapshot",
+            Self::TerminalReceipt => "terminal_receipt",
+            Self::OperatorStatus => "operator_status",
+            Self::OperatorRetryCompensation => "operator_retry_compensation",
+            Self::OperatorRepairClaim => "operator_repair_claim",
+            Self::OperatorRepairCommit => "operator_repair_commit",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SagaStorageErrorClass {
+    DatabaseTransient,
+    DatabasePermanent,
+    Io,
+    Tls,
+    Protocol,
+    PoolTimedOut,
+    PoolClosed,
+    WorkerCrashed,
+    Configuration,
+    DataMapping,
+    OtherPermanent,
+}
+
+impl SagaStorageErrorClass {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::DatabaseTransient => "database_transient",
+            Self::DatabasePermanent => "database_permanent",
+            Self::Io => "io",
+            Self::Tls => "tls",
+            Self::Protocol => "protocol",
+            Self::PoolTimedOut => "pool_timed_out",
+            Self::PoolClosed => "pool_closed",
+            Self::WorkerCrashed => "worker_crashed",
+            Self::Configuration => "configuration",
+            Self::DataMapping => "data_mapping",
+            Self::OtherPermanent => "other_permanent",
+        }
+    }
+
+    const fn is_transient(self) -> bool {
+        matches!(
+            self,
+            Self::DatabaseTransient | Self::Io | Self::PoolTimedOut | Self::WorkerCrashed
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SagaDiagnosticContext {
+    tenant: vocab::TenantId,
+    owner: Option<String>,
+    contract: Option<String>,
+}
+
+impl SagaDiagnosticContext {
+    fn for_instance(instance: SagaInstanceRef) -> Self {
+        Self {
+            tenant: instance.tenant(),
+            owner: None,
+            contract: None,
+        }
+    }
+
+    fn for_worker(instance: SagaInstanceRef, identity: &SagaWorkerIdentity) -> Self {
+        Self {
+            tenant: instance.tenant(),
+            owner: Some(identity.owner().to_owned()),
+            contract: Some(identity.contract_id().as_str().to_owned()),
+        }
+    }
+}
 
 /// Mandatory protected-storage dependencies for durable Saga receipts.
 pub struct PgSagaReceiptProtection {
@@ -115,6 +287,7 @@ impl PgSagaDurableStore {
 
     async fn mutate_journal(
         &self,
+        operation: SagaStorageOperation,
         lease: &SagaLease,
         entry: JournalEntryFields,
         lifecycle: Option<LifecycleFields>,
@@ -149,8 +322,10 @@ impl PgSagaDurableStore {
                             match tx
                                 .saga_intent_attempt_is_next(&lease_fields, &entry)
                                 .await
-                                .map_err(MutationTxError::Storage)?
-                            {
+                                .map_err(mutation_storage_error_for(
+                                    operation,
+                                    SagaStorageStage::JournalMutation,
+                                ))? {
                                 Some(true) => {}
                                 Some(false) => {
                                     return Err(MutationTxError::abort(
@@ -168,8 +343,10 @@ impl PgSagaDurableStore {
                             match tx
                                 .saga_has_exact_prior_intent(&lease_fields, &entry, required_intent)
                                 .await
-                                .map_err(MutationTxError::Storage)?
-                            {
+                                .map_err(mutation_storage_error_for(
+                                    operation,
+                                    SagaStorageStage::JournalMutation,
+                                ))? {
                                 Some(true) => {}
                                 Some(false) => {
                                     return Err(MutationTxError::abort(
@@ -186,13 +363,19 @@ impl PgSagaDurableStore {
                         if tx
                             .saga_insert_journal(&lease_fields, &entry)
                             .await
-                            .map_err(MutationTxError::Storage)?
+                            .map_err(mutation_storage_error_for(
+                                operation,
+                                SagaStorageStage::JournalMutation,
+                            ))?
                         {
                             if let Some(audit) = audit
                                 && !tx
                                     .saga_insert_operator_decision(&lease_fields, &entry, &audit)
                                     .await
-                                    .map_err(MutationTxError::Storage)?
+                                    .map_err(mutation_storage_error_for(
+                                        operation,
+                                        SagaStorageStage::JournalMutation,
+                                    ))?
                             {
                                 return Err(MutationTxError::abort(
                                     SagaDurableMutationOutcome::Conflict,
@@ -202,7 +385,10 @@ impl PgSagaDurableStore {
                                 && !tx
                                     .saga_apply_lifecycle(&lease_fields, &lifecycle)
                                     .await
-                                    .map_err(MutationTxError::Storage)?
+                                    .map_err(mutation_storage_error_for(
+                                        operation,
+                                        SagaStorageStage::JournalMutation,
+                                    ))?
                             {
                                 return Err(MutationTxError::abort(
                                     SagaDurableMutationOutcome::Conflict,
@@ -210,17 +396,21 @@ impl PgSagaDurableStore {
                             }
                             #[cfg(all(test, feature = "integration"))]
                             if inject_commit_unknown {
-                                tx.saga_inject_commit_unknown_after_commit()
-                                    .await
-                                    .map_err(MutationTxError::Storage)?;
+                                tx.saga_inject_commit_unknown_after_commit().await.map_err(
+                                    mutation_storage_error_for(
+                                        operation,
+                                        SagaStorageStage::JournalMutation,
+                                    ),
+                                )?;
                             }
                             return Ok(SagaDurableMutationOutcome::Applied);
                         }
-                        if !tx
-                            .saga_lease_is_held(&lease_fields)
-                            .await
-                            .map_err(MutationTxError::Storage)?
-                        {
+                        if !tx.saga_lease_is_held(&lease_fields).await.map_err(
+                            mutation_storage_error_for(
+                                operation,
+                                SagaStorageStage::JournalMutation,
+                            ),
+                        )? {
                             return Err(MutationTxError::abort(
                                 SagaDurableMutationOutcome::LeaseLost,
                             ));
@@ -231,7 +421,10 @@ impl PgSagaDurableStore {
                                 entry.seq,
                             )
                             .await
-                            .map_err(MutationTxError::Storage)?;
+                            .map_err(mutation_storage_error_for(
+                                operation,
+                                SagaStorageStage::JournalMutation,
+                            ))?;
                         let exact = existing.is_some_and(|row| {
                             row.step_name == entry.step_name
                                 && row.status == entry.status
@@ -247,7 +440,7 @@ impl PgSagaDurableStore {
                         }))
                     })
                 },
-                MutationTxError::Storage,
+                mutation_storage_error_for(operation, SagaStorageStage::JournalMutation),
             )
             .await;
         let settlement = attempt.settlement();
@@ -301,22 +494,25 @@ impl PgSagaDurableStore {
                 infra_tenant_scope(instance.tenant()),
                 move |mut conn| {
                     Box::pin(async move {
-                        let instance_row = conn
-                            .saga_get_instance(&instance_fields)
-                            .await
-                            .map_err(storage_error)?;
+                        let instance_row = conn.saga_get_instance(&instance_fields).await.map_err(
+                            storage_error(SagaStorageStage::JournalCommitUnknownReadback),
+                        )?;
                         let journal = conn
                             .saga_read_journal_entry(&instance_fields, decision_seq)
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error(
+                                SagaStorageStage::JournalCommitUnknownReadback,
+                            ))?;
                         let audit = conn
                             .saga_read_operator_decision(&instance_fields, decision_seq)
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error(
+                                SagaStorageStage::JournalCommitUnknownReadback,
+                            ))?;
                         Ok((instance_row, journal, audit))
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::JournalCommitUnknownReadback),
             )
             .await?;
         let Some(instance_row) = instance_row else {
@@ -360,14 +556,14 @@ impl PgSagaDurableStore {
                         if tx
                             .saga_apply_lifecycle(&lease_fields, &lifecycle)
                             .await
-                            .map_err(MutationTxError::Storage)?
+                            .map_err(mutation_storage_error(SagaStorageStage::LifecycleMutation))?
                         {
                             return Ok(SagaDurableMutationOutcome::Applied);
                         }
                         let held = tx
                             .saga_lease_is_held(&lease_fields)
                             .await
-                            .map_err(MutationTxError::Storage)?;
+                            .map_err(mutation_storage_error(SagaStorageStage::LifecycleMutation))?;
                         Err(MutationTxError::abort(if held {
                             SagaDurableMutationOutcome::Conflict
                         } else {
@@ -375,7 +571,7 @@ impl PgSagaDurableStore {
                         }))
                     })
                 },
-                MutationTxError::Storage,
+                mutation_storage_error(SagaStorageStage::LifecycleMutation),
             )
             .await;
         settle_mutation_attempt(attempt)
@@ -414,23 +610,6 @@ fn settle_mutation_attempt(
     }
 }
 
-#[cfg(all(test, feature = "integration"))]
-impl PgStore {
-    pub(crate) fn saga_durable_store(
-        &self,
-        protection: PgSagaReceiptProtection,
-    ) -> PgSagaDurableStore {
-        PgSagaDurableStore {
-            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
-            write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
-            candidate_source: PgSagaCandidateSource::from_unverified_for_test(self),
-            protection,
-            _capability: SagaReceiptCapabilityReceipt::for_test(),
-            inject_commit_unknown_after_next_completion: std::sync::atomic::AtomicBool::new(false),
-        }
-    }
-}
-
 impl SagaDurableStore for PgSagaDurableStore {
     async fn register(
         &self,
@@ -445,19 +624,31 @@ impl SagaDurableStore for PgSagaDurableStore {
                 InvariantError("saga start authorization does not match registration"),
             ));
         }
+        let diagnostic =
+            SagaDiagnosticContext::for_worker(registration.instance(), registration.identity());
+        let transaction_diagnostic = diagnostic.clone();
         let fields = RegistrationFields::authorized(authorization, registration);
         self.write_pool
             .saga_write(
                 infra_tenant_scope(fields.instance.tenant()),
                 move |mut tx| {
+                    let diagnostic = diagnostic.clone();
                     Box::pin(async move {
-                        tx.saga_register_instance(&fields)
-                            .await
-                            .map_err(storage_error)?;
+                        tx.saga_register_instance(&fields).await.map_err(
+                            storage_error_with_context(
+                                SagaStorageOperation::Register,
+                                SagaStorageStage::Register,
+                                diagnostic.clone(),
+                            ),
+                        )?;
                         let row = tx
                             .saga_load_instance(&InstanceFields::from(fields.instance))
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error_with_context(
+                                SagaStorageOperation::Register,
+                                SagaStorageStage::Register,
+                                diagnostic,
+                            ))?;
                         let record = instance_from_row(fields.instance, &row)?;
                         if record.identity() != &fields.identity
                             || record.definition() != &fields.definition
@@ -472,7 +663,11 @@ impl SagaDurableStore for PgSagaDurableStore {
                         Ok(record)
                     })
                 },
-                storage_error,
+                storage_error_with_context(
+                    SagaStorageOperation::Register,
+                    SagaStorageStage::Register,
+                    transaction_diagnostic,
+                ),
             )
             .await
     }
@@ -481,20 +676,31 @@ impl SagaDurableStore for PgSagaDurableStore {
         &self,
         instance: &SagaInstanceRef,
     ) -> Result<Option<SagaInstanceRecord>, SagaDurableStoreError> {
+        let diagnostic = SagaDiagnosticContext::for_instance(*instance);
+        let read_diagnostic = diagnostic.clone();
         let fields = InstanceFields::from(*instance);
         self.read_pool
             .saga_read_map(
                 infra_tenant_scope(instance.tenant()),
                 move |mut conn| {
+                    let diagnostic = diagnostic.clone();
                     Box::pin(async move {
                         conn.saga_get_instance(&fields)
                             .await
-                            .map_err(storage_error)?
+                            .map_err(storage_error_with_context(
+                                SagaStorageOperation::Get,
+                                SagaStorageStage::Get,
+                                diagnostic,
+                            ))?
                             .map(|row| instance_from_row(fields.instance, &row))
                             .transpose()
                     })
                 },
-                storage_error,
+                storage_error_with_context(
+                    SagaStorageOperation::Get,
+                    SagaStorageStage::Get,
+                    read_diagnostic,
+                ),
             )
             .await
     }
@@ -516,13 +722,13 @@ impl SagaDurableStore for PgSagaDurableStore {
                     Box::pin(async move {
                         conn.saga_list_runnable(&owner, &contract_id, limit)
                             .await
-                            .map_err(storage_error)?
+                            .map_err(storage_error(SagaStorageStage::ListRunnable))?
                             .into_iter()
                             .map(|row| runnable_from_row(tenant, row))
                             .collect()
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::ListRunnable),
             )
             .await
     }
@@ -545,7 +751,11 @@ impl SagaDurableStore for PgSagaDurableStore {
                 infra_tenant_scope(instance.tenant()),
                 move |mut tx| {
                     Box::pin(async move {
-                        if let Some(row) = tx.saga_claim(&fields).await.map_err(storage_error)? {
+                        if let Some(row) = tx
+                            .saga_claim(&fields)
+                            .await
+                            .map_err(storage_error(SagaStorageStage::Claim))?
+                        {
                             return lease_from_row(instance, holder_id, row.lease_token, row.epoch)
                                 .map(SagaClaimOutcome::Acquired)
                                 .map_err(|error| {
@@ -555,7 +765,7 @@ impl SagaDurableStore for PgSagaDurableStore {
                         let Some(row) = tx
                             .saga_observe_claim(&InstanceFields::from(instance))
                             .await
-                            .map_err(storage_error)?
+                            .map_err(storage_error(SagaStorageStage::Claim))?
                         else {
                             return Ok(SagaClaimOutcome::Missing);
                         };
@@ -597,7 +807,7 @@ impl SagaDurableStore for PgSagaDurableStore {
                         }
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::Claim),
             )
             .await
     }
@@ -633,30 +843,30 @@ impl SagaDurableStore for PgSagaDurableStore {
                         if !tx
                             .saga_lease_is_held(&lease_fields)
                             .await
-                            .map_err(storage_error)?
+                            .map_err(storage_error(SagaStorageStage::RecoverySnapshot))?
                         {
                             return Ok(None);
                         }
                         let instance = tx
                             .saga_load_instance(&instance_fields)
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error(SagaStorageStage::RecoverySnapshot))?;
                         let journal = tx
                             .saga_read_journal_locked(&instance_fields)
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error(SagaStorageStage::RecoverySnapshot))?;
                         let mut receipts = Vec::with_capacity(scopes.len());
                         for scope in scopes {
                             let row = tx
                                 .saga_load_receipt(&SagaReceiptScopeFields::from_scope(&scope))
                                 .await
-                                .map_err(storage_error)?;
+                                .map_err(storage_error(SagaStorageStage::RecoverySnapshot))?;
                             receipts.push((scope, row));
                         }
                         Ok(Some((instance, journal, receipts)))
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::RecoverySnapshot),
             )
             .await?;
         let Some((instance_row, journal_rows, receipt_rows)) = raw else {
@@ -711,20 +921,24 @@ impl SagaDurableStore for PgSagaDurableStore {
                         let row = match tx.saga_load_instance(&instance_fields).await {
                             Ok(row) => row,
                             Err(sqlx::Error::RowNotFound) => return Ok(None),
-                            Err(error) => return Err(storage_error(error)),
+                            Err(error) => {
+                                return Err(storage_error(SagaStorageStage::TerminalReceipt)(
+                                    error,
+                                ));
+                            }
                         };
                         let journal = tx
                             .saga_read_journal_locked(&instance_fields)
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error(SagaStorageStage::TerminalReceipt))?;
                         let receipt = tx
                             .saga_load_receipt(&scope_fields)
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error(SagaStorageStage::TerminalReceipt))?;
                         Ok(Some((row, journal, receipt)))
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::TerminalReceipt),
             )
             .await?;
         let Some((row, journal_rows, receipt_row)) = raw else {
@@ -793,7 +1007,8 @@ impl SagaDurableStore for PgSagaDurableStore {
                     None,
                     None,
                 )?;
-                self.mutate_journal(lease, entry, None, None, None).await
+                self.mutate_journal(SagaStorageOperation::Mutate, lease, entry, None, None, None)
+                    .await
             }
             SagaDurableMutation::ForwardCompleted(completion) => {
                 self.commit_forward_completion(lease, completion).await
@@ -809,6 +1024,7 @@ impl SagaDurableStore for PgSagaDurableStore {
                     Some(intent.cause()),
                 )?;
                 self.mutate_journal(
+                    SagaStorageOperation::Mutate,
                     lease,
                     entry,
                     Some(LifecycleFields::compensating(intent.cause())),
@@ -839,6 +1055,7 @@ impl SagaDurableStore for PgSagaDurableStore {
                     _ => return Ok(SagaDurableMutationOutcome::Conflict),
                 };
                 self.mutate_journal(
+                    SagaStorageOperation::Mutate,
                     lease,
                     entry,
                     Some(lifecycle),
@@ -858,6 +1075,7 @@ impl SagaDurableStore for PgSagaDurableStore {
                     None,
                 )?;
                 self.mutate_journal(
+                    SagaStorageOperation::Mutate,
                     lease,
                     entry,
                     Some(LifecycleFields::terminal(
@@ -907,10 +1125,10 @@ impl SagaOperatorStore for PgSagaDurableStore {
                     Box::pin(async move {
                         conn.saga_operator_status(&fields)
                             .await
-                            .map_err(storage_error)
+                            .map_err(storage_error(SagaStorageStage::OperatorStatus))
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::OperatorStatus),
             )
             .await?;
         let Some(row) = row else {
@@ -968,18 +1186,18 @@ impl SagaOperatorStore for PgSagaDurableStore {
                                 &start_audit_id,
                             )
                             .await
-                            .map_err(storage_error)?
+                            .map_err(storage_error(SagaStorageStage::OperatorRetryCompensation))?
                         {
                             return Ok((true, None));
                         }
                         let row = tx
                             .saga_operator_status(&fields)
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error(SagaStorageStage::OperatorRetryCompensation))?;
                         Ok((false, row))
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::OperatorRetryCompensation),
             )
             .await?;
         let (applied, row) = observed;
@@ -1028,19 +1246,23 @@ impl SagaOperatorStore for PgSagaDurableStore {
                                 ttl_micros,
                             )
                             .await
-                            .map_err(storage_error)?
+                            .map_err(storage_error(SagaStorageStage::OperatorRepairClaim))?
                         {
                             return Ok(Ok((holder_id, row)));
                         }
                         let row = match tx.saga_load_instance(&fields).await {
                             Ok(row) => row,
                             Err(sqlx::Error::RowNotFound) => return Ok(Err(None)),
-                            Err(error) => return Err(storage_error(error)),
+                            Err(error) => {
+                                return Err(storage_error(SagaStorageStage::OperatorRepairClaim)(
+                                    error,
+                                ));
+                            }
                         };
                         Ok(Err(Some(row)))
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::OperatorRepairClaim),
             )
             .await?;
         match observed {
@@ -1136,6 +1358,7 @@ impl SagaOperatorStore for PgSagaDurableStore {
                     "confirmed_not_applied",
                 );
                 self.mutate_journal(
+                    SagaStorageOperation::OperatorRepairCommit,
                     &claim.lease,
                     entry,
                     Some(LifecycleFields::operator_forward_not_applied()),
@@ -1164,6 +1387,7 @@ impl SagaOperatorStore for PgSagaDurableStore {
                     "confirmed_applied",
                 );
                 self.mutate_journal(
+                    SagaStorageOperation::OperatorRepairCommit,
                     &claim.lease,
                     entry,
                     Some(LifecycleFields::operator_compensation(progress, None)),
@@ -1191,6 +1415,7 @@ impl SagaOperatorStore for PgSagaDurableStore {
                     "confirmed_not_applied",
                 );
                 self.mutate_journal(
+                    SagaStorageOperation::OperatorRepairCommit,
                     &claim.lease,
                     entry,
                     Some(LifecycleFields::operator_compensation(
@@ -1205,63 +1430,6 @@ impl SagaOperatorStore for PgSagaDurableStore {
             _ => return Ok(SagaOperatorCasOutcome::StaleJournal),
         }?;
         Ok(operator_cas_from_mutation(outcome))
-    }
-
-    async fn terminate(
-        &self,
-        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
-    ) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
-        let instance = authorization.instance();
-        let fields = InstanceFields::from(instance);
-        let owner = authorization.identity().owner().to_string();
-        let contract_id = authorization.identity().contract_id().as_str().to_string();
-        let operator_actor = authorization.caller().as_str().to_string();
-        let reason_text = authorization.evidence().reason_text().as_str().to_string();
-        let change_ticket = authorization
-            .evidence()
-            .change_ticket()
-            .as_str()
-            .to_string();
-        let start_audit_id = authorization.start_audit_id().as_str().to_string();
-        let observed = self
-            .write_pool
-            .saga_write(
-                infra_tenant_scope(instance.tenant()),
-                move |mut tx| {
-                    Box::pin(async move {
-                        if tx
-                            .saga_terminate(
-                                &fields,
-                                &owner,
-                                &contract_id,
-                                &operator_actor,
-                                &reason_text,
-                                &change_ticket,
-                                &start_audit_id,
-                            )
-                            .await
-                            .map_err(storage_error)?
-                        {
-                            return Ok((true, None));
-                        }
-                        let row = tx
-                            .saga_operator_status(&fields)
-                            .await
-                            .map_err(storage_error)?;
-                        Ok((false, row))
-                    })
-                },
-                storage_error,
-            )
-            .await?;
-        let (applied, row) = observed;
-        if applied {
-            return Ok(SagaOperatorCasOutcome::Applied);
-        }
-        let Some(row) = row else {
-            return Ok(SagaOperatorCasOutcome::Missing);
-        };
-        classify_terminate_rejection(&authorization, &row)
     }
 }
 
@@ -1305,10 +1473,10 @@ impl PgSagaDurableStore {
                                     SagaLeaseOutcome::Lost
                                 }
                             })
-                            .map_err(storage_error)
+                            .map_err(storage_error(SagaStorageStage::LeaseMutation))
                     })
                 },
-                storage_error,
+                storage_error(SagaStorageStage::LeaseMutation),
             )
             .await
     }
@@ -1323,7 +1491,7 @@ impl PgSagaDurableStore {
         lease: &SagaLease,
         completion: SagaForwardCompletion,
     ) -> Result<SagaDurableMutationOutcome, SagaDurableStoreError> {
-        self.commit_forward_completion_inner(lease, completion, None)
+        self.commit_forward_completion_inner(SagaStorageOperation::Mutate, lease, completion, None)
             .await
     }
 
@@ -1337,12 +1505,18 @@ impl PgSagaDurableStore {
             consistency::SagaEffectPhase::Forward,
             "confirmed_applied",
         );
-        self.commit_forward_completion_inner(&operator.lease, completion, Some(audit))
-            .await
+        self.commit_forward_completion_inner(
+            SagaStorageOperation::OperatorRepairCommit,
+            &operator.lease,
+            completion,
+            Some(audit),
+        )
+        .await
     }
 
     async fn commit_forward_completion_inner(
         &self,
+        operation: SagaStorageOperation,
         lease: &SagaLease,
         completion: SagaForwardCompletion,
         operator_audit: Option<OperatorDecisionFields>,
@@ -1424,13 +1598,18 @@ impl PgSagaDurableStore {
                                 SagaJournalStatus::ForwardIntent,
                             )
                             .await
-                            .map_err(ReceiptTxError::Storage)?
+                            .map_err(receipt_storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionMutation,
+                            ))?
                             != Some(true)
                         {
-                            let held = tx
-                                .saga_lease_is_held(&lease_fields)
-                                .await
-                                .map_err(ReceiptTxError::Storage)?;
+                            let held = tx.saga_lease_is_held(&lease_fields).await.map_err(
+                                receipt_storage_error_for(
+                                    operation,
+                                    SagaStorageStage::CompletionMutation,
+                                ),
+                            )?;
                             return Err(ReceiptTxError::abort(if held {
                                 SagaDurableMutationOutcome::Conflict
                             } else {
@@ -1440,12 +1619,18 @@ impl PgSagaDurableStore {
                         if tx
                             .saga_insert_receipt(&lease_fields, &receipt_fields)
                             .await
-                            .map_err(ReceiptTxError::Storage)?
+                            .map_err(receipt_storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionMutation,
+                            ))?
                         {
                             if tx
                                 .saga_insert_journal(&lease_fields, &journal_fields)
                                 .await
-                                .map_err(ReceiptTxError::Storage)?
+                                .map_err(receipt_storage_error_for(
+                                    operation,
+                                    SagaStorageStage::CompletionMutation,
+                                ))?
                             {
                                 if let Some(audit) = operator_audit
                                     && !tx
@@ -1455,7 +1640,10 @@ impl PgSagaDurableStore {
                                             &audit,
                                         )
                                         .await
-                                        .map_err(ReceiptTxError::Storage)?
+                                        .map_err(receipt_storage_error_for(
+                                            operation,
+                                            SagaStorageStage::CompletionMutation,
+                                        ))?
                                 {
                                     return Err(ReceiptTxError::abort(
                                         SagaDurableMutationOutcome::Conflict,
@@ -1465,7 +1653,10 @@ impl PgSagaDurableStore {
                                     && !tx
                                         .saga_apply_lifecycle(&lease_fields, &lifecycle)
                                         .await
-                                        .map_err(ReceiptTxError::Storage)?
+                                        .map_err(receipt_storage_error_for(
+                                            operation,
+                                            SagaStorageStage::CompletionMutation,
+                                        ))?
                                 {
                                     return Err(ReceiptTxError::abort(
                                         SagaDurableMutationOutcome::Conflict,
@@ -1473,17 +1664,21 @@ impl PgSagaDurableStore {
                                 }
                                 #[cfg(all(test, feature = "integration"))]
                                 if inject_commit_unknown {
-                                    tx.saga_inject_commit_unknown_after_commit()
-                                        .await
-                                        .map_err(ReceiptTxError::Storage)?;
+                                    tx.saga_inject_commit_unknown_after_commit().await.map_err(
+                                        receipt_storage_error_for(
+                                            operation,
+                                            SagaStorageStage::CompletionMutation,
+                                        ),
+                                    )?;
                                 }
                                 return Ok(SagaDurableMutationOutcome::Applied);
                             }
-                            if !tx
-                                .saga_lease_is_held(&lease_fields)
-                                .await
-                                .map_err(ReceiptTxError::Storage)?
-                            {
+                            if !tx.saga_lease_is_held(&lease_fields).await.map_err(
+                                receipt_storage_error_for(
+                                    operation,
+                                    SagaStorageStage::CompletionMutation,
+                                ),
+                            )? {
                                 return Err(ReceiptTxError::abort(
                                     SagaDurableMutationOutcome::LeaseLost,
                                 ));
@@ -1493,11 +1688,12 @@ impl PgSagaDurableStore {
                             ));
                         }
 
-                        if !tx
-                            .saga_lease_is_held(&lease_fields)
-                            .await
-                            .map_err(ReceiptTxError::Storage)?
-                        {
+                        if !tx.saga_lease_is_held(&lease_fields).await.map_err(
+                            receipt_storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionMutation,
+                            ),
+                        )? {
                             return Err(ReceiptTxError::abort(
                                 SagaDurableMutationOutcome::LeaseLost,
                             ));
@@ -1506,14 +1702,20 @@ impl PgSagaDurableStore {
                         let stored = tx
                             .saga_load_receipt(&receipt_fields.scope_fields())
                             .await
-                            .map_err(ReceiptTxError::Storage)?;
+                            .map_err(receipt_storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionMutation,
+                            ))?;
                         let journal = tx
                             .saga_load_journal_entry(
                                 &InstanceFields::from(lease_fields.instance),
                                 receipt_fields.completed_seq,
                             )
                             .await
-                            .map_err(ReceiptTxError::Storage)?;
+                            .map_err(receipt_storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionMutation,
+                            ))?;
                         let Some(stored) = stored else {
                             return Err(ReceiptTxError::abort(
                                 SagaDurableMutationOutcome::Conflict,
@@ -1529,7 +1731,7 @@ impl PgSagaDurableStore {
                         Err(ReceiptTxError::duplicate_candidate(stored, exact_journal))
                     })
                 },
-                ReceiptTxError::Storage,
+                receipt_storage_error_for(operation, SagaStorageStage::CompletionMutation),
             )
             .await;
         let settlement = attempt_result.settlement();
@@ -1545,6 +1747,7 @@ impl PgSagaDurableStore {
                 };
                 match self
                     .read_back_commit_unknown_completion(
+                        operation,
                         &expectation,
                         &journal_expectation,
                         lifecycle_expectation.as_ref(),
@@ -1603,6 +1806,7 @@ impl PgSagaDurableStore {
 
     async fn read_back_commit_unknown_completion(
         &self,
+        operation: SagaStorageOperation,
         expectation: &ReceiptDuplicateExpectation<'_>,
         journal_expected: &JournalEntryFields,
         lifecycle_expected: Option<&LifecycleFields>,
@@ -1619,26 +1823,36 @@ impl PgSagaDurableStore {
                 infra_tenant_scope(instance.tenant()),
                 move |mut conn| {
                     Box::pin(async move {
-                        let instance_row = conn
-                            .saga_get_instance(&instance_fields)
-                            .await
-                            .map_err(storage_error)?;
+                        let instance_row = conn.saga_get_instance(&instance_fields).await.map_err(
+                            storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionCommitUnknownReadback,
+                            ),
+                        )?;
                         let journal = conn
                             .saga_read_journal_entry(&instance_fields, decision_seq)
                             .await
-                            .map_err(storage_error)?;
-                        let receipt = conn
-                            .saga_load_receipt(&scope_fields)
-                            .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionCommitUnknownReadback,
+                            ))?;
+                        let receipt = conn.saga_load_receipt(&scope_fields).await.map_err(
+                            storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionCommitUnknownReadback,
+                            ),
+                        )?;
                         let audit = conn
                             .saga_read_operator_decision(&instance_fields, decision_seq)
                             .await
-                            .map_err(storage_error)?;
+                            .map_err(storage_error_for(
+                                operation,
+                                SagaStorageStage::CompletionCommitUnknownReadback,
+                            ))?;
                         Ok((instance_row, journal, receipt, audit))
                     })
                 },
-                storage_error,
+                storage_error_for(operation, SagaStorageStage::CompletionCommitUnknownReadback),
             )
             .await?;
         let Some(instance_row) = instance_row else {
@@ -2502,8 +2716,188 @@ fn parse_optional_compensation_cause(
     .transpose()
 }
 
-fn storage_error(error: sqlx::Error) -> SagaDurableStoreError {
-    saga_error(SagaDurableStoreErrorKind::Storage, error)
+fn classify_storage_error(error: &sqlx::Error) -> SagaStorageErrorClass {
+    match error {
+        sqlx::Error::Database(_) => {
+            if crate::tx_retry::classify_sqlx_error(error) == consistency::TxRetryClass::Transient {
+                SagaStorageErrorClass::DatabaseTransient
+            } else {
+                SagaStorageErrorClass::DatabasePermanent
+            }
+        }
+        sqlx::Error::Io(_) => SagaStorageErrorClass::Io,
+        sqlx::Error::Tls(_) => SagaStorageErrorClass::Tls,
+        sqlx::Error::Protocol(_) => SagaStorageErrorClass::Protocol,
+        sqlx::Error::PoolTimedOut => SagaStorageErrorClass::PoolTimedOut,
+        sqlx::Error::PoolClosed => SagaStorageErrorClass::PoolClosed,
+        sqlx::Error::WorkerCrashed => SagaStorageErrorClass::WorkerCrashed,
+        sqlx::Error::Configuration(_) => SagaStorageErrorClass::Configuration,
+        sqlx::Error::RowNotFound
+        | sqlx::Error::TypeNotFound { .. }
+        | sqlx::Error::ColumnIndexOutOfBounds { .. }
+        | sqlx::Error::ColumnNotFound(_)
+        | sqlx::Error::ColumnDecode { .. }
+        | sqlx::Error::Encode(_)
+        | sqlx::Error::Decode(_)
+        | sqlx::Error::AnyDriverError(_) => SagaStorageErrorClass::DataMapping,
+        _ => SagaStorageErrorClass::OtherPermanent,
+    }
+}
+
+fn record_storage_error(
+    operation: SagaStorageOperation,
+    stage: SagaStorageStage,
+    context: Option<&SagaDiagnosticContext>,
+    error: &sqlx::Error,
+) {
+    let sqlstate = error
+        .as_database_error()
+        .and_then(sqlx::error::DatabaseError::code)
+        .filter(|code| is_safe_sqlstate(code.as_ref()));
+    let sqlstate = sqlstate.as_deref().unwrap_or("none");
+    let error_class = classify_storage_error(error);
+    let tenant = context
+        .map(|context| context.tenant.to_string())
+        .unwrap_or_else(|| "none".to_owned());
+    let owner = context
+        .and_then(|context| context.owner.as_deref())
+        .unwrap_or("none");
+    let contract = context
+        .and_then(|context| context.contract.as_deref())
+        .unwrap_or("none");
+    if error_class.is_transient() {
+        record_transient_storage_error(
+            operation,
+            stage,
+            error_class,
+            sqlstate,
+            &tenant,
+            owner,
+            contract,
+        );
+    } else {
+        record_permanent_storage_error(
+            operation,
+            stage,
+            error_class,
+            sqlstate,
+            &tenant,
+            owner,
+            contract,
+        );
+    }
+}
+
+fn record_transient_storage_error(
+    operation: SagaStorageOperation,
+    stage: SagaStorageStage,
+    error_class: SagaStorageErrorClass,
+    sqlstate: &str,
+    tenant: &str,
+    owner: &str,
+    contract: &str,
+) {
+    tracing::warn!(
+        target: "postgres",
+        operation = operation.as_label(),
+        stage = stage.as_label(),
+        error_class = error_class.as_label(),
+        severity = "warn",
+        sqlstate,
+        tenant,
+        owner,
+        contract,
+        "saga durable storage operation failed"
+    );
+}
+
+fn record_permanent_storage_error(
+    operation: SagaStorageOperation,
+    stage: SagaStorageStage,
+    error_class: SagaStorageErrorClass,
+    sqlstate: &str,
+    tenant: &str,
+    owner: &str,
+    contract: &str,
+) {
+    tracing::error!(
+        target: "postgres",
+        operation = operation.as_label(),
+        stage = stage.as_label(),
+        error_class = error_class.as_label(),
+        severity = "error",
+        sqlstate,
+        tenant,
+        owner,
+        contract,
+        "saga durable storage operation failed"
+    );
+}
+
+fn is_safe_sqlstate(code: &str) -> bool {
+    code.len() == 5
+        && code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+}
+
+pub(crate) fn storage_error(
+    stage: SagaStorageStage,
+) -> impl Fn(sqlx::Error) -> SagaDurableStoreError + Copy {
+    move |error| {
+        record_storage_error(stage.operation(), stage, None, &error);
+        saga_error(SagaDurableStoreErrorKind::Storage, error)
+    }
+}
+
+fn storage_error_for(
+    operation: SagaStorageOperation,
+    stage: SagaStorageStage,
+) -> impl Fn(sqlx::Error) -> SagaDurableStoreError + Copy {
+    move |error| {
+        record_storage_error(operation, stage, None, &error);
+        saga_error(SagaDurableStoreErrorKind::Storage, error)
+    }
+}
+
+fn storage_error_with_context(
+    operation: SagaStorageOperation,
+    stage: SagaStorageStage,
+    context: SagaDiagnosticContext,
+) -> impl Fn(sqlx::Error) -> SagaDurableStoreError + Clone {
+    move |error| {
+        record_storage_error(operation, stage, Some(&context), &error);
+        saga_error(SagaDurableStoreErrorKind::Storage, error)
+    }
+}
+
+fn mutation_storage_error(
+    stage: SagaStorageStage,
+) -> impl Fn(sqlx::Error) -> MutationTxError + Copy {
+    move |error| {
+        record_storage_error(stage.operation(), stage, None, &error);
+        MutationTxError::Storage(error)
+    }
+}
+
+fn mutation_storage_error_for(
+    operation: SagaStorageOperation,
+    stage: SagaStorageStage,
+) -> impl Fn(sqlx::Error) -> MutationTxError + Copy {
+    move |error| {
+        record_storage_error(operation, stage, None, &error);
+        MutationTxError::Storage(error)
+    }
+}
+
+fn receipt_storage_error_for(
+    operation: SagaStorageOperation,
+    stage: SagaStorageStage,
+) -> impl Fn(sqlx::Error) -> ReceiptTxError + Copy {
+    move |error| {
+        record_storage_error(operation, stage, None, &error);
+        ReceiptTxError::Storage(error)
+    }
 }
 
 fn saga_error<E>(kind: SagaDurableStoreErrorKind, source: E) -> SagaDurableStoreError
@@ -2667,26 +3061,6 @@ fn classify_retry_rejection(
     Ok(SagaOperatorCasOutcome::StaleJournal)
 }
 
-fn classify_terminate_rejection(
-    authorization: &SagaOperatorAuthorization<saga_operator_action::Terminate>,
-    row: &SagaOperatorStatusRow,
-) -> Result<SagaOperatorCasOutcome, SagaDurableStoreError> {
-    if !operator_identity_matches(row, authorization.identity()) {
-        return Ok(SagaOperatorCasOutcome::IdentityConflict);
-    }
-    let status = parse_instance_status(&row.status)?;
-    if status != SagaInstanceStatus::Ready {
-        return Ok(SagaOperatorCasOutcome::StaleStatus(status));
-    }
-    if row.lease_busy {
-        return Ok(SagaOperatorCasOutcome::Busy);
-    }
-    if row.has_effect_intent {
-        return Ok(SagaOperatorCasOutcome::EffectAlreadyStarted);
-    }
-    Ok(SagaOperatorCasOutcome::StaleJournal)
-}
-
 const fn operator_cas_from_mutation(outcome: SagaDurableMutationOutcome) -> SagaOperatorCasOutcome {
     match outcome {
         SagaDurableMutationOutcome::Applied => SagaOperatorCasOutcome::Applied,
@@ -2740,3 +3114,324 @@ impl std::fmt::Display for InvariantError {
 }
 
 impl std::error::Error for InvariantError {}
+
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::collections::BTreeMap;
+    use std::fmt;
+    use std::sync::{Arc, Mutex};
+
+    use sqlx::error::{DatabaseError, ErrorKind};
+    use tracing::field::Visit;
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+
+    use super::{
+        SagaDiagnosticContext, SagaStorageOperation, SagaStorageStage, classify_storage_error,
+        storage_error, storage_error_for, storage_error_with_context,
+    };
+
+    const CANARY: &str = "postgres://operator:canary-secret@database/saga";
+
+    #[derive(Debug)]
+    struct FakeDatabaseError {
+        code: &'static str,
+    }
+
+    impl fmt::Display for FakeDatabaseError {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter.write_str(CANARY)
+        }
+    }
+
+    impl std::error::Error for FakeDatabaseError {}
+
+    impl DatabaseError for FakeDatabaseError {
+        fn message(&self) -> &str {
+            CANARY
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.code))
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+
+        fn kind(&self) -> ErrorKind {
+            ErrorKind::Other
+        }
+    }
+
+    #[derive(Default)]
+    struct CapturedFields(BTreeMap<String, String>);
+
+    impl Visit for CapturedFields {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct StorageEventCapture {
+        records: Arc<Mutex<Vec<BTreeMap<String, String>>>>,
+    }
+
+    impl Subscriber for StorageEventCapture {
+        fn enabled(&self, metadata: &Metadata<'_>) -> bool {
+            matches!(
+                *metadata.level(),
+                tracing::Level::WARN | tracing::Level::ERROR
+            )
+        }
+
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+
+        fn event(&self, event: &Event<'_>) {
+            let mut fields = CapturedFields::default();
+            event.record(&mut fields);
+            self.records
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(fields.0);
+        }
+
+        fn enter(&self, _: &Id) {}
+
+        fn exit(&self, _: &Id) {}
+    }
+
+    #[test]
+    fn storage_stage_labels_are_closed_and_stable() {
+        let stages = [
+            (SagaStorageStage::Register, "register"),
+            (SagaStorageStage::Get, "get"),
+            (SagaStorageStage::ListRunnable, "list_runnable"),
+            (
+                SagaStorageStage::ListCandidateTenants,
+                "list_candidate_tenants",
+            ),
+            (SagaStorageStage::ObserveUnresolved, "observe_unresolved"),
+            (SagaStorageStage::Claim, "claim"),
+            (SagaStorageStage::LeaseMutation, "lease_mutation"),
+            (SagaStorageStage::JournalMutation, "journal_mutation"),
+            (
+                SagaStorageStage::JournalCommitUnknownReadback,
+                "journal_commit_unknown_readback",
+            ),
+            (SagaStorageStage::LifecycleMutation, "lifecycle_mutation"),
+            (SagaStorageStage::RecoverySnapshot, "recovery_snapshot"),
+            (SagaStorageStage::TerminalReceipt, "terminal_receipt"),
+            (SagaStorageStage::CompletionMutation, "completion_mutation"),
+            (
+                SagaStorageStage::CompletionCommitUnknownReadback,
+                "completion_commit_unknown_readback",
+            ),
+            (SagaStorageStage::OperatorStatus, "operator_status"),
+            (
+                SagaStorageStage::OperatorRetryCompensation,
+                "operator_retry_compensation",
+            ),
+            (
+                SagaStorageStage::OperatorRepairClaim,
+                "operator_repair_claim",
+            ),
+        ];
+
+        for (stage, label) in stages {
+            assert_eq!(stage.as_label(), label);
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn storage_diagnostic_has_exact_safe_fields_and_redacts_source() {
+        let capture = StorageEventCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let tenant = vocab::TenantId::parse("00000000-0000-0000-0000-000000000123")
+            .expect("tenant fixture is valid");
+        let instance = consistency::SagaInstanceRef::new(
+            tenant,
+            consistency::SagaId::new(
+                uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000456")
+                    .expect("saga fixture is valid"),
+            ),
+        )
+        .expect("instance fixture is valid");
+        let identity = diport::SagaWorkerIdentity::new(
+            "billing",
+            diport::SagaContractId::parse("billing.checkout").expect("contract fixture is valid"),
+        )
+        .expect("worker fixture is valid");
+        let error = storage_error_with_context(
+            SagaStorageOperation::Register,
+            SagaStorageStage::Register,
+            SagaDiagnosticContext::for_worker(instance, &identity),
+        )(sqlx::Error::Database(Box::new(FakeDatabaseError {
+            code: "42501",
+        })));
+
+        assert_eq!(error.kind(), diport::SagaDurableStoreErrorKind::Storage);
+        assert!(!format!("{error:?}").contains(CANARY));
+        assert!(!error.to_string().contains(CANARY));
+
+        let records = records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fields = records.first().expect("storage failure is logged");
+        assert_eq!(
+            fields.keys().map(String::as_str).collect::<Vec<_>>(),
+            [
+                "contract",
+                "error_class",
+                "message",
+                "operation",
+                "owner",
+                "severity",
+                "sqlstate",
+                "stage",
+                "tenant"
+            ]
+        );
+        assert_eq!(
+            fields.get("operation").map(|value| value.trim_matches('"')),
+            Some("register")
+        );
+        assert_eq!(
+            fields.get("owner").map(|value| value.trim_matches('"')),
+            Some("billing")
+        );
+        assert_eq!(
+            fields.get("contract").map(|value| value.trim_matches('"')),
+            Some("billing.checkout")
+        );
+        assert_eq!(
+            fields.get("tenant").map(|value| value.trim_matches('"')),
+            Some("00000000-0000-0000-0000-000000000123")
+        );
+        assert_eq!(
+            fields.get("stage").map(|value| value.trim_matches('"')),
+            Some("register")
+        );
+        assert_eq!(
+            fields.get("sqlstate").map(|value| value.trim_matches('"')),
+            Some("42501")
+        );
+        assert_eq!(
+            fields
+                .get("error_class")
+                .map(|value| value.trim_matches('"')),
+            Some("database_permanent")
+        );
+        assert_eq!(
+            fields.get("severity").map(|value| value.trim_matches('"')),
+            Some("error")
+        );
+        assert!(
+            !fields.values().any(|value| value.contains(CANARY)),
+            "database source must remain redacted"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn storage_diagnostic_rejects_non_sqlstate_provider_codes() {
+        let capture = StorageEventCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let _ = storage_error(SagaStorageStage::ObserveUnresolved)(sqlx::Error::Database(
+            Box::new(FakeDatabaseError { code: CANARY }),
+        ));
+
+        let records = records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fields = records.first().expect("storage failure is logged");
+        assert_eq!(
+            fields.get("sqlstate").map(|value| value.trim_matches('"')),
+            Some("none")
+        );
+        assert!(
+            !fields.values().any(|value| value.contains(CANARY)),
+            "invalid provider code must remain redacted"
+        );
+    }
+
+    #[test]
+    fn storage_error_classes_cover_non_database_provider_failures() {
+        let cases = [
+            (sqlx::Error::PoolTimedOut, "pool_timed_out", true),
+            (sqlx::Error::PoolClosed, "pool_closed", false),
+            (sqlx::Error::Protocol(CANARY.to_owned()), "protocol", false),
+            (sqlx::Error::Io(std::io::Error::other(CANARY)), "io", true),
+            (
+                sqlx::Error::Tls(Box::new(std::io::Error::other(CANARY))),
+                "tls",
+                false,
+            ),
+        ];
+        for (error, label, transient) in cases {
+            let class = classify_storage_error(&error);
+            assert_eq!(class.as_label(), label);
+            assert_eq!(class.is_transient(), transient);
+        }
+
+        let transient_database =
+            sqlx::Error::Database(Box::new(FakeDatabaseError { code: "08006" }));
+        let class = classify_storage_error(&transient_database);
+        assert_eq!(class.as_label(), "database_transient");
+        assert!(class.is_transient());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn operator_repair_commit_keeps_outer_operation_across_inner_stage() {
+        let capture = StorageEventCapture::default();
+        let records = Arc::clone(&capture.records);
+        let dispatch = tracing::Dispatch::new(capture);
+        let _guard = tracing::dispatcher::set_default(&dispatch);
+
+        let _ = storage_error_for(
+            SagaStorageOperation::OperatorRepairCommit,
+            SagaStorageStage::CompletionMutation,
+        )(sqlx::Error::PoolTimedOut);
+
+        let records = records
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let fields = records.first().expect("storage failure is logged");
+        assert_eq!(
+            fields.get("operation").map(|value| value.trim_matches('"')),
+            Some("operator_repair_commit")
+        );
+        assert_eq!(
+            fields.get("stage").map(|value| value.trim_matches('"')),
+            Some("completion_mutation")
+        );
+    }
+}

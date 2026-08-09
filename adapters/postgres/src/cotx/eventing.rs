@@ -770,30 +770,6 @@ impl EventingTx<'_, ServingWriteLane, SagaConcern> {
         .await
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) async fn saga_terminate(
-        &mut self,
-        fields: &InstanceFields,
-        owner: &str,
-        contract_id: &str,
-        operator_actor: &str,
-        reason_text: &str,
-        change_ticket: &str,
-        start_audit_id: &str,
-    ) -> Result<bool, sqlx::Error> {
-        ensure_embedded_tenant(self.tenant, fields.instance.tenant(), "saga terminate")?;
-        sqlx::query_scalar("SELECT public.rss_saga_terminate($1::uuid, $2, $3, $4, $5, $6, $7)")
-            .bind(&fields.saga_id)
-            .bind(owner)
-            .bind(contract_id)
-            .bind(operator_actor)
-            .bind(reason_text)
-            .bind(change_ticket)
-            .bind(start_audit_id)
-            .fetch_one(&mut *self.conn)
-            .await
-    }
-
     pub(crate) async fn saga_observe_claim(
         &mut self,
         fields: &InstanceFields,

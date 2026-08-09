@@ -1645,18 +1645,6 @@ where
             ctx.recover(&actions, operator, expected_reason).await
         })
     }
-
-    /// Terminate only an exact ready instance for which the store proves no effect intent exists.
-    pub fn terminate(
-        &self,
-        authorization: SagaOperatorAuthorization<saga_operator_action::Terminate>,
-    ) -> BoxFuture<'static, Result<SagaOperatorCasOutcome, SagaDurableStoreError>> {
-        if authorization.identity() != &self.identity {
-            return Box::pin(async { Ok(SagaOperatorCasOutcome::IdentityConflict) });
-        }
-        let store = Arc::clone(&self.store);
-        Box::pin(async move { store.terminate(authorization).await })
-    }
 }
 
 impl<R, D> SagaStartPort for SagaExecutorImpl<R, D>

@@ -149,6 +149,11 @@ name = "migration_0098_settings_active_serving_upgrade"
 path = "tests/migration_0098_settings_active_serving_upgrade.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "migration_0102_abac_profile_upgrade"
+path = "tests/migration_0102_abac_profile_upgrade.rs"
+required-features = ["integration"]
+
 # Affected（无 live PG 资源；默认可构建，不绑 RemoteOnly 调度身份）。
 [[test]]
 name = "migration_0087_device_command_fencing_contract"
