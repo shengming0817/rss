@@ -28,7 +28,7 @@ use redis::{
     RedisRuntimeDeps, RedisSagaEffectApplyOutcome, RedisSagaEffectFixture,
     RedisSagaEffectObservation, RedisSagaEffectProbeOutcome,
 };
-use testkit::crash_matrix::{CrashFaultSpec, CrashRunner};
+use testkit::crash_matrix::{CrashExecutionKind, CrashFaultSpec, CrashRunner};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -51,6 +51,9 @@ impl ReadyCaseRunner {
         contract: vocab::ContractBinding,
         run: SagaCaseRunnerFn,
     ) -> Self {
+        if !matches!(fault_spec.execution_kind(), CrashExecutionKind::Normal) {
+            panic!("Saga runner requires the normal typed execution shape");
+        }
         let Some(case) = fault_spec.saga_case() else {
             panic!("Saga runner requires Saga catalog metadata");
         };

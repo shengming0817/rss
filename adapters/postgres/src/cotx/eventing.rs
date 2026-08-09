@@ -1448,7 +1448,7 @@ macro_rules! impl_dlq_write {
                 &mut self,
                 event_id: &str,
             ) -> Result<i64, sqlx::Error> {
-                sqlx::query_scalar("SELECT rss_outbox_redrive($1, $2::uuid)")
+                sqlx::query_scalar(crate::outbox_routine::OutboxCallableRoutine::Redrive.sql())
                     .bind(event_id)
                     .bind(self.tenant.to_string())
                     .fetch_one(&mut *self.conn)
@@ -1460,9 +1460,7 @@ macro_rules! impl_dlq_write {
                 input: DlqExpiredResolution<'_>,
             ) -> Result<i64, sqlx::Error> {
                 sqlx::query_scalar(
-                    r#"
-                    SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)
-                    "#,
+                    crate::outbox_routine::OutboxCallableRoutine::ResolveExpired.sql(),
                 )
                 .bind(input.event_id)
                 .bind(self.tenant.to_string())
@@ -1815,15 +1813,17 @@ impl EventingTx<'_, ServingWriteLane, OutboxConcern> {
     ) -> Result<String, sqlx::Error> {
         match mutation {
             OutboxSettlementMutation::Published => {
-                sqlx::query_scalar("SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text")
-                    .bind(fence.event_id)
-                    .bind(fence.lease_token)
-                    .bind(fence.lease_deadline_epoch_micros)
-                    .fetch_one(&mut *self.conn)
-                    .await
+                sqlx::query_scalar(
+                    crate::outbox_routine::OutboxCallableRoutine::SettlePublished.sql(),
+                )
+                .bind(fence.event_id)
+                .bind(fence.lease_token)
+                .bind(fence.lease_deadline_epoch_micros)
+                .fetch_one(&mut *self.conn)
+                .await
             }
             OutboxSettlementMutation::Retry => {
-                sqlx::query_scalar("SELECT rss_outbox_settle_retry($1, $2::uuid, $3)::text")
+                sqlx::query_scalar(crate::outbox_routine::OutboxCallableRoutine::SettleRetry.sql())
                     .bind(fence.event_id)
                     .bind(fence.lease_token)
                     .bind(fence.lease_deadline_epoch_micros)
@@ -1837,19 +1837,12 @@ impl EventingTx<'_, ServingWriteLane, OutboxConcern> {
         &mut self,
         fence: OutboxSettlementFence<'_>,
     ) -> Result<MarkDlxRow, sqlx::Error> {
-        sqlx::query_as(
-            r#"
-            SELECT settlement_outcome::text, tenant_id, domain, contract_id, topic,
-                   payload, metadata AS metadata_json, contract_version, schema_hash,
-                   retry_count
-            FROM rss_outbox_mark_dlx($1, $2::uuid, $3)
-            "#,
-        )
-        .bind(fence.event_id)
-        .bind(fence.lease_token)
-        .bind(fence.lease_deadline_epoch_micros)
-        .fetch_one(&mut *self.conn)
-        .await
+        sqlx::query_as(crate::outbox_routine::OutboxCallableRoutine::MarkDlx.sql())
+            .bind(fence.event_id)
+            .bind(fence.lease_token)
+            .bind(fence.lease_deadline_epoch_micros)
+            .fetch_one(&mut *self.conn)
+            .await
     }
 }
 

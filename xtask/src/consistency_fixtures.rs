@@ -9,8 +9,8 @@
 //! INVARIANT: CONSISTENCY-CRASH-FIXTURE-01 { level = "Medium", exec = "check", source = "code" } -- consistency crash fixture ids must be unique and fixtures must parse as the closed TOML DSL.
 //! INVARIANT: CONSISTENCY-FAULT-MATRIX-01 { level = "Medium", exec = "check", source = "code" } -- N-028 ready cases must cover every consistency mechanism with a non-draft contract; each ready DeviceLatent fixture must bind a non-draft contract, and every ready fixture must have a real journey runner mapping.
 //! INVARIANT: CONSISTENCY-FAULT-EVIDENCE-01 { level = "Medium", exec = "check", source = "code" } -- ready L2 evidence is exported only after full fixture, contract, generated-binding, runner, filesystem-safety, and anti-vacuity validation succeeds.
-//! INVARIANT: CONSISTENCY-FAULT-RUNNER-SYMBOL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runner_symbol_must_be_canonical_run_function_path", anti_vacuity = "tests::real_critical_l2_ga_cases_bind_exact_specs_contracts_and_runner_symbols" } -- every ready case binds a canonical top-level `run_*` function that becomes its exact assurance carrier.
-//! INVARIANT: CONSISTENCY-FAULT-TYPED-SEAM-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_direct_sqlx_dependency_is_rejected + tests::red_package_aliased_sqlx_dependency_is_rejected_in_every_dependency_table + tests::red_critical_runner_fake_receiver_cannot_supply_provider_capability + tests::red_critical_runner_fake_publisher_and_direct_sql_remain_rejected", anti_vacuity = "tests::green_real_tree_has_required_ready_fixtures + tests::real_critical_l2_ga_cases_bind_exact_specs_contracts_and_runner_symbols" } -- critical runner constructors require sealed provider/conformance output types, assurance consumes the same exact typed runner registration, and the verifier rejects direct or aliased sqlx dependencies, raw SQL, and fake publishers.
+//! INVARIANT: CONSISTENCY-FAULT-RUNNER-SYMBOL-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runner_symbol_must_be_canonical_run_function_path", anti_vacuity = "tests::green_real_tree_has_required_ready_fixtures" } -- every ready case binds a canonical top-level `run_*` function that becomes its exact assurance carrier.
+//! INVARIANT: CONSISTENCY-FAULT-TYPED-SEAM-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_direct_sqlx_dependency_is_rejected + tests::red_package_aliased_sqlx_dependency_is_rejected_in_every_dependency_table + tests::red_critical_runner_typed_constructor_cannot_be_deleted + tests::red_critical_runner_fake_receiver_cannot_supply_provider_capability + tests::red_critical_runner_fake_publisher_and_direct_sql_remain_rejected + tests::red_catalog_closure_rejects_missing_normal_and_equal_count_replacement", anti_vacuity = "tests::green_real_tree_has_required_ready_fixtures + tests::specialized_fault_specs_exactly_match_typed_runner_projection" } -- critical runner constructors require sealed provider/conformance output types, assurance consumes the same exact typed runner registration, and the verifier rejects direct or aliased sqlx dependencies, raw SQL, fake publishers, and catalog/fixture/runner projection drift.
 
 use crate::contract::GovernedContract;
 use crate::contract::manifest::{ConsistencyLevel, Lifecycle};
@@ -49,6 +49,7 @@ pub(crate) enum Rule {
     RunnerMismatch,
     ForbiddenJourneyDependency,
     CriticalCase,
+    CatalogClosure,
 }
 
 pub(crate) struct ConsistencyFixtures;
@@ -156,7 +157,32 @@ struct FaultCatalogEntry {
     crash_point: String,
     expected_invariant: String,
     runner: CrashRunner,
+    execution: CrashExecutionKind,
     saga: Option<SagaFaultCatalogEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CrashExecutionKind {
+    Normal,
+    ConfirmLost,
+    StaleContender,
+    DeadlineExpired,
+}
+
+impl CrashExecutionKind {
+    fn from_rust_variant(value: &str) -> Option<Self> {
+        match value {
+            "Normal" => Some(Self::Normal),
+            "ConfirmLost" => Some(Self::ConfirmLost),
+            "StaleContender" => Some(Self::StaleContender),
+            "DeadlineExpired" => Some(Self::DeadlineExpired),
+            _ => None,
+        }
+    }
+
+    fn is_specialized(self) -> bool {
+        self != Self::Normal
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -194,6 +220,7 @@ struct FaultCatalogSyntaxEntry {
     crash_point: syn::LitStr,
     expected_invariant: syn::LitStr,
     runner: Ident,
+    execution: Ident,
     saga: Expr,
 }
 
@@ -217,6 +244,9 @@ impl Parse for FaultCatalogSyntax {
             parse_catalog_label(&content, "runner")?;
             let runner = content.parse()?;
             content.parse::<Token![,]>()?;
+            parse_catalog_label(&content, "execution")?;
+            let execution = content.parse()?;
+            content.parse::<Token![,]>()?;
             parse_catalog_label(&content, "saga")?;
             let saga = content.parse()?;
             if content.peek(Token![,]) {
@@ -231,6 +261,7 @@ impl Parse for FaultCatalogSyntax {
                 crash_point,
                 expected_invariant,
                 runner,
+                execution,
                 saga,
             });
             if input.peek(Token![,]) {
@@ -295,6 +326,8 @@ fn fault_catalog(root: &Path) -> Result<FaultCatalog, String> {
             .ok_or_else(|| format!("unknown fault catalog mechanism `{}`", entry.mechanism))?;
         let runner = CrashRunner::from_rust_variant(&entry.runner.to_string())
             .ok_or_else(|| format!("unknown fault catalog runner `{}`", entry.runner))?;
+        let execution = CrashExecutionKind::from_rust_variant(&entry.execution.to_string())
+            .ok_or_else(|| format!("unknown fault catalog execution `{}`", entry.execution))?;
         let saga = parse_saga_catalog_expr(&entry.saga)?;
         if mechanism == CrashMechanism::Saga && saga.is_none() {
             return Err(format!(
@@ -320,6 +353,7 @@ fn fault_catalog(root: &Path) -> Result<FaultCatalog, String> {
             crash_point: entry.crash_point.value(),
             expected_invariant: entry.expected_invariant.value(),
             runner,
+            execution,
             saga,
         };
         if by_variant.insert(variant.clone(), catalog_entry).is_some() {
@@ -415,8 +449,15 @@ struct RunnerContract {
     runner: CrashRunner,
     generated_contract: String,
     runner_symbol: String,
-    critical_kind: Option<CriticalRunnerBodyKind>,
+    execution: CrashExecutionKind,
     forbidden_bypass: bool,
+    registry: RunnerRegistry,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunnerRegistry {
+    Standard,
+    Saga,
 }
 
 #[derive(Debug, Clone)]
@@ -437,57 +478,11 @@ pub struct ReadyL2FaultEvidence {
     pub runner_symbol: String,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct CriticalFaultCase {
-    case_id: &'static str,
-    contract_id: &'static str,
-    fault_spec: &'static str,
-    runner: CrashRunner,
-    generated_contract: &'static str,
-    runner_symbol: &'static str,
-    body_kind: CriticalRunnerBodyKind,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CriticalRunnerBodyKind {
-    ConfirmLost,
-    StaleContender,
-    DeadlineExpired,
-}
-
-const CRITICAL_FAULT_CASES: [CriticalFaultCase; 3] = [
-    CriticalFaultCase {
-        case_id: "outbox-confirm-lost-channel-close",
-        contract_id: "identity.session-created",
-        fault_spec: "OutboxConfirmLostChannelClose",
-        runner: CrashRunner::PostgresRabbitmq,
-        generated_contract: "generated::event::identity_v1::session_created::CONTRACT",
-        runner_symbol: "run_outbox_confirm_lost_channel_close",
-        body_kind: CriticalRunnerBodyKind::ConfirmLost,
-    },
-    CriticalFaultCase {
-        case_id: "outbox-stale-contender-settle",
-        contract_id: "identity.session-created",
-        fault_spec: "OutboxStaleLeaseContender",
-        runner: CrashRunner::Postgres,
-        generated_contract: "generated::event::identity_v1::session_created::CONTRACT",
-        runner_symbol: "run_outbox_stale_contender_settle",
-        body_kind: CriticalRunnerBodyKind::StaleContender,
-    },
-    CriticalFaultCase {
-        case_id: "outbox-deadline-expired-settle",
-        contract_id: "identity.session-created",
-        fault_spec: "OutboxLeaseDeadlineExpired",
-        runner: CrashRunner::Postgres,
-        generated_contract: "generated::event::identity_v1::session_created::CONTRACT",
-        runner_symbol: "run_outbox_deadline_expired_settle",
-        body_kind: CriticalRunnerBodyKind::DeadlineExpired,
-    },
-];
-
 #[derive(Debug, Default)]
 struct FixtureScan {
     ready_ids: BTreeSet<String>,
+    fixture_fault_specs: BTreeSet<CrashFaultSpec>,
+    ready_fault_specs: BTreeSet<CrashFaultSpec>,
     ready_count: usize,
     ready_by_mechanism: BTreeMap<CrashMechanism, usize>,
     ready_l2_evidence: Vec<ReadyL2FaultEvidence>,
@@ -621,7 +616,14 @@ fn validate_root_with_contracts(
 
     let scan = scan_fixture_corpus(root, &files, &contracts, &journey_runners, &catalog);
     add_orphan_runner_findings(&mut findings, &scan.ready_ids, &journey_runners);
-    add_critical_fault_findings(&mut findings, &scan, &journey_runners);
+    add_catalog_closure_findings(
+        &mut findings,
+        &scan.fixture_fault_specs,
+        &scan.ready_fault_specs,
+        &journey_runners,
+        &catalog,
+    );
+    add_critical_fault_findings(&mut findings, &journey_runners, &catalog);
     findings.extend(scan.findings);
     add_ready_coverage_findings(
         &mut findings,
@@ -683,6 +685,9 @@ fn scan_fixture_corpus(
                 continue;
             }
         };
+        if let Some(entry) = catalog.entry_for_fixture(&fixture) {
+            scan.fixture_fault_specs.insert(entry.fault_spec.clone());
+        }
         if fixture.status == CrashStatus::Ready {
             scan.ready_count += 1;
             scan.ready_ids.insert(fixture.id.clone());
@@ -690,6 +695,9 @@ fn scan_fixture_corpus(
                 .ready_by_mechanism
                 .entry(fixture.mechanism)
                 .or_default() += 1;
+            if let Some(entry) = catalog.entry_for_fixture(&fixture) {
+                scan.ready_fault_specs.insert(entry.fault_spec.clone());
+            }
             if fixture.level == CrashLevel::L2
                 && let Some(runner) = journey_runners.get(&fixture.id)
             {
@@ -886,37 +894,29 @@ fn dependency_declares_package<'a>(
 
 fn add_critical_fault_findings(
     findings: &mut Vec<Finding>,
-    scan: &FixtureScan,
     journey_runners: &BTreeMap<String, RunnerContract>,
+    catalog: &FaultCatalog,
 ) {
-    for expected in CRITICAL_FAULT_CASES {
-        let evidence = scan
-            .ready_l2_evidence
-            .iter()
-            .find(|evidence| evidence.case_id == expected.case_id);
-        let runner = journey_runners.get(expected.case_id);
-        let exact = evidence.is_some_and(|evidence| {
-            evidence.contract_id == expected.contract_id
-                && evidence.runner_symbol == expected.runner_symbol
-        }) && runner.is_some_and(|runner| {
-            runner.fault_spec.variant() == expected.fault_spec
-                && runner.runner == expected.runner
-                && runner.generated_contract == expected.generated_contract
-                && runner.runner_symbol == expected.runner_symbol
-                && runner.critical_kind == Some(expected.body_kind)
-                && !runner.forbidden_bypass
-        });
-        if !exact {
+    for expected in catalog
+        .by_variant
+        .values()
+        .filter(|entry| entry.execution.is_specialized())
+    {
+        let matching = journey_runners
+            .values()
+            .filter(|runner| runner.fault_spec == expected.fault_spec)
+            .collect::<Vec<_>>();
+        if matching.is_empty()
+            || matching
+                .iter()
+                .any(|runner| runner.execution != expected.execution || runner.forbidden_bypass)
+        {
             findings.push(finding(
                 Rule::CriticalCase,
-                expected.case_id,
+                expected.fault_spec.variant(),
                 format!(
-                    "critical fault case must bind contract `{}`, spec {:?}, runner {:?}, generated contract `{}`, runner function `{}`, and its exact real capability/conformance body",
-                    expected.contract_id,
-                    expected.fault_spec,
-                    expected.runner,
-                    expected.generated_contract,
-                    expected.runner_symbol
+                    "specialized fault spec must have a matching typed runner and real capability/conformance body: execution={:?}",
+                    expected.execution
                 ),
             ));
         }
@@ -936,6 +936,70 @@ fn add_orphan_runner_findings(
                 format!("journey runner mapping `{runner_id}` has no ready fixture"),
             ));
         }
+    }
+}
+
+fn add_catalog_closure_findings(
+    findings: &mut Vec<Finding>,
+    fixture_fault_specs: &BTreeSet<CrashFaultSpec>,
+    ready_fault_specs: &BTreeSet<CrashFaultSpec>,
+    journey_runners: &BTreeMap<String, RunnerContract>,
+    catalog: &FaultCatalog,
+) {
+    let expected_fixtures = catalog
+        .by_variant
+        .values()
+        .map(|entry| entry.fault_spec.clone())
+        .collect::<BTreeSet<_>>();
+    add_fault_spec_set_diff(
+        findings,
+        "fixture projection",
+        &expected_fixtures,
+        fixture_fault_specs,
+    );
+
+    for (registry, label, expects_saga) in [
+        (RunnerRegistry::Standard, JOURNEY_RUNNER_SOURCE, false),
+        (RunnerRegistry::Saga, SAGA_JOURNEY_RUNNER_SOURCE, true),
+    ] {
+        let expected = ready_fault_specs
+            .iter()
+            .filter(|fault_spec| {
+                catalog
+                    .by_variant(fault_spec.variant())
+                    .is_some_and(|entry| entry.saga.is_some() == expects_saga)
+            })
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let actual = journey_runners
+            .values()
+            .filter(|runner| runner.registry == registry)
+            .map(|runner| runner.fault_spec.clone())
+            .collect::<BTreeSet<_>>();
+        add_fault_spec_set_diff(findings, label, &expected, &actual);
+    }
+}
+
+fn add_fault_spec_set_diff(
+    findings: &mut Vec<Finding>,
+    carrier: &str,
+    expected: &BTreeSet<CrashFaultSpec>,
+    actual: &BTreeSet<CrashFaultSpec>,
+) {
+    let missing = expected
+        .difference(actual)
+        .map(CrashFaultSpec::variant)
+        .collect::<Vec<_>>();
+    let extra = actual
+        .difference(expected)
+        .map(CrashFaultSpec::variant)
+        .collect::<Vec<_>>();
+    if !missing.is_empty() || !extra.is_empty() {
+        findings.push(finding(
+            Rule::CatalogClosure,
+            carrier,
+            format!("fault catalog projection drift: missing={missing:?}, extra={extra:?}"),
+        ));
     }
 }
 
@@ -1324,7 +1388,7 @@ fn journey_runner_mappings_from_catalog(
         for entry in &entries.elems {
             let saga_registry = source == SAGA_JOURNEY_RUNNER_SOURCE;
             let (id, mut runner) = parse_journey_runner_entry(entry, catalog, saga_registry)?;
-            if runner.critical_kind.is_some() {
+            if runner.execution.is_specialized() {
                 runner.forbidden_bypass =
                     critical_runner_has_forbidden_bypass(&syntax, &runner.runner_symbol)?;
             }
@@ -1432,7 +1496,7 @@ fn parse_journey_runner_entry(
     let Expr::Call(call) = entry else {
         return Err("READY_CASE_RUNNERS entry must be ReadyCaseRunner::new(...)".to_string());
     };
-    let critical_kind = ready_case_runner_constructor(&call.func)?;
+    let execution = ready_case_runner_constructor(&call.func)?;
     let expected_args = if saga_registry { 3 } else { 5 };
     if call.args.len() != expected_args {
         return Err(format!(
@@ -1441,7 +1505,7 @@ fn parse_journey_runner_entry(
         ));
     }
     let mut args = call.args.iter();
-    if saga_registry && critical_kind.is_some() {
+    if saga_registry && execution.is_specialized() {
         return Err("Saga READY_CASE_RUNNERS entries must use ReadyCaseRunner::new".to_string());
     }
     let (id, fault_spec, runner) = if saga_registry {
@@ -1465,6 +1529,16 @@ fn parse_journey_runner_entry(
     };
     let generated_contract = generated_contract_arg(args.next())?;
     let runner_symbol = runner_function_arg(args.next())?;
+    let expected_execution = catalog
+        .by_variant(fault_spec.variant())
+        .ok_or_else(|| format!("unknown fault spec `{}`", fault_spec.variant()))?
+        .execution;
+    if execution != expected_execution {
+        return Err(format!(
+            "fault spec `{}` requires {expected_execution:?}, got {execution:?}",
+            fault_spec.variant()
+        ));
+    }
     Ok((
         id,
         RunnerContract {
@@ -1472,13 +1546,18 @@ fn parse_journey_runner_entry(
             runner,
             generated_contract,
             runner_symbol,
-            critical_kind,
+            execution,
             forbidden_bypass: false,
+            registry: if saga_registry {
+                RunnerRegistry::Saga
+            } else {
+                RunnerRegistry::Standard
+            },
         },
     ))
 }
 
-fn ready_case_runner_constructor(expr: &Expr) -> Result<Option<CriticalRunnerBodyKind>, String> {
+fn ready_case_runner_constructor(expr: &Expr) -> Result<CrashExecutionKind, String> {
     let Expr::Path(path) = expr else {
         return Err("READY_CASE_RUNNERS entry must call a ReadyCaseRunner constructor".to_string());
     };
@@ -1497,10 +1576,10 @@ fn ready_case_runner_constructor(expr: &Expr) -> Result<Option<CriticalRunnerBod
         );
     }
     match path.path.segments[1].ident.to_string().as_str() {
-        "new" => Ok(None),
-        "confirm_lost" => Ok(Some(CriticalRunnerBodyKind::ConfirmLost)),
-        "stale_contender" => Ok(Some(CriticalRunnerBodyKind::StaleContender)),
-        "deadline_expired" => Ok(Some(CriticalRunnerBodyKind::DeadlineExpired)),
+        "new" => Ok(CrashExecutionKind::Normal),
+        "confirm_lost" => Ok(CrashExecutionKind::ConfirmLost),
+        "stale_contender" => Ok(CrashExecutionKind::StaleContender),
+        "deadline_expired" => Ok(CrashExecutionKind::DeadlineExpired),
         constructor => Err(format!(
             "unknown READY_CASE_RUNNERS constructor `ReadyCaseRunner::{constructor}`"
         )),
@@ -2318,6 +2397,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[];
             crash_point: "retry-exhaustion".to_string(),
             expected_invariant: "saga-retry-budget-exhausted".to_string(),
             runner: CrashRunner::PostgresRedis,
+            execution: CrashExecutionKind::Normal,
             saga: Some(SagaFaultCatalogEntry {
                 fixture_id: "saga-retry-exhaustion".to_string(),
                 contract_id: "billing.checkout".to_string(),
@@ -2339,8 +2419,9 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[];
                 runner: CrashRunner::PostgresRedis,
                 generated_contract: "generated::saga::billing_v1::CONTRACT".to_string(),
                 runner_symbol: "run_saga_retry_exhaustion".to_string(),
-                critical_kind: None,
+                execution: CrashExecutionKind::Normal,
                 forbidden_bypass: false,
+                registry: RunnerRegistry::Saga,
             },
         )])
     }
@@ -2726,22 +2807,10 @@ async fn saga_retry_exhaustion() { renamed_private_router(); }
     fn red_critical_runner_typed_constructor_cannot_be_deleted() -> Result<()> {
         let root = crate::workspace_root()?;
         let source = fs::read_to_string(root.join(JOURNEY_RUNNER_SOURCE))?;
-        for (case_id, constructor, expected_kind) in [
-            (
-                "outbox-confirm-lost-channel-close",
-                "confirm_lost",
-                CriticalRunnerBodyKind::ConfirmLost,
-            ),
-            (
-                "outbox-stale-contender-settle",
-                "stale_contender",
-                CriticalRunnerBodyKind::StaleContender,
-            ),
-            (
-                "outbox-deadline-expired-settle",
-                "deadline_expired",
-                CriticalRunnerBodyKind::DeadlineExpired,
-            ),
+        for (case_id, constructor) in [
+            ("outbox-confirm-lost-channel-close", "confirm_lost"),
+            ("outbox-stale-contender-settle", "stale_contender"),
+            ("outbox-deadline-expired-settle", "deadline_expired"),
         ] {
             let mutated = source.replacen(
                 &format!("ReadyCaseRunner::{constructor}(\n        \"{case_id}\""),
@@ -2753,17 +2822,13 @@ async fn saga_retry_exhaustion() { renamed_private_router(); }
             let entries = ready_case_runner_array(&syntax)
                 .ok_or_else(|| anyhow::anyhow!("missing synthetic runner table"))?;
             let catalog = fault_catalog(&root).map_err(anyhow::Error::msg)?;
-            let (_, runner) = entries
+            let parsed = entries
                 .elems
                 .iter()
                 .map(|entry| parse_journey_runner_entry(entry, &catalog, false))
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(anyhow::Error::msg)?
-                .into_iter()
-                .find(|(id, _)| id == case_id)
-                .ok_or_else(|| anyhow::anyhow!("missing critical case {case_id}"))?;
+                .collect::<Result<Vec<_>, _>>();
             assert!(
-                runner.critical_kind != Some(expected_kind),
+                parsed.is_err(),
                 "critical typed constructor deletion passed: {case_id}"
             );
         }
@@ -2799,17 +2864,16 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
         let entries = ready_case_runner_array(&syntax)
             .ok_or_else(|| anyhow::anyhow!("missing synthetic runner table"))?;
         let catalog = fault_catalog(&crate::workspace_root()?).map_err(anyhow::Error::msg)?;
-        let (_, runner) = parse_journey_runner_entry(
+        let parsed = parse_journey_runner_entry(
             entries
                 .elems
                 .first()
                 .ok_or_else(|| anyhow::anyhow!("missing synthetic runner"))?,
             &catalog,
             false,
-        )
-        .map_err(anyhow::Error::msg)?;
+        );
         assert!(
-            runner.critical_kind != Some(CriticalRunnerBodyKind::StaleContender),
+            parsed.is_err(),
             "a same-named method on a fake receiver supplied typed postgres capability"
         );
         Ok(())
@@ -2837,33 +2901,64 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
     }
 
     #[test]
-    fn real_critical_l2_ga_cases_bind_exact_specs_contracts_and_runner_symbols() -> Result<()> {
+    fn specialized_fault_specs_exactly_match_typed_runner_projection() -> Result<()> {
         let root = crate::workspace_root()?;
-        let governance = crate::contract::governance::ContractGovernanceIr::load_contracts_root(
-            &root.join("contracts"),
-        )?;
-        let evidence = governance
-            .read(|contracts| ready_l2_fault_evidence_from_validated(&root, contracts))?;
-        let actual = CRITICAL_FAULT_CASES
-            .iter()
-            .map(|expected| {
-                let item = evidence
-                    .iter()
-                    .find(|item| item.case_id == expected.case_id)
-                    .ok_or_else(|| anyhow::anyhow!("missing {}", expected.case_id))?;
-                Ok((
-                    item.case_id.as_str(),
-                    item.contract_id.as_str(),
-                    item.runner_symbol.as_str(),
-                ))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let expected = CRITICAL_FAULT_CASES
-            .iter()
-            .map(|item| (item.case_id, item.contract_id, item.runner_symbol))
-            .collect::<Vec<_>>();
-
+        let catalog = fault_catalog(&root).map_err(anyhow::Error::msg)?;
+        let runners = journey_runner_mappings(&root).map_err(anyhow::Error::msg)?;
+        let expected = catalog
+            .by_variant
+            .values()
+            .filter(|entry| entry.execution.is_specialized())
+            .map(|entry| entry.fault_spec.clone())
+            .collect::<BTreeSet<_>>();
+        let actual = runners
+            .values()
+            .filter(|runner| runner.execution.is_specialized())
+            .map(|runner| runner.fault_spec.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(!expected.is_empty());
         assert_eq!(actual, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn red_catalog_closure_rejects_missing_normal_and_equal_count_replacement() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let catalog = fault_catalog(&root).map_err(anyhow::Error::msg)?;
+        let runners = journey_runner_mappings(&root).map_err(anyhow::Error::msg)?;
+        let ready = runners
+            .values()
+            .map(|runner| runner.fault_spec.clone())
+            .collect::<BTreeSet<_>>();
+        let expected = catalog
+            .by_variant
+            .values()
+            .map(|entry| entry.fault_spec.clone())
+            .collect::<BTreeSet<_>>();
+        let normal = catalog
+            .by_variant
+            .values()
+            .find(|entry| entry.saga.is_none() && !entry.execution.is_specialized())
+            .map(|entry| entry.fault_spec.clone())
+            .ok_or_else(|| anyhow::anyhow!("normal non-Saga fault catalog must be non-vacuous"))?;
+
+        let mut missing = expected.clone();
+        missing.remove(&normal);
+        let mut findings = Vec::new();
+        add_catalog_closure_findings(&mut findings, &missing, &ready, &runners, &catalog);
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::CatalogClosure && finding.detail.contains(normal.variant())
+        }));
+
+        let mut replaced = missing;
+        replaced.insert(CrashFaultSpec("EqualCountReplacement".to_string()));
+        let mut findings = Vec::new();
+        add_catalog_closure_findings(&mut findings, &replaced, &ready, &runners, &catalog);
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::CatalogClosure
+                && finding.detail.contains(normal.variant())
+                && finding.detail.contains("EqualCountReplacement")
+        }));
         Ok(())
     }
 

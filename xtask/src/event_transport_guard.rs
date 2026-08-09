@@ -2408,6 +2408,7 @@ fn expr_is_infra_call(expr: &syn::Expr) -> bool {
 const EVENTEXEC_RELAY_PATH: &str = "crates/eventexec/src/relay.rs";
 const POSTGRES_OUTBOX_PATH: &str = "adapters/postgres/src/outbox.rs";
 const POSTGRES_OUTBOX_SETTLEMENT_PATH: &str = "adapters/postgres/src/cotx/eventing.rs";
+const POSTGRES_OUTBOX_ROUTINE_CATALOG_PATH: &str = "adapters/postgres/src/outbox_routine.rs";
 const POSTGRES_OUTBOX_INTEGRATION_TESTS_PATH: &str =
     "adapters/postgres/src/integration_tests/outbox_tests.rs";
 const OUTBOX_SETTLEMENT_RAW_FUNCTIONS: &[&str] = &[
@@ -2463,6 +2464,7 @@ struct ResolvedSettlementSql {
 
 fn scan_settlement_funnel_sources(sources: &[(PathBuf, String)]) -> SettlementFunnelScan {
     let test_only_files = external_cfg_test_module_paths(sources);
+    let callable_functions = outbox_callable_catalog(sources);
     let mut scan = SettlementFunnelScan::default();
     for (path, content) in sources.iter().filter(|(path, _)| {
         path.extension().and_then(|extension| extension.to_str()) == Some("rs")
@@ -2491,6 +2493,7 @@ fn scan_settlement_funnel_sources(sources: &[(PathBuf, String)]) -> SettlementFu
             } else {
                 BTreeMap::new()
             },
+            callable_functions: &callable_functions,
         };
         visitor.visit_file(&file);
     }
@@ -2515,6 +2518,7 @@ struct SettlementSqlVisitor<'a> {
     bindings: Vec<BTreeMap<String, ResolvedSettlementSql>>,
     builders: Vec<BTreeMap<String, ResolvedSettlementSql>>,
     local_executor_arguments: BTreeMap<String, BTreeSet<usize>>,
+    callable_functions: &'a BTreeMap<String, String>,
 }
 
 impl SettlementSqlVisitor<'_> {
@@ -2556,6 +2560,12 @@ impl SettlementSqlVisitor<'_> {
             && let Some(sql) = Self::scoped_sql(&self.bindings, &name)
         {
             return Some(sql);
+        }
+        if let Some(function) = typed_outbox_routine_function(expression, self.callable_functions) {
+            return Some(ResolvedSettlementSql {
+                value: format!("SELECT {function}($1)"),
+                line: expression.span().start().line,
+            });
         }
         let syn::Expr::Macro(expression) = peel_expr(expression) else {
             return None;
@@ -2631,6 +2641,108 @@ impl SettlementSqlVisitor<'_> {
             }
         }
     }
+}
+
+fn typed_outbox_routine_function<'a>(
+    expression: &syn::Expr,
+    callable_functions: &'a BTreeMap<String, String>,
+) -> Option<&'a str> {
+    let syn::Expr::MethodCall(call) = peel_expr(expression) else {
+        return None;
+    };
+    if call.method != "sql" || !call.args.is_empty() {
+        return None;
+    }
+    let syn::Expr::Path(receiver) = peel_expr(&call.receiver) else {
+        return None;
+    };
+    let segments = receiver
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments.len() != 4
+        || segments[0] != "crate"
+        || segments[1] != "outbox_routine"
+        || segments[2] != "OutboxCallableRoutine"
+    {
+        return None;
+    }
+    callable_functions.get(&segments[3]).map(String::as_str)
+}
+
+fn outbox_callable_catalog(sources: &[(PathBuf, String)]) -> BTreeMap<String, String> {
+    let Some((_, source)) = sources
+        .iter()
+        .find(|(path, _)| path == Path::new(POSTGRES_OUTBOX_ROUTINE_CATALOG_PATH))
+    else {
+        return BTreeMap::new();
+    };
+    parse_outbox_callable_catalog(source)
+}
+
+pub(crate) fn parse_outbox_callable_catalog(source: &str) -> BTreeMap<String, String> {
+    use proc_macro2::{Delimiter, TokenTree};
+
+    let Ok(file) = syn::parse_file(source) else {
+        return BTreeMap::new();
+    };
+    let Some(invocation) = file.items.iter().find_map(|item| match item {
+        syn::Item::Macro(item) if path_ends_with(&item.mac.path, "outbox_routine_catalog") => {
+            Some(&item.mac)
+        }
+        _ => None,
+    }) else {
+        return BTreeMap::new();
+    };
+    let tokens = invocation.tokens.clone().into_iter().collect::<Vec<_>>();
+    let mut catalog = BTreeMap::new();
+    for index in 0..tokens.len().saturating_sub(1) {
+        let TokenTree::Ident(section) = &tokens[index] else {
+            continue;
+        };
+        if section != "serving" && section != "operator" {
+            continue;
+        }
+        let TokenTree::Group(entries) = &tokens[index + 1] else {
+            continue;
+        };
+        if entries.delimiter() != Delimiter::Brace {
+            continue;
+        }
+        let entries = entries.stream().into_iter().collect::<Vec<_>>();
+        for entry_index in 0..entries.len().saturating_sub(2) {
+            let (TokenTree::Ident(variant), TokenTree::Punct(eq), TokenTree::Punct(gt)) = (
+                &entries[entry_index],
+                &entries[entry_index + 1],
+                &entries[entry_index + 2],
+            ) else {
+                continue;
+            };
+            if eq.as_char() != '=' || gt.as_char() != '>' {
+                continue;
+            }
+            let Some(TokenTree::Group(fields)) = entries.get(entry_index + 3) else {
+                continue;
+            };
+            let fields = fields.stream().into_iter().collect::<Vec<_>>();
+            for field_index in 0..fields.len().saturating_sub(2) {
+                let (TokenTree::Ident(label), TokenTree::Punct(colon), TokenTree::Ident(function)) = (
+                    &fields[field_index],
+                    &fields[field_index + 1],
+                    &fields[field_index + 2],
+                ) else {
+                    continue;
+                };
+                if label == "function" && colon.as_char() == ':' {
+                    catalog.insert(variant.to_string(), function.to_string());
+                    break;
+                }
+            }
+        }
+    }
+    catalog
 }
 
 impl<'ast> Visit<'ast> for SettlementSqlVisitor<'_> {
@@ -9496,10 +9608,10 @@ $do$;
             .iter_mut()
             .find(|(path, _)| path == Path::new(POSTGRES_OUTBOX_SETTLEMENT_PATH))
             .expect("closed settlement SQL façade");
-        assert!(settlement.contains("rss_outbox_settle_published"));
+        assert!(settlement.contains("OutboxCallableRoutine::SettlePublished.sql()"));
         let unknown_family = settlement.replacen(
-            "SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text",
-            "SELECT rss_outbox_settle_force($1, $2::uuid, $3)::text",
+            "OutboxCallableRoutine::SettlePublished.sql()",
+            "OutboxCallableRoutine::SettleForce.sql()",
             1,
         );
         let unknown_scan = scan_settlement_funnel_sources(&[(
@@ -9507,16 +9619,15 @@ $do$;
             unknown_family,
         )]);
         assert!(
-            unknown_scan
-                .findings
-                .iter()
-                .any(|finding| finding.detail.contains("rss_outbox_settle_force")),
-            "private module must reject unknown settlement family members: {:#?}",
+            unknown_scan.findings.iter().any(|finding| finding
+                .detail
+                .contains("canonical raw function `rss_outbox_settle_published`")),
+            "private module must fail closed when the typed settlement witness changes: {:#?}",
             unknown_scan.findings
         );
         *settlement = settlement.replacen(
-            "SELECT rss_outbox_settle_published($1, $2::uuid, $3)::text",
-            "SELECT rss_outbox_settle_published_broken($1, $2::uuid, $3)::text",
+            "OutboxCallableRoutine::SettlePublished.sql()",
+            "OutboxCallableRoutine::SettlePublishedBroken.sql()",
             1,
         );
         settlement
@@ -9529,6 +9640,47 @@ $do$;
             "non-executable string bait must not satisfy anti-vacuity: {:#?}",
             scan.findings
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn settlement_funnel_rejects_fake_receiver_and_catalog_identity_drift() {
+        let root = workspace_root().expect("workspace root");
+        let mut sources = load_outbox_claim_cutover_sources(&root).expect("workspace sources");
+        let (_, settlement) = sources
+            .iter_mut()
+            .find(|(path, _)| path == Path::new(POSTGRES_OUTBOX_SETTLEMENT_PATH))
+            .expect("closed settlement façade");
+        *settlement = settlement.replacen(
+            "crate::outbox_routine::OutboxCallableRoutine::SettlePublished.sql()",
+            "fake::OutboxCallableRoutine::SettlePublished.sql()",
+            1,
+        );
+        settlement
+            .push_str("\n// crate::outbox_routine::OutboxCallableRoutine::SettlePublished.sql()\n");
+        let fake_receiver = scan_settlement_funnel_sources(&sources);
+        assert!(fake_receiver.findings.iter().any(|finding| {
+            finding
+                .detail
+                .contains("canonical raw function `rss_outbox_settle_published`")
+        }));
+
+        let mut sources = load_outbox_claim_cutover_sources(&root).expect("workspace sources");
+        let (_, catalog) = sources
+            .iter_mut()
+            .find(|(path, _)| path == Path::new(POSTGRES_OUTBOX_ROUTINE_CATALOG_PATH))
+            .expect("typed outbox routine catalog");
+        *catalog = catalog.replacen(
+            "function: rss_outbox_settle_published",
+            "function: rss_outbox_settle_published_broken",
+            1,
+        );
+        let identity_drift = scan_settlement_funnel_sources(&sources);
+        assert!(identity_drift.findings.iter().any(|finding| {
+            finding
+                .detail
+                .contains("canonical raw function `rss_outbox_settle_published`")
+        }));
     }
 
     #[test]

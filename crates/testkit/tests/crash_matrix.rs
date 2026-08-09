@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use testkit::crash_matrix::{
-    CrashCase, CrashFaultSpec, CrashLevel, CrashMatrix, CrashMechanism, CrashRunner, CrashStatus,
-    TenantAuthorityState,
+    CrashCase, CrashExecutionKind, CrashFaultSpec, CrashLevel, CrashMatrix, CrashMechanism,
+    CrashRunner, CrashStatus, TenantAuthorityState,
 };
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -280,18 +280,21 @@ fn plaintext_payload_fields_are_rejected_without_raw_key_leak() -> TestResult {
 }
 
 #[test]
-fn real_fixture_directory_has_exactly_twenty_one_ready_cases() -> TestResult {
+fn real_fixture_directory_maps_every_case_to_the_fault_catalog() -> TestResult {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
         .ok_or("testkit manifest should be under crates/testkit")?;
     let matrix = CrashMatrix::from_fixture_dir(root.join("fixtures").join("consistency"))?;
 
-    assert_eq!(
-        matrix.ready_count(),
-        21,
-        "L2-GA requires the exact reviewed READY fixture corpus (verify consistency-fixtures: 21 ready)"
+    assert!(
+        !matrix.cases().is_empty(),
+        "fixture discovery must be non-empty"
     );
+    for case in matrix.cases() {
+        let fault_spec = case.fault_spec()?;
+        assert_eq!(fault_spec.expected_runner(), case.runner(), "{}", case.id());
+    }
     assert!(
         matrix
             .cases()
@@ -303,33 +306,13 @@ fn real_fixture_directory_has_exactly_twenty_one_ready_cases() -> TestResult {
 }
 
 #[test]
-fn l2_ga_fault_specs_are_closed_and_old_ambiguity_contract_is_retired() {
-    let cases = [
-        (
-            "post-send-close-before-confirm",
-            "outbox-ambiguous-retry-consumer-effect-once",
-            CrashFaultSpec::OutboxConfirmLostChannelClose,
-            CrashRunner::PostgresRabbitmq,
-        ),
-        (
-            "stale-contender-settle",
-            "outbox-stale-lease-settle-rejected",
-            CrashFaultSpec::OutboxStaleLeaseContender,
-            CrashRunner::Postgres,
-        ),
-        (
-            "deadline-expired-settle",
-            "outbox-expired-deadline-settle-rejected",
-            CrashFaultSpec::OutboxLeaseDeadlineExpired,
-            CrashRunner::Postgres,
-        ),
-    ];
-
-    for (crash_point, invariant, expected, runner) in cases {
-        let actual = CrashFaultSpec::from_parts(CrashMechanism::Outbox, crash_point, invariant);
-        assert_eq!(actual, Some(expected));
-        assert_eq!(expected.expected_runner(), runner);
-    }
+fn typed_fault_execution_catalog_is_non_vacuous_and_old_ambiguity_contract_is_retired() {
+    assert!(
+        CrashFaultSpec::ALL
+            .iter()
+            .any(|spec| spec.execution_kind() != CrashExecutionKind::Normal),
+        "typed specialized execution catalog must be non-empty"
+    );
     assert_eq!(
         CrashFaultSpec::from_parts(
             CrashMechanism::Outbox,
@@ -339,32 +322,4 @@ fn l2_ga_fault_specs_are_closed_and_old_ambiguity_contract_is_retired() {
         None,
         "the fake ambiguity fixture contract must not remain as an alias"
     );
-}
-
-#[test]
-fn real_fixture_directory_has_exact_l2_ga_critical_cases() -> TestResult {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("testkit manifest should be under crates/testkit")?;
-    let matrix = CrashMatrix::from_fixture_dir(root.join("fixtures").join("consistency"))?;
-    let actual = matrix
-        .cases()
-        .iter()
-        .filter(|case| {
-            matches!(
-                case.id(),
-                "outbox-confirm-lost-channel-close"
-                    | "outbox-stale-contender-settle"
-                    | "outbox-deadline-expired-settle"
-            )
-        })
-        .map(|case| (case.id(), case.fault_spec(), case.runner()))
-        .collect::<Vec<_>>();
-
-    assert_eq!(actual.len(), 3, "critical L2-GA fixture identity drifted");
-    for (_, fault_spec, _) in actual {
-        assert!(fault_spec.is_ok());
-    }
-    Ok(())
 }

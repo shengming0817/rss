@@ -12,6 +12,8 @@ use std::path::Path;
 use anyhow::{Context as _, Result};
 
 use crate::diagnostic::{Finding, GovernanceCheck, finding};
+use crate::event_transport_guard::parse_outbox_callable_catalog;
+use crate::phase_helper_expand::mask_comments_and_strings;
 use crate::workspace_root;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -164,13 +166,23 @@ const CARRIERS: &[Carrier] = &[
         ],
     },
     Carrier {
+        path: "adapters/postgres/src/outbox_routine.rs",
+        purpose: "provider-owned typed catalog owns expired-resolution SQL identity",
+        anchors: &[
+            "ResolveExpired => {",
+            "function: rss_outbox_resolve_expired",
+            "arguments: \"(text,uuid,text,text,text,text)\"",
+            "sql: [\"SELECT \", \"($1, $2::uuid, $3, $4, $5, $6)\"]",
+        ],
+    },
+    Carrier {
         path: "adapters/postgres/src/cotx/eventing.rs",
-        purpose: "closed DLQ façade owns the canonical expired-resolution SQL and tenant bind",
+        purpose: "closed DLQ façade consumes the typed expired-resolution authority and tenant bind",
         anchors: &[
             "pub(crate) struct DlqExpiredResolution<'a>",
             "pub(crate) async fn dlq_resolve_expired_outbox(",
             "input: DlqExpiredResolution<'_>",
-            "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)",
+            "crate::outbox_routine::OutboxCallableRoutine::ResolveExpired.sql()",
             ".bind(self.tenant.to_string())",
             "impl_dlq_write!(MaintenanceWriteLane);",
         ],
@@ -346,6 +358,20 @@ fn scan_sources(sources: &BTreeMap<&str, String>) -> Vec<Finding<Rule>> {
             }
         }
     }
+    let catalog_function = sources
+        .get("adapters/postgres/src/outbox_routine.rs")
+        .and_then(|source| {
+            parse_outbox_callable_catalog(source)
+                .get("ResolveExpired")
+                .cloned()
+        });
+    if catalog_function.as_deref() != Some("rss_outbox_resolve_expired") {
+        findings.push(finding(
+            Rule::MissingSemanticAnchor,
+            "adapters/postgres/src/outbox_routine.rs",
+            "ResolveExpired must structurally bind the canonical rss_outbox_resolve_expired identity",
+        ));
+    }
     for (path, sequence) in ORDERED_SEQUENCES {
         let Some(content) = sources.get(path) else {
             continue;
@@ -373,19 +399,21 @@ fn scan_sources(sources: &BTreeMap<&str, String>) -> Vec<Finding<Rule>> {
 const DLQ_PATH: &str = "adapters/postgres/src/dlq.rs";
 const EVENTING_FACADE_PATH: &str = "adapters/postgres/src/cotx/eventing.rs";
 const RESOLUTION_SQL: &str = "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)";
+const RESOLUTION_CALL: &str = "crate::outbox_routine::OutboxCallableRoutine::ResolveExpired.sql()";
 
 fn scan_expired_resolution_topology(
     sources: &BTreeMap<&str, String>,
     findings: &mut Vec<Finding<Rule>>,
 ) {
     if let Some(source) = sources.get(EVENTING_FACADE_PATH) {
+        let code = mask_comments_and_strings(source);
         let signature = "pub(crate) async fn dlq_resolve_expired_outbox(";
-        let body = rust_item_body(source, signature);
-        let owner = rust_item_body(source, "macro_rules! impl_dlq_write");
+        let body = rust_item_body(&code, signature);
+        let owner = rust_item_body(&code, "macro_rules! impl_dlq_write");
         let scoped = body.is_some_and(|body| {
             [
                 "input: DlqExpiredResolution<'_>",
-                RESOLUTION_SQL,
+                RESOLUTION_CALL,
                 ".bind(input.event_id)",
                 ".bind(self.tenant.to_string())",
                 ".bind(input.kind)",
@@ -399,9 +427,10 @@ fn scan_expired_resolution_topology(
         });
         if !scoped
             || !owner
-                .is_some_and(|owner| owner.contains(signature) && owner.contains(RESOLUTION_SQL))
-            || source.matches(signature).count() != 1
-            || source.matches(RESOLUTION_SQL).count() != 1
+                .is_some_and(|owner| owner.contains(signature) && owner.contains(RESOLUTION_CALL))
+            || code.matches(signature).count() != 1
+            || code.matches(RESOLUTION_CALL).count() != 1
+            || code.contains(RESOLUTION_SQL)
         {
             findings.push(finding(
                 Rule::MissingSemanticAnchor,
@@ -486,6 +515,23 @@ mod tests {
             .map(|carrier| (carrier.path, carrier.anchors.join("\n")))
             .collect();
         sources.insert(
+            "adapters/postgres/src/outbox_routine.rs",
+            r#"
+outbox_routine_catalog! {
+    helpers {}
+    serving {}
+    operator {
+        ResolveExpired => {
+            function: rss_outbox_resolve_expired,
+            arguments: "(text,uuid,text,text,text,text)",
+            sql: ["SELECT ", "($1, $2::uuid, $3, $4, $5, $6)"]
+        }
+    }
+}
+"#
+            .to_owned(),
+        );
+        sources.insert(
             EVENTING_FACADE_PATH,
             r#"
 pub(crate) struct DlqExpiredResolution<'a> { event_id: &'a str }
@@ -497,7 +543,7 @@ macro_rules! impl_dlq_write {
                 input: DlqExpiredResolution<'_>,
             ) -> Result<i64, sqlx::Error> {
                 sqlx::query_scalar(
-                    "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)"
+                    crate::outbox_routine::OutboxCallableRoutine::ResolveExpired.sql()
                 )
                 .bind(input.event_id)
                 .bind(self.tenant.to_string())
@@ -591,14 +637,14 @@ async fn resolve_expired_outbox(
 
     #[test]
     #[allow(clippy::expect_used)] // reason: complete_sources must carry the eventing façade fixture.
-    fn scan_rejects_expired_resolution_sql_moved_outside_closed_facade() {
+    fn scan_rejects_expired_resolution_authority_moved_outside_closed_facade() {
         let mut sources = complete_sources();
         let content = sources
             .get_mut(EVENTING_FACADE_PATH)
             .expect("eventing façade fixture carrier");
-        *content = content.replace(RESOLUTION_SQL, "moved-resolution-sql");
+        *content = content.replace(RESOLUTION_CALL, "moved-resolution-authority");
         content.push_str(&format!(
-            "\nfn unrelated_sql_owner() {{ /* {RESOLUTION_SQL} */ }}"
+            "\nfn unrelated_authority_owner() {{ /* {RESOLUTION_CALL} */ }}"
         ));
 
         let findings = scan_sources(&sources);
@@ -606,8 +652,46 @@ async fn resolve_expired_outbox(
             findings
                 .iter()
                 .any(|finding| { finding.subject == EVENTING_FACADE_PATH }),
-            "moving resolution SQL outside the closed façade must be red"
+            "moving the typed resolution authority outside the closed façade must be red"
         );
+    }
+
+    #[test]
+    fn scan_rejects_fake_resolution_receiver_and_comment_bait() {
+        let mut sources = complete_sources();
+        let content = sources
+            .get_mut(EVENTING_FACADE_PATH)
+            .expect("eventing façade fixture carrier");
+        *content = content.replace(
+            RESOLUTION_CALL,
+            "fake::OutboxCallableRoutine::ResolveExpired.sql()",
+        );
+        content.push_str(&format!("\n// {RESOLUTION_CALL}\n"));
+        let findings = scan_sources(&sources);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject == EVENTING_FACADE_PATH),
+            "fake receiver plus comment bait must not satisfy the closed façade witness"
+        );
+    }
+
+    #[test]
+    fn scan_rejects_catalog_identity_drift_with_comment_bait() {
+        let mut sources = complete_sources();
+        let catalog = sources
+            .get_mut("adapters/postgres/src/outbox_routine.rs")
+            .expect("outbox routine catalog fixture");
+        *catalog = catalog.replace(
+            "function: rss_outbox_resolve_expired",
+            "function: rss_outbox_resolve_expired_broken",
+        );
+        catalog.push_str("\n// function: rss_outbox_resolve_expired\n");
+        let findings = scan_sources(&sources);
+        assert!(findings.iter().any(|finding| {
+            finding.subject == "adapters/postgres/src/outbox_routine.rs"
+                && finding.detail.contains("structurally bind")
+        }));
     }
 
     #[test]

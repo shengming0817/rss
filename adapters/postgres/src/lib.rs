@@ -72,6 +72,7 @@ mod identity_security_lifecycle;
 mod inbox;
 mod outbox;
 mod outbox_cdc;
+mod outbox_routine;
 #[cfg(feature = "domain-identity")]
 mod policy_repo;
 mod pool;

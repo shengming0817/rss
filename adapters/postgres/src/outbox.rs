@@ -1504,12 +1504,7 @@ impl OutboxRelay for PgOutbox {
         // still consumes this bound and is rechecked before publish I/O.
         let monotonic_deadline = io_deadline_after(self.relay_budget.lease_ttl());
         let rows: Vec<ClaimedOutboxRow> = sqlx::query_as(
-            r#"
-            SELECT tenant_id, contract_id, topic, event_id, payload, retry_count, metadata,
-                   domain, contract_version, schema_hash, claimed_at_epoch_seconds,
-                   lease_token, deadline_epoch_micros
-            FROM rss_outbox_claim_batch($1, $2, $3, $4)
-            "#,
+            crate::outbox_routine::OutboxCallableRoutine::ClaimBatch.sql(),
         )
         .bind(domain)
         .bind(limit)
@@ -2092,9 +2087,7 @@ async fn sweep_published_outbox(
     let secs =
         i64::try_from(retain_seconds).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
     let result = sqlx::query(
-        r#"
-        SELECT rss_sweep_outbox_published($1) AS deleted_rows
-        "#,
+        crate::outbox_routine::OutboxCallableRoutine::SweepPublished.sql(),
     )
     .bind(secs)
     .fetch_one(pool)
@@ -2116,10 +2109,7 @@ async fn sample_outbox_backlog(
     domain: &str,
 ) -> Result<Vec<BacklogMetricSample>, EngineError> {
     let rows: Vec<(String, String, i64, i64, i64)> = sqlx::query_as(
-        r#"
-        SELECT tenant_id, contract_id, depth, oldest_age_seconds, partition_blocked_depth
-        FROM rss_outbox_sample_backlog($1)
-        "#,
+        crate::outbox_routine::OutboxCallableRoutine::SampleBacklog.sql(),
     )
     .bind(domain)
     .fetch_all(pool)
@@ -2202,7 +2192,7 @@ async fn publish_preflight(
         move |connection| {
             Box::pin(async move {
                 sqlx::query_scalar::<_, i16>(
-                    "SELECT rss_outbox_publish_preflight($1, $2::uuid, $3, $4, $5)",
+                    crate::outbox_routine::OutboxCallableRoutine::PublishPreflight.sql(),
                 )
                 .bind(event_id)
                 .bind(lease_token)

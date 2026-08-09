@@ -1,6 +1,157 @@
 //! Postgres integration tests — outbox seam.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use super::support::*;
+use crate::outbox_routine::{
+    OUTBOX_ROUTINES, OutboxRoutineOwnerPolicy, OutboxRoutineRole, OutboxRoutineSpec,
+};
+
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+struct OutboxRoutineObservation {
+    signature: String,
+    owner: String,
+    owner_can_login: bool,
+    security_definer: bool,
+    fixed_search_path: bool,
+    public_execute: bool,
+    app_execute: bool,
+    maintenance_execute: bool,
+    recovery_execute: bool,
+}
+
+fn validate_outbox_routine_catalog(actual: &[OutboxRoutineObservation]) -> Result<(), String> {
+    let expected = OUTBOX_ROUTINES
+        .iter()
+        .map(|spec| (spec.signature, spec))
+        .collect::<BTreeMap<_, _>>();
+    if expected.len() != OUTBOX_ROUTINES.len() {
+        return Err("duplicate expected outbox routine signature".to_string());
+    }
+    let actual_by_signature = actual
+        .iter()
+        .map(|routine| (routine.signature.as_str(), routine))
+        .collect::<BTreeMap<_, _>>();
+    if actual_by_signature.len() != actual.len() {
+        return Err("duplicate discovered outbox routine signature".to_string());
+    }
+
+    let expected_ids = expected.keys().copied().collect::<BTreeSet<_>>();
+    let actual_ids = actual_by_signature.keys().copied().collect::<BTreeSet<_>>();
+    let missing = expected_ids
+        .difference(&actual_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let extra = actual_ids
+        .difference(&expected_ids)
+        .copied()
+        .collect::<Vec<_>>();
+    let mut drift = Vec::new();
+    for signature in expected_ids.intersection(&actual_ids) {
+        let spec = expected[*signature];
+        let observed = actual_by_signature[*signature];
+        let policy = spec.role.policy();
+        let owner_matches = match policy.owner {
+            OutboxRoutineOwnerPolicy::NotServingRole => observed.owner != "rss_app",
+            OutboxRoutineOwnerPolicy::MaintenanceNoLogin => {
+                observed.owner == "rss_outbox_maintenance" && !observed.owner_can_login
+            }
+        };
+        if !owner_matches
+            || observed.security_definer != policy.security_definer
+            || observed.fixed_search_path != policy.fixed_search_path
+            || observed.public_execute != policy.public_execute
+            || observed.app_execute != policy.app_execute
+            || observed.maintenance_execute != policy.maintenance_execute
+            || observed.recovery_execute != policy.recovery_execute
+        {
+            drift.push(format!("{} ({:?})", spec.signature, spec.id));
+        }
+    }
+
+    if missing.is_empty() && extra.is_empty() && drift.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "outbox routine catalog drift: missing={missing:?}, extra={extra:?}, policy={drift:?}"
+        ))
+    }
+}
+
+fn conforming_outbox_routine(spec: &OutboxRoutineSpec) -> OutboxRoutineObservation {
+    let policy = spec.role.policy();
+    let (owner, owner_can_login) = match policy.owner {
+        OutboxRoutineOwnerPolicy::NotServingRole => ("migration_owner", true),
+        OutboxRoutineOwnerPolicy::MaintenanceNoLogin => ("rss_outbox_maintenance", false),
+    };
+    OutboxRoutineObservation {
+        signature: spec.signature.to_string(),
+        owner: owner.to_string(),
+        owner_can_login,
+        security_definer: policy.security_definer,
+        fixed_search_path: policy.fixed_search_path,
+        public_execute: policy.public_execute,
+        app_execute: policy.app_execute,
+        maintenance_execute: policy.maintenance_execute,
+        recovery_execute: policy.recovery_execute,
+    }
+}
+
+#[test]
+fn outbox_routine_catalog_rejects_missing_extra_equal_replacement_and_policy_drift() {
+    let baseline = OUTBOX_ROUTINES
+        .iter()
+        .map(conforming_outbox_routine)
+        .collect::<Vec<_>>();
+    assert!(validate_outbox_routine_catalog(&baseline).is_ok());
+
+    let mut missing = baseline.clone();
+    missing.pop();
+    assert!(validate_outbox_routine_catalog(&missing).is_err());
+
+    let mut extra = baseline.clone();
+    let mut unexpected = extra[0].clone();
+    unexpected.signature = "rss_outbox_unexpected(text)".to_string();
+    extra.push(unexpected);
+    assert!(validate_outbox_routine_catalog(&extra).is_err());
+
+    let mut equal_replacement = baseline.clone();
+    equal_replacement[0].signature = "rss_outbox_replaced(text)".to_string();
+    assert!(validate_outbox_routine_catalog(&equal_replacement).is_err());
+
+    let mut owner_drift = baseline.clone();
+    let mut owner_mutated = false;
+    for observed in &mut owner_drift {
+        if observed.owner == "rss_outbox_maintenance" {
+            observed.owner = "rss_app".to_string();
+            owner_mutated = true;
+            break;
+        }
+    }
+    assert!(owner_mutated);
+    assert!(validate_outbox_routine_catalog(&owner_drift).is_err());
+
+    let operator_signatures = OUTBOX_ROUTINES
+        .iter()
+        .filter(|spec| spec.role == OutboxRoutineRole::OperatorAuthority)
+        .map(|spec| spec.signature)
+        .collect::<BTreeSet<_>>();
+    let mut mechanism_drift = baseline.clone();
+    let mut mechanism_mutated = false;
+    for observed in &mut mechanism_drift {
+        if operator_signatures.contains(observed.signature.as_str()) {
+            observed.app_execute = true;
+            mechanism_mutated = true;
+            break;
+        }
+    }
+    assert!(mechanism_mutated);
+    assert!(validate_outbox_routine_catalog(&mechanism_drift).is_err());
+
+    let mut acl_drift = baseline;
+    acl_drift[0].maintenance_execute = !acl_drift[0].maintenance_execute;
+    assert!(validate_outbox_routine_catalog(&acl_drift).is_err());
+}
 
 /// A successful settings ConsumerTx attempt must commit the claimed receipt to `done`; the next
 /// provider claim is then the durable duplicate decision owned by Postgres.
@@ -182,39 +333,6 @@ async fn outbox_log_schema_catalog_after_migrations() -> TestResult {
         ],
         "CDC header projection columns must be stored generated columns"
     );
-
-    let fingerprint_functions: Vec<(String, String, bool, bool)> = sqlx::query_as(
-        "SELECT p.proname, pg_get_userbyid(p.proowner), \
-                has_function_privilege('rss_app', p.oid, 'EXECUTE'), \
-                has_function_privilege('rss_outbox_maintenance', p.oid, 'EXECUTE') \
-         FROM pg_proc p \
-         JOIN pg_namespace n ON n.oid = p.pronamespace \
-         WHERE n.nspname = 'public' \
-           AND p.proname IN ( \
-               'rss_outbox_fact_frame', \
-               'rss_outbox_canonical_number', \
-               'rss_outbox_canonical_json', \
-               'rss_outbox_fact_fingerprint' \
-           ) \
-         ORDER BY p.proname",
-    )
-    .fetch_all(&store.pool)
-    .await?;
-    assert_eq!(fingerprint_functions.len(), 4);
-    for (function, owner, rss_app_can_execute, maintenance_can_execute) in fingerprint_functions {
-        assert_ne!(
-            owner, "rss_app",
-            "serving role must not own generated-column helper `{function}`"
-        );
-        assert!(
-            rss_app_can_execute,
-            "serving role must retain EXECUTE on `{function}`"
-        );
-        assert!(
-            maintenance_can_execute,
-            "relay maintenance role needs only EXECUTE on generated-column helper `{function}`"
-        );
-    }
 
     let constraint_text: Vec<(String, String)> = sqlx::query_as(
         "SELECT conname, pg_get_constraintdef(oid) \
@@ -5634,7 +5752,7 @@ async fn outbox_terminal_timestamp_checks_reject_invalid_state_combinations() ->
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn outbox_terminal_timestamp_catalog_matches_current_authority() -> TestResult {
+async fn outbox_terminal_timestamp_and_routine_catalog_match_current_authority() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
@@ -5657,61 +5775,42 @@ async fn outbox_terminal_timestamp_catalog_matches_current_authority() -> TestRe
     assert!(sweep_def.contains("published_at <="));
     assert!(!sweep_def.contains("created_at"));
 
-    type FunctionSecurity = (String, String, bool, bool, bool, bool, bool);
-    let functions: Vec<FunctionSecurity> = sqlx::query_as(
+    let observed: Vec<OutboxRoutineObservation> = sqlx::query_as(
         r#"
-        SELECT p.oid::regprocedure::text,
-               owner.rolname,
-               owner.rolcanlogin,
-               p.prosecdef,
-               COALESCE('search_path=public, pg_temp' = ANY(p.proconfig), false),
-               NOT EXISTS (
+        SELECT p.oid::regprocedure::text AS signature,
+               owner.rolname AS owner,
+               owner.rolcanlogin AS owner_can_login,
+               p.prosecdef AS security_definer,
+               COALESCE(
+                   'search_path=public, pg_temp' = ANY(p.proconfig),
+                   false
+               ) AS fixed_search_path,
+               EXISTS (
                    SELECT 1
                    FROM aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) acl
                    WHERE acl.grantee = 0 AND acl.privilege_type = 'EXECUTE'
-               ),
-               has_function_privilege('rss_app', p.oid, 'EXECUTE')
+               ) AS public_execute,
+               has_function_privilege('rss_app', p.oid, 'EXECUTE') AS app_execute,
+               has_function_privilege(
+                   'rss_outbox_maintenance', p.oid, 'EXECUTE'
+               ) AS maintenance_execute,
+               has_function_privilege(
+                   'rss_l2_dr_recovery_owner', p.oid, 'EXECUTE'
+               ) AS recovery_execute
         FROM pg_proc p
+        JOIN pg_namespace namespace ON namespace.oid = p.pronamespace
         JOIN pg_roles owner ON owner.oid = p.proowner
-        WHERE p.oid IN (
-            'rss_outbox_claim_batch(text, bigint, bigint, bigint)'::regprocedure,
-            'rss_outbox_publish_preflight(text, uuid, bigint, bigint, bigint)'::regprocedure,
-            'rss_outbox_settle_published(text, uuid, bigint)'::regprocedure,
-            'rss_outbox_settle_retry(text, uuid, bigint)'::regprocedure,
-            'rss_outbox_mark_dlx(text, uuid, bigint)'::regprocedure,
-            'rss_outbox_redrive(text, uuid)'::regprocedure,
-            'rss_outbox_resolve_expired(text, uuid, text, text, text, text)'::regprocedure,
-            'rss_sweep_outbox_published(bigint)'::regprocedure,
-            'rss_outbox_sample_backlog(text)'::regprocedure
-        )
+        WHERE namespace.nspname = 'public'
+          AND (
+              starts_with(p.proname, 'rss_outbox_')
+              OR p.proname = 'rss_sweep_outbox_published'
+          )
         ORDER BY p.oid::regprocedure::text
         "#,
     )
     .fetch_all(&store.pool)
     .await?;
-    assert_eq!(functions.len(), 9);
-    for (signature, owner, owner_can_login, security_definer, fixed_path, no_public, app_exec) in
-        functions
-    {
-        assert_eq!(owner, "rss_outbox_maintenance", "owner drift: {signature}");
-        assert!(
-            !owner_can_login,
-            "function owner must be NOLOGIN: {signature}"
-        );
-        assert!(security_definer, "SECURITY DEFINER drift: {signature}");
-        assert!(fixed_path, "search_path drift: {signature}");
-        assert!(no_public, "PUBLIC execute drift: {signature}");
-        if signature.starts_with("rss_outbox_redrive")
-            || signature.starts_with("rss_outbox_resolve_expired")
-        {
-            assert!(
-                !app_exec,
-                "serving rss_app must not execute operator redrive"
-            );
-        } else {
-            assert!(app_exec, "rss_app execute drift: {signature}");
-        }
-    }
+    validate_outbox_routine_catalog(&observed)?;
 
     let outcome_type_acl: (String, bool, bool, bool) = sqlx::query_as(
         r#"

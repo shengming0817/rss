@@ -29,7 +29,8 @@ use postgres::fault_matrix::{
 };
 use redis::RedisRuntimeDeps;
 use testkit::crash_matrix::{
-    CrashCase, CrashFaultSpec, CrashMatrix, CrashMechanism, CrashRunner, CrashStatus,
+    CrashCase, CrashExecutionKind, CrashFaultSpec, CrashMatrix, CrashMechanism, CrashRunner,
+    CrashStatus,
 };
 use testkit::eventing_conformance::{
     ConsumerDuplicateEffectConformancePassed, ConsumerDuplicateEffectObservation, EventingIds,
@@ -107,6 +108,16 @@ struct ConfirmLostCriticalEvidence {
 }
 
 impl ReadyCaseRunner {
+    const fn assert_execution_kind(fault_spec: CrashFaultSpec, expected: CrashExecutionKind) {
+        match (fault_spec.execution_kind(), expected) {
+            (CrashExecutionKind::Normal, CrashExecutionKind::Normal)
+            | (CrashExecutionKind::ConfirmLost, CrashExecutionKind::ConfirmLost)
+            | (CrashExecutionKind::StaleContender, CrashExecutionKind::StaleContender)
+            | (CrashExecutionKind::DeadlineExpired, CrashExecutionKind::DeadlineExpired) => {}
+            _ => panic!("crash fault spec uses the wrong typed journey constructor"),
+        }
+    }
+
     const fn new(
         id: &'static str,
         fault_spec: CrashFaultSpec,
@@ -114,6 +125,7 @@ impl ReadyCaseRunner {
         contract: vocab::ContractBinding,
         run: NormalCaseRunnerFn,
     ) -> Self {
+        Self::assert_execution_kind(fault_spec, CrashExecutionKind::Normal);
         Self {
             id,
             fault_spec,
@@ -130,6 +142,7 @@ impl ReadyCaseRunner {
         contract: vocab::ContractBinding,
         run: ConfirmLostCaseRunnerFn,
     ) -> Self {
+        Self::assert_execution_kind(fault_spec, CrashExecutionKind::ConfirmLost);
         Self {
             id,
             fault_spec,
@@ -146,6 +159,7 @@ impl ReadyCaseRunner {
         contract: vocab::ContractBinding,
         run: StaleContenderCaseRunnerFn,
     ) -> Self {
+        Self::assert_execution_kind(fault_spec, CrashExecutionKind::StaleContender);
         Self {
             id,
             fault_spec,
@@ -162,6 +176,7 @@ impl ReadyCaseRunner {
         contract: vocab::ContractBinding,
         run: DeadlineExpiredCaseRunnerFn,
     ) -> Self {
+        Self::assert_execution_kind(fault_spec, CrashExecutionKind::DeadlineExpired);
         Self {
             id,
             fault_spec,
