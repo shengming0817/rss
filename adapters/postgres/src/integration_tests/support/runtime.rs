@@ -446,6 +446,25 @@ pub(in super::super) async fn reviewed_bound_certificate_command(
     artifact_id: &str,
     artifact_digest: &[u8],
 ) -> Result<ReviewedFencedCommand, eventexec::reconcile::ReconcileScheduleError> {
+    reviewed_bound_certificate_command_with_deadline(
+        attempt,
+        generation,
+        policy_hash,
+        artifact_id,
+        artifact_digest,
+        4_000_000_000,
+    )
+    .await
+}
+
+pub(in super::super) async fn reviewed_bound_certificate_command_with_deadline(
+    attempt: &ReconcileAttempt,
+    generation: u64,
+    policy_hash: &[u8],
+    artifact_id: &str,
+    artifact_digest: &[u8],
+    deadline_epoch_seconds: u64,
+) -> Result<ReviewedFencedCommand, eventexec::reconcile::ReconcileScheduleError> {
     let encoded = |bytes: &[u8]| {
         bytes
             .iter()
@@ -459,7 +478,7 @@ pub(in super::super) async fn reviewed_bound_certificate_command(
         "policyHash": format!("sha256:{}", encoded(policy_hash)),
         "artifactId": artifact_id,
         "artifactDigest": format!("sha256:{}", encoded(artifact_digest)),
-        "deadlineEpochSeconds": 4_000_000_000_u64
+        "deadlineEpochSeconds": deadline_epoch_seconds
     }))?;
     crate::reconcile_test_driver::drive_reviewed_device_command(
         attempt,

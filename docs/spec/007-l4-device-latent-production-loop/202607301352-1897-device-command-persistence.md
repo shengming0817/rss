@@ -46,6 +46,29 @@ create a second requirement source.
   tenant/device/generation/intent. `device_ingress_receipts` uses `(tenant_id,event_id)` identity,
   kind-specific fields, immutable fingerprint/disposition, and append-only ACL.
 
+## Overall command deadline
+
+- A command has exactly one durable overall deadline. The ordinary periodic `ReconcileWorker`
+  due scan is the recovery and restart carrier; there is no command-specific sweeper, attempt
+  store, probe, runtime harness, or production-profile role.
+- Before making a normal certificate decision, the reconciler submits only its sealed
+  attempt/lease/epoch/wake-version/desired-generation fence. In one tenant-bound write
+  transaction fixed `SECURITY DEFINER` selector/settler funnels validate that fence. The selector
+  locks the current-generation command and returns database transaction time; the provider restores
+  the aggregate and applies the canonical Rust `DeviceCommandMutation::timeout` FSM; the settler
+  revalidates the fence, selected identity, exact version advance, deadline, and authoritative time
+  before persisting the snapshot. Callers cannot select a command, optimistic version, or clock
+  value; `rss_app` receives EXECUTE on the fixed eligibility wrappers and retains no raw command
+  UPDATE permission.
+- Due `queued`, `published`, or `received` commands advance once through
+  the same closed transition and lifecycle trigger used by every durable command mutation; replay
+  returns the closed `AlreadyExpired` outcome without a write. The reconciler persists
+  `CommandTimedOut` degraded conditions and settles, so it cannot immediately reissue a command
+  for the same desired generation. A later desired-generation update may author the next command
+  normally.
+- RSS deliberately rejects separate ScheduleToSend and SendToComplete timers and the former
+  three-tier timeout model. No alias, shim, dual path, or compatibility entry point is retained.
+
 ## Verification and delivery
 
 - Unit and compile-fail tests prove digest round-trip, closed states/mutations/evidence, mandatory

@@ -383,6 +383,25 @@ pub enum DeletionRequestOutcome {
     StaleFence,
 }
 
+/// Closed result of checking the current-generation command's durable overall deadline.
+///
+/// The repository selects the command, optimistic version, and authoritative transaction time.
+/// Callers can supply only the sealed reconcile-attempt fence, so an arbitrary command or clock
+/// cannot be used to manufacture expiry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CurrentCommandExpiryOutcome {
+    /// No active or previously timed-out command exists for the current desired generation.
+    NoCurrent,
+    /// The current active command's durable overall deadline has not elapsed.
+    NotDue,
+    /// The current active command advanced exactly once to `timed_out`.
+    Expired,
+    /// The latest command for this generation was already durably timed out.
+    AlreadyExpired,
+    /// The reconcile attempt lost its lease, epoch, wake version, or desired-generation fence.
+    StaleFence,
+}
+
 /// Closed failure taxonomy for the reconcile-only repository boundary.
 #[derive(Debug, thiserror::Error)]
 pub enum CertificateReconcileRepositoryError {
@@ -392,6 +411,9 @@ pub enum CertificateReconcileRepositoryError {
     /// Persisted state failed a restore funnel.
     #[error("certificate reconcile storage returned invalid state")]
     CorruptState(#[source] DeviceCertificateError),
+    /// The command provider rejected a permanent, corrupt, or invariant-breaking expiry path.
+    #[error("certificate reconcile command expiry violated a durable invariant")]
+    CommandInvariant(#[source] deviceloop::DeviceCommandStoreError),
     /// Storage or its transaction was unavailable.
     #[error("certificate reconcile storage is unavailable")]
     StorageUnavailable {
@@ -435,6 +457,12 @@ pub trait CertificateReconcileRepositoryLocal<E: ArtifactEligibility>: Send + Sy
         Option<eventexec::reconcile::DeviceCertificateCommandEvidence>,
         CertificateReconcileRepositoryError,
     >;
+
+    /// Expire the selected current-generation command when its provider-owned deadline is due.
+    async fn expire_due_current_command(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<CurrentCommandExpiryOutcome, CertificateReconcileRepositoryError>;
 
     /// Append one current-generation receipt or return a closed zero-write classification.
     async fn append_artifact_receipt(

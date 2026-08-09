@@ -22,12 +22,12 @@ use identity::ports::device_certificate::{
     CertificateAttemptAuthority, CertificateAttemptFence, CertificateConditionMutation,
     CertificatePublicKeyDigest, CertificateReadyProof, CertificateReconcileRepository,
     CertificateReconcileRepositoryError, CertificateReconcileView,
-    CertificateRevocationObservation, CertificateTransportObservation, DeletionRequestOutcome,
-    DesiredPolicyAcceptOutcome, DesiredPolicyAccepted, DesiredPolicyAcceptedCondition,
-    DesiredStateRestore, DesiredStateSnapshot, DeviceCertificateActiveCommand,
-    DeviceCertificateActiveCommandState, DeviceCertificateError, DeviceCertificateRepository,
-    DeviceCertificateRepositoryError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
-    DeviceCertificateStatusEvidence, DeviceCertificateStatusStore,
+    CertificateRevocationObservation, CertificateTransportObservation, CurrentCommandExpiryOutcome,
+    DeletionRequestOutcome, DesiredPolicyAcceptOutcome, DesiredPolicyAccepted,
+    DesiredPolicyAcceptedCondition, DesiredStateRestore, DesiredStateSnapshot,
+    DeviceCertificateActiveCommand, DeviceCertificateActiveCommandState, DeviceCertificateError,
+    DeviceCertificateRepository, DeviceCertificateRepositoryError, DeviceCertificateScope,
+    DeviceCertificateStateSnapshot, DeviceCertificateStatusEvidence, DeviceCertificateStatusStore,
     DeviceCertificateStatusStoreError, DeviceSequence, ExpectedGeneration, FencedMutationOutcome,
     PersistedCertificateArtifactSnapshot, PolicyHash, ReportEnvelopeId, ReportedStateHash,
     ReportedStateRestore, ReportedStateSnapshot, RotationOutcome,
@@ -488,7 +488,8 @@ fn status_from_reconcile(error: CertificateReconcileRepositoryError) -> StatusEr
         CertificateReconcileRepositoryError::StorageUnavailable { source } => {
             StatusError::StorageUnavailable { source }
         }
-        CertificateReconcileRepositoryError::InvalidMutation => status_corrupt(),
+        CertificateReconcileRepositoryError::InvalidMutation
+        | CertificateReconcileRepositoryError::CommandInvariant(_) => status_corrupt(),
     }
 }
 
@@ -1342,6 +1343,27 @@ fn reconcile_from_repo(error: RepoError) -> CertificateReconcileRepositoryError 
     }
 }
 
+fn reconcile_from_command(
+    error: deviceloop::DeviceCommandStoreError,
+) -> CertificateReconcileRepositoryError {
+    use deviceloop::DeviceCommandStoreError;
+
+    match error {
+        error @ (DeviceCommandStoreError::StorageTransient { .. }
+        | DeviceCommandStoreError::SettlementUnknown { .. }) => {
+            CertificateReconcileRepositoryError::storage_unavailable(error)
+        }
+        error @ (DeviceCommandStoreError::ScopeMismatch
+        | DeviceCommandStoreError::MutationRejected(_)
+        | DeviceCommandStoreError::InvariantViolation
+        | DeviceCommandStoreError::StoragePermanent { .. }
+        | DeviceCommandStoreError::CorruptCommand(_)
+        | DeviceCommandStoreError::CorruptIngress(_)) => {
+            CertificateReconcileRepositoryError::CommandInvariant(error)
+        }
+    }
+}
+
 fn restore_artifact_receipt<E: ArtifactEligibility>(
     scope: DeviceCertificateScope,
     row: ArtifactReceiptRow,
@@ -1789,6 +1811,30 @@ where
             .await
     }
 
+    async fn expire_due_current_command(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<CurrentCommandExpiryOutcome, CertificateReconcileRepositoryError> {
+        let fence = fence.clone();
+        let scope = fence.scope();
+        self.write_pool
+            .identity_write(
+                scope,
+                move |mut identity| {
+                    Box::pin(async move {
+                        let mut identity_write = identity.identity();
+                        identity_write
+                            .device_commands()
+                            .expire_due_current::<E>(&fence)
+                            .await
+                            .map_err(reconcile_from_command)
+                    })
+                },
+                reconcile_storage,
+            )
+            .await
+    }
+
     async fn append_artifact_receipt(
         &self,
         fence: &CertificateAttemptFence,
@@ -2139,6 +2185,35 @@ mod tests {
             ],
             ["enroll_reconcile_target", "accept_desired_policy"]
         );
+    }
+
+    #[test]
+    fn command_expiry_error_mapping_preserves_retry_safety() {
+        let transient = deviceloop::DeviceCommandStoreError::storage_transient(
+            std::io::Error::other("transient"),
+        );
+        assert!(matches!(
+            reconcile_from_command(transient),
+            CertificateReconcileRepositoryError::StorageUnavailable { .. }
+        ));
+        let settlement = deviceloop::DeviceCommandStoreError::settlement_unknown(
+            std::io::Error::other("settlement"),
+        );
+        assert!(matches!(
+            reconcile_from_command(settlement),
+            CertificateReconcileRepositoryError::StorageUnavailable { .. }
+        ));
+        let permanent = deviceloop::DeviceCommandStoreError::storage_permanent(
+            std::io::Error::other("permanent"),
+        );
+        assert!(matches!(
+            reconcile_from_command(permanent),
+            CertificateReconcileRepositoryError::CommandInvariant(_)
+        ));
+        assert!(matches!(
+            reconcile_from_command(deviceloop::DeviceCommandStoreError::InvariantViolation),
+            CertificateReconcileRepositoryError::CommandInvariant(_)
+        ));
     }
 
     #[test]

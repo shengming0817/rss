@@ -9,23 +9,24 @@
 use std::num::NonZeroU64;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-#[cfg(all(test, feature = "integration"))]
+use deviceloop::DeviceCommandMutation;
 use deviceloop::DeviceCommandSnapshotView;
+#[cfg(all(test, feature = "integration"))]
+use deviceloop::TransitionDeviceCommandOutcome;
 use deviceloop::{
     AppendDeviceIngressOutcome, CommandIntentDigest, CommandProgressRestore, CommandRestoreCommon,
-    CommandVersion, DesiredGeneration, DeviceCommandCorruption, DeviceCommandId,
-    DeviceCommandRestore, DeviceCommandScope, DeviceCommandSnapshot, DeviceCommandState,
-    DeviceCommandStoreError, DeviceIngressCorruption, DeviceIngressDisposition,
+    CommandTransitionOutcome, CommandVersion, DesiredGeneration, DeviceCommandCorruption,
+    DeviceCommandId, DeviceCommandRestore, DeviceCommandScope, DeviceCommandSnapshot,
+    DeviceCommandState, DeviceCommandStoreError, DeviceIngressCorruption, DeviceIngressDisposition,
     DeviceIngressEnvelopeId, DeviceIngressError, DeviceIngressEvidence, DeviceIngressEvidenceView,
     DeviceIngressFingerprint, DeviceIngressReceipt, DeviceSequence, FenceCoordinate, FenceEpoch,
-    ObservedGeneration,
+    GenerationTracker, ObservedGeneration,
 };
 #[cfg(all(test, feature = "integration"))]
-use deviceloop::{CommandTransitionOutcome, TransitionDeviceCommandOutcome};
-#[cfg(all(test, feature = "integration"))]
-use deviceloop::{CreateDeviceCommand, CreateDeviceCommandOutcome, DeviceCommandMutation};
+use deviceloop::{CreateDeviceCommand, CreateDeviceCommandOutcome};
 use identity::ports::device_certificate::{
-    ArtifactEligibility, DeviceCertificateScope, DeviceIngressWrite, ReportedStateWrite,
+    ArtifactEligibility, CertificateAttemptFence, CurrentCommandExpiryOutcome,
+    DeviceCertificateScope, DeviceIngressWrite, ReportedStateWrite,
 };
 use sqlx::PgConnection;
 
@@ -167,6 +168,47 @@ pub(crate) struct DeviceCommandWriteTx<'tx> {
     conn: &'tx mut PgConnection,
 }
 
+#[derive(sqlx::FromRow)]
+struct CurrentCommandExpirySelectionRow {
+    outcome: String,
+    artifact_eligibility: Option<String>,
+    command_id: Option<String>,
+    device_id: Option<String>,
+    generation: Option<i64>,
+    fence_epoch: Option<i64>,
+    intent_digest: Option<Vec<u8>>,
+    deadline_micros: Option<i64>,
+    state: Option<String>,
+    version: Option<i64>,
+    queued_at_micros: Option<i64>,
+    published_at_micros: Option<i64>,
+    received_at_micros: Option<i64>,
+    terminal_at_micros: Option<i64>,
+    authority_time_micros: i64,
+}
+
+impl CurrentCommandExpirySelectionRow {
+    fn into_command(self) -> Result<(CommandRow, SystemTime), StoreError> {
+        let required = || command_corruption(DeviceCommandCorruption::Shape);
+        let command = CommandRow {
+            artifact_eligibility: self.artifact_eligibility.ok_or_else(required)?,
+            command_id: self.command_id.ok_or_else(required)?,
+            device_id: self.device_id.ok_or_else(required)?,
+            generation: self.generation.ok_or_else(required)?,
+            fence_epoch: self.fence_epoch.ok_or_else(required)?,
+            intent_digest: self.intent_digest.ok_or_else(required)?,
+            deadline_micros: self.deadline_micros.ok_or_else(required)?,
+            state: self.state.ok_or_else(required)?,
+            version: self.version.ok_or_else(required)?,
+            queued_at_micros: self.queued_at_micros.ok_or_else(required)?,
+            published_at_micros: self.published_at_micros,
+            received_at_micros: self.received_at_micros,
+            terminal_at_micros: self.terminal_at_micros,
+        };
+        Ok((command, decode_command_time(self.authority_time_micros)?))
+    }
+}
+
 impl<'tx> DeviceCommandWriteTx<'tx> {
     pub(crate) fn new(conn: &'tx mut PgConnection) -> Self {
         Self { conn }
@@ -175,6 +217,95 @@ impl<'tx> DeviceCommandWriteTx<'tx> {
     #[cfg(all(test, feature = "integration"))]
     async fn transaction_time(&mut self) -> Result<SystemTime, StoreError> {
         transaction_time(self.conn).await
+    }
+
+    /// Expire the provider-selected current-generation command using only transaction-owned
+    /// identity and time. PostgreSQL seals selection and settlement around the canonical Rust FSM.
+    pub(crate) async fn expire_due_current<E: ArtifactEligibility>(
+        &mut self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<CurrentCommandExpiryOutcome, StoreError> {
+        let scope = fence.scope();
+        let (tenant, device) = scope_params(scope);
+        let lane = match E::PERSISTENCE_LABEL {
+            "draft" => "draft",
+            "production" => "production",
+            _ => return Err(StoreError::InvariantViolation),
+        };
+        let selection = sqlx::query_as::<_, CurrentCommandExpirySelectionRow>(&format!(
+            "SELECT * FROM public.rss_select_due_current_device_command_{lane}(\
+             $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::bigint,$6::bigint,$7::bigint)"
+        ))
+        .bind(&tenant)
+        .bind(&device)
+        .bind(fence.attempt_id())
+        .bind(fence.lease_token())
+        .bind(coordinate_to_i64(fence.epoch().get())?)
+        .bind(coordinate_to_i64(fence.wake_version().get())?)
+        .bind(coordinate_to_i64(fence.expected_generation().get())?)
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        match selection.outcome.as_str() {
+            "no_current" => return Ok(CurrentCommandExpiryOutcome::NoCurrent),
+            "not_due" => return Ok(CurrentCommandExpiryOutcome::NotDue),
+            "already_expired" => return Ok(CurrentCommandExpiryOutcome::AlreadyExpired),
+            "stale_fence" => return Ok(CurrentCommandExpiryOutcome::StaleFence),
+            "due" => {}
+            _ => return Err(StoreError::InvariantViolation),
+        }
+
+        let (row, authority_time) = selection.into_command()?;
+        let expected = CommandVersion::restore(row.version).map_err(corrupt_command)?;
+        let state = restore_command::<E>(scope.tenant(), row)?;
+        let coordinate = state.coordinate();
+        let authority = GenerationTracker::new(
+            state.scope(),
+            coordinate.generation(),
+            (),
+            coordinate.epoch(),
+        )
+        .current_fence();
+        let transition = DeviceCommandMutation::timeout(authority)
+            .apply_to(state, authority_time)
+            .map_err(|error| StoreError::MutationRejected(error.error().clone()))?;
+        if transition.outcome() != CommandTransitionOutcome::Advanced {
+            return Err(StoreError::InvariantViolation);
+        }
+        let snapshot = transition.into_state().snapshot();
+        let (common, terminal_at) = match snapshot.view() {
+            DeviceCommandSnapshotView::TimedOut {
+                common,
+                timed_out_at,
+                ..
+            } => (common, timed_out_at),
+            _ => return Err(StoreError::InvariantViolation),
+        };
+        let outcome = sqlx::query_scalar::<_, String>(&format!(
+            "SELECT public.rss_settle_due_current_device_command_{lane}(\
+             $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5::bigint,$6::bigint,$7::bigint,\
+             $8,$9::bigint,$10::bigint,$11::bigint)"
+        ))
+        .bind(&tenant)
+        .bind(&device)
+        .bind(fence.attempt_id())
+        .bind(fence.lease_token())
+        .bind(coordinate_to_i64(fence.epoch().get())?)
+        .bind(coordinate_to_i64(fence.wake_version().get())?)
+        .bind(coordinate_to_i64(fence.expected_generation().get())?)
+        .bind(common.command_id().as_str())
+        .bind(expected.get())
+        .bind(common.version().get())
+        .bind(encode_command_time(terminal_at)?)
+        .fetch_one(&mut *self.conn)
+        .await
+        .map_err(storage)?;
+        match outcome.as_str() {
+            "expired" => Ok(CurrentCommandExpiryOutcome::Expired),
+            "stale_fence" => Ok(CurrentCommandExpiryOutcome::StaleFence),
+            "version_conflict" => Err(StoreError::InvariantViolation),
+            _ => Err(StoreError::InvariantViolation),
+        }
     }
 
     #[cfg(all(test, feature = "integration"))]
@@ -802,7 +933,6 @@ fn raw_micros_to_system_time(value: i64) -> Option<SystemTime> {
     }
 }
 
-#[cfg(all(test, feature = "integration"))]
 fn encode_command_time(value: SystemTime) -> Result<i64, StoreError> {
     raw_system_time_to_micros(value).ok_or(StoreError::InvariantViolation)
 }

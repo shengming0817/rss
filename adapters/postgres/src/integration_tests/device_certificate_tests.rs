@@ -21,9 +21,11 @@ use identity::ports::device_certificate::{
     CertificateArtifactId, CertificateArtifactRequest, CertificateArtifactSource,
     CertificateAttemptAuthority, CertificateAttemptFence, CertificateConditionMutation,
     CertificatePublicKeyDigest, CertificateReconcileRepository,
-    CertificateReconcileRepositoryError, CertificateReconcileView, DeletionRequestOutcome,
-    DeviceCertificateReconciler, FencedMutationOutcome, PersistedCertificateArtifactSnapshot,
-    ProductionEligibility, ProviderCertificateCandidate, ReportedStateHash, RotationOutcome,
+    CertificateReconcileRepositoryError, CertificateReconcileView, CurrentCommandExpiryOutcome,
+    DeletionRequestOutcome, DeviceCertificateReconciler, DeviceIngressContract,
+    DeviceIngressDelivery, DeviceIngressPreparation, DeviceIngressRepository,
+    FencedMutationOutcome, PersistedCertificateArtifactSnapshot, ProductionEligibility,
+    ProviderCertificateCandidate, ReportedStateHash, RotationOutcome,
 };
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Notify;
@@ -36,6 +38,74 @@ use crate::cotx::test_proof::DeviceCertificateJoinObservation;
 use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb};
 use crate::device_certificate::PgDeviceCertificateRepository;
 use crate::reconcile::PgReconcileStore;
+
+struct ExpiryRejectedAck {
+    tenant: vocab::TenantId,
+    device: ids::DeviceId,
+    event_id: String,
+    payload: Vec<u8>,
+}
+
+impl DeviceIngressDelivery for ExpiryRejectedAck {
+    fn tenant(&self) -> vocab::TenantId {
+        self.tenant
+    }
+
+    fn device(&self) -> ids::DeviceId {
+        self.device
+    }
+
+    fn credential_generation(&self) -> u64 {
+        1
+    }
+
+    fn contract(&self) -> DeviceIngressContract {
+        DeviceIngressContract::CommandAcked
+    }
+
+    fn correlation_data(&self) -> Option<&[u8]> {
+        Some(self.event_id.as_bytes())
+    }
+
+    fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+
+async fn commit_expiry_rejected_ack(
+    repository: &PgDeviceCertificateRepository<ProductionEligibility>,
+    fence: &CertificateAttemptFence,
+    command_id: &str,
+    event_id: &str,
+) -> TestResult {
+    let delivery = ExpiryRejectedAck {
+        tenant: fence.scope().tenant(),
+        device: fence.scope().device(),
+        event_id: event_id.to_owned(),
+        payload: serde_json::to_vec(&serde_json::json!({
+            "deviceId": fence.scope().device().as_uuid(),
+            "commandId": command_id,
+            "desiredGeneration": fence.expected_generation().get(),
+            "fenceEpoch": fence.epoch().get(),
+            "deviceSequence": 1,
+            "result": "rejected",
+            "reason": "DeviceFailure",
+            "observedAt": 1_700_000_000_000_000_i64
+        }))?,
+    };
+    let prepared = match identity::ports::device_certificate::prepare_device_ingress(&delivery) {
+        DeviceIngressPreparation::Accepted(prepared)
+        | DeviceIngressPreparation::Rejected(prepared) => prepared,
+        DeviceIngressPreparation::UnaddressablePoison(_) => {
+            return Err("expiry ACK fixture was unaddressable".into());
+        }
+    };
+    let (write, pending) = prepared.into_parts();
+    let committed = DeviceIngressRepository::commit(repository, write).await?;
+    let (receipt, _proof) = committed.into_parts();
+    pending.verify_receipt(receipt)?;
+    Ok(())
+}
 
 #[tokio::test(flavor = "multi_thread")]
 async fn device_latent_operator_audit_is_fixed_identifier_free_and_business_zero_write()
@@ -399,6 +469,288 @@ async fn device_certificate_command_requires_exact_persisted_artifact_before_any
         durable_writes, 0,
         "missing or mismatched immutable artifact evidence must reject before every command write"
     );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn current_command_expiry_is_durable_closed_and_fenced_for_every_active_state() -> TestResult
+{
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let app = connect_pg_rss_app_role(&pg, &store).await?;
+    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let mut fixtures = Vec::new();
+
+    for state in ["queued", "published", "received"] {
+        let device = uuid::Uuid::new_v4().to_string();
+        insert_device_desired(&store, tenant, &device).await?;
+        let policy_hash: Vec<u8> = sqlx::query_scalar(
+            "SELECT policy_hash FROM device_certificate_desired_states \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+        )
+        .bind(tenant.to_string())
+        .bind(&device)
+        .fetch_one(&store.pool)
+        .await?;
+        let attempt =
+            claim_device_certificate_attempt(&store, tenant, &device, &format!("expiry-{state}"))
+                .await?;
+        let scope = DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&device)?);
+        let fence =
+            CertificateAttemptFence::for_test(scope, &attempt, ExpectedGeneration::try_new(1)?)?;
+        let repository =
+            PgDeviceCertificateRepository::<ProductionEligibility>::from_unverified_for_test(
+                &store,
+            );
+        let (authorization, receipt) = authorized_artifact(
+            scope,
+            1,
+            &policy_hash,
+            &format!("expiry-artifact-{state}"),
+            vec![0x17, u8::try_from(state.len())?],
+        )?;
+        assert_eq!(
+            repository
+                .append_artifact_receipt(&fence, authorization)
+                .await?,
+            ArtifactAppendOutcome::Appended
+        );
+        let command = reviewed_bound_certificate_command_with_deadline(
+            &attempt,
+            1,
+            &policy_hash,
+            receipt.artifact_id().as_str(),
+            receipt.artifact_digest().as_bytes(),
+            u64::try_from(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT floor(extract(epoch FROM transaction_timestamp()))::bigint + 3",
+                )
+                .fetch_one(&store.pool)
+                .await?,
+            )?,
+        )
+        .await?;
+        assert_eq!(
+            ReconcileScheduleStore::record_fenced_command(
+                &store.reconcile(),
+                &attempt,
+                ConvergeAction::Create,
+                command,
+            )
+            .await?,
+            ScheduleActionOutcome::Enqueued
+        );
+        let command_id: String = sqlx::query_scalar(
+            "SELECT command_id FROM device_commands \
+             WHERE tenant_id=$1::uuid AND device_id=$2::uuid AND generation=1",
+        )
+        .bind(tenant.to_string())
+        .bind(&device)
+        .fetch_one(&store.pool)
+        .await?;
+        if matches!(state, "published" | "received") {
+            sqlx::query(
+                "UPDATE device_commands SET state='published',version=2, \
+                 published_at=pg_catalog.transaction_timestamp() \
+                 WHERE tenant_id=$1::uuid AND command_id=$2",
+            )
+            .bind(tenant.to_string())
+            .bind(&command_id)
+            .execute(&store.pool)
+            .await?;
+        }
+        if state == "received" {
+            sqlx::query(
+                "UPDATE device_commands SET state='received',version=3, \
+                 received_at=pg_catalog.transaction_timestamp() \
+                 WHERE tenant_id=$1::uuid AND command_id=$2",
+            )
+            .bind(tenant.to_string())
+            .bind(&command_id)
+            .execute(&store.pool)
+            .await?;
+        }
+        let repository =
+            PgDeviceCertificateRepository::<ProductionEligibility>::from_unverified_stores_for_test(
+                &app, &app,
+            );
+        let before: (String, i64) = sqlx::query_as(
+            "SELECT state,version FROM device_commands \
+             WHERE tenant_id=$1::uuid AND command_id=$2",
+        )
+        .bind(tenant.to_string())
+        .bind(&command_id)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(
+            repository.expire_due_current_command(&fence).await?,
+            CurrentCommandExpiryOutcome::NotDue
+        );
+        let after: (String, i64) = sqlx::query_as(
+            "SELECT state,version FROM device_commands \
+             WHERE tenant_id=$1::uuid AND command_id=$2",
+        )
+        .bind(tenant.to_string())
+        .bind(&command_id)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(after, before, "future deadline must be zero-write");
+        fixtures.push((state, fence, command_id));
+    }
+
+    for (previous_state, fence, command_id) in fixtures {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                let due: bool = sqlx::query_scalar(
+                    "SELECT transaction_timestamp() >= deadline FROM device_commands \
+                     WHERE tenant_id=$1::uuid AND command_id=$2",
+                )
+                .bind(tenant.to_string())
+                .bind(&command_id)
+                .fetch_one(&store.pool)
+                .await?;
+                if due {
+                    return TestResult::Ok(());
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await??;
+        let restarted =
+            PgDeviceCertificateRepository::<ProductionEligibility>::from_unverified_stores_for_test(
+                &app, &app,
+            );
+        let expiry = restarted.expire_due_current_command(&fence);
+        let outcome = if previous_state == "published" {
+            let ack =
+                commit_expiry_rejected_ack(&restarted, &fence, &command_id, "expiry-rejected-ack");
+            let (expiry_result, ack_result) = tokio::join!(expiry, ack);
+            ack_result?;
+            expiry_result?
+        } else {
+            expiry.await?
+        };
+        assert!(
+            matches!(outcome, CurrentCommandExpiryOutcome::Expired)
+                || (previous_state == "published"
+                    && matches!(outcome, CurrentCommandExpiryOutcome::NoCurrent)),
+            "{previous_state} command must have one expiry/rejection winner, got {outcome:?}"
+        );
+        let row: (String, i64, bool) = sqlx::query_as(
+            "SELECT state,version,terminal_at >= deadline FROM device_commands \
+             WHERE tenant_id=$1::uuid AND command_id=$2",
+        )
+        .bind(tenant.to_string())
+        .bind(&command_id)
+        .fetch_one(&store.pool)
+        .await?;
+        let expected_state = if outcome == CurrentCommandExpiryOutcome::Expired {
+            "timed_out"
+        } else {
+            "rejected"
+        };
+        assert_eq!(row.0, expected_state);
+        assert!(row.2);
+        let replay = restarted.expire_due_current_command(&fence).await?;
+        assert_eq!(
+            replay,
+            if expected_state == "timed_out" {
+                CurrentCommandExpiryOutcome::AlreadyExpired
+            } else {
+                CurrentCommandExpiryOutcome::NoCurrent
+            }
+        );
+        let replay_version: i64 = sqlx::query_scalar(
+            "SELECT version FROM device_commands WHERE tenant_id=$1::uuid AND command_id=$2",
+        )
+        .bind(tenant.to_string())
+        .bind(&command_id)
+        .fetch_one(&store.pool)
+        .await?;
+        assert_eq!(replay_version, row.1, "repeated expiry must be zero-write");
+    }
+
+    let empty_device = uuid::Uuid::new_v4().to_string();
+    insert_device_desired(&store, tenant, &empty_device).await?;
+    let empty_attempt =
+        claim_device_certificate_attempt(&store, tenant, &empty_device, "expiry-empty").await?;
+    let empty_scope =
+        DeviceCertificateScope::for_test(tenant, ids::DeviceId::parse(&empty_device)?);
+    let empty_fence = CertificateAttemptFence::for_test(
+        empty_scope,
+        &empty_attempt,
+        ExpectedGeneration::try_new(1)?,
+    )?;
+    let repository =
+        PgDeviceCertificateRepository::<ProductionEligibility>::from_unverified_stores_for_test(
+            &app, &app,
+        );
+    assert_eq!(
+        repository.expire_due_current_command(&empty_fence).await?,
+        CurrentCommandExpiryOutcome::NoCurrent
+    );
+    let stale_fence = CertificateAttemptFence::for_test(
+        empty_scope,
+        &empty_attempt,
+        ExpectedGeneration::try_new(2)?,
+    )?;
+    assert_eq!(
+        repository.expire_due_current_command(&stale_fence).await?,
+        CurrentCommandExpiryOutcome::StaleFence
+    );
+    let empty_writes: i64 = sqlx::query_scalar(
+        "SELECT count(*)::bigint FROM device_commands \
+         WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
+    )
+    .bind(tenant.to_string())
+    .bind(&empty_device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(empty_writes, 0);
+
+    let raw_update =
+        sqlx::query("UPDATE device_commands SET state='timed_out' WHERE tenant_id=$1::uuid")
+            .bind(tenant.to_string())
+            .execute(&app.pool)
+            .await
+            .expect_err("rss_app must not receive raw command UPDATE");
+    assert_eq!(
+        raw_update
+            .as_database_error()
+            .and_then(|database| database.code())
+            .map(|code| code.into_owned()),
+        Some("42501".to_owned())
+    );
+    let other_tenant = uuid::Uuid::new_v4().to_string();
+    let mut cross_tenant = app.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id',$1,true)")
+        .bind(tenant.to_string())
+        .execute(&mut *cross_tenant)
+        .await?;
+    let cross_tenant_error = sqlx::query_scalar::<_, String>(
+        "SELECT outcome FROM public.rss_select_due_current_device_command_production( \
+         $1::uuid,$2::uuid,$3::uuid,$4::uuid,$5,$6,$7)",
+    )
+    .bind(other_tenant)
+    .bind(empty_scope.device().as_uuid().to_string())
+    .bind(empty_fence.attempt_id())
+    .bind(empty_fence.lease_token())
+    .bind(i64::try_from(empty_fence.epoch().get())?)
+    .bind(i64::try_from(empty_fence.wake_version().get())?)
+    .bind(i64::try_from(empty_fence.expected_generation().get())?)
+    .fetch_one(&mut *cross_tenant)
+    .await
+    .expect_err("expiry wrapper must reject cross-tenant authority");
+    assert_eq!(
+        cross_tenant_error
+            .as_database_error()
+            .and_then(|database| database.code())
+            .map(|code| code.into_owned()),
+        Some("42501".to_owned())
+    );
+    cross_tenant.rollback().await?;
 
     store.shutdown().await?;
     Ok(())
@@ -3776,6 +4128,13 @@ impl CertificateReconcileRepository<ProductionEligibility> for ObservingReposito
         fence: &CertificateAttemptFence,
     ) -> Result<Option<DeviceCertificateCommandEvidence>, CertificateReconcileRepositoryError> {
         self.inner.load_current_command_evidence(fence).await
+    }
+
+    async fn expire_due_current_command(
+        &self,
+        fence: &CertificateAttemptFence,
+    ) -> Result<CurrentCommandExpiryOutcome, CertificateReconcileRepositoryError> {
+        self.inner.expire_due_current_command(fence).await
     }
 
     async fn append_artifact_receipt(

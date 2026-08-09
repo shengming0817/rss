@@ -32,9 +32,9 @@ use super::{
     ArtifactAppendOutcome, ArtifactDigest, CertificateAttemptAuthority,
     CertificateConditionMutation, CertificateReconcileRepository,
     CertificateReconcileRepositoryError, CertificateTransportObservation, ConditionStateBatch,
-    DesiredStateSnapshot, DeviceCertificateScope, DeviceSequence, ExpectedGeneration,
-    FencedMutationOutcome, ReportEnvelopeId, ReportedStateHash, ReportedStateSnapshot,
-    RotationOutcome,
+    CurrentCommandExpiryOutcome, DesiredStateSnapshot, DeviceCertificateScope, DeviceSequence,
+    ExpectedGeneration, FencedMutationOutcome, ReportEnvelopeId, ReportedStateHash,
+    ReportedStateSnapshot, RotationOutcome,
 };
 
 const DEGRADED_RETRY_AFTER: Duration = Duration::from_secs(30);
@@ -636,6 +636,20 @@ where
         if view.deletion_requested() {
             return self.reconcile_deletion(attempt, &receipts, now).await;
         }
+        match self
+            .repository
+            .expire_due_current_command(fence)
+            .await
+            .map_err(map_repo_error)?
+        {
+            CurrentCommandExpiryOutcome::NoCurrent | CurrentCommandExpiryOutcome::NotDue => {}
+            CurrentCommandExpiryOutcome::Expired | CurrentCommandExpiryOutcome::AlreadyExpired => {
+                self.write_degraded(fence, DegradedReason::CommandTimedOut)
+                    .await?;
+                return Ok(DurableReconcileOutcome::settled());
+            }
+            CurrentCommandExpiryOutcome::StaleFence => return Err(transient()),
+        }
         let desired = view.state().desired();
         if view.transport() == CertificateTransportObservation::Unavailable {
             let offline = CertificateReconcileInput::<E>::new(
@@ -915,7 +929,8 @@ where
             Err(CertificateReconcileRepositoryError::StorageUnavailable { .. }) => Err(transient()),
             Err(
                 CertificateReconcileRepositoryError::InvalidMutation
-                | CertificateReconcileRepositoryError::CorruptState(_),
+                | CertificateReconcileRepositoryError::CorruptState(_)
+                | CertificateReconcileRepositoryError::CommandInvariant(_),
             ) => {
                 self.write_quarantined(fence).await?;
                 Err(invariant())
@@ -1061,7 +1076,8 @@ fn map_repo_error(error: CertificateReconcileRepositoryError) -> ReconcileError 
     match error {
         CertificateReconcileRepositoryError::StorageUnavailable { .. } => transient(),
         CertificateReconcileRepositoryError::InvalidMutation
-        | CertificateReconcileRepositoryError::CorruptState(_) => invariant(),
+        | CertificateReconcileRepositoryError::CorruptState(_)
+        | CertificateReconcileRepositoryError::CommandInvariant(_) => invariant(),
     }
 }
 
@@ -1690,7 +1706,8 @@ mod tests {
         };
         use crate::device_certificate::{
             CertificateAttemptFence, CertificateReconcileView, CertificateTransportObservation,
-            DeletionRequestOutcome, DeviceCertificateStateSnapshot, ReportedStateRestore,
+            CurrentCommandExpiryOutcome, DeletionRequestOutcome, DeviceCertificateStateSnapshot,
+            ReportedStateRestore,
         };
 
         use super::*;
@@ -1785,8 +1802,17 @@ mod tests {
             append_calls: AtomicUsize,
             append_conflict: AtomicBool,
             has_command: AtomicBool,
+            expiry: Mutex<CurrentCommandExpiryOutcome>,
+            expiry_calls: AtomicUsize,
+            condition_failure_once: AtomicBool,
             conditions: Mutex<BTreeMap<String, (String, String)>>,
             rotations: AtomicUsize,
+        }
+
+        impl Default for CurrentCommandExpiryOutcome {
+            fn default() -> Self {
+                Self::NoCurrent
+            }
         }
 
         #[derive(Clone)]
@@ -1820,6 +1846,14 @@ mod tests {
                     .load(Ordering::SeqCst)
                     .then(|| command_evidence(9)))
             }
+            async fn expire_due_current_command(
+                &self,
+                _fence: &CertificateAttemptFence,
+            ) -> Result<CurrentCommandExpiryOutcome, CertificateReconcileRepositoryError>
+            {
+                self.0.expiry_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(*self.0.expiry.lock().unwrap())
+            }
             async fn append_artifact_receipt(
                 &self,
                 _fence: &CertificateAttemptFence,
@@ -1841,6 +1875,11 @@ mod tests {
                 _fence: &CertificateAttemptFence,
                 mutation: CertificateConditionMutation,
             ) -> Result<FencedMutationOutcome, CertificateReconcileRepositoryError> {
+                if self.0.condition_failure_once.swap(false, Ordering::SeqCst) {
+                    return Err(CertificateReconcileRepositoryError::storage_unavailable(
+                        std::io::Error::other("injected condition failure"),
+                    ));
+                }
                 let states = match mutation {
                     CertificateConditionMutation::States(batch) => batch.into_states(),
                     CertificateConditionMutation::Ready(proof) => {
@@ -2252,6 +2291,100 @@ mod tests {
             assert_eq!(repo.append_calls.load(Ordering::SeqCst), 0);
             assert!(repo.conditions.lock().unwrap().is_empty());
             assert!(schedule.actions.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn durable_component_settles_expired_command_without_reissuing() {
+            let attempt = ReconcileAttempt::new("attempt-component", target());
+            let authority = CertificateAttemptAuthority::for_test(scope(), &attempt).unwrap();
+            let repo_state = Arc::new(RepoState::default());
+            *repo_state.view.lock().unwrap() = Some(
+                CertificateReconcileView::restore_current(
+                    &authority,
+                    state(None),
+                    false,
+                    CertificateTransportObservation::Available,
+                )
+                .unwrap(),
+            );
+            *repo_state.receipts.lock().unwrap() = vec![receipt(NOW_SECONDS + 301)];
+            *repo_state.expiry.lock().unwrap() = CurrentCommandExpiryOutcome::Expired;
+            let schedule_state = Arc::new(ScheduleState::default());
+
+            let result = run_existing(
+                Arc::clone(&repo_state),
+                Arc::clone(&schedule_state),
+                Arc::new(FakeSource::new(SourceMode::Healthy)),
+            )
+            .await;
+
+            assert!(matches!(result, Ok(DurableReconcileOutcome::Schedule(_))));
+            assert_eq!(repo_state.expiry_calls.load(Ordering::SeqCst), 1);
+            assert!(schedule_state.actions.lock().unwrap().is_empty());
+            assert!(condition_is(
+                &repo_state,
+                "Degraded",
+                "True",
+                "CommandTimedOut"
+            ));
+
+            *repo_state.expiry.lock().unwrap() = CurrentCommandExpiryOutcome::AlreadyExpired;
+            let repeated = run_existing(
+                Arc::clone(&repo_state),
+                Arc::clone(&schedule_state),
+                Arc::new(FakeSource::new(SourceMode::Healthy)),
+            )
+            .await;
+            assert!(repeated.is_ok());
+            assert_eq!(repo_state.expiry_calls.load(Ordering::SeqCst), 2);
+            assert!(schedule_state.actions.lock().unwrap().is_empty());
+        }
+
+        #[tokio::test]
+        async fn durable_component_repairs_timed_out_conditions_after_transient_write_failure() {
+            let attempt = ReconcileAttempt::new("attempt-component", target());
+            let authority = CertificateAttemptAuthority::for_test(scope(), &attempt).unwrap();
+            let repo_state = Arc::new(RepoState::default());
+            *repo_state.view.lock().unwrap() = Some(
+                CertificateReconcileView::restore_current(
+                    &authority,
+                    state(None),
+                    false,
+                    CertificateTransportObservation::Available,
+                )
+                .unwrap(),
+            );
+            *repo_state.expiry.lock().unwrap() = CurrentCommandExpiryOutcome::Expired;
+            repo_state
+                .condition_failure_once
+                .store(true, Ordering::SeqCst);
+            let schedule_state = Arc::new(ScheduleState::default());
+
+            let first = run_existing(
+                Arc::clone(&repo_state),
+                Arc::clone(&schedule_state),
+                Arc::new(FakeSource::new(SourceMode::Healthy)),
+            )
+            .await;
+            assert!(first.is_err());
+            assert!(repo_state.conditions.lock().unwrap().is_empty());
+            assert!(schedule_state.actions.lock().unwrap().is_empty());
+
+            *repo_state.expiry.lock().unwrap() = CurrentCommandExpiryOutcome::AlreadyExpired;
+            let repaired = run_existing(
+                Arc::clone(&repo_state),
+                Arc::clone(&schedule_state),
+                Arc::new(FakeSource::new(SourceMode::Healthy)),
+            )
+            .await;
+            assert!(repaired.is_ok());
+            assert!(condition_is(
+                &repo_state,
+                "Degraded",
+                "True",
+                "CommandTimedOut"
+            ));
+            assert!(schedule_state.actions.lock().unwrap().is_empty());
         }
 
         #[tokio::test]

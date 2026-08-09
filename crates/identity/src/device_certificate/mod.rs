@@ -33,10 +33,10 @@ pub use port::{
     ArtifactAppendOutcome, CertificateAttemptAuthority, CertificateAttemptFence,
     CertificateConditionMutation, CertificateReconcileRepository,
     CertificateReconcileRepositoryError, CertificateReconcileRepositoryLocal,
-    CertificateReconcileView, CertificateTransportObservation, DeletionRequestOutcome,
-    DesiredPolicyAcceptOutcome, DeviceCertificateRepository, DeviceCertificateRepositoryError,
-    DeviceCertificateRepositoryLocal, DynDeviceCertificateRepository, FencedMutationOutcome,
-    RotationOutcome,
+    CertificateReconcileView, CertificateTransportObservation, CurrentCommandExpiryOutcome,
+    DeletionRequestOutcome, DesiredPolicyAcceptOutcome, DeviceCertificateRepository,
+    DeviceCertificateRepositoryError, DeviceCertificateRepositoryLocal,
+    DynDeviceCertificateRepository, FencedMutationOutcome, RotationOutcome,
 };
 pub use reconcile::{
     CertificateReadyProof, CertificateReadyProofError, CertificateRevocationObservation,
