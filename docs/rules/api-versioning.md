@@ -35,6 +35,10 @@ internal。package version、MSRV、Cargo publish eligibility 以及 binary/imag
 `profile = "production"`、artifact `supported` 或 binary/image 存在均不能自动选择或激活 official profile。设计边界
 见 [`Spec 010`](../spec/010-release-surface-convergence/spec.md)。
 
+公开品牌、registry 前缀与 internal package → public package 映射只由
+[`architecture.md` §公开发布命名](architecture.md#公开发布命名) 持有。本文件只消费该命名决策，不复制 package
+名称或把尚未选择的 internal package 提升为 Release API。
+
 仓内 `pub` 只表示 Rust 跨 crate 可见性，不自动进入轴 A。`publish = false` 的 internal crate 可以保留
 `cargo public-api` curated baseline 作为安全敏感 exported-symbol 漂移审查，但该 baseline 不把 internal crate 提升为
 Release API，也不产生外部 SemVer 承诺；`diport` 属于这一类 Internal Provider Contract。

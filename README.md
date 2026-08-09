@@ -8,6 +8,16 @@ RSS 是 GoCell 的 Rust 重写——domain-native 治理 + 惯用扁平 Cargo wo
 完整结构树 / 分层 / 命名的**单一事实源**见 [`docs/rules/architecture.md`](docs/rules/architecture.md)；
 最高协作规范见 [`CLAUDE.md`](CLAUDE.md)。分层由 crate 依赖图（编译期）+ `deny.toml` wrappers 强制。
 
+## 项目治理
+
+- [贡献指南](CONTRIBUTING.md) / [Contributing](CONTRIBUTING.md)
+- [安全策略](SECURITY.md) / [Security](SECURITY.md)
+- [治理模型](GOVERNANCE.md) / [Governance](GOVERNANCE.md)
+- [维护者](MAINTAINERS.md) / [Maintainers](MAINTAINERS.md)
+- [发布策略](RELEASES.md) / [Releases](RELEASES.md)
+- [行为准则](CODE_OF_CONDUCT.md) / [Code of Conduct](CODE_OF_CONDUCT.md)
+- [MIT License](LICENSE)
+
 ## 构建与本地验证
 
 gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `ExecutionProfile`：`check`、`test`、
