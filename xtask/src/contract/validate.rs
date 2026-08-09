@@ -1624,6 +1624,13 @@ fn rule_manifest_wire_metadata(m: &ContractManifest, label: &str) -> Vec<Finding
                 ),
             ));
         }
+        if m.schemas.response.is_some() && !m.schemas.responses.is_empty() {
+            out.push(finding(
+                Rule::ManifestWireMetadata,
+                label,
+                "HTTP contract 不得同时声明 schemas.response 与 schemas.responses；typed response map 是唯一响应 schema 来源",
+            ));
+        }
     }
 
     let mut subscription_identities = BTreeSet::new();
@@ -3266,6 +3273,29 @@ lifecycle = "draft"
         event.subscriptions[0].execution = SubscriptionExecution::AdapterNative;
         event.subscriptions[0].effect = Some(SubscriptionEffect::SettingsConfigVersionRefresh);
         assert_eq!(rule_manifest_wire_metadata(&event, "event").len(), 1);
+    }
+
+    #[test]
+    fn wire_metadata_rejects_legacy_and_typed_http_response_sources_together() {
+        let mut http = manifest(
+            ContractKind::Http,
+            ConsistencyLevel::LocalOnly,
+            RawContractOwner::Framework,
+            http_schemas(),
+        );
+        http.endpoints = Some(public_http_endpoints());
+        http.schemas
+            .responses
+            .insert(HttpStatusCode::new(200), "response.schema.json".to_string());
+
+        let findings = rule_manifest_wire_metadata(&http, "http");
+
+        assert_eq!(findings.len(), 1);
+        assert!(
+            findings[0]
+                .detail
+                .contains("不得同时声明 schemas.response 与 schemas.responses")
+        );
     }
 
     #[test]

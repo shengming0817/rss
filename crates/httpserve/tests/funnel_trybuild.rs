@@ -26,9 +26,12 @@
 fn ui() {
     let t = trybuild::TestCases::new();
     t.pass("tests/ui/funnel_pass.rs");
+    t.pass("tests/ui/declared_response_funnel_pass.rs");
+    t.pass("tests/ui/primary_declared_response_funnel_pass.rs");
     t.pass("tests/ui/local_only_classified_state_pass.rs");
     t.pass("tests/ui/primary_local_only_classified_state_pass.rs");
     t.pass("tests/ui/producer_funnel_pass.rs");
+    t.pass("tests/ui/declared_producer_funnel_pass.rs");
     t.compile_fail("tests/ui/cannot_bind_unfinalized.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated_evidence.rs");
@@ -42,6 +45,15 @@ fn ui() {
     t.compile_fail("tests/ui/cannot_impl_listener_for_external.rs");
     t.compile_fail("tests/ui/generated_endpoint_requires_evidence.rs");
     t.compile_fail("tests/ui/generated_endpoint_requires_handler.rs");
+    t.compile_fail("tests/ui/declared_response_rejects_raw_response.rs");
+    t.compile_fail("tests/ui/declared_response_rejects_open_constructor.rs");
+    t.compile_fail("tests/ui/open_response_rejects_declared_constructor.rs");
+    t.compile_fail("tests/ui/declared_result_rejects_raw_error.rs");
+    t.compile_fail("tests/ui/declared_fixed_error_rejects_dto_injection.rs");
+    t.compile_fail("tests/ui/declared_fixed_error_rejects_bare_request_id.rs");
+    t.compile_fail("tests/ui/primary_declared_response_rejects_raw_response.rs");
+    t.compile_fail("tests/ui/primary_declared_response_rejects_open_constructor.rs");
+    t.compile_fail("tests/ui/primary_open_response_rejects_declared_constructor.rs");
     t.compile_fail("tests/ui/old_route_api_is_removed.rs");
     t.compile_fail("tests/ui/raw_method_router_cannot_mount.rs");
     t.compile_fail("tests/ui/local_only_cannot_with_state.rs");
@@ -58,5 +70,6 @@ fn ui() {
     t.compile_fail("tests/ui/producer_receipt_cannot_be_forged.rs");
     t.compile_fail("tests/ui/producer_handler_cannot_select_binding.rs");
     t.compile_fail("tests/ui/producer_duplicate_facts.rs");
+    t.compile_fail("tests/ui/declared_producer_rejects_raw_response.rs");
     t.compile_fail("tests/ui/authorized_subject_has_no_grant_evidence.rs");
 }

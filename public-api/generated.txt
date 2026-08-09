@@ -2883,6 +2883,186 @@ impl core::marker::Unpin for generated::http::audit_v1::list_entries::error::Con
 impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::error::ConversionError
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::error::ConversionError
+pub enum generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::ErrCoreValidation
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::cmp::Eq for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::cmp::Ord for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::cmp(&self, &generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::eq(&self, &generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode) -> bool
+impl core::cmp::PartialOrd for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::partial_cmp(&self, &generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub type generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub type generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::try_from(&str) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub type generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::marker::StructuralPartialEq for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::str::traits::FromStr for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub type generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::Err = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::from_str(&str) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub enum generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::ValidationError
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::cmp::Eq for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::cmp::Ord for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::cmp(&self, &generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::eq(&self, &generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage) -> bool
+impl core::cmp::PartialOrd for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::partial_cmp(&self, &generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub type generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub type generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::try_from(&str) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub type generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::marker::StructuralPartialEq for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::str::traits::FromStr for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub type generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::Err = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::from_str(&str) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub enum generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::ErrCoreInternal
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::cmp::Eq for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::cmp::Ord for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::cmp(&self, &generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::eq(&self, &generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode) -> bool
+impl core::cmp::PartialOrd for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::partial_cmp(&self, &generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub type generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub type generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::try_from(&str) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub type generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::marker::StructuralPartialEq for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::str::traits::FromStr for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub type generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::Err = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::from_str(&str) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub enum generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::InternalError
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::cmp::Eq for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::cmp::Ord for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::cmp(&self, &generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::eq(&self, &generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage) -> bool
+impl core::cmp::PartialOrd for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::partial_cmp(&self, &generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub type generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub type generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::try_from(&str) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub type generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::Error = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::marker::StructuralPartialEq for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::str::traits::FromStr for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub type generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::Err = generated::http::audit_v1::list_entries::error::ConversionError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::from_str(&str) -> core::result::Result<Self, generated::http::audit_v1::list_entries::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub enum generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
+pub generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope::Error(generated::http::audit_v1::list_entries::AuditListEntriesResponseError)
+pub generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope::Success(generated::http::audit_v1::list_entries::AuditListEntriesResponse)
+impl axum_core::response::into_response::IntoResponse for generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope
 pub enum generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
 impl core::marker::Freeze for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
 impl core::marker::Send for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
@@ -2892,6 +3072,8 @@ impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::Loca
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::LocalOnlyConformanceMarker
 pub enum generated::http::audit_v1::list_entries::RouteMarker
+impl vocab::http::DeclaredHttpResponseMarker for generated::http::audit_v1::list_entries::RouteMarker
+pub type generated::http::audit_v1::list_entries::RouteMarker::HandlerOutput = core::result::Result<generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope, generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure>
 impl core::marker::Freeze for generated::http::audit_v1::list_entries::RouteMarker
 impl core::marker::Send for generated::http::audit_v1::list_entries::RouteMarker
 impl core::marker::Sync for generated::http::audit_v1::list_entries::RouteMarker
@@ -2927,6 +3109,114 @@ impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditEntry
 impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditEntryView
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditEntryView
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditEntryView
+pub struct generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+pub generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::code: generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorCode
+pub generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::message: generated::http::audit_v1::list_entries::AuditListEntriesBadRequestErrorMessage
+pub generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::request_id: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::retryable: bool
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+pub struct generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::error: generated::http::audit_v1::list_entries::AuditListEntriesBadRequestError
+impl axum_core::response::into_response::IntoResponse for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::into_response(self) -> axum_core::response::Response
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::http::HttpResponseBinding for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub const generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::SCHEMA: &'static str
+pub const generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::STATUS: u16
+impl secure::redaction::Redact for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub struct generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+impl generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure::internal(requestidmint::WireRequestId) -> Self
+impl axum_core::response::into_response::IntoResponse for generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure
+pub struct generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+pub generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::code: generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorCode
+pub generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::message: generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorMessage
+pub generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::request_id: alloc::string::String
+pub generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::retryable: bool
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+pub struct generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::error: generated::http::audit_v1::list_entries::AuditListEntriesInternalServerError
+impl axum_core::response::into_response::IntoResponse for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::into_response(self) -> axum_core::response::Response
+impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::http::HttpResponseBinding for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub const generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::SCHEMA: &'static str
+pub const generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::STATUS: u16
+impl secure::redaction::Redact for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
 pub struct generated::http::audit_v1::list_entries::AuditListEntriesRequest
 pub generated::http::audit_v1::list_entries::AuditListEntriesRequest::cursor: core::option::Option<alloc::string::String>
 pub generated::http::audit_v1::list_entries::AuditListEntriesRequest::limit: core::num::nonzero::NonZeroU32
@@ -2953,10 +3243,16 @@ pub struct generated::http::audit_v1::list_entries::AuditListEntriesResponse
 pub generated::http::audit_v1::list_entries::AuditListEntriesResponse::data: alloc::vec::Vec<generated::http::audit_v1::list_entries::AuditEntryView>
 pub generated::http::audit_v1::list_entries::AuditListEntriesResponse::has_more: bool
 pub generated::http::audit_v1::list_entries::AuditListEntriesResponse::next_cursor: core::option::Option<alloc::string::String>
+impl axum_core::response::into_response::IntoResponse for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::into_response(self) -> axum_core::response::Response
 impl core::clone::Clone for generated::http::audit_v1::list_entries::AuditListEntriesResponse
 pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::clone(&self) -> generated::http::audit_v1::list_entries::AuditListEntriesResponse
 impl core::fmt::Debug for generated::http::audit_v1::list_entries::AuditListEntriesResponse
 pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::http::HttpResponseBinding for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub const generated::http::audit_v1::list_entries::AuditListEntriesResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v1::list_entries::AuditListEntriesResponse::SCHEMA: &'static str
+pub const generated::http::audit_v1::list_entries::AuditListEntriesResponse::STATUS: u16
 impl secure::redaction::Redact for generated::http::audit_v1::list_entries::AuditListEntriesResponse
 pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl serde_core::ser::Serialize for generated::http::audit_v1::list_entries::AuditListEntriesResponse
@@ -2970,6 +3266,19 @@ impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListE
 impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesResponse
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponse
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub struct generated::http::audit_v1::list_entries::AuditListEntriesResponseError(_)
+impl generated::http::audit_v1::list_entries::AuditListEntriesResponseError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponseError::status_400(requestidmint::WireRequestId) -> Self
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponseError::status_500(requestidmint::WireRequestId) -> Self
+impl axum_core::response::into_response::IntoResponse for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
+pub fn generated::http::audit_v1::list_entries::AuditListEntriesResponseError::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
+impl core::marker::Send for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
+impl core::marker::Sync for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
+impl core::marker::Unpin for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
+impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
 pub const generated::http::audit_v1::list_entries::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::audit_v1::list_entries::CONTRACT_ID: &str
 pub const generated::http::audit_v1::list_entries::EFFECTS: &[vocab::http::HttpEffectKind]
@@ -2977,8 +3286,10 @@ pub const generated::http::audit_v1::list_entries::EFFECT_PROFILE: vocab::http::
 pub const generated::http::audit_v1::list_entries::PATH: &str
 pub const generated::http::audit_v1::list_entries::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::audit_v1::list_entries::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
+pub const generated::http::audit_v1::list_entries::RESPONSES: &[generated::http::HttpResponseSpec]
 pub const generated::http::audit_v1::list_entries::ROUTE: vocab::http::HttpRouteBinding<generated::http::audit_v1::list_entries::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::audit_v1::list_entries::SPEC: generated::http::HttpSpec
+pub type generated::http::audit_v1::list_entries::AuditListEntriesHandlerResult = core::result::Result<generated::http::audit_v1::list_entries::AuditListEntriesResponseEnvelope, generated::http::audit_v1::list_entries::AuditListEntriesFrameworkFailure>
 pub mod generated::http::audit_v1::list_tenant_entries
 pub mod generated::http::audit_v1::list_tenant_entries::defaults
 pub mod generated::http::audit_v1::list_tenant_entries::error
@@ -3000,6 +3311,7 @@ impl core::marker::UnsafeUnpin for generated::http::audit_v1::list_tenant_entrie
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list_tenant_entries::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::error::ConversionError
 pub enum generated::http::audit_v1::list_tenant_entries::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::audit_v1::list_tenant_entries::RouteMarker
 impl core::marker::Freeze for generated::http::audit_v1::list_tenant_entries::RouteMarker
 impl core::marker::Send for generated::http::audit_v1::list_tenant_entries::RouteMarker
 impl core::marker::Sync for generated::http::audit_v1::list_tenant_entries::RouteMarker
@@ -3162,6 +3474,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::account_status_get::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::account_status_get::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::account_status_get::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::account_status_get::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::account_status_get::RouteMarker
@@ -3346,6 +3659,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::account_status_
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetRequestTargetStatus
 pub enum generated::http::identity_v1::account_status_set::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::account_status_set::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::account_status_set::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::account_status_set::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::account_status_set::RouteMarker
@@ -3442,6 +3756,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::login::error::C
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::login::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::login::error::ConversionError
 pub enum generated::http::identity_v1::login::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::login::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::login::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::login::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::login::RouteMarker
@@ -3542,6 +3857,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout::error::
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout::error::ConversionError
 pub enum generated::http::identity_v1::logout::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::logout::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::logout::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::logout::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::logout::RouteMarker
@@ -3638,6 +3954,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::logout_all::err
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::logout_all::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout_all::error::ConversionError
 pub enum generated::http::identity_v1::logout_all::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::logout_all::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::logout_all::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::logout_all::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::logout_all::RouteMarker
@@ -3734,6 +4051,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::password_change
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::password_change::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::password_change::error::ConversionError
 pub enum generated::http::identity_v1::password_change::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::password_change::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::password_change::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::password_change::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::password_change::RouteMarker
@@ -4844,6 +5162,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_create
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyRuleViewEffect
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyRuleViewEffect
 pub enum generated::http::identity_v1::policies_create::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::policies_create::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::policies_create::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::policies_create::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::policies_create::RouteMarker
@@ -5369,6 +5688,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_deacti
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_deactivate::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_deactivate::error::ConversionError
 pub enum generated::http::identity_v1::policies_deactivate::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::policies_deactivate::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::policies_deactivate::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::policies_deactivate::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::policies_deactivate::RouteMarker
@@ -6355,6 +6675,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_get::L
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::policies_get::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::policies_get::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::policies_get::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::policies_get::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::policies_get::RouteMarker
@@ -7702,6 +8023,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_list::
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::policies_list::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::policies_list::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::policies_list::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::policies_list::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::policies_list::RouteMarker
@@ -9131,6 +9453,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::policies_update
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateRuleEffect
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyUpdateRuleEffect
 pub enum generated::http::identity_v1::policies_update::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::policies_update::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::policies_update::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::policies_update::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::policies_update::RouteMarker
@@ -9711,6 +10034,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::profile::LocalO
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::profile::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::profile::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::profile::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::profile::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::profile::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::profile::RouteMarker
@@ -9807,6 +10131,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::refresh::error:
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::refresh::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::refresh::error::ConversionError
 pub enum generated::http::identity_v1::refresh::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::refresh::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::refresh::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::refresh::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::refresh::RouteMarker
@@ -9904,6 +10229,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_assign::e
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_assign::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_assign::error::ConversionError
 pub enum generated::http::identity_v1::roles_assign::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::roles_assign::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::roles_assign::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::roles_assign::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::roles_assign::RouteMarker
@@ -10008,6 +10334,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_list::Loc
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_list::LocalOnlyConformanceMarker
 pub enum generated::http::identity_v1::roles_list::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::roles_list::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::roles_list::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::roles_list::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::roles_list::RouteMarker
@@ -10108,6 +10435,7 @@ impl core::marker::UnsafeUnpin for generated::http::identity_v1::roles_revoke::e
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::roles_revoke::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_revoke::error::ConversionError
 pub enum generated::http::identity_v1::roles_revoke::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::identity_v1::roles_revoke::RouteMarker
 impl core::marker::Freeze for generated::http::identity_v1::roles_revoke::RouteMarker
 impl core::marker::Send for generated::http::identity_v1::roles_revoke::RouteMarker
 impl core::marker::Sync for generated::http::identity_v1::roles_revoke::RouteMarker
@@ -10375,6 +10703,18 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_po
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutPolicyKeyUsagesItem
+pub enum generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope::Error(generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError)
+pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope::Success(generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse)
+impl axum_core::response::into_response::IntoResponse for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
+impl core::marker::Send for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope
 pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError::code: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictErrorCode
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
@@ -10396,6 +10736,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::d
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
 pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse::error: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictError
+impl axum_core::response::into_response::IntoResponse for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse::into_response(self) -> axum_core::response::Response
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
 pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
 impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
@@ -10437,6 +10779,18 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_po
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData
+pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+impl generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure::internal(requestidmint::WireRequestId) -> Self
+impl axum_core::response::into_response::IntoResponse for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+impl core::marker::Send for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure
 pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError::code: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundErrorCode
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError
@@ -10458,6 +10812,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::d
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError
 pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse::error: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundError
+impl axum_core::response::into_response::IntoResponse for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse::into_response(self) -> axum_core::response::Response
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse
 pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse
 impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse
@@ -10569,6 +10925,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::d
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutRequest
 pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse
 pub generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::data: generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutData
+impl axum_core::response::into_response::IntoResponse for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::into_response(self) -> axum_core::response::Response
 impl core::clone::Clone for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse
 pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::clone(&self) -> generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse
 impl core::fmt::Debug for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse
@@ -10590,9 +10948,23 @@ impl core::marker::Unpin for generated::http::identity_v2::device_certificate_po
 impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse
+pub struct generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError(_)
+impl generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError::status_404(generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutNotFoundResponse) -> Self
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError::status_409(generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse) -> Self
+impl axum_core::response::into_response::IntoResponse for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
+pub fn generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
+impl core::marker::Send for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
+impl core::marker::Sync for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
+impl core::marker::Unpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
+impl core::marker::UnsafeUnpin for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
 pub const generated::http::identity_v2::device_certificate_policy_put::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID: &str
 pub const generated::http::identity_v2::device_certificate_policy_put::RESPONSES: &[generated::http::HttpResponseSpec]
+pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutHandlerResult = core::result::Result<generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope, generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure>
 pub mod generated::http::identity_v2::device_certificate_status_get
 pub mod generated::http::identity_v2::device_certificate_status_get::error
 pub struct generated::http::identity_v2::device_certificate_status_get::error::ConversionError(_)
@@ -10938,6 +11310,7 @@ impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::Local
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
 pub enum generated::http::runtime_v1::inventory::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::runtime_v1::inventory::RouteMarker
 impl core::marker::Freeze for generated::http::runtime_v1::inventory::RouteMarker
 impl core::marker::Send for generated::http::runtime_v1::inventory::RouteMarker
 impl core::marker::Sync for generated::http::runtime_v1::inventory::RouteMarker
@@ -12194,6 +12567,7 @@ impl core::marker::UnsafeUnpin for generated::http::settings_v1::error::Conversi
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v1::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v1::error::ConversionError
 pub enum generated::http::settings_v1::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::settings_v1::RouteMarker
 impl core::marker::Freeze for generated::http::settings_v1::RouteMarker
 impl core::marker::Send for generated::http::settings_v1::RouteMarker
 impl core::marker::Sync for generated::http::settings_v1::RouteMarker
@@ -12293,6 +12667,7 @@ impl core::marker::UnsafeUnpin for generated::http::settings_v2::error::Conversi
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v2::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v2::error::ConversionError
 pub enum generated::http::settings_v2::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::settings_v2::RouteMarker
 impl core::marker::Freeze for generated::http::settings_v2::RouteMarker
 impl core::marker::Send for generated::http::settings_v2::RouteMarker
 impl core::marker::Sync for generated::http::settings_v2::RouteMarker
@@ -12399,6 +12774,7 @@ impl core::marker::UnsafeUnpin for generated::http::settings_v4::LocalOnlyConfor
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v4::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v4::LocalOnlyConformanceMarker
 pub enum generated::http::settings_v4::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::settings_v4::RouteMarker
 impl core::marker::Freeze for generated::http::settings_v4::RouteMarker
 impl core::marker::Send for generated::http::settings_v4::RouteMarker
 impl core::marker::Sync for generated::http::settings_v4::RouteMarker
@@ -12495,6 +12871,7 @@ impl core::marker::UnsafeUnpin for generated::http::settings_v5::error::Conversi
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v5::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v5::error::ConversionError
 pub enum generated::http::settings_v5::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::settings_v5::RouteMarker
 impl core::marker::Freeze for generated::http::settings_v5::RouteMarker
 impl core::marker::Send for generated::http::settings_v5::RouteMarker
 impl core::marker::Sync for generated::http::settings_v5::RouteMarker
@@ -12573,6 +12950,7 @@ impl core::marker::UnsafeUnpin for generated::http::settings_v6::error::Conversi
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v6::error::ConversionError
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v6::error::ConversionError
 pub enum generated::http::settings_v6::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::settings_v6::RouteMarker
 impl core::marker::Freeze for generated::http::settings_v6::RouteMarker
 impl core::marker::Send for generated::http::settings_v6::RouteMarker
 impl core::marker::Sync for generated::http::settings_v6::RouteMarker
@@ -12678,6 +13056,7 @@ impl core::marker::UnsafeUnpin for generated::http::settings_v7::LocalOnlyConfor
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v7::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v7::LocalOnlyConformanceMarker
 pub enum generated::http::settings_v7::RouteMarker
+impl vocab::http::OpenHttpResponseMarker for generated::http::settings_v7::RouteMarker
 impl core::marker::Freeze for generated::http::settings_v7::RouteMarker
 impl core::marker::Send for generated::http::settings_v7::RouteMarker
 impl core::marker::Sync for generated::http::settings_v7::RouteMarker
@@ -12901,6 +13280,18 @@ pub trait generated::http::HttpResponseBinding
 pub const generated::http::HttpResponseBinding::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::HttpResponseBinding::SCHEMA: &'static str
 pub const generated::http::HttpResponseBinding::STATUS: u16
+impl generated::http::HttpResponseBinding for generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse
+pub const generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::SCHEMA: &'static str
+pub const generated::http::audit_v1::list_entries::AuditListEntriesBadRequestResponse::STATUS: u16
+impl generated::http::HttpResponseBinding for generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse
+pub const generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::SCHEMA: &'static str
+pub const generated::http::audit_v1::list_entries::AuditListEntriesInternalServerErrorResponse::STATUS: u16
+impl generated::http::HttpResponseBinding for generated::http::audit_v1::list_entries::AuditListEntriesResponse
+pub const generated::http::audit_v1::list_entries::AuditListEntriesResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::audit_v1::list_entries::AuditListEntriesResponse::SCHEMA: &'static str
+pub const generated::http::audit_v1::list_entries::AuditListEntriesResponse::STATUS: u16
 impl generated::http::HttpResponseBinding for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutConflictResponse::SCHEMA: &'static str

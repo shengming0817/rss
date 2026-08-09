@@ -238,6 +238,7 @@ pub mod account_status_get {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
@@ -620,6 +621,7 @@ pub mod account_status_set {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -875,6 +877,7 @@ pub mod login {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -1065,6 +1068,7 @@ pub mod logout {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -1254,6 +1258,7 @@ pub mod logout_all {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -1530,6 +1535,7 @@ pub mod password_change {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -4846,6 +4852,7 @@ pub mod policies_create {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -5054,6 +5061,7 @@ pub mod policies_deactivate {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -7956,6 +7964,7 @@ pub mod policies_get {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
@@ -10906,6 +10915,7 @@ pub mod policies_list {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
@@ -14216,6 +14226,7 @@ pub mod policies_update {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -14547,6 +14558,7 @@ pub mod profile {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
@@ -14761,6 +14773,7 @@ pub mod refresh {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -14956,6 +14969,7 @@ pub mod roles_assign {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =
@@ -15225,6 +15239,7 @@ pub mod roles_list {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
@@ -15403,6 +15418,7 @@ pub mod roles_revoke {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =

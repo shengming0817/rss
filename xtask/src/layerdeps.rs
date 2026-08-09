@@ -474,6 +474,8 @@ const AUTHMINT_ALLOWED_WRAPPERS: &[&str] = &[
 ];
 const SAGAAUTHMINT_CRATE: &str = "sagaauthmint";
 const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
+const REQUESTIDMINT_CRATE: &str = "requestidmint";
+const REQUESTIDMINT_ALLOWED_WRAPPERS: &[&str] = &["httpserve", "generated"];
 const WORKSPACEFACTS_CRATE: &str = "workspacefacts";
 const WORKSPACEFACTS_CONSUMER: &str = "xtask";
 const GUPPY_CRATE: &str = "guppy";
@@ -605,6 +607,7 @@ pub(crate) fn check_wrappers(
     let mut findings = check_runtimeexec_wrapper_coverage(members, bans);
     findings.extend(check_authmint_wrapper_coverage(members, bans));
     findings.extend(check_sagaauthmint_wrapper_coverage(members, bans));
+    findings.extend(check_requestidmint_wrapper_coverage(members, bans));
     findings.extend(check_postgres_migration_operator_confinement(
         members, bans, edges,
     ));
@@ -649,6 +652,7 @@ pub(crate) fn check_wrappers(
             || b.crate_name == RUNTIMEEXEC_CRATE
             || b.crate_name == AUTHMINT_CRATE
             || b.crate_name == SAGAAUTHMINT_CRATE
+            || b.crate_name == REQUESTIDMINT_CRATE
             || b.crate_name == WORKSPACEFACTS_CRATE
             || b.crate_name == GUPPY_CRATE
         {
@@ -991,6 +995,74 @@ pub(crate) fn check_sagaauthmint_wrapper_coverage(
                     SAGAAUTHMINT_CRATE,
                     format!(
                         "sagaauthmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// The HTTP request-id mint is an isolated Basis capability. Only the transport owner may mint
+/// it, and generated response factories may consume it; domains and composition roots stay out.
+///
+/// INVARIANT: HTTP-REQUEST-ID-AUTHORITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "opaque carrier + exact wrapper allowlist" }
+pub(crate) fn check_requestidmint_wrapper_coverage(
+    members: &[Member],
+    bans: &[BanEntry],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let target = members
+        .iter()
+        .find(|member| member.name == REQUESTIDMINT_CRATE);
+    let ban = bans
+        .iter()
+        .find(|entry| entry.crate_name == REQUESTIDMINT_CRATE);
+    if target.is_none() && ban.is_none() {
+        return findings;
+    }
+    if !matches!(target.map(|member| member.layer), Some(Some(Layer::Basis)))
+        || target.is_some_and(|member| member.path != "crates/requestidmint")
+    {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            REQUESTIDMINT_CRATE,
+            "requestidmint 必须是 `crates/requestidmint` 的 isolated Basis workspace member",
+        ));
+        return findings;
+    }
+    for (name, path, layer) in [
+        ("httpserve", "crates/httpserve", Layer::Service),
+        ("generated", "generated", Layer::Generated),
+    ] {
+        if !members
+            .iter()
+            .any(|member| member.name == name && member.path == path && member.layer == Some(layer))
+        {
+            findings.push(finding(
+                Rule::WrapperCoverage,
+                REQUESTIDMINT_CRATE,
+                format!("requestidmint 批准消费者 `{name}` 的 path/layer 不精确"),
+            ));
+        }
+    }
+    match ban {
+        None => findings.push(finding(
+            Rule::WrapperCoverage,
+            REQUESTIDMINT_CRATE,
+            "deny.toml 缺 requestidmint target wrapper",
+        )),
+        Some(ban) => {
+            let have: BTreeSet<&str> = ban.wrappers.iter().map(String::as_str).collect();
+            let want: BTreeSet<&str> = REQUESTIDMINT_ALLOWED_WRAPPERS.iter().copied().collect();
+            if have != want {
+                let extra: Vec<&str> = have.difference(&want).copied().collect();
+                let missing: Vec<&str> = want.difference(&have).copied().collect();
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    REQUESTIDMINT_CRATE,
+                    format!(
+                        "requestidmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
                     ),
                 ));
             }
@@ -3245,6 +3317,33 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         let findings = check_sagaauthmint_wrapper_coverage(&sagaauthmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].subject, "sagaauthmint");
+    }
+
+    fn requestidmint_fixture_members() -> Vec<Member> {
+        vec![
+            m("requestidmint", "crates/requestidmint", Some(Layer::Basis)),
+            m("httpserve", "crates/httpserve", Some(Layer::Service)),
+            m("generated", "generated", Some(Layer::Generated)),
+            m("audit", "crates/audit", Some(Layer::Domain)),
+        ]
+    }
+
+    #[test]
+    fn requestidmint_wrapper_exact_green() {
+        let bans = vec![ban("requestidmint", &["httpserve", "generated"])];
+        assert!(
+            check_requestidmint_wrapper_coverage(&requestidmint_fixture_members(), &bans)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn requestidmint_wrapper_widened_to_domain_red() {
+        let bans = vec![ban("requestidmint", &["httpserve", "generated", "audit"])];
+        let findings =
+            check_requestidmint_wrapper_coverage(&requestidmint_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].subject, "requestidmint");
     }
 
     fn runtime_dep(key: &str, is_workspace_internal: bool) -> ShippedDep {

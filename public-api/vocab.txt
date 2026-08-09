@@ -1046,6 +1046,8 @@ impl core::marker::Unpin for vocab::http::WorkflowEventual
 impl core::marker::UnsafeUnpin for vocab::http::WorkflowEventual
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::http::WorkflowEventual
 impl core::panic::unwind_safe::UnwindSafe for vocab::http::WorkflowEventual
+pub trait vocab::http::DeclaredHttpResponseMarker
+pub type vocab::http::DeclaredHttpResponseMarker::HandlerOutput
 pub trait vocab::http::HttpConsistencyClass: vocab::http::consistency_sealed::HttpConsistencyClass
 pub const vocab::http::HttpConsistencyClass::LEVEL: vocab::http::HttpConsistencyLevel
 impl vocab::http::HttpConsistencyClass for vocab::http::DeviceLatent
@@ -1068,6 +1070,7 @@ impl vocab::http::NonProducerHttpConsistency for vocab::http::DeviceLatent
 impl vocab::http::NonProducerHttpConsistency for vocab::http::LocalOnly
 impl vocab::http::NonProducerHttpConsistency for vocab::http::LocalTx
 impl vocab::http::NonProducerHttpConsistency for vocab::http::WorkflowEventual
+pub trait vocab::http::OpenHttpResponseMarker
 pub mod vocab::principal
 #[non_exhaustive] pub enum vocab::principal::PrincipalKind
 pub vocab::principal::PrincipalKind::Admin

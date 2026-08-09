@@ -122,6 +122,542 @@ pub mod list_entries {
         #[redact(sensitivity = public)]
         pub tenant_id: ::std::string::String,
     }
+    ///`AuditListEntriesBadRequestError`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "AuditListEntriesBadRequestError",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "code",
+    ///    "details",
+    ///    "message",
+    ///    "requestId",
+    ///    "retryable"
+    ///  ],
+    ///  "properties": {
+    ///    "code": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ERR_CORE_VALIDATION"
+    ///      ]
+    ///    },
+    ///    "details": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "object",
+    ///        "additionalProperties": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "maxItems": 0
+    ///    },
+    ///    "message": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "validation error"
+    ///      ]
+    ///    },
+    ///    "requestId": {
+    ///      "type": "string"
+    ///    },
+    ///    "retryable": {
+    ///      "type": "boolean",
+    ///      "const": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct AuditListEntriesBadRequestError {
+        #[redact(sensitivity = public)]
+        pub code: AuditListEntriesBadRequestErrorCode,
+        #[redact(sensitivity = public)]
+        pub details: ::std::vec::Vec<
+            ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+        >,
+        #[redact(sensitivity = public)]
+        pub message: AuditListEntriesBadRequestErrorMessage,
+        #[serde(rename = "requestId")]
+        #[redact(sensitivity = public)]
+        pub request_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub retryable: bool,
+    }
+    ///`AuditListEntriesBadRequestErrorCode`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ERR_CORE_VALIDATION"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum AuditListEntriesBadRequestErrorCode {
+        #[serde(rename = "ERR_CORE_VALIDATION")]
+        ErrCoreValidation,
+    }
+    impl ::std::fmt::Display for AuditListEntriesBadRequestErrorCode {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::ErrCoreValidation => f.write_str("ERR_CORE_VALIDATION"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for AuditListEntriesBadRequestErrorCode {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ERR_CORE_VALIDATION" => Ok(Self::ErrCoreValidation),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for AuditListEntriesBadRequestErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for AuditListEntriesBadRequestErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for AuditListEntriesBadRequestErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`AuditListEntriesBadRequestErrorMessage`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "validation error"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum AuditListEntriesBadRequestErrorMessage {
+        #[serde(rename = "validation error")]
+        ValidationError,
+    }
+    impl ::std::fmt::Display for AuditListEntriesBadRequestErrorMessage {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::ValidationError => f.write_str("validation error"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for AuditListEntriesBadRequestErrorMessage {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "validation error" => Ok(Self::ValidationError),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for AuditListEntriesBadRequestErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for AuditListEntriesBadRequestErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for AuditListEntriesBadRequestErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`AuditListEntriesBadRequestResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "AuditListEntriesBadRequestResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "error"
+    ///  ],
+    ///  "properties": {
+    ///    "error": {
+    ///      "title": "AuditListEntriesBadRequestError",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "code",
+    ///        "details",
+    ///        "message",
+    ///        "requestId",
+    ///        "retryable"
+    ///      ],
+    ///      "properties": {
+    ///        "code": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "ERR_CORE_VALIDATION"
+    ///          ]
+    ///        },
+    ///        "details": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "object",
+    ///            "additionalProperties": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "maxItems": 0
+    ///        },
+    ///        "message": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "validation error"
+    ///          ]
+    ///        },
+    ///        "requestId": {
+    ///          "type": "string"
+    ///        },
+    ///        "retryable": {
+    ///          "type": "boolean",
+    ///          "const": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct AuditListEntriesBadRequestResponse {
+        #[redact(sensitivity = public)]
+        pub error: AuditListEntriesBadRequestError,
+    }
+    ///`AuditListEntriesInternalServerError`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "AuditListEntriesInternalServerError",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "code",
+    ///    "details",
+    ///    "message",
+    ///    "requestId",
+    ///    "retryable"
+    ///  ],
+    ///  "properties": {
+    ///    "code": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ERR_CORE_INTERNAL"
+    ///      ]
+    ///    },
+    ///    "details": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "object",
+    ///        "additionalProperties": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "maxItems": 0
+    ///    },
+    ///    "message": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "internal error"
+    ///      ]
+    ///    },
+    ///    "requestId": {
+    ///      "type": "string"
+    ///    },
+    ///    "retryable": {
+    ///      "type": "boolean",
+    ///      "const": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct AuditListEntriesInternalServerError {
+        #[redact(sensitivity = public)]
+        pub code: AuditListEntriesInternalServerErrorCode,
+        #[redact(sensitivity = public)]
+        pub details: ::std::vec::Vec<
+            ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+        >,
+        #[redact(sensitivity = public)]
+        pub message: AuditListEntriesInternalServerErrorMessage,
+        #[serde(rename = "requestId")]
+        #[redact(sensitivity = public)]
+        pub request_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub retryable: bool,
+    }
+    ///`AuditListEntriesInternalServerErrorCode`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ERR_CORE_INTERNAL"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum AuditListEntriesInternalServerErrorCode {
+        #[serde(rename = "ERR_CORE_INTERNAL")]
+        ErrCoreInternal,
+    }
+    impl ::std::fmt::Display for AuditListEntriesInternalServerErrorCode {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::ErrCoreInternal => f.write_str("ERR_CORE_INTERNAL"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for AuditListEntriesInternalServerErrorCode {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ERR_CORE_INTERNAL" => Ok(Self::ErrCoreInternal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for AuditListEntriesInternalServerErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for AuditListEntriesInternalServerErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for AuditListEntriesInternalServerErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`AuditListEntriesInternalServerErrorMessage`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "internal error"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum AuditListEntriesInternalServerErrorMessage {
+        #[serde(rename = "internal error")]
+        InternalError,
+    }
+    impl ::std::fmt::Display for AuditListEntriesInternalServerErrorMessage {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::InternalError => f.write_str("internal error"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for AuditListEntriesInternalServerErrorMessage {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "internal error" => Ok(Self::InternalError),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for AuditListEntriesInternalServerErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for AuditListEntriesInternalServerErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for AuditListEntriesInternalServerErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`AuditListEntriesInternalServerErrorResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "AuditListEntriesInternalServerErrorResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "error"
+    ///  ],
+    ///  "properties": {
+    ///    "error": {
+    ///      "title": "AuditListEntriesInternalServerError",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "code",
+    ///        "details",
+    ///        "message",
+    ///        "requestId",
+    ///        "retryable"
+    ///      ],
+    ///      "properties": {
+    ///        "code": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "ERR_CORE_INTERNAL"
+    ///          ]
+    ///        },
+    ///        "details": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "object",
+    ///            "additionalProperties": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "maxItems": 0
+    ///        },
+    ///        "message": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "internal error"
+    ///          ]
+    ///        },
+    ///        "requestId": {
+    ///          "type": "string"
+    ///        },
+    ///        "retryable": {
+    ///          "type": "boolean",
+    ///          "const": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct AuditListEntriesInternalServerErrorResponse {
+        #[redact(sensitivity = public)]
+        pub error: AuditListEntriesInternalServerError,
+    }
     ///`AuditListEntriesRequest`
     ///
     /// <details><summary>JSON schema</summary>
@@ -285,8 +821,206 @@ pub mod list_entries {
         "audit",
         "audit.list-entries",
         "v1",
-        "sha256:cc274e89fd8c15fc4fb276a2c252364177a53e4c5f8d2f8abfcd86930def505d",
+        "sha256:c11a70b0493a5f46a95b250c31800d0824fa9abfda48b55a3e35f3ff260ae1ef",
     );
+
+    impl super::super::HttpResponseBinding for AuditListEntriesResponse {
+        const CONTRACT: ::vocab::ContractBinding = CONTRACT;
+        const STATUS: u16 = 200;
+        const SCHEMA: &'static str = "response.schema.json";
+    }
+
+    impl ::axum::response::IntoResponse for AuditListEntriesResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
+    }
+
+    impl super::super::HttpResponseBinding for AuditListEntriesBadRequestResponse {
+        const CONTRACT: ::vocab::ContractBinding = CONTRACT;
+        const STATUS: u16 = 400;
+        const SCHEMA: &'static str = "bad-request.schema.json";
+    }
+
+    impl ::axum::response::IntoResponse for AuditListEntriesBadRequestResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
+    }
+
+    impl super::super::HttpResponseBinding for AuditListEntriesInternalServerErrorResponse {
+        const CONTRACT: ::vocab::ContractBinding = CONTRACT;
+        const STATUS: u16 = 500;
+        const SCHEMA: &'static str = "internal-server-error.schema.json";
+    }
+
+    impl ::axum::response::IntoResponse for AuditListEntriesInternalServerErrorResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
+    }
+
+    /// Declared business error responses for this contract.
+    pub struct AuditListEntriesResponseError(AuditListEntriesResponseErrorKind);
+
+    struct AuditListEntriesResponseErrorStatus400 {
+        request_id: ::requestidmint::WireRequestId,
+    }
+
+    impl ::axum::response::IntoResponse for AuditListEntriesResponseErrorStatus400 {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <AuditListEntriesBadRequestResponse as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (
+                status,
+                ::axum::Json(::serde_json::json!({
+                    "error": {
+                        "code": "ERR_CORE_VALIDATION",
+                        "message": "validation error",
+                        "retryable": false,
+                        "details": [],
+                        "requestId": self.request_id.as_str(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+
+    struct AuditListEntriesResponseErrorStatus500 {
+        request_id: ::requestidmint::WireRequestId,
+    }
+
+    impl ::axum::response::IntoResponse for AuditListEntriesResponseErrorStatus500 {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+            <AuditListEntriesInternalServerErrorResponse as super::super::HttpResponseBinding>::STATUS,
+        )
+        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (
+                status,
+                ::axum::Json(::serde_json::json!({
+                    "error": {
+                        "code": "ERR_CORE_INTERNAL",
+                        "message": "internal error",
+                        "retryable": false,
+                        "details": [],
+                        "requestId": self.request_id.as_str(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+
+    enum AuditListEntriesResponseErrorKind {
+        Status400(AuditListEntriesResponseErrorStatus400),
+        Status500(AuditListEntriesResponseErrorStatus500),
+    }
+
+    impl AuditListEntriesResponseError {
+        /// Construct the validator-approved fixed `400` response.
+        pub fn status_400(request_id: ::requestidmint::WireRequestId) -> Self {
+            Self(AuditListEntriesResponseErrorKind::Status400(
+                AuditListEntriesResponseErrorStatus400 { request_id },
+            ))
+        }
+
+        /// Construct the validator-approved fixed `500` response.
+        pub fn status_500(request_id: ::requestidmint::WireRequestId) -> Self {
+            Self(AuditListEntriesResponseErrorKind::Status500(
+                AuditListEntriesResponseErrorStatus500 { request_id },
+            ))
+        }
+    }
+
+    impl ::axum::response::IntoResponse for AuditListEntriesResponseError {
+        fn into_response(self) -> ::axum::response::Response {
+            match self.0 {
+                AuditListEntriesResponseErrorKind::Status400(response) => response.into_response(),
+                AuditListEntriesResponseErrorKind::Status500(response) => response.into_response(),
+            }
+        }
+    }
+
+    /// Complete declared response envelope. Outer `Err` is reserved for framework failures.
+    pub enum AuditListEntriesResponseEnvelope {
+        Success(AuditListEntriesResponse),
+        Error(AuditListEntriesResponseError),
+    }
+
+    impl ::axum::response::IntoResponse for AuditListEntriesResponseEnvelope {
+        fn into_response(self) -> ::axum::response::Response {
+            match self {
+                Self::Success(response) => response.into_response(),
+                Self::Error(response) => response.into_response(),
+            }
+        }
+    }
+
+    /// Closed framework failure channel. It cannot be created from arbitrary `IntoResponse` values.
+    pub struct AuditListEntriesFrameworkFailure {
+        request_id: ::requestidmint::WireRequestId,
+    }
+
+    impl AuditListEntriesFrameworkFailure {
+        /// Construct the fail-closed response used when framework request context is unavailable.
+        pub fn internal(request_id: ::requestidmint::WireRequestId) -> Self {
+            Self { request_id }
+        }
+    }
+
+    impl ::axum::response::IntoResponse for AuditListEntriesFrameworkFailure {
+        fn into_response(self) -> ::axum::response::Response {
+            (
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ::axum::Json(::serde_json::json!({
+                    "error": {
+                        "code": "ERR_CORE_INTERNAL",
+                        "message": "internal error",
+                        "retryable": false,
+                        "details": [],
+                        "requestId": self.request_id.as_str(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+
+    /// Exact handler output required by the generated route marker.
+    pub type AuditListEntriesHandlerResult =
+        ::std::result::Result<AuditListEntriesResponseEnvelope, AuditListEntriesFrameworkFailure>;
+
+    /// Known HTTP responses, indexed by status in `contract.toml`.
+    pub const RESPONSES: &[super::super::HttpResponseSpec] = &[
+        super::super::HttpResponseSpec {
+            status: 200,
+            schema: "response.schema.json",
+        },
+        super::super::HttpResponseSpec {
+            status: 400,
+            schema: "bad-request.schema.json",
+        },
+        super::super::HttpResponseSpec {
+            status: 500,
+            schema: "internal-server-error.schema.json",
+        },
+    ];
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/audit/entries";
@@ -334,6 +1068,9 @@ pub mod list_entries {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::DeclaredHttpResponseMarker for RouteMarker {
+        type HandlerOutput = AuditListEntriesHandlerResult;
+    }
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
@@ -700,6 +1437,7 @@ pub mod list_tenant_entries {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
+    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalTx> =

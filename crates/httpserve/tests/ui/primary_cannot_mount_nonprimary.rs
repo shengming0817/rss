@@ -4,6 +4,7 @@ use httpserve::routes::unfinalized_for_test;
 
 const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
 enum RouteMarker {}
+impl vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
 fn endpoint() -> httpserve::GeneratedEndpoint<(), vocab::http::LocalOnly> {
     let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalOnly>::from_static(

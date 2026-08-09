@@ -28,13 +28,15 @@ pub use auth::{
 #[cfg(any(test, feature = "test-util"))]
 pub use auth::{NonRssTestScheme, RssAccessRejectMatrixKind};
 pub use budget::ServerRequestBudget;
+pub use middleware::VerifiedRequestId;
 pub use middleware::rate_limit;
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
 pub use routes::{
-    Admin, AuthenticatedRoutes, ClassifiedRouteState, ContractMarker, GeneratedEndpoint,
-    GeneratedPrimaryEndpoint, Health, Internal, Listener, ListenerRouter, LocalOnlyAllowedEffect,
-    NonPrimaryListener, Primary, ProducerAssuranceReceipt, ProducerAuthorization, ProducerMarker,
-    ServerService, UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
+    Admin, AuthenticatedRoutes, ClassifiedRouteState, ContractMarker,
+    DeclaredProducerContractHandler, GeneratedEndpoint, GeneratedPrimaryEndpoint, Health, Internal,
+    Listener, ListenerRouter, LocalOnlyAllowedEffect, NonPrimaryListener, Primary,
+    ProducerAssuranceReceipt, ProducerAuthorization, ProducerMarker, ServerService,
+    UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
     finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
     finalize_primary_auth_with_audit,
 };
@@ -60,8 +62,8 @@ pub use server_observation::{
 /// 不暴露 `RequestId` newtype 的只读窗口。
 pub fn request_id_str(extensions: &axum::http::Extensions) -> Option<&str> {
     extensions
-        .get::<middleware::RequestId>()
-        .map(middleware::RequestId::as_str)
+        .get::<middleware::VerifiedRequestId>()
+        .map(middleware::VerifiedRequestId::as_str)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -53,7 +53,7 @@ use tower::Service;
 use vocab::{PrincipalKind, ProjectionField, RoutePermissionId, TenantId};
 
 use crate::auth_audit::record_auth_audit;
-use crate::middleware::RequestId;
+use crate::middleware::VerifiedRequestId;
 use crate::{PrimaryRouteAuthz, RoutePermission, RouteResourceScope, RouteTenantBinding};
 
 const BEARER_SCHEME: &[u8] = b"Bearer";
@@ -1367,8 +1367,8 @@ where
             .map(|ev| ev.scheme());
         let rid = req
             .extensions()
-            .get::<RequestId>()
-            .map(|r| r.0.clone())
+            .get::<VerifiedRequestId>()
+            .map(|r| r.as_str().to_owned())
             .unwrap_or_default();
 
         // 运行期 route method drift 检测：声明 method 与实际请求 method 不一致时记 warn。

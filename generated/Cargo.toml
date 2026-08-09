@@ -19,14 +19,20 @@ uuid = { workspace = true, features = ["serde"] }
 # event glue 的 `CONTRACT: ContractBinding` 常量绑定（#1193；domain + id 同源类型化）。基础层 vocab，
 # allows(Generated, Basis)=true（layers.rs）已授权；不引入循环。
 vocab = { path = "../crates/vocab" }
+requestidmint = { path = "../crates/requestidmint" }
 # generated DTO 的 Debug 由 contract schema 字段级 x-pii/x-redaction 派生为 secure::Redact（#1358）。
 secure = { path = "../crates/secure" }
 # typify emits regress-backed parsers for contract schema string patterns.
 regress = { workspace = true }
+# HTTP response envelopes implement Axum's native IntoResponse/Result seam directly; status remains
+# owned by generated HttpResponseBinding rather than a domain-side mapping table.
+axum = { workspace = true }
+# Declared-response factories materialize validator-approved fixed envelopes without exposing
+# mutable DTO fields at the handler seam.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 # contract roundtrip 回归测试用（仅 tests/，不进 generated 产物 / 公开 API；F7）。
-serde_json = { workspace = true }
 jsonschema = { workspace = true }
 
 [lints]

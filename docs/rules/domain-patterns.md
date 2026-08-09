@@ -89,5 +89,12 @@ governance 规则定义，rules 只声明架构意图。
 
 ## Typed response envelope
 
-codegen contract handler 使用 typed response envelope 表达业务状态码。`Err(...)`
-只用于未声明的 framework 5xx。业务 4xx/5xx 返回生成的 typed error response。
+`[schemas.responses]` 含非成功状态时，codegen 派生 typed error enum、完整 response envelope、
+`HandlerResult` 与 declared-response route marker。此类 handler（含 OutboxFact producer）只能经对应
+declared constructor 挂载，且 future 输出必须精确等于生成的 `HandlerResult`；返回 raw `Response`、
+在 outer `Err` 注入任意 `IntoResponse` 或改走 open constructor 均编译失败。固定错误 schema 经生成的
+request-id factory 构造，常量字段在 handler seam 不可改写。
+
+业务 4xx/5xx 返回 envelope 的 typed error carrier；外层 `Err(...)` 是生成的闭合 framework failure，
+只用于未声明的 framework 5xx。
+未声明业务错误集合的 contract 使用 open-response marker 与普通 constructor。

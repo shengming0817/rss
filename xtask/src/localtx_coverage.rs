@@ -5901,7 +5901,10 @@ fn constructor_is_canonical(call: &ExprCall, resolver: &Resolver) -> bool {
         [httpserve, endpoint, constructor]
             if httpserve == "httpserve"
                 && matches!(endpoint.as_str(), "GeneratedEndpoint" | "GeneratedPrimaryEndpoint")
-                && matches!(constructor.as_str(), "new" | "new_producer")
+                && matches!(
+                    constructor.as_str(),
+                    "new" | "new_declared" | "new_producer" | "new_declared_producer"
+                )
     )
 }
 
@@ -6218,10 +6221,6 @@ mod tests {
             "::httpserve::ProducerMarker<::generated::http::demo_v1::write::RouteMarker>",
         )?;
         let producer: Expr = syn::parse_str("::generated::http::demo_v1::write::PRODUCER")?;
-        let constructor: ExprCall = syn::parse_str(
-            "::httpserve::GeneratedPrimaryEndpoint::new_producer(\
-             ::generated::http::demo_v1::write::PRODUCER, handler)",
-        )?;
         assert_eq!(
             marker_key_from_type(&marker, &resolver).as_deref(),
             Some("demo_v1::write")
@@ -6230,7 +6229,18 @@ mod tests {
             route_key(&producer, &resolver).as_deref(),
             Some("demo_v1::write")
         );
-        assert!(constructor_is_canonical(&constructor, &resolver));
+        for constructor in ["new_producer", "new_declared_producer"] {
+            let constructor: ExprCall = syn::parse_str(&format!(
+                "::httpserve::GeneratedPrimaryEndpoint::{constructor}(\
+                 ::generated::http::demo_v1::write::PRODUCER, handler)"
+            ))?;
+            assert!(constructor_is_canonical(&constructor, &resolver));
+        }
+        let declared: ExprCall = syn::parse_str(
+            "::httpserve::GeneratedEndpoint::new_declared(\
+             ::generated::http::demo_v1::write::ROUTE, handler)",
+        )?;
+        assert!(constructor_is_canonical(&declared, &resolver));
         Ok(())
     }
 

@@ -29,10 +29,11 @@ use core::marker::PhantomData;
 use diport::{AuthEffect, LocalPrivilege, PortEffectClass, PortPrivilegeClass, ReadEffect};
 use primitives::{AuthPlan, ListenerKind};
 use std::convert::Infallible;
+use std::future::Future;
 use std::sync::Arc;
 use vocab::http::{
-    HttpConsistencyClass, HttpProducerBinding, LocalOnly, NonLocalHttpConsistency,
-    NonProducerHttpConsistency, OutboxFact,
+    DeclaredHttpResponseMarker, HttpConsistencyClass, HttpProducerBinding, LocalOnly,
+    NonLocalHttpConsistency, NonProducerHttpConsistency, OutboxFact,
 };
 use vocab::{ContractBinding, HttpRouteAuth, HttpRouteBinding, HttpRouteEvidence};
 
@@ -399,6 +400,124 @@ impl<M> ProducerAuthorization<M> {
 #[doc(hidden)]
 pub trait ContractHandlerArgs<M>: sealed::ContractHandlerArgs<M> {}
 
+/// Sealed proof that a declared-response handler preserves its generated output until mount.
+#[doc(hidden)]
+pub trait DeclaredContractHandler<M, T, S>:
+    Handler<T, S> + sealed::DeclaredContractHandler<M, T, S>
+where
+    M: DeclaredHttpResponseMarker,
+{
+}
+
+/// Sealed proof that a declared-response producer handler preserves its generated output.
+#[doc(hidden)]
+pub trait DeclaredProducerContractHandler<M, T, S>:
+    Handler<T, S> + sealed::DeclaredProducerContractHandler<M, T, S>
+where
+    M: DeclaredHttpResponseMarker,
+{
+}
+
+macro_rules! impl_declared_contract_handler {
+    ($($ty:ident),*) => {
+        impl<F, Fut, Mode, M, S, $($ty),*> sealed::DeclaredContractHandler<
+            M,
+            (Mode, ContractMarker<M>, $($ty,)*),
+            S,
+        > for F
+        where
+            M: DeclaredHttpResponseMarker,
+            F: Handler<(Mode, ContractMarker<M>, $($ty,)*), S>
+                + FnOnce(ContractMarker<M>, $($ty),*) -> Fut,
+            Fut: Future<Output = M::HandlerOutput> + Send + 'static,
+        {
+        }
+
+        impl<F, Fut, Mode, M, S, $($ty),*> DeclaredContractHandler<
+            M,
+            (Mode, ContractMarker<M>, $($ty,)*),
+            S,
+        > for F
+        where
+            M: DeclaredHttpResponseMarker,
+            F: Handler<(Mode, ContractMarker<M>, $($ty,)*), S>
+                + FnOnce(ContractMarker<M>, $($ty),*) -> Fut,
+            Fut: Future<Output = M::HandlerOutput> + Send + 'static,
+        {
+        }
+    };
+}
+
+impl_declared_contract_handler!();
+impl_declared_contract_handler!(T1);
+impl_declared_contract_handler!(T1, T2);
+impl_declared_contract_handler!(T1, T2, T3);
+impl_declared_contract_handler!(T1, T2, T3, T4);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6, T7);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13);
+impl_declared_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14);
+impl_declared_contract_handler!(
+    T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15
+);
+
+macro_rules! impl_declared_producer_contract_handler {
+    ($($ty:ident),*) => {
+        impl<F, Fut, Mode, M, S, $($ty),*> sealed::DeclaredProducerContractHandler<
+            M,
+            (Mode, ProducerMarker<M>, $($ty,)*),
+            S,
+        > for F
+        where
+            M: DeclaredHttpResponseMarker,
+            F: Handler<(Mode, ProducerMarker<M>, $($ty,)*), S>
+                + FnOnce(ProducerMarker<M>, $($ty),*) -> Fut,
+            Fut: Future<Output = M::HandlerOutput> + Send + 'static,
+        {
+        }
+
+        impl<F, Fut, Mode, M, S, $($ty),*> DeclaredProducerContractHandler<
+            M,
+            (Mode, ProducerMarker<M>, $($ty,)*),
+            S,
+        > for F
+        where
+            M: DeclaredHttpResponseMarker,
+            F: Handler<(Mode, ProducerMarker<M>, $($ty,)*), S>
+                + FnOnce(ProducerMarker<M>, $($ty),*) -> Fut,
+            Fut: Future<Output = M::HandlerOutput> + Send + 'static,
+        {
+        }
+    };
+}
+
+impl_declared_producer_contract_handler!();
+impl_declared_producer_contract_handler!(T1);
+impl_declared_producer_contract_handler!(T1, T2);
+impl_declared_producer_contract_handler!(T1, T2, T3);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5, T6);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5, T6, T7);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12);
+impl_declared_producer_contract_handler!(T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13);
+impl_declared_producer_contract_handler!(
+    T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14
+);
+impl_declared_producer_contract_handler!(
+    T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15
+);
+
 macro_rules! impl_contract_handler_args {
     ($($ty:ident),*) => {
         impl<Mode, M, $($ty),*> sealed::ContractHandlerArgs<M>
@@ -528,8 +647,22 @@ where
         handler: H,
     ) -> Result<Self, RouteGroupError>
     where
-        M: 'static,
+        M: vocab::http::OpenHttpResponseMarker + 'static,
         H: Handler<T, S>,
+        T: ContractHandlerArgs<M> + 'static,
+    {
+        Endpoint::new::<M, _, _>(binding.evidence(), handler)
+            .map(|endpoint| Self(endpoint, PhantomData))
+    }
+
+    /// Bind a route with declared business responses to its exact generated handler output.
+    pub fn new_declared<M, H, T>(
+        binding: HttpRouteBinding<M, C>,
+        handler: H,
+    ) -> Result<Self, RouteGroupError>
+    where
+        M: DeclaredHttpResponseMarker + 'static,
+        H: DeclaredContractHandler<M, T, S>,
         T: ContractHandlerArgs<M> + 'static,
     {
         Endpoint::new::<M, _, _>(binding.evidence(), handler)
@@ -592,8 +725,22 @@ where
         handler: H,
     ) -> Result<Self, RouteGroupError>
     where
-        M: 'static,
+        M: vocab::http::OpenHttpResponseMarker + 'static,
         H: Handler<T, S>,
+        T: ContractHandlerArgs<M> + 'static,
+    {
+        Endpoint::new::<M, _, _>(binding.evidence(), handler)
+            .map(|endpoint| Self(endpoint, PhantomData))
+    }
+
+    /// Bind a Primary route with declared responses to its exact generated handler output.
+    pub fn new_declared<M, H, T>(
+        binding: HttpRouteBinding<M, C>,
+        handler: H,
+    ) -> Result<Self, RouteGroupError>
+    where
+        M: DeclaredHttpResponseMarker + 'static,
+        H: DeclaredContractHandler<M, T, S>,
         T: ContractHandlerArgs<M> + 'static,
     {
         Endpoint::new::<M, _, _>(binding.evidence(), handler)
@@ -612,8 +759,26 @@ where
         handler: H,
     ) -> Result<Self, RouteGroupError>
     where
-        M: 'static,
+        M: vocab::http::OpenHttpResponseMarker + 'static,
         H: Handler<T, S>,
+        T: ProducerHandlerArgs<M> + 'static,
+    {
+        Endpoint::new::<M, _, _>(producer.route_evidence(), handler).map(|mut endpoint| {
+            endpoint.handler = endpoint
+                .handler
+                .layer(axum::Extension(ProducerRouteWitness(producer)));
+            Self(endpoint, PhantomData)
+        })
+    }
+
+    /// Bind a producer route with declared responses to its exact generated handler output.
+    pub fn new_declared_producer<M, H, T>(
+        producer: HttpProducerBinding<M>,
+        handler: H,
+    ) -> Result<Self, RouteGroupError>
+    where
+        M: DeclaredHttpResponseMarker + 'static,
+        H: DeclaredProducerContractHandler<M, T, S>,
         T: ProducerHandlerArgs<M> + 'static,
     {
         Endpoint::new::<M, _, _>(producer.route_evidence(), handler).map(|mut endpoint| {
@@ -791,6 +956,8 @@ fn test_route_evidence(
 mod sealed {
     pub trait Sealed {}
     pub trait ContractHandlerArgs<M> {}
+    pub trait DeclaredContractHandler<M, T, S> {}
+    pub trait DeclaredProducerContractHandler<M, T, S> {}
     pub trait ProducerHandlerArgs<M> {}
 }
 
@@ -1741,7 +1908,10 @@ mod tests {
         vocab::EventFactBinding::from_static(OTHER_FACT, "test.other");
 
     enum TestRouteMarker {}
+
+    impl vocab::http::OpenHttpResponseMarker for TestRouteMarker {}
     enum OtherTestRouteMarker {}
+    impl vocab::http::OpenHttpResponseMarker for OtherTestRouteMarker {}
 
     #[derive(Clone)]
     struct TestReadState;
@@ -2582,7 +2752,7 @@ mod tests {
                     |req: axum::extract::Request, next: axum::middleware::Next| async move {
                         let saw = req
                             .extensions()
-                            .get::<crate::middleware::RequestId>()
+                            .get::<crate::middleware::VerifiedRequestId>()
                             .is_some();
                         let mut resp = next.run(req).await;
                         if saw {
@@ -2606,7 +2776,9 @@ mod tests {
     fn request_id_str_reads_from_extensions() {
         let mut ext = axum::http::Extensions::new();
         assert_eq!(crate::request_id_str(&ext), None, "无 RequestId → None");
-        ext.insert(crate::middleware::RequestId("test-rid".to_owned()));
+        ext.insert(crate::middleware::VerifiedRequestId::from_middleware(
+            "test-rid".to_owned(),
+        ));
         assert_eq!(
             crate::request_id_str(&ext),
             Some("test-rid"),

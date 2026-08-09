@@ -26,7 +26,11 @@ fields = [
 
 [schemas]
 request = "request.schema.json"
-response = "response.schema.json"
+
+[schemas.responses]
+200 = "response.schema.json"
+400 = "bad-request.schema.json"
+500 = "internal-server-error.schema.json"
 
 [effectProfile]
 effects = ["auth", "read", "projection"]

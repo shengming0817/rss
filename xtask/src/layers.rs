@@ -20,7 +20,7 @@
 /// `secure` ⇒ sanctioned 前向边 `secure → securederive`（proc-macro 是编译期纯工具，出边全是外部 crate
 /// syn/quote/proc-macro2，无内部边可违 [`allows`]）。
 ///
-/// `diagctx`、`authmint` 与 `sagaauthmint` capability crates 是**独立根**
+/// `diagctx`、`authmint`、`sagaauthmint` 与 `requestidmint` capability crates 是**独立根**
 /// （[`ISOLATED_BASIS_CRATES`]）：任何涉及这些 crate 的 base 内边
 /// （双向）均不 sanction，由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz
 /// crate import diagctx）见 follow-up #1400。
@@ -29,6 +29,7 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
     "diagctx",
     "authmint",
     "sagaauthmint",
+    "requestidmint",
     "vocab",
     "assembly-schema",
     "ids",
@@ -39,9 +40,10 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
 ];
 
 /// 独立根基础 crate：任何涉及这些 crate 的 intra-base 边（双向）均不 sanction。
-/// `diagctx` 是诊断独立根；`authmint` 是 Authenticated production mint capability 独立根
+/// `diagctx` 是诊断独立根；其余 mint crates 是 production capability 独立根
 /// （deny.toml wrappers 另收窄持有方）。
-pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &["diagctx", "authmint", "sagaauthmint"];
+pub(crate) const ISOLATED_BASIS_CRATES: &[&str] =
+    &["diagctx", "authmint", "sagaauthmint", "requestidmint"];
 /// 引擎 / 原语层（依赖基础）。
 ///
 /// `tracewire` 是 W3C Trace Context capture/remote-parent restore 单源（唯一新 otel 落点）：domain-neutral
@@ -294,6 +296,7 @@ mod tests {
     #[case("runctx", "crates/runctx", Some(Layer::Basis))]
     #[case("diagctx", "crates/diagctx", Some(Layer::Basis))]
     #[case("authmint", "crates/authmint", Some(Layer::Basis))]
+    #[case("requestidmint", "crates/requestidmint", Some(Layer::Basis))]
     #[case("consistency", "crates/consistency", Some(Layer::Engine))]
     #[case("diport", "crates/diport", Some(Layer::DiPort))]
     #[case("httpserve", "crates/httpserve", Some(Layer::Service))]
@@ -408,6 +411,11 @@ mod tests {
     #[case("vocab", "authmint", false)]
     #[case("authmint", "vocab", false)]
     #[case("authmint", "runctx", false)]
+    // requestidmint 独立根：只能被 deny.toml 指定的上层 wrapper 消费。
+    #[case("runctx", "requestidmint", false)]
+    #[case("vocab", "requestidmint", false)]
+    #[case("requestidmint", "vocab", false)]
+    #[case("requestidmint", "runctx", false)]
     fn basis_intra_dag_allows_forward_only(
         #[case] from: &str,
         #[case] to: &str,

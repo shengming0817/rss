@@ -10,6 +10,7 @@ impl httpserve::ClassifiedRouteState for ReadState {
 }
 
 enum RouteMarker {}
+impl vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
 fn main() {
     let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalOnly>::from_static(

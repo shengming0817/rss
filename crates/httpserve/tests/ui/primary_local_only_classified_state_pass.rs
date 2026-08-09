@@ -17,7 +17,9 @@ impl httpserve::ClassifiedRouteState for AuthState {
 }
 
 enum ReadRouteMarker {}
+impl vocab::http::OpenHttpResponseMarker for ReadRouteMarker {}
 enum AuthRouteMarker {}
+impl vocab::http::OpenHttpResponseMarker for AuthRouteMarker {}
 
 fn main() {
     let read_binding =

@@ -16,6 +16,7 @@ members = [
   # Authenticated production evidence mint capability（AUTH-EVIDENCE-MINT-01 Hard token）
   "crates/authmint",
   "crates/sagaauthmint",
+  "crates/requestidmint",
   # contract authoring/provenance schema；仅依赖更低位 vocab（typed StepName/DomainName）+ 外部 crate。
   "crates/assembly-schema",
   # 引擎 / 原语（依赖基础）

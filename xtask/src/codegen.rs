@@ -1190,6 +1190,7 @@ pub const CONTRACT: ::vocab::ContractBinding =
     let effect_profile = render_http_effect_profile_consts(c)?;
     let (local_tx_evidence, local_tx) = render_http_local_tx(c, sup)?;
     let producer_binding = render_http_producer_binding(c, contracts)?;
+    let response_marker = render_http_response_marker(c)?;
     let resource = render_option_str(http.resource.as_deref(), "resource")?;
     let self_scoped = http.self_scoped;
     let resource_present = http
@@ -1308,6 +1309,7 @@ pub const PROJECTION_FIELDS: &[{sup}HttpProjectionFieldSpec] = &[{projection_fie
 
 /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
 pub enum RouteMarker {{}}
+{response_marker}
 
 /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
 pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::{consistency_level}> = ::vocab::HttpRouteBinding::from_static(
@@ -1389,6 +1391,7 @@ fn render_http_response_bindings(c: &GovernedContract, sup: &str) -> Result<Stri
 
     let mut implementations = Vec::with_capacity(c.manifest().schemas.responses.len());
     let mut specs = Vec::with_capacity(c.manifest().schemas.responses.len());
+    let mut responses = Vec::with_capacity(c.manifest().schemas.responses.len());
     for (status, schema_file) in &c.manifest().schemas.responses {
         validate_schema_filename(schema_file).with_context(|| {
             format!(
@@ -1406,22 +1409,410 @@ impl {sup}HttpResponseBinding for {response_ty} {{
     const STATUS: u16 = {status};
     const SCHEMA: &'static str = "{schema_file}";
 }}
+
+impl ::axum::response::IntoResponse for {response_ty} {{
+    fn into_response(self) -> ::axum::response::Response {{
+        let status = ::axum::http::StatusCode::from_u16(
+            <Self as {sup}HttpResponseBinding>::STATUS,
+        )
+        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        (status, ::axum::Json(self)).into_response()
+    }}
+}}
 "#
         ));
+        responses.push((status.get(), response_ty, schema_file.clone()));
         specs.push(format!(
             "    {sup}HttpResponseSpec {{ status: {status}, schema: \"{schema_file}\" }}"
         ));
     }
     let specs = specs.join(",\n");
+    let aggregates = render_http_response_aggregates(c, &responses, sup)?;
     Ok(format!(
         r#"
 {}
+{aggregates}
 /// Known HTTP responses, indexed by status in `contract.toml`.
 pub const RESPONSES: &[{sup}HttpResponseSpec] = &[
 {specs}
 ];
 "#,
         implementations.join("")
+    ))
+}
+
+struct FixedHttpErrorEnvelope {
+    code: String,
+    message: String,
+    retryable: bool,
+}
+
+fn fixed_http_error_envelope(
+    c: &GovernedContract,
+    schema_file: &str,
+) -> Result<Option<FixedHttpErrorEnvelope>> {
+    let schema = c
+        .resolved_schema(schema_file)
+        .with_context(|| format!("parse declared HTTP error schema {schema_file}"))?;
+    let exact_string_set = |value: Option<&serde_json::Value>, expected: &[&str]| {
+        value
+            .and_then(serde_json::Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<BTreeSet<_>>()
+                    == expected.iter().copied().collect::<BTreeSet<_>>()
+            })
+            .unwrap_or(false)
+    };
+    let exact_object_keys = |value: &serde_json::Value, expected: &[&str]| {
+        value
+            .as_object()
+            .map(|object| {
+                object.keys().map(String::as_str).collect::<BTreeSet<_>>()
+                    == expected.iter().copied().collect::<BTreeSet<_>>()
+            })
+            .unwrap_or(false)
+    };
+    let Some(root_properties) = schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    if !exact_object_keys(
+        &schema,
+        &[
+            "$schema",
+            "title",
+            "type",
+            "required",
+            "properties",
+            "additionalProperties",
+        ],
+    ) || schema.get("type").and_then(serde_json::Value::as_str) != Some("object")
+        || root_properties
+            .keys()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>()
+            != BTreeSet::from(["error"])
+        || !exact_string_set(schema.get("required"), &["error"])
+        || schema
+            .get("additionalProperties")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        return Ok(None);
+    }
+    let Some(error_schema) = root_properties.get("error") else {
+        return Ok(None);
+    };
+    let Some(error) = error_schema
+        .get("properties")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    let fixed_fields = ["code", "details", "message", "requestId", "retryable"];
+    if !exact_object_keys(
+        error_schema,
+        &[
+            "title",
+            "type",
+            "required",
+            "properties",
+            "additionalProperties",
+        ],
+    ) || error_schema.get("type").and_then(serde_json::Value::as_str) != Some("object")
+        || error.keys().map(String::as_str).collect::<BTreeSet<_>>()
+            != fixed_fields.iter().copied().collect::<BTreeSet<_>>()
+        || !exact_string_set(error_schema.get("required"), &fixed_fields)
+        || error_schema
+            .get("additionalProperties")
+            .and_then(serde_json::Value::as_bool)
+            != Some(false)
+    {
+        return Ok(None);
+    }
+    let singleton_string = |field: &str| -> Option<String> {
+        let values = error
+            .get(field)
+            .and_then(|value| value.get("enum"))
+            .and_then(serde_json::Value::as_array)?;
+        if values.len() != 1 {
+            return None;
+        }
+        values[0].as_str().map(str::to_owned)
+    };
+    let Some(retryable) = error
+        .get("retryable")
+        .and_then(|value| value.get("const"))
+        .and_then(serde_json::Value::as_bool)
+    else {
+        return Ok(None);
+    };
+    let details_is_empty = error
+        .get("details")
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("array")
+        && error
+            .get("details")
+            .and_then(|value| value.get("maxItems"))
+            .and_then(serde_json::Value::as_u64)
+            == Some(0)
+        && error
+            .get("details")
+            .is_some_and(|value| exact_object_keys(value, &["type", "maxItems", "items"]));
+    if !details_is_empty {
+        return Ok(None);
+    }
+    let request_id_is_string = error
+        .get("requestId")
+        .and_then(|value| value.get("type"))
+        .and_then(serde_json::Value::as_str)
+        == Some("string")
+        && error
+            .get("requestId")
+            .is_some_and(|value| exact_object_keys(value, &["type"]));
+    if !request_id_is_string {
+        return Ok(None);
+    }
+    let (Some(code), Some(message)) = (singleton_string("code"), singleton_string("message"))
+    else {
+        return Ok(None);
+    };
+    if !error
+        .get("code")
+        .is_some_and(|value| exact_object_keys(value, &["type", "enum"]))
+        || !error
+            .get("message")
+            .is_some_and(|value| exact_object_keys(value, &["type", "enum"]))
+        || !error
+            .get("retryable")
+            .is_some_and(|value| exact_object_keys(value, &["type", "const"]))
+    {
+        return Ok(None);
+    }
+    Ok(Some(FixedHttpErrorEnvelope {
+        code,
+        message,
+        retryable,
+    }))
+}
+
+fn render_http_response_aggregates(
+    c: &GovernedContract,
+    responses: &[(u16, String, String)],
+    sup: &str,
+) -> Result<String> {
+    let Some(http) = c
+        .manifest()
+        .endpoints
+        .as_ref()
+        .and_then(|endpoints| endpoints.http.as_ref())
+    else {
+        return Ok(String::new());
+    };
+    let Some((_, success_ty, _)) = responses
+        .iter()
+        .find(|(status, _, _)| *status == http.success_status)
+    else {
+        bail!(
+            "契约 {}/{}/{} 的 schemas.responses 缺 successStatus={} schema",
+            c.manifest().kind.as_dir(),
+            c.manifest().domain,
+            c.manifest().version,
+            http.success_status,
+        );
+    };
+    let errors = responses
+        .iter()
+        .filter(|(status, _, _)| *status != http.success_status)
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        return Ok(String::new());
+    }
+    let error_ty = format!("{success_ty}Error");
+    let envelope_ty = format!("{success_ty}Envelope");
+    let handler_result_ty = format!(
+        "{}HandlerResult",
+        success_ty.strip_suffix("Response").unwrap_or(success_ty)
+    );
+    let framework_failure_ty = format!(
+        "{}FrameworkFailure",
+        success_ty.strip_suffix("Response").unwrap_or(success_ty)
+    );
+    let mut error_variants = Vec::with_capacity(errors.len());
+    let mut error_arms = Vec::with_capacity(errors.len());
+    let mut error_factories = Vec::with_capacity(errors.len());
+    let mut fixed_carriers = Vec::new();
+    for (status, ty, schema_file) in errors {
+        let Some(fixed) = fixed_http_error_envelope(c, schema_file)? else {
+            error_variants.push(format!("    Status{status}({ty})"));
+            error_arms.push(format!(
+                "            {error_ty}Kind::Status{status}(response) => response.into_response()"
+            ));
+            error_factories.push(format!(
+                r#"
+    /// Wrap a typed `{status}` response declared by the contract.
+    pub fn status_{status}(response: {ty}) -> Self {{
+        Self({error_ty}Kind::Status{status}(response))
+    }}
+"#
+            ));
+            continue;
+        };
+        let fixed_ty = format!("{error_ty}Status{status}");
+        let code = format!("{:?}", fixed.code);
+        let message = format!("{:?}", fixed.message);
+        let retryable = fixed.retryable;
+        error_variants.push(format!("    Status{status}({fixed_ty})"));
+        error_arms.push(format!(
+            "            {error_ty}Kind::Status{status}(response) => response.into_response()"
+        ));
+        error_factories.push(format!(
+            r#"
+    /// Construct the validator-approved fixed `{status}` response.
+    pub fn status_{status}(request_id: ::requestidmint::WireRequestId) -> Self {{
+        Self({error_ty}Kind::Status{status}({fixed_ty} {{ request_id }}))
+    }}
+"#
+        ));
+        fixed_carriers.push(format!(
+            r#"
+struct {fixed_ty} {{
+    request_id: ::requestidmint::WireRequestId,
+}}
+
+impl ::axum::response::IntoResponse for {fixed_ty} {{
+    fn into_response(self) -> ::axum::response::Response {{
+        let status = ::axum::http::StatusCode::from_u16(
+            <{ty} as {sup}HttpResponseBinding>::STATUS,
+        )
+        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+        (status, ::axum::Json(::serde_json::json!({{
+            "error": {{
+                "code": {code},
+                "message": {message},
+                "retryable": {retryable},
+                "details": [],
+                "requestId": self.request_id.as_str(),
+            }}
+        }}))).into_response()
+    }}
+}}
+"#
+        ));
+    }
+    let error_variants = error_variants.join(",\n");
+    let error_arms = error_arms.join(",\n");
+    let error_factories = error_factories.join("");
+    let fixed_carriers = fixed_carriers.join("");
+    Ok(format!(
+        r#"
+/// Declared business error responses for this contract.
+pub struct {error_ty}({error_ty}Kind);
+
+{fixed_carriers}
+
+enum {error_ty}Kind {{
+{error_variants},
+}}
+
+impl {error_ty} {{
+{error_factories}}}
+
+impl ::axum::response::IntoResponse for {error_ty} {{
+    fn into_response(self) -> ::axum::response::Response {{
+        match self.0 {{
+{error_arms},
+        }}
+    }}
+}}
+
+/// Complete declared response envelope. Outer `Err` is reserved for framework failures.
+pub enum {envelope_ty} {{
+    Success({success_ty}),
+    Error({error_ty}),
+}}
+
+impl ::axum::response::IntoResponse for {envelope_ty} {{
+    fn into_response(self) -> ::axum::response::Response {{
+        match self {{
+            Self::Success(response) => response.into_response(),
+            Self::Error(response) => response.into_response(),
+        }}
+    }}
+}}
+
+/// Closed framework failure channel. It cannot be created from arbitrary `IntoResponse` values.
+pub struct {framework_failure_ty} {{
+    request_id: ::requestidmint::WireRequestId,
+}}
+
+impl {framework_failure_ty} {{
+    /// Construct the fail-closed response used when framework request context is unavailable.
+    pub fn internal(request_id: ::requestidmint::WireRequestId) -> Self {{
+        Self {{ request_id }}
+    }}
+}}
+
+impl ::axum::response::IntoResponse for {framework_failure_ty} {{
+    fn into_response(self) -> ::axum::response::Response {{
+        (
+            ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            ::axum::Json(::serde_json::json!({{
+                "error": {{
+                    "code": "ERR_CORE_INTERNAL",
+                    "message": "internal error",
+                    "retryable": false,
+                    "details": [],
+                    "requestId": self.request_id.as_str(),
+                }}
+            }})),
+        ).into_response()
+    }}
+}}
+
+/// Exact handler output required by the generated route marker.
+pub type {handler_result_ty} = ::std::result::Result<
+    {envelope_ty},
+    {framework_failure_ty},
+>;
+"#
+    ))
+}
+
+fn render_http_response_marker(c: &GovernedContract) -> Result<String> {
+    let Some(http) = c
+        .manifest()
+        .endpoints
+        .as_ref()
+        .and_then(|endpoints| endpoints.http.as_ref())
+    else {
+        return Ok("impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}".to_string());
+    };
+    let responses = &c.manifest().schemas.responses;
+    let has_declared_error = responses
+        .keys()
+        .any(|status| status.get() != http.success_status);
+    if !has_declared_error {
+        return Ok("impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}".to_string());
+    }
+    let success_schema = c
+        .manifest()
+        .schemas
+        .response(http.success_status)
+        .context("declared HTTP responses must include the success schema")?;
+    let success_ty = schema_root_type_name(c, success_schema, "HTTP success response schema")?;
+    let handler_result_ty = format!(
+        "{}HandlerResult",
+        success_ty.strip_suffix("Response").unwrap_or(&success_ty)
+    );
+    Ok(format!(
+        "impl ::vocab::http::DeclaredHttpResponseMarker for RouteMarker {{\n    type HandlerOutput = {handler_result_ty};\n}}"
     ))
 }
 
@@ -4026,13 +4417,22 @@ mod tests {
                 "version = \"v1\"\n",
                 "owner = \"_framework\"\n",
                 "consistencyLevel = \"LocalOnly\"\n",
-                "lifecycle = \"draft\"\n",
+                "lifecycle = \"active\"\n",
+                "path = \"/api/v1/_seed/echo\"\n",
+                "method = \"POST\"\n",
+                "[endpoints.http]\n",
+                "successStatus = 200\n",
+                "idempotency = \"idempotent\"\n",
+                "[endpoints.http.auth]\n",
+                "mode = \"public\"\n",
                 "[schemas]\n",
                 "request = \"request.schema.json\"\n",
                 "[schemas.responses]\n",
                 "200 = \"response.schema.json\"\n",
                 "404 = \"not-found.schema.json\"\n",
                 "409 = \"conflict.schema.json\"\n",
+                "[effectProfile]\n",
+                "effects = [\"read\"]\n",
             ),
         )?;
         for (file, title) in [
@@ -4047,6 +4447,50 @@ mod tests {
             )?;
         }
         Ok(())
+    }
+
+    fn synthetic_fixed_error_schema(
+        title: &str,
+        code: &str,
+        extra_required: bool,
+        request_id_max_length: Option<u64>,
+    ) -> serde_json::Value {
+        let mut request_id = serde_json::json!({ "type": "string" });
+        if let Some(max_length) = request_id_max_length {
+            request_id["maxLength"] = serde_json::json!(max_length);
+        }
+        let mut required = vec!["code", "message", "retryable", "details", "requestId"];
+        let mut properties = serde_json::json!({
+            "code": { "type": "string", "enum": [code] },
+            "message": { "type": "string", "enum": ["fixed error"] },
+            "retryable": { "type": "boolean", "const": false },
+            "details": {
+                "type": "array",
+                "maxItems": 0,
+                "items": { "type": "object" }
+            },
+            "requestId": request_id
+        });
+        if extra_required {
+            required.push("extra");
+            properties["extra"] = serde_json::json!({ "type": "string" });
+        }
+        serde_json::json!({
+            "$schema": "http://json-schema.org/draft-07/schema#",
+            "title": title,
+            "type": "object",
+            "required": ["error"],
+            "properties": {
+                "error": {
+                    "title": format!("{title}Error"),
+                    "type": "object",
+                    "required": required,
+                    "properties": properties,
+                    "additionalProperties": false
+                }
+            },
+            "additionalProperties": false
+        })
     }
 
     fn write_seed_active_http(root: &Path, endpoints_http: &str) -> Result<()> {
@@ -5005,6 +5449,20 @@ mod tests {
             "const STATUS: u16 = 404",
             "const STATUS: u16 = 409",
             "pub const RESPONSES: &[super::HttpResponseSpec]",
+            "pub struct SeedEchoResponseError(SeedEchoResponseErrorKind)",
+            "enum SeedEchoResponseErrorKind",
+            "Status404(SeedEchoNotFoundResponse)",
+            "Status409(SeedEchoConflictResponse)",
+            "pub fn status_404(response: SeedEchoNotFoundResponse) -> Self",
+            "pub fn status_409(response: SeedEchoConflictResponse) -> Self",
+            "pub enum SeedEchoResponseEnvelope",
+            "Success(SeedEchoResponse)",
+            "Error(SeedEchoResponseError)",
+            "pub struct SeedEchoFrameworkFailure",
+            "pub type SeedEchoHandlerResult =",
+            "::std::result::Result<SeedEchoResponseEnvelope, SeedEchoFrameworkFailure>",
+            "impl ::vocab::http::DeclaredHttpResponseMarker for RouteMarker",
+            "type HandlerOutput = SeedEchoHandlerResult",
         ] {
             assert_generated_contains(
                 &rendered,
@@ -5012,10 +5470,156 @@ mod tests {
                 "typed response binding must preserve status-to-schema identity",
             );
         }
+        for response_ty in [
+            "SeedEchoResponse",
+            "SeedEchoNotFoundResponse",
+            "SeedEchoConflictResponse",
+            "SeedEchoResponseError",
+            "SeedEchoResponseEnvelope",
+        ] {
+            assert_generated_contains(
+                &rendered,
+                &format!("impl ::axum::response::IntoResponse for {response_ty}"),
+                "typed responses and aggregate envelopes must own their wire conversion",
+            );
+        }
         assert_generated_contains(
             &root_mod,
             "pub trait HttpResponseBinding",
             "generated clients and servers need a common typed response seam",
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_fixed_error_factory_falls_back_for_unowned_constraints() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-http-fixed-response-fallback");
+        seed_http_with_typed_responses(&root)?;
+        let dir = root.join("contracts/http/_seed/v1");
+        std::fs::write(
+            dir.join("not-found.schema.json"),
+            serde_json::to_vec_pretty(&synthetic_fixed_error_schema(
+                "SeedEchoNotFoundResponse",
+                "ERR_NOT_FOUND",
+                true,
+                None,
+            ))?,
+        )?;
+        std::fs::write(
+            dir.join("conflict.schema.json"),
+            serde_json::to_vec_pretty(&synthetic_fixed_error_schema(
+                "SeedEchoConflictResponse",
+                "ERR_CONFLICT",
+                false,
+                Some(8),
+            ))?,
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        for needle in [
+            "pub fn status_404(response: SeedEchoNotFoundResponse) -> Self",
+            "pub fn status_409(response: SeedEchoConflictResponse) -> Self",
+        ] {
+            assert_generated_contains(
+                &rendered,
+                needle,
+                "constraints not wholly owned by the generated factory must retain typed input",
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_fixed_error_factory_requires_an_exact_panic_free_schema_proof() -> anyhow::Result<()>
+    {
+        for (case, mutate) in [
+            ("root-composition", 0_u8),
+            ("error-composition", 1),
+            ("wrong-details-type", 2),
+        ] {
+            let root = unique_tmp(&format!("codegen-http-fixed-response-{case}"));
+            seed_http_with_typed_responses(&root)?;
+            let mut schema = synthetic_fixed_error_schema(
+                "SeedEchoNotFoundResponse",
+                "ERR_NOT_FOUND",
+                false,
+                None,
+            );
+            match mutate {
+                0 => schema["allOf"] = serde_json::json!([]),
+                1 => schema["properties"]["error"]["minProperties"] = serde_json::json!(5),
+                2 => {
+                    schema["properties"]["error"]["properties"]["details"]["type"] =
+                        serde_json::json!("object")
+                }
+                _ => unreachable!(),
+            }
+            let dir = root.join("contracts/http/_seed/v1");
+            std::fs::write(
+                dir.join("not-found.schema.json"),
+                serde_json::to_vec_pretty(&schema)?,
+            )?;
+            let gen_src = root.join("generated/src");
+            generate(&root.join("contracts"), &gen_src, false)?;
+            let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+            let _ = std::fs::remove_dir_all(&root);
+            assert_generated_contains(
+                &rendered,
+                "pub fn status_404(response: SeedEchoNotFoundResponse) -> Self",
+                "unproved constraints must fall back to the ordinary typed DTO factory",
+            );
+        }
+
+        let root = unique_tmp("codegen-http-fixed-response-panic-free");
+        seed_http_with_typed_responses(&root)?;
+        let dir = root.join("contracts/http/_seed/v1");
+        std::fs::write(
+            dir.join("not-found.schema.json"),
+            serde_json::to_vec_pretty(&synthetic_fixed_error_schema(
+                "SeedEchoNotFoundResponse",
+                "ERR_NOT_FOUND",
+                false,
+                None,
+            ))?,
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+        assert_generated_contains(
+            &rendered,
+            "pub fn status_404(request_id: ::requestidmint::WireRequestId) -> Self",
+            "proved fixed factories must require transport-owned request-id authority",
+        );
+        assert!(!rendered.contains("serde_json::from_value"));
+        assert!(!rendered.contains("unreachable!"));
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_marks_single_response_http_routes_as_open() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-open-http-response");
+        seed_http(&root)?;
+        write_seed_active_http(
+            &root,
+            concat!("[endpoints.http.auth]\n", "mode = \"public\"\n"),
+        )?;
+        let gen_src = root.join("generated/src");
+        generate(&root.join("contracts"), &gen_src, false)?;
+        let rendered = std::fs::read_to_string(gen_src.join("http/_seed_v1.rs"))?;
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_generated_contains(
+            &rendered,
+            "impl ::vocab::http::OpenHttpResponseMarker for RouteMarker",
+            "single-response routes must stay on the open response constructor",
+        );
+        assert!(
+            !rendered.contains("DeclaredHttpResponseMarker for RouteMarker"),
+            "single-response routes must not select the declared response constructor"
         );
         Ok(())
     }

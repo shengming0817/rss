@@ -60,6 +60,8 @@ fn primary_plan(scheme: AuthScheme) -> AuthPlan {
 
 enum PermissionRouteMarker {}
 
+impl vocab::http::OpenHttpResponseMarker for PermissionRouteMarker {}
+
 async fn ok_handler(_: httpserve::ContractMarker<PermissionRouteMarker>) -> &'static str {
     "ok"
 }
@@ -703,6 +705,8 @@ async fn route_meta_in_request_extension() {
     const META_EFFECTS: &[vocab::HttpEffectKind] =
         &[vocab::HttpEffectKind::Auth, vocab::HttpEffectKind::Read];
     enum MetaRouteMarker {}
+
+    impl vocab::http::OpenHttpResponseMarker for MetaRouteMarker {}
     const META_BINDING: vocab::HttpRouteBinding<MetaRouteMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
             vocab::HttpContractOwner::domain("test"),
@@ -756,7 +760,10 @@ async fn route_meta_in_request_extension() {
 #[allow(clippy::unwrap_used)]
 async fn route_meta_exposes_both_declared_idempotency_classes() {
     enum IdempotentMarker {}
+
+    impl vocab::http::OpenHttpResponseMarker for IdempotentMarker {}
     enum NonIdempotentMarker {}
+    impl vocab::http::OpenHttpResponseMarker for NonIdempotentMarker {}
     const IDEMPOTENT_BINDING: vocab::HttpRouteBinding<IdempotentMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
             vocab::HttpContractOwner::domain("test"),
@@ -838,6 +845,8 @@ async fn route_meta_exposes_both_declared_idempotency_classes() {
 #[allow(clippy::unwrap_used)]
 async fn declared_success_status_drift_fails_closed() {
     enum DriftMarker {}
+
+    impl vocab::http::OpenHttpResponseMarker for DriftMarker {}
     const DRIFT_BINDING: vocab::HttpRouteBinding<DriftMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
             vocab::HttpContractOwner::domain("test"),
@@ -884,6 +893,8 @@ async fn declared_success_status_drift_fails_closed() {
 #[allow(clippy::unwrap_used)]
 async fn undeclared_redirect_status_fails_closed() {
     enum RedirectMarker {}
+
+    impl vocab::http::OpenHttpResponseMarker for RedirectMarker {}
     const REDIRECT_BINDING: vocab::HttpRouteBinding<RedirectMarker, vocab::http::LocalOnly> =
         vocab::HttpRouteBinding::from_static(
             vocab::HttpContractOwner::domain("test"),

@@ -112,6 +112,8 @@ deny = [
   # SAGA-OPERATOR-MINT-01：高权限 Saga operator mint 仅 DI proof owner 与 production runtime 可持有；
   # 依赖普通 authmint 的 httpserve/settingsonly/identityaudit 不能因此获得 operator authority。
   { crate = "sagaauthmint", wrappers = ["diport", "runtime"] },
+  # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint；generated 仅消费 opaque carrier。
+  { crate = "requestidmint", wrappers = ["httpserve", "generated"] },
   # postgres impl RoleRepo + AuthGrantLifecycle（合并 co-tx 创建 + find/revoke，#1083/#1192/#1278）；memory impl
   #   AuthGrantLifecycle（demo provider，#1192/#1278）——均 adapter→域 DIP 内向边（Option 2/ADR-005），故加入 identity wrapper。
   { crate = "identity", wrappers = ["server", "rss", "runtime", "settings-composition", "identity-composition", "audit-composition", "eventing-composition", "settingsonly", "identityaudit", "deviceidentity", "xtask", "journeys", "journeys-fault-matrix", "postgres", "memory"] },

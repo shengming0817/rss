@@ -1,6 +1,7 @@
 use httpserve::routes::unfinalized_for_test;
 
 enum RouteMarker {}
+impl vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
 fn main() {
     const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];

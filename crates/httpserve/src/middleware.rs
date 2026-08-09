@@ -43,7 +43,7 @@ fn new_uuid_correlation_id() -> diagctx::CorrelationId {
 ///
 /// **回退链**（按优先级）：
 /// 1. 入站 `X-Correlation-ID` header（经 [`diagctx::CorrelationId::parse`] 校验）；
-/// 2. 已注入的 [`RequestId`] extension（`request_id` 中间件为本层外层，先行运行）经 `CorrelationId::parse`
+/// 2. 已注入的 [`VerifiedRequestId`] extension（`request_id` 中间件为本层外层，先行运行）经 `CorrelationId::parse`
 ///    再校验（UUID v4 形态在白名单内，通常成功）；
 /// 3. 生成 UUID v4（保底，与 `request_id` 同款 `uuid` crate）。
 ///
@@ -68,7 +68,7 @@ pub(crate) async fn correlation(req: Request, next: Next) -> Response {
     let corr = from_header
         .or_else(|| {
             req.extensions()
-                .get::<RequestId>()
+                .get::<VerifiedRequestId>()
                 .and_then(|r| diagctx::CorrelationId::parse(r.as_str()).ok())
         })
         // 回退链第 3 步：生成 UUID v4 保底。
@@ -104,8 +104,8 @@ pub(crate) async fn server_request_budget(
 ) -> Response {
     let request_id = req
         .extensions()
-        .get::<RequestId>()
-        .map_or_else(String::new, |request_id| request_id.0.clone());
+        .get::<VerifiedRequestId>()
+        .map_or_else(String::new, |request_id| request_id.as_str().to_owned());
     match tokio::time::timeout(budget.duration(), next.run(req)).await {
         Ok(response) => response,
         Err(_elapsed) => {
@@ -124,14 +124,31 @@ pub(crate) async fn server_request_budget(
     }
 }
 
-/// 请求 ID newtype（存入 extensions 供 enforce 层读取）。
+/// Request ID verified and minted by the transport middleware.
 #[derive(Clone, Debug)]
-pub(crate) struct RequestId(pub(crate) String);
+pub struct VerifiedRequestId(requestidmint::WireRequestId);
 
-impl RequestId {
+impl VerifiedRequestId {
+    pub(crate) fn from_middleware(value: String) -> Self {
+        Self(requestidmint::WireRequestId::from_http_middleware(value))
+    }
+
     /// 借出请求 id 字符串（供 [`crate::request_id_str`] 给组合根外层中间件读 request 关联）。
-    pub(crate) fn as_str(&self) -> &str {
-        &self.0
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    /// Consume the transport proof at a generated typed response factory.
+    #[must_use]
+    pub fn into_wire(self) -> requestidmint::WireRequestId {
+        self.0
+    }
+
+    /// Test-only mint for domain harnesses that do not execute the sealed middleware stack.
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn for_test(value: impl Into<String>) -> Self {
+        Self::from_middleware(value.into())
     }
 }
 
@@ -145,7 +162,8 @@ pub(crate) async fn request_id(mut req: Request, next: Next) -> Response {
         .filter(|s| !s.is_empty() && s.len() <= MAX_REQUEST_ID_LEN)
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    req.extensions_mut().insert(RequestId(id.clone()));
+    req.extensions_mut()
+        .insert(VerifiedRequestId::from_middleware(id.clone()));
 
     let mut resp = next.run(req).await;
 
@@ -207,7 +225,7 @@ pub(crate) async fn body_limit(
 ) -> Response {
     let rid = req
         .extensions()
-        .get::<RequestId>()
+        .get::<VerifiedRequestId>()
         .map(|r| r.0.as_str())
         .unwrap_or("")
         .to_owned();
@@ -273,7 +291,7 @@ where
 {
     let rid = req
         .extensions()
-        .get::<RequestId>()
+        .get::<VerifiedRequestId>()
         .map(|r| r.0.as_str())
         .unwrap_or("")
         .to_owned();
@@ -313,8 +331,8 @@ where
 pub(crate) async fn panic_recovery(req: Request, next: Next) -> Response {
     let rid = req
         .extensions()
-        .get::<RequestId>()
-        .map(|r| r.0.clone())
+        .get::<VerifiedRequestId>()
+        .map(|r| r.as_str().to_owned())
         .unwrap_or_default();
     match std::panic::AssertUnwindSafe(next.run(req))
         .catch_unwind()

@@ -1,0 +1,13 @@
+error[E0308]: mismatched types
+  --> tests/ui/declared_fixed_error_rejects_dto_injection.rs:22:55
+   |
+22 |     let _ = AuditListEntriesResponseError::status_500(response);
+   |             ----------------------------------------- ^^^^^^^^ expected `WireRequestId`, found `AuditListEntriesInternalServerErrorResponse`
+   |             |
+   |             arguments to this function are incorrect
+   |
+note: associated function defined here
+  --> $WORKSPACE/generated/src/http/audit_v1.rs
+   |
+   |         pub fn status_500(request_id: ::requestidmint::WireRequestId) -> Self {
+   |                ^^^^^^^^^^

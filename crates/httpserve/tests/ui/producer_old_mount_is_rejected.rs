@@ -5,6 +5,7 @@ use vocab::http::{
 use vocab::{ContractBinding, HttpContractOwner, HttpRouteAuth};
 
 enum RouteMarker {}
+impl vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
 const ROUTE: HttpRouteBinding<RouteMarker, OutboxFact> = HttpRouteBinding::from_static(
     HttpContractOwner::domain("identity"),

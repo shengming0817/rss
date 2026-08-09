@@ -423,6 +423,22 @@ pub struct HttpRouteBinding<M, C> {
     marker: PhantomData<fn() -> (M, C)>,
 }
 
+/// Codegen-owned marker for an HTTP contract without declared business error responses.
+///
+/// Generated route markers and this trait live in different crates, so a domain consumer cannot
+/// add this implementation to a generated declared-response route. Endpoint constructors use that
+/// orphan-rule boundary as the Hard response-mode funnel.
+pub trait OpenHttpResponseMarker {}
+
+/// Codegen-owned marker for an HTTP contract with declared business error responses.
+///
+/// `HandlerOutput` is the generated `Result` envelope for the complete declared response set.
+/// Serving code verifies the handler future's exact output before Axum erases it to `Response`.
+pub trait DeclaredHttpResponseMarker {
+    /// Exact generated handler output for this route.
+    type HandlerOutput;
+}
+
 impl<M, C> Copy for HttpRouteBinding<M, C> {}
 
 impl<M, C> Clone for HttpRouteBinding<M, C> {

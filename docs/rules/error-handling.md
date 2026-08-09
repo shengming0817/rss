@@ -26,7 +26,7 @@ typed 值形固定（golden 锁）：`Duration`→毫秒 `u64`、`Time`→epoch 
   库错误用 `thiserror` 枚举表达。
 - domain 层不返回 HTTP 状态码。
 - handler 层把领域错误映射为 contract 声明的状态码。
-- codegen handler 用 typed response envelope（`Result` + typed error enum）表达业务 4xx/5xx。
+- codegen handler 用 typed response envelope（闭合 framework failure + typed error carrier）表达业务 4xx/5xx；声明业务错误响应的 route marker 只能经 declared constructor 挂载，handler future 的精确输出类型由 rustc 校验。固定 `code/message/retryable/details` 的 error schema 只生成 request-id factory，业务无法注入违背 schema 的值；outer `Err` 也不能从 raw `Response` 转换。
 
 ## Message 与 PII
 

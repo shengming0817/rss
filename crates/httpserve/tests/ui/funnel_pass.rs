@@ -5,6 +5,9 @@ use httpserve::routes::unfinalized_for_test;
 enum RouteMarker {}
 enum StatefulRouteMarker {}
 
+impl vocab::http::OpenHttpResponseMarker for RouteMarker {}
+impl vocab::http::OpenHttpResponseMarker for StatefulRouteMarker {}
+
 fn main() {
     const EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::Auth];
     let binding = vocab::HttpRouteBinding::<RouteMarker, vocab::http::LocalOnly>::from_static(

@@ -1739,7 +1739,29 @@ fn slot_files(m: &ContractManifest) -> Vec<(String, String, SchemaDirection)> {
         ),
     ] {
         if let Some(f) = file {
-            v.push((slot.to_string(), f.to_string(), direction));
+            let normalized = if slot == "response" && m.kind == ContractKind::Http {
+                m.endpoints
+                    .as_ref()
+                    .and_then(|endpoints| endpoints.http.as_ref())
+                    .map_or_else(
+                        || slot.to_string(),
+                        |http| format!("response:{}", http.success_status),
+                    )
+            } else {
+                slot.to_string()
+            };
+            let shadowed_by_explicit_response = normalized
+                .strip_prefix("response:")
+                .and_then(|status| status.parse::<u16>().ok())
+                .is_some_and(|status| {
+                    m.schemas
+                        .responses
+                        .keys()
+                        .any(|declared| declared.get() == status)
+                });
+            if !shadowed_by_explicit_response {
+                v.push((normalized, f.to_string(), direction));
+            }
         }
     }
     v.extend(m.schemas.responses.iter().map(|(status, file)| {
@@ -2062,7 +2084,27 @@ fn base_slot_files(m: &BaseContractManifest) -> Vec<(String, String, SchemaDirec
         ),
     ] {
         if let Some(f) = file {
-            v.push((slot.to_string(), f.to_string(), direction));
+            let normalized = if slot == "response" && m.kind == ContractKind::Http {
+                m.endpoints
+                    .as_ref()
+                    .and_then(|endpoints| endpoints.http.as_ref())
+                    .and_then(|http| http.success_status)
+                    .map_or_else(|| slot.to_string(), |status| format!("response:{status}"))
+            } else {
+                slot.to_string()
+            };
+            let shadowed_by_explicit_response = normalized
+                .strip_prefix("response:")
+                .and_then(|status| status.parse::<u16>().ok())
+                .is_some_and(|status| {
+                    m.schemas
+                        .responses
+                        .keys()
+                        .any(|declared| declared.get() == status)
+                });
+            if !shadowed_by_explicit_response {
+                v.push((normalized, f.to_string(), direction));
+            }
         }
     }
     v.extend(m.schemas.responses.iter().map(|(status, file)| {
@@ -3188,6 +3230,167 @@ steps = [
                     SchemaDirection::Output
                 ),
             ]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_http_success_response_normalizes_to_status_slot() -> anyhow::Result<()> {
+        let manifest: BaseContractManifest = toml::from_str(
+            r#"
+id = "audit.list-entries"
+kind = "http"
+domain = "audit"
+version = "v1"
+owner = "audit"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/audit/entries"
+method = "GET"
+
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+"#,
+        )?;
+
+        assert!(
+            base_slot_files(&manifest).iter().any(|(slot, file, _)| {
+                slot == "response:200" && file == "response.schema.json"
+            })
+        );
+        assert!(
+            base_slot_files(&manifest)
+                .iter()
+                .all(|(slot, _, _)| slot != "response"),
+            "legacy success response must compare against an explicit response:200 slot"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_success_to_typed_responses_preserves_the_success_schema_in_full_diff()
+    -> anyhow::Result<()> {
+        let base: BaseContractManifest = toml::from_str(
+            r#"
+id = "audit.list-entries"
+kind = "http"
+domain = "audit"
+version = "v1"
+owner = "audit"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/audit/entries"
+method = "GET"
+
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+
+[endpoints.http.auth]
+mode = "public"
+
+[schemas]
+request = "request.schema.json"
+response = "response.schema.json"
+
+[effectProfile]
+effects = ["read"]
+"#,
+        )?;
+        let working = ContractManifest::from_toml_str(
+            r#"
+id = "audit.list-entries"
+kind = "http"
+domain = "audit"
+version = "v1"
+owner = "audit"
+consistencyLevel = "LocalOnly"
+lifecycle = "active"
+path = "/api/v1/audit/entries"
+method = "GET"
+
+[endpoints.http]
+successStatus = 200
+idempotency = "idempotent"
+
+[endpoints.http.auth]
+mode = "public"
+
+[schemas]
+request = "request.schema.json"
+
+[schemas.responses]
+200 = "response.schema.json"
+400 = "bad-request.schema.json"
+500 = "internal-server-error.schema.json"
+
+[effectProfile]
+effects = ["read"]
+"#,
+        )?;
+        let success_schema = json!({
+            "type": "object",
+            "properties": { "data": { "type": "array" } },
+            "required": ["data"],
+            "additionalProperties": false
+        });
+        let schema_for = |file: &str| match file {
+            "request.schema.json" => json!({"type": "object"}),
+            "response.schema.json" => success_schema.clone(),
+            _ => json!({"type": "object", "properties": {"error": {"type": "object"}}}),
+        };
+        let make_slots = |files: Vec<(String, String, SchemaDirection)>| {
+            files
+                .into_iter()
+                .map(|(slot, file, direction)| (slot, (direction, schema_for(&file))))
+                .collect::<BTreeMap<_, _>>()
+        };
+        let base_side = ContractSide {
+            identity: ContractIdentity {
+                id: base.id.clone(),
+                version: base.version.clone(),
+            },
+            label: "http/audit/v1/list-entries".to_string(),
+            lifecycle: base.lifecycle,
+            kind: base.kind,
+            slots: make_slots(base_slot_files(&base)),
+            manifest: base_manifest_projection(&base)?,
+        };
+        let working_side = ContractSide {
+            identity: ContractIdentity {
+                id: working.id.clone(),
+                version: working.version.clone(),
+            },
+            label: "http/audit/v1/list-entries".to_string(),
+            lifecycle: working.lifecycle,
+            kind: working.kind,
+            slots: make_slots(slot_files(&working)),
+            manifest: manifest_projection(&working)?,
+        };
+
+        let diffs = plan_diffs(&[base_side], &[working_side])?;
+        let success = diffs[0]
+            .schemas
+            .iter()
+            .find(|schema| schema.file == "response:200")
+            .expect("normalized success slot participates in the full comparator");
+        assert_eq!(success.old.as_ref(), Some(&success_schema));
+        assert_eq!(success.new, success_schema);
+        assert!(!success.removed);
+        let result = evaluate(&diffs);
+        assert_eq!(
+            result
+                .findings
+                .iter()
+                .map(|finding| finding.rule)
+                .collect::<Vec<_>>(),
+            vec![BreakingRule::HttpStatusCodeChanged],
+            "only the intentional {{200}} -> {{200,400,500}} status-set change may be reported"
         );
         Ok(())
     }

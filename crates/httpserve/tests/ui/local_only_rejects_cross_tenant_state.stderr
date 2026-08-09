@@ -1,10 +1,10 @@
 error[E0599]: the method `with_classified_state` exists for struct `GeneratedEndpoint<CrossTenantState, vocab::http::LocalOnly>`, but its trait bounds were not satisfied
-  --> tests/ui/local_only_rejects_cross_tenant_state.rs:38:22
+  --> tests/ui/local_only_rejects_cross_tenant_state.rs:39:22
    |
  4 | struct CrossTenantState;
    | ----------------------- doesn't satisfy `<_ as ClassifiedRouteState>::Privilege = LocalPrivilege`
 ...
-38 |     let _ = endpoint.with_classified_state(CrossTenantState);
+39 |     let _ = endpoint.with_classified_state(CrossTenantState);
    |                      ^^^^^^^^^^^^^^^^^^^^^ method cannot be called due to unsatisfied trait bounds
    |
    = note: the following trait bounds were not satisfied:

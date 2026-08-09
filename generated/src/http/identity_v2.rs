@@ -811,10 +811,30 @@ pub mod device_certificate_policy_put {
         const SCHEMA: &'static str = "response.schema.json";
     }
 
+    impl ::axum::response::IntoResponse for IdentityDeviceCertificatePolicyPutResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
+    }
+
     impl super::super::HttpResponseBinding for IdentityDeviceCertificatePolicyPutNotFoundResponse {
         const CONTRACT: ::vocab::ContractBinding = CONTRACT;
         const STATUS: u16 = 404;
         const SCHEMA: &'static str = "not-found.response.schema.json";
+    }
+
+    impl ::axum::response::IntoResponse for IdentityDeviceCertificatePolicyPutNotFoundResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
     }
 
     impl super::super::HttpResponseBinding for IdentityDeviceCertificatePolicyPutConflictResponse {
@@ -822,6 +842,102 @@ pub mod device_certificate_policy_put {
         const STATUS: u16 = 409;
         const SCHEMA: &'static str = "conflict.response.schema.json";
     }
+
+    impl ::axum::response::IntoResponse for IdentityDeviceCertificatePolicyPutConflictResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
+    }
+
+    /// Declared business error responses for this contract.
+    pub struct IdentityDeviceCertificatePolicyPutResponseError(
+        IdentityDeviceCertificatePolicyPutResponseErrorKind,
+    );
+
+    enum IdentityDeviceCertificatePolicyPutResponseErrorKind {
+        Status404(IdentityDeviceCertificatePolicyPutNotFoundResponse),
+        Status409(IdentityDeviceCertificatePolicyPutConflictResponse),
+    }
+
+    impl IdentityDeviceCertificatePolicyPutResponseError {
+        /// Wrap a typed `404` response declared by the contract.
+        pub fn status_404(response: IdentityDeviceCertificatePolicyPutNotFoundResponse) -> Self {
+            Self(IdentityDeviceCertificatePolicyPutResponseErrorKind::Status404(response))
+        }
+
+        /// Wrap a typed `409` response declared by the contract.
+        pub fn status_409(response: IdentityDeviceCertificatePolicyPutConflictResponse) -> Self {
+            Self(IdentityDeviceCertificatePolicyPutResponseErrorKind::Status409(response))
+        }
+    }
+
+    impl ::axum::response::IntoResponse for IdentityDeviceCertificatePolicyPutResponseError {
+        fn into_response(self) -> ::axum::response::Response {
+            match self.0 {
+                IdentityDeviceCertificatePolicyPutResponseErrorKind::Status404(response) => {
+                    response.into_response()
+                }
+                IdentityDeviceCertificatePolicyPutResponseErrorKind::Status409(response) => {
+                    response.into_response()
+                }
+            }
+        }
+    }
+
+    /// Complete declared response envelope. Outer `Err` is reserved for framework failures.
+    pub enum IdentityDeviceCertificatePolicyPutResponseEnvelope {
+        Success(IdentityDeviceCertificatePolicyPutResponse),
+        Error(IdentityDeviceCertificatePolicyPutResponseError),
+    }
+
+    impl ::axum::response::IntoResponse for IdentityDeviceCertificatePolicyPutResponseEnvelope {
+        fn into_response(self) -> ::axum::response::Response {
+            match self {
+                Self::Success(response) => response.into_response(),
+                Self::Error(response) => response.into_response(),
+            }
+        }
+    }
+
+    /// Closed framework failure channel. It cannot be created from arbitrary `IntoResponse` values.
+    pub struct IdentityDeviceCertificatePolicyPutFrameworkFailure {
+        request_id: ::requestidmint::WireRequestId,
+    }
+
+    impl IdentityDeviceCertificatePolicyPutFrameworkFailure {
+        /// Construct the fail-closed response used when framework request context is unavailable.
+        pub fn internal(request_id: ::requestidmint::WireRequestId) -> Self {
+            Self { request_id }
+        }
+    }
+
+    impl ::axum::response::IntoResponse for IdentityDeviceCertificatePolicyPutFrameworkFailure {
+        fn into_response(self) -> ::axum::response::Response {
+            (
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ::axum::Json(::serde_json::json!({
+                    "error": {
+                        "code": "ERR_CORE_INTERNAL",
+                        "message": "internal error",
+                        "retryable": false,
+                        "details": [],
+                        "requestId": self.request_id.as_str(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+
+    /// Exact handler output required by the generated route marker.
+    pub type IdentityDeviceCertificatePolicyPutHandlerResult = ::std::result::Result<
+        IdentityDeviceCertificatePolicyPutResponseEnvelope,
+        IdentityDeviceCertificatePolicyPutFrameworkFailure,
+    >;
 
     /// Known HTTP responses, indexed by status in `contract.toml`.
     pub const RESPONSES: &[super::super::HttpResponseSpec] = &[

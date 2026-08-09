@@ -73,6 +73,26 @@ fn audit_reads_expose_split_effect_profiles() {
 }
 
 #[test]
+fn audit_list_entries_declares_complete_typed_response_set() {
+    use generated::http::HttpResponseBinding as _;
+    use generated::http::audit_v1::list_entries::{
+        AuditListEntriesBadRequestResponse, AuditListEntriesInternalServerErrorResponse,
+        AuditListEntriesResponse, RESPONSES,
+    };
+
+    assert_eq!(AuditListEntriesResponse::STATUS, 200);
+    assert_eq!(AuditListEntriesBadRequestResponse::STATUS, 400);
+    assert_eq!(AuditListEntriesInternalServerErrorResponse::STATUS, 500);
+    assert_eq!(
+        RESPONSES
+            .iter()
+            .map(|response| response.status)
+            .collect::<Vec<_>>(),
+        [200, 400, 500]
+    );
+}
+
+#[test]
 fn local_tx_registry_contains_exact_active_l1_contracts() {
     let actual: Option<Vec<_>> = http::LOCAL_TX_SPECS
         .iter()

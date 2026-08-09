@@ -24,8 +24,9 @@ use std::time::SystemTime;
 use ::generated::http::audit_v1::list_entries::SPEC as AUDIT_LIST_HTTP_SPEC;
 use ::generated::http::audit_v1::{
     list_entries::{
-        AuditEntryView, AuditListEntriesRequest, AuditListEntriesResponse,
-        ROUTE as AUDIT_LIST_HTTP_ROUTE,
+        AuditEntryView, AuditListEntriesFrameworkFailure, AuditListEntriesHandlerResult,
+        AuditListEntriesRequest, AuditListEntriesResponse, AuditListEntriesResponseEnvelope,
+        AuditListEntriesResponseError, ROUTE as AUDIT_LIST_HTTP_ROUTE,
     },
     list_tenant_entries::{
         AuditListTenantEntriesRequest, AuditListTenantEntriesResponse, AuditTenantEntryView,
@@ -34,7 +35,7 @@ use ::generated::http::audit_v1::{
 };
 use ::httpserve::{
     Admin, AuthorizedSubject, ContractMarker, GeneratedEndpoint, ResourceProjection,
-    RouteAuthorizer,
+    RouteAuthorizer, VerifiedRequestId,
 };
 use axum::Json;
 use axum::extract::rejection::{PathRejection, QueryRejection};
@@ -646,24 +647,34 @@ async fn list_entries(
     repo: Arc<DynAuditReadRepo<'static>>,
     projection: ResourceProjection,
     request: AuditListEntriesRequest,
-    request_id: String,
-) -> Response {
+    request_id: VerifiedRequestId,
+) -> AuditListEntriesHandlerResult {
     // 租户 fail-closed：缺 ctx（未经认证通道）即 500，不静默落空租户。
     let Ok(tenant) = runctx::try_with(|ctx| *ctx.tenant()) else {
-        return httpserve::error::internal_error(&request_id);
+        tracing::error!(
+            domain = AUDIT_DOMAIN,
+            request_id = request_id.as_str(),
+            reason = "missing_run_context",
+            "audit handler: framework request context missing"
+        );
+        return Err(AuditListEntriesFrameworkFailure::internal(
+            request_id.into_wire(),
+        ));
     };
     // 下限 ≥1 由 wire 类型 `NonZeroU32` 在反序列化层 type-enforced（F5）：limit=0 / 负值反序列化即失败
     // → QueryRejection → 统一 400（见路由闭包）。上限由 `vocab::Limit::new` 与 schema maximum=500
     // 收口；超限不截断，直接返回 400。
     let page = match page_from_parts(request.limit, request.cursor.as_deref()) {
         Ok(page) => page,
-        Err(_) => return httpserve::error::validation_bad_request(&request_id),
+        Err(_) => return Ok(list_entries_bad_request(request_id)),
     };
     let scope = TenantRepoScope::from_authenticated_tenant(tenant);
     match repo.list(scope, page).await {
-        Ok(result) => Json(to_response(result, projection)).into_response(),
+        Ok(result) => Ok(AuditListEntriesResponseEnvelope::Success(to_response(
+            result, projection,
+        ))),
         // 语义无效游标（合法 base64url 但非有效页索引）是客户端错误 → 400（F4）。
-        Err(AuditError::InvalidCursor) => httpserve::error::validation_bad_request(&request_id),
+        Err(AuditError::InvalidCursor) => Ok(list_entries_bad_request(request_id)),
         // 链完整性等其它失败不可静默：记录后 500（无 wire 泄漏）。
         Err(error) => {
             tracing::error!(
@@ -672,9 +683,21 @@ async fn list_entries(
                 error_chain = %secure::redact_error(&error),
                 "audit handler: list failed"
             );
-            httpserve::error::internal_error(&request_id)
+            Ok(list_entries_internal_error(request_id))
         }
     }
+}
+
+fn list_entries_bad_request(request_id: VerifiedRequestId) -> AuditListEntriesResponseEnvelope {
+    AuditListEntriesResponseEnvelope::Error(AuditListEntriesResponseError::status_400(
+        request_id.into_wire(),
+    ))
+}
+
+fn list_entries_internal_error(request_id: VerifiedRequestId) -> AuditListEntriesResponseEnvelope {
+    AuditListEntriesResponseEnvelope::Error(AuditListEntriesResponseError::status_500(
+        request_id.into_wire(),
+    ))
 }
 
 #[derive(Clone)]
@@ -691,12 +714,11 @@ async fn list_entries_handler(
     _: ContractMarker<::generated::http::audit_v1::list_entries::RouteMarker>,
     State(state): State<AuditListHandlerState>,
     Extension(authorized): Extension<AuthorizedSubject>,
+    Extension(request_id): Extension<VerifiedRequestId>,
     query: Result<Query<AuditListEntriesRequest>, QueryRejection>,
-    request: axum::extract::Request,
-) -> Response {
-    let request_id = request_id_from_parts(request.headers(), request.extensions());
+) -> AuditListEntriesHandlerResult {
     let Ok(query) = query else {
-        return httpserve::error::validation_bad_request(&request_id);
+        return Ok(list_entries_bad_request(request_id));
     };
     list_entries(state.repo, authorized.projection(), query.0, request_id).await
 }
@@ -969,7 +991,14 @@ async fn authorize_and_list_entries_for_test(
         Ok(projection) => projection,
         Err(AuditReadAuthError::Forbidden) => return httpserve::error::forbidden(&request_id),
     };
-    list_entries(repo, projection, request, request_id).await
+    list_entries(
+        repo,
+        projection,
+        request,
+        VerifiedRequestId::for_test(request_id),
+    )
+    .await
+    .into_response()
 }
 
 fn role_binding_resource_id(tenant: vocab::TenantId, role_id: &str, subject: &str) -> String {
@@ -1107,7 +1136,7 @@ where
         };
         reg.route_group::<Admin>(AUDIT_ROUTE_PREFIX, move |rb| {
             let scoped_endpoint =
-                GeneratedEndpoint::new(AUDIT_LIST_HTTP_ROUTE, list_entries_handler)?
+                GeneratedEndpoint::new_declared(AUDIT_LIST_HTTP_ROUTE, list_entries_handler)?
                     .with_classified_state(AuditListHandlerState {
                         repo: scoped_repo.clone(),
                     });
@@ -2990,6 +3019,44 @@ mod tests {
                 .expect("oneshot");
 
             assert_eq!(response.status(), case.expected_status, "{}", case.label);
+            let response_request_id = response
+                .headers()
+                .get("x-request-id")
+                .and_then(|value| value.to_str().ok())
+                .expect("sealed router generated request id")
+                .to_string();
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("body");
+            match case.label {
+                "success" => {
+                    let page: AuditListEntriesResponse =
+                        serde_json::from_slice(&body).expect("typed success response");
+                    assert!(page.data.is_empty());
+                    assert!(!page.has_more);
+                    assert!(page.next_cursor.is_none());
+                }
+                "legacy tenant query" => {
+                    let json: serde_json::Value =
+                        serde_json::from_slice(&body).expect("typed validation response");
+                    assert_eq!(json["error"]["code"], "ERR_CORE_VALIDATION");
+                    assert_eq!(json["error"]["message"], "validation error");
+                    assert_eq!(json["error"]["retryable"], false);
+                    assert_eq!(json["error"]["details"], serde_json::json!([]));
+                    assert_eq!(json["error"]["requestId"], response_request_id);
+                }
+                "hash mismatch" => {
+                    let json: serde_json::Value =
+                        serde_json::from_slice(&body).expect("typed internal response");
+                    assert_eq!(json["error"]["code"], "ERR_CORE_INTERNAL");
+                    assert_eq!(json["error"]["message"], "internal error");
+                    assert_eq!(json["error"]["retryable"], false);
+                    assert_eq!(json["error"]["details"], serde_json::json!([]));
+                    assert_eq!(json["error"]["requestId"], response_request_id);
+                    assert!(!String::from_utf8_lossy(&body).contains("HashMismatch"));
+                }
+                _ => {}
+            }
             let auth_events = auth_sink.events();
             assert_eq!(
                 auth_events.len(),
@@ -3958,9 +4025,10 @@ mod tests {
                 limit: std::num::NonZeroU32::new(10).expect("nonzero"),
                 cursor: None,
             },
-            String::new(),
+            VerifiedRequestId::for_test(String::new()),
         )
-        .await;
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         // 验证 JSON 信封：error.code == "ERR_CORE_INTERNAL"。
         let body = axum::body::to_bytes(response.into_body(), usize::MAX)

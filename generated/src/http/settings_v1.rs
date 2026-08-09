@@ -198,6 +198,7 @@ pub const EFFECT_PROFILE: ::vocab::HttpEffectProfile = ::vocab::HttpEffectProfil
 
 /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
 pub enum RouteMarker {}
+impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
 
 /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
 pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::OutboxFact> =

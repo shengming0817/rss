@@ -1,7 +1,7 @@
 error[E0599]: the associated function or constant `new` exists for struct `GeneratedPrimaryEndpoint<(), vocab::http::OutboxFact>`, but its trait bounds were not satisfied
-  --> tests/ui/producer_old_mount_is_rejected.rs:37:68
+  --> tests/ui/producer_old_mount_is_rejected.rs:38:68
    |
-37 |     let _ = httpserve::GeneratedPrimaryEndpoint::<(), OutboxFact>::new(ROUTE, handler);
+38 |     let _ = httpserve::GeneratedPrimaryEndpoint::<(), OutboxFact>::new(ROUTE, handler);
    |                                                                    ^^^ associated function or constant cannot be called due to unsatisfied trait bounds
    |
   ::: $WORKSPACE/crates/vocab/src/http.rs
@@ -9,7 +9,9 @@ error[E0599]: the associated function or constant `new` exists for struct `Gener
    |             pub struct $class;
    |             ------------------ doesn't satisfy `_: NonProducerHttpConsistency`
    |
-note: if you're trying to build a new `GeneratedPrimaryEndpoint<(), vocab::http::OutboxFact>`, consider using `GeneratedPrimaryEndpoint::<S, vocab::http::OutboxFact>::new_producer` which returns `Result<GeneratedPrimaryEndpoint<_, vocab::http::OutboxFact>, RouteGroupError>`
+note: if you're trying to build a new `GeneratedPrimaryEndpoint<(), vocab::http::OutboxFact>` consider using one of the following associated functions:
+      GeneratedPrimaryEndpoint::<S, vocab::http::OutboxFact>::new_producer
+      GeneratedPrimaryEndpoint::<S, vocab::http::OutboxFact>::new_declared_producer
   --> src/routes.rs
    |
    | /     pub fn new_producer<M, H, T>(
@@ -18,6 +20,15 @@ note: if you're trying to build a new `GeneratedPrimaryEndpoint<(), vocab::http:
    | |     ) -> Result<Self, RouteGroupError>
 ...  |
    | |         H: Handler<T, S>,
+   | |         T: ProducerHandlerArgs<M> + 'static,
+   | |____________________________________________^
+...
+   | /     pub fn new_declared_producer<M, H, T>(
+   | |         producer: HttpProducerBinding<M>,
+   | |         handler: H,
+   | |     ) -> Result<Self, RouteGroupError>
+...  |
+   | |         H: DeclaredProducerContractHandler<M, T, S>,
    | |         T: ProducerHandlerArgs<M> + 'static,
    | |____________________________________________^
    = note: the following trait bounds were not satisfied:
