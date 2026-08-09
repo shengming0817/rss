@@ -1088,7 +1088,7 @@ async fn settings_projection_operator_replay_failure_case(
                 commit_tenant,
             )
             .ok_or("Settings commit-unknown source scope missing")?;
-        let commit_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+        let commit_lsn = append_projection_source_event_with_payload_for_tenant(
             &app,
             binding,
             "operator-commit-unknown",
@@ -1178,7 +1178,7 @@ async fn settings_projection_operator_replay_failure_case(
                 rollback_tenant,
             )
             .ok_or("Settings rollback-failed source scope missing")?;
-        append_generated_projection_source_event_with_payload_for_tenant(
+        append_projection_source_event_with_payload_for_tenant(
             &app,
             binding,
             "operator-rollback-failed",
@@ -1249,7 +1249,7 @@ async fn settings_projection_operator_replay_failure_case(
             )
             .ok_or("Settings tenant-drift source scope missing")?;
         let drift_id = unique_event_id("settings-tenant-drift");
-        append_generated_projection_source_event_with_payload_for_tenant(
+        append_projection_source_event_with_payload_for_tenant(
             &app,
             binding,
             &drift_id,
@@ -1311,7 +1311,7 @@ async fn settings_projection_operator_replay_failure_case(
             )
             .ok_or("Settings order source scope missing")?;
         let order_id = unique_event_id("settings-persistent-order");
-        let order_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+        let order_lsn = append_projection_source_event_with_payload_for_tenant(
             &app,
             binding,
             &order_id,
@@ -1579,8 +1579,7 @@ async fn settings_active_generation_swap_requires_exact_precondition_and_support
     );
 
     let source_event_id = unique_event_id("projection-promote-source");
-    append_generated_projection_source_event_for_tenant(&app, binding, &source_event_id, tenant)
-        .await?;
+    append_projection_source_event_for_tenant(&app, binding, &source_event_id, tenant).await?;
     let source_high_water = deps
         .authorize_projection_target(
             projection_maintenance_receipt(
@@ -1813,7 +1812,7 @@ async fn settings_active_swap_rejections_preserve_pointer_and_candidate_state() 
         let source_high_water = if fixture == SwapRejectionFixture::SourceMissing {
             None
         } else {
-            append_generated_projection_source_event_for_tenant(
+            append_projection_source_event_for_tenant(
                 &app,
                 binding,
                 &unique_event_id(&format!("swap-rejection-{}", fixture.reason())),
@@ -2045,7 +2044,7 @@ async fn settings_projection_query_request_pins_one_active_generation_across_swa
         .iter()
         .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
         .ok_or_else(|| std::io::Error::other("generated Settings projection input is missing"))?;
-    append_generated_projection_source_event_for_tenant(
+    append_projection_source_event_for_tenant(
         &app,
         binding,
         &unique_event_id("settings-query-pin-source"),
@@ -2220,7 +2219,7 @@ async fn settings_active_swap_serializes_concurrent_generation_changes() -> Test
         .iter()
         .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
         .ok_or_else(|| std::io::Error::other("generated Settings projection input is missing"))?;
-    append_generated_projection_source_event_for_tenant(
+    append_projection_source_event_for_tenant(
         &app,
         binding,
         &unique_event_id("settings-active-swap-concurrency"),
@@ -3346,7 +3345,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     let healthy = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let quarantined_generation = "quarantine-blue";
     let healthy_generation = "healthy-green";
-    append_generated_projection_source_event_for_tenant(
+    append_projection_source_event_for_tenant(
         &app,
         binding,
         &unique_event_id("projection-quarantine"),
@@ -3382,7 +3381,7 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         .execute(&owner.pool)
         .await?;
     }
-    append_generated_projection_source_event_for_tenant(
+    append_projection_source_event_for_tenant(
         &app,
         binding,
         &unique_event_id("projection-healthy"),
@@ -4452,7 +4451,7 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
         "tenantId": tenant.to_string(), "key": "projection.c", "version": 1,
         "changeKind": "deleted", "occurredAt": TEST_OCCURRED_SECS + 2,
     }))?;
-    let first_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+    let first_lsn = append_projection_source_event_with_payload_for_tenant(
         &app,
         binding,
         &first_id,
@@ -4460,7 +4459,7 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
         &first_payload,
     )
     .await?;
-    let second_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+    let second_lsn = append_projection_source_event_with_payload_for_tenant(
         &app,
         binding,
         &second_id,
@@ -4468,7 +4467,7 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
         &second_payload,
     )
     .await?;
-    let third_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+    let third_lsn = append_projection_source_event_with_payload_for_tenant(
         &app,
         binding,
         &third_id,
@@ -4476,7 +4475,7 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
         &third_payload,
     )
     .await?;
-    append_generated_projection_source_event_with_payload_for_tenant(
+    append_projection_source_event_with_payload_for_tenant(
         &app,
         binding,
         &unique_event_id("settings-parity-other-tenant"),
@@ -4637,7 +4636,7 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
 
     drop(rebuilt);
     let poison_id = unique_event_id("settings-parity-poison");
-    let poison_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+    let poison_lsn = append_projection_source_event_with_payload_for_tenant(
         &app,
         binding,
         &poison_id,
@@ -4648,7 +4647,7 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
     )
     .await?;
     let after_poison_id = unique_event_id("settings-parity-after-poison");
-    append_generated_projection_source_event_with_payload_for_tenant(
+    append_projection_source_event_with_payload_for_tenant(
         &app,
         binding,
         &after_poison_id,

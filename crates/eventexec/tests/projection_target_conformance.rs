@@ -13,21 +13,33 @@ use diport::{
 };
 use eventexec::{
     ConformingProjectionTarget, ProjectionHarness, ProjectionId, ProjectionProjector,
-    ProjectionSelector, ProjectionStop, ProjectionTarget, ProjectionTargetDefinition,
-    ProjectionTargetStore, ProjectionTargetStoreError, ProjectionTargetStoreErrorKind,
-    ProjectionTargetStoreOutcome, ProjectionVersion, ValidatedProjectionApply,
+    ProjectionSelector, ProjectionStop, ProjectionTarget, ProjectionTargetConfigError,
+    ProjectionTargetDefinition, ProjectionTargetRegistry, ProjectionTargetStore,
+    ProjectionTargetStoreError, ProjectionTargetStoreErrorKind, ProjectionTargetStoreOutcome,
+    ProjectionVersion, ValidatedProjectionApply,
 };
 use futures::future::BoxFuture;
 use testkit::projection_conformance::{
     ProjectionAttemptError, ProjectionAttemptObservation, ProjectionAttemptOutcome,
-    ProjectionConformanceError, ProjectionObservation,
+    ProjectionConformanceBinding, ProjectionConformanceError, ProjectionConformanceFixture,
+    ProjectionObservation,
 };
 
 const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
-const PROJECTION: &str = "audit.session-projection";
-const TOPIC: &str = "identity.session.created";
-const CONTRACT: &str = "identity.session-created";
-const SCHEMA: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+const fn fixture() -> ProjectionConformanceFixture {
+    ProjectionConformanceFixture::primary()
+}
+
+const fn binding() -> ProjectionConformanceBinding {
+    fixture().binding()
+}
+
+fn secondary_binding() -> ProjectionConformanceBinding {
+    fixture()
+        .secondary_binding()
+        .expect("primary fixture seals one complete secondary binding")
+}
 
 #[derive(Clone, Copy)]
 enum Fault {
@@ -280,22 +292,22 @@ impl PartitionSerialDelivery for SerialSource {}
 fn selector() -> ProjectionSelector {
     ProjectionSelector::new(
         vocab::TenantId::parse(TENANT).expect("canonical tenant"),
-        ProjectionId::parse(PROJECTION).expect("canonical projection"),
-        ProjectionVersion::parse("v2").expect("canonical generation"),
+        ProjectionId::parse(fixture().projection_id()).expect("canonical projection"),
+        ProjectionVersion::parse(fixture().target_generation()).expect("canonical generation"),
     )
 }
 
 fn record(lsn: u64, event_id: &str, payload: &[u8], schema: &str) -> ProjectionEventRecord {
     ProjectionEventRecord::with_metadata(
         Lsn::new(lsn),
-        consistency::EventTopic::parse(TOPIC).expect("canonical topic"),
+        consistency::EventTopic::parse(binding().topic()).expect("canonical topic"),
         payload.to_vec(),
         ProjectionEventMetadata::new(
             vocab::TenantId::parse(TENANT).expect("canonical tenant"),
             event_id,
-            "identity",
-            CONTRACT,
-            "v1",
+            binding().source_domain(),
+            binding().contract_id(),
+            binding().contract_version(),
             schema,
             serde_json::json!({"tenantId": TENANT}),
             None,
@@ -309,21 +321,158 @@ fn target(store: Arc<ReferenceStore>) -> Arc<dyn ProjectionTarget> {
         ConformingProjectionTarget::new(
             ProjectionTargetDefinition::new(
                 vocab::ContractBinding::from_static(
-                    "audit",
-                    PROJECTION,
-                    "v2",
-                    "sha256:8750ef9b30912c837637ee30ee712e1572903fdaa59514fd486f2d0ab15fa071",
+                    fixture().definition_domain(),
+                    fixture().projection_id(),
+                    fixture().definition_version(),
+                    fixture().definition_schema_hash(),
                 ),
-                generated::event::PROJECTION_INPUT_GENERATION,
+                fixture().input_generation(),
             )
             .expect("canonical target definition"),
-            vec![vocab::ProjectionInputBinding::from_static(
-                PROJECTION, "identity", CONTRACT, "v1", SCHEMA, TOPIC,
-            )],
+            vec![
+                vocab::ProjectionInputBinding::from_static(
+                    fixture().projection_id(),
+                    binding().source_domain(),
+                    binding().contract_id(),
+                    binding().contract_version(),
+                    binding().schema_hash(),
+                    binding().topic(),
+                ),
+                vocab::ProjectionInputBinding::from_static(
+                    fixture().projection_id(),
+                    secondary_binding().source_domain(),
+                    secondary_binding().contract_id(),
+                    secondary_binding().contract_version(),
+                    secondary_binding().schema_hash(),
+                    secondary_binding().topic(),
+                ),
+            ],
             store,
         )
         .expect("canonical target configuration"),
     )
+}
+
+#[test]
+fn conformance_registry_rejects_every_authority_mint_bypass() {
+    let canonical = target(Arc::new(ReferenceStore::new(Fault::None)));
+    assert!(matches!(
+        ProjectionTargetRegistry::from_conformance_fixture(canonical.definition(), &[]),
+        Err(ProjectionTargetConfigError::EmptyBindings)
+    ));
+
+    let wrong = vocab::ProjectionInputBinding::from_static(
+        ProjectionConformanceFixture::foreign().projection_id(),
+        binding().source_domain(),
+        binding().contract_id(),
+        binding().contract_version(),
+        binding().schema_hash(),
+        binding().topic(),
+    );
+    assert!(matches!(
+        ProjectionTargetRegistry::from_conformance_fixture(canonical.definition(), &[wrong]),
+        Err(ProjectionTargetConfigError::ProjectionMismatch)
+    ));
+
+    let canonical_binding = canonical.bindings()[0];
+    assert!(matches!(
+        ProjectionTargetRegistry::from_conformance_fixture(
+            canonical.definition(),
+            &[canonical_binding, canonical_binding],
+        ),
+        Err(ProjectionTargetConfigError::DuplicateBinding)
+    ));
+
+    let noncanonical_definition = ProjectionTargetDefinition::new(
+        vocab::ContractBinding::from_static(
+            "test.projection-conformance",
+            "test.projection-conformance.ad-hoc",
+            "v1",
+            fixture().definition_schema_hash(),
+        ),
+        fixture().input_generation(),
+    )
+    .expect("synthetic definition is structurally valid");
+    let noncanonical_binding = vocab::ProjectionInputBinding::from_static(
+        "test.projection-conformance.ad-hoc",
+        binding().source_domain(),
+        binding().contract_id(),
+        binding().contract_version(),
+        binding().schema_hash(),
+        binding().topic(),
+    );
+    assert!(matches!(
+        ProjectionTargetRegistry::from_conformance_fixture(
+            &noncanonical_definition,
+            &[noncanonical_binding],
+        ),
+        Err(ProjectionTargetConfigError::NonCanonicalConformanceIdentity)
+    ));
+
+    let registry = ProjectionTargetRegistry::from_conformance_fixture(
+        canonical.definition(),
+        canonical.bindings(),
+    )
+    .expect("canonical fixture mints its closed registry");
+    let selector = selector();
+    assert!(
+        registry
+            .source_scope(selector.projection(), selector.tenant())
+            .is_ok()
+    );
+    let execution = registry
+        .operator_execution_context(selector.projection(), selector.tenant())
+        .expect("canonical registry mints target-bound execution");
+    let same_projection_ad_hoc_definition = ProjectionTargetDefinition::new(
+        vocab::ContractBinding::from_static(
+            fixture().definition_domain(),
+            fixture().projection_id(),
+            fixture().definition_version(),
+            "sha256:9999999999999999999999999999999999999999999999999999999999999999",
+        ),
+        fixture().input_generation(),
+    )
+    .expect("same-projection drift definition is structurally valid");
+    let ad_hoc_target: Arc<dyn ProjectionTarget> = Arc::new(
+        ConformingProjectionTarget::new(
+            same_projection_ad_hoc_definition,
+            canonical.bindings().to_vec(),
+            Arc::new(ReferenceStore::new(Fault::None)),
+        )
+        .expect("synthetic ad-hoc target is structurally valid"),
+    );
+    assert!(matches!(
+        ProjectionProjector::with_execution(execution, selector, ad_hoc_target),
+        Err(ProjectionTargetConfigError::ExecutionTargetMismatch)
+    ));
+
+    let foreign = ProjectionConformanceFixture::foreign();
+    let foreign_definition = ProjectionTargetDefinition::new(
+        vocab::ContractBinding::from_static(
+            foreign.definition_domain(),
+            foreign.projection_id(),
+            foreign.definition_version(),
+            foreign.definition_schema_hash(),
+        ),
+        foreign.input_generation(),
+    )
+    .expect("canonical foreign definition");
+    let foreign_binding = vocab::ProjectionInputBinding::from_static(
+        foreign.projection_id(),
+        foreign.binding().source_domain(),
+        foreign.binding().contract_id(),
+        foreign.binding().contract_version(),
+        foreign.binding().schema_hash(),
+        foreign.binding().topic(),
+    );
+    assert!(
+        ProjectionTargetRegistry::from_conformance_fixture(
+            &foreign_definition,
+            &[foreign_binding],
+        )
+        .is_ok(),
+        "foreign fixture fingerprint must remain enrolled"
+    );
 }
 
 async fn attempt(
@@ -333,12 +482,12 @@ async fn attempt(
 ) -> ProjectionAttemptObservation {
     let before = checkpoint.offset();
     let selector = selector();
-    let execution =
-        eventexec::WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
-            selector.projection(),
-            selector.tenant(),
-        )
-        .expect("generated conformance projection execution");
+    let registry =
+        ProjectionTargetRegistry::from_conformance_fixture(target.definition(), target.bindings())
+            .expect("canonical conformance projection registry");
+    let execution = registry
+        .operator_execution_context(selector.projection(), selector.tenant())
+        .expect("canonical conformance projection execution");
     let harness = ProjectionHarness::new(
         Arc::new(
             ProjectionProjector::with_execution(execution, selector.clone(), target)
@@ -433,7 +582,7 @@ async fn atomic_apply_with(
     let result = attempt(
         target(Arc::clone(&store)),
         Arc::new(CheckpointStore::default()),
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     observation(vec![result], &store)
@@ -451,20 +600,20 @@ async fn same_fact_duplicate_with(
     let first = attempt(
         target(Arc::clone(&store)),
         Arc::clone(&checkpoint),
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     let second = attempt(
         target(Arc::clone(&store)),
         checkpoint,
-        record(2, "event-2", b"two", SCHEMA),
+        record(2, "event-2", b"two", binding().schema_hash()),
     )
     .await;
     // Simulate loss of the local checkpoint after the target committed a newer high-water.
     let replay = attempt(
         target(Arc::clone(&store)),
         Arc::new(CheckpointStore::default()),
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     observation(vec![first, second, replay], &store)
@@ -481,13 +630,13 @@ async fn same_key_conflict_with(
     let first = attempt(
         target(Arc::clone(&store)),
         Arc::new(CheckpointStore::default()),
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     let second = attempt(
         target(Arc::clone(&store)),
         Arc::new(CheckpointStore::default()),
-        record(2, "event-1", b"changed", SCHEMA),
+        record(2, "event-1", b"changed", binding().schema_hash()),
     )
     .await;
     observation(vec![first, second], &store)
@@ -504,13 +653,13 @@ async fn persistent_out_of_order_with(
     let first = attempt(
         target(Arc::clone(&store)),
         Arc::new(CheckpointStore::default()),
-        record(2, "event-2", b"two", SCHEMA),
+        record(2, "event-2", b"two", binding().schema_hash()),
     )
     .await;
     let second = attempt(
         target(Arc::clone(&store)),
         Arc::new(CheckpointStore::default()),
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     observation(vec![first, second], &store)
@@ -544,7 +693,7 @@ async fn confirmed_rollback_with(
     let result = attempt(
         target(Arc::clone(&store)),
         Arc::new(CheckpointStore::default()),
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     rollback_observation(vec![result], &store)
@@ -562,13 +711,13 @@ async fn commit_unknown_replay_with(
     let first = attempt(
         target(Arc::clone(&store)),
         Arc::clone(&checkpoint),
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     let second = attempt(
         target(Arc::clone(&store)),
         checkpoint,
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     observation(vec![first, second], &store)
@@ -585,7 +734,7 @@ async fn rollback_failed_with(
     let result = attempt(
         target(Arc::clone(&store)),
         Arc::new(CheckpointStore::default()),
-        record(1, "event-1", b"one", SCHEMA),
+        record(1, "event-1", b"one", binding().schema_hash()),
     )
     .await;
     rollback_observation(vec![result], &store)
@@ -612,7 +761,7 @@ async fn broken_store_fixtures_are_rejected_through_runtime_path() {
         ),
         (
             testkit::projection_conformance::ProjectionCase::IdentityMismatch,
-            identity_mismatch_with(SCHEMA).await,
+            identity_mismatch_with(binding().schema_hash()).await,
         ),
         (
             testkit::projection_conformance::ProjectionCase::ConfirmedRollback,

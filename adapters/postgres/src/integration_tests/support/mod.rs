@@ -49,6 +49,9 @@ pub(super) use sha2::{Digest as _, Sha256};
 
 pub(super) use std::future::Future;
 
+pub(super) use testkit::projection_conformance::{
+    ProjectionConformanceBinding, ProjectionConformanceFixture,
+};
 pub(super) use testkit::{await_delay, await_map, await_try};
 
 pub(super) use crate::reconcile::{

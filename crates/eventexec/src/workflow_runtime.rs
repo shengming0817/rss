@@ -1144,7 +1144,7 @@ pub struct ProjectionSourceScope {
     pub(crate) projection: crate::ProjectionId,
     pub(crate) definition_version: Box<str>,
     pub(crate) definition_schema_digest: Box<str>,
-    pub(crate) input_generation: &'static str,
+    pub(crate) input_generation: Box<str>,
 }
 
 impl ProjectionSourceScope {
@@ -1165,7 +1165,7 @@ impl ProjectionSourceScope {
     }
 
     pub fn input_generation(&self) -> &str {
-        self.input_generation
+        &self.input_generation
     }
 }
 

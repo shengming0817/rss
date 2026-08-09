@@ -36,11 +36,12 @@
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
 //!   （例如 `allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`，Example
 //!   分类也不会自行阻止 root/其它允许边把 iotdevice 带入 shipped 图）。
-//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
+//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_eventexec_testsupport_feature_closure_is_shipped|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
 //!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped feature 闭包
 //!   （成员默认 feature + `[dependencies]`/`[build-dependencies]`/`[target.*]` activation）启用。闭包解析
 //!   Cargo `default`、本地递归/循环、`dep:`、依赖 feature forwarding 与 package alias。覆盖 `runctx/test-support`
-//!   （构造 `AppCtx`）、`identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`、以及
+//!   （构造 `AppCtx`）、`identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`、
+//!   `eventexec/test-support`（构造 Projection conformance source/operator authority）、以及
 //!   `bootstrap/test-support`（`forge_topology_for_test`）与 `identity-composition|deviceidentity/test-support`
 //!   （暂停 application-receipt relay 的测试控制）；生产构建启用即可伪造 tenant scope / 事件拓扑或
 //!   暴露 relay 控制，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
@@ -1161,6 +1162,10 @@ const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str)] = &[
     (
         "bootstrap",
         "SubscriberBinding::forge_topology_for_test forges event topology; must stay [dev-dependencies]-only",
+    ),
+    (
+        "eventexec",
+        "Projection conformance fixtures mint source and operator authority outside the generated production registry",
     ),
     (
         "identity-composition",
@@ -2503,6 +2508,69 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge" }
         Ok(())
     }
 
+    #[test]
+    fn red_eventexec_testsupport_feature_closure_is_shipped() -> Result<()> {
+        let root = crate::testutil::unique_tmp("eventexec-testsupport-feature-closure-red");
+        let manifests = [
+            (
+                "crates/eventexec/Cargo.toml",
+                r#"
+[package]
+name = "eventexec"
+
+[features]
+default = []
+test-support = []
+"#,
+            ),
+            (
+                "adapters/postgres/Cargo.toml",
+                r#"
+[package]
+name = "postgres"
+
+[features]
+default = []
+integration = ["eventexec/test-support"]
+
+[dependencies]
+eventexec = { path = "../../crates/eventexec" }
+"#,
+            ),
+            (
+                "assemblies/runtime/Cargo.toml",
+                r#"
+[package]
+name = "runtime"
+
+[dependencies]
+postgres = { path = "../../adapters/postgres", features = ["integration"] }
+"#,
+            ),
+        ];
+        for (relative, source) in manifests {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().context("feature fixture parent")?)?;
+            std::fs::write(path, source)?;
+        }
+        let members = [
+            m("eventexec", "crates/eventexec", Some(Layer::Service)),
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+            m("runtime", "assemblies/runtime", Some(Layer::Root)),
+        ];
+
+        let findings = scan_workspace_testsupport_features(&root, &members, &BTreeMap::new())?;
+        assert_eq!(findings.len(), 1, "{findings:#?}");
+        assert_eq!(findings[0].subject, "runtime");
+        assert!(
+            findings[0].detail.contains(
+                "postgres/integration → postgres/eventexec/test-support → eventexec/test-support",
+            ),
+            "{findings:#?}"
+        );
+        Ok(())
+    }
+
     /// LAYER-DEPS-09 synthetic red：`dep:` 激活 optional dependency 后，其 default feature
     /// 与跨包 dependency-feature forwarding 同属 shipped closure，不能只检查入口 dependency entry。
     #[test]
@@ -2628,8 +2696,14 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
                 "deviceidentity",
                 &["test-support"],
             ),
+            sdep(
+                "bad-eventexec",
+                "[dependencies]",
+                "eventexec",
+                &["test-support"],
+            ),
         ]);
-        assert_eq!(findings.len(), 6, "{findings:?}");
+        assert_eq!(findings.len(), 7, "{findings:?}");
         assert!(
             findings
                 .iter()

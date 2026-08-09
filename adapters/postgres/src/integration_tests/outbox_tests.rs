@@ -657,12 +657,13 @@ async fn concurrent_outbox_append_serializes_same_fact_and_conflict() -> TestRes
     setup_outbox(&store).await?;
 
     let same_id = unique_event_id("outbox-concurrent-same");
-    let same_entry_a = make_entry(&same_id);
+    let same_entry_a = projection_conformance_entry(&same_id)?;
     let same_entry_b = same_entry_a.clone();
-    let same_env_a = make_test_env("test", "projection.bound");
+    let same_env_a = projection_conformance_env();
     let same_env_b = same_env_a.clone();
-    let projection_registry_a =
-        crate::projection_events::ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS);
+    let projection_registry_a = crate::projection_events::ProjectionWriteRegistry::from_selected(
+        PROJECTION_CONFORMANCE_INPUTS,
+    );
     let projection_registry_b = projection_registry_a.clone();
     let same_db_a = eventing_test_db(&store);
     let same_db_b = eventing_test_db(&store);
@@ -2497,7 +2498,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
             binding.version().to_string(),
             binding.schema_hash().to_string(),
         )],
-        "generated-bound DLQ replay must mirror exactly one projection event"
+        "registered-bound DLQ replay must mirror exactly one projection event"
     );
 
     let duplicate = dlq

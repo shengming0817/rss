@@ -5,8 +5,8 @@ use super::support::*;
 #[tokio::test(flavor = "multi_thread")]
 async fn readiness_degrades_when_active_projection_generation_drifts() -> TestResult {
     let (fixture, deps) = setup_runtime_deps_with_projection_inputs(
-        TEST_PROJECTION_INPUT_GENERATION,
-        TEST_PROJECTION_INPUTS,
+        ProjectionConformanceFixture::primary().input_generation(),
+        PROJECTION_CONFORMANCE_INPUTS,
     )
     .await?;
     let owner = runtime_assertion_pool(fixture.owner_params()).await?;
@@ -25,7 +25,7 @@ async fn readiness_degrades_when_active_projection_generation_drifts() -> TestRe
         &PgStore {
             pool: owner.clone(),
         },
-        TEST_PROJECTION_INPUT_GENERATION,
+        ProjectionConformanceFixture::primary().input_generation(),
         &[],
     )
     .await?;

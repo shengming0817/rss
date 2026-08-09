@@ -61,13 +61,37 @@ pub(in super::super) async fn setup_outbox(
     store: &PgStore,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     store.run_migrations().await?;
-    store
-        .register_projection_input_bindings(
-            TEST_PROJECTION_INPUT_GENERATION,
-            TEST_PROJECTION_INPUTS,
-        )
-        .await?;
+    register_projection_conformance_catalog(store).await?;
     Ok(())
+}
+
+pub(in super::super) async fn register_projection_conformance_catalog(
+    store: &PgStore,
+) -> Result<(), sqlx::Error> {
+    let mut transaction = store.pool.begin().await?;
+    for fixture in [
+        ProjectionConformanceFixture::primary(),
+        ProjectionConformanceFixture::foreign(),
+    ] {
+        for binding in projection_conformance_inputs(fixture) {
+            sqlx::query(
+                "SELECT public.rss_register_projection_input_binding(\
+                 $1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(fixture.input_generation())
+            .bind(fixture.projection_id())
+            .bind(fixture.definition_version())
+            .bind(fixture.definition_schema_hash())
+            .bind(binding.domain())
+            .bind(binding.contract_id())
+            .bind(binding.version())
+            .bind(binding.schema_hash())
+            .bind(binding.topic())
+            .execute(&mut *transaction)
+            .await?;
+        }
+    }
+    transaction.commit().await
 }
 
 pub(in super::super) async fn register_generated_projection_input_catalog(
@@ -116,21 +140,21 @@ pub(in super::super) async fn register_generated_projection_input_catalog(
     }
 }
 
-pub(in super::super) async fn append_generated_projection_source_event(
+pub(in super::super) async fn append_projection_source_event(
     app: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    append_generated_projection_source_event_for_tenant(app, binding, event_id, test_tenant()).await
+    append_projection_source_event_for_tenant(app, binding, event_id, test_tenant()).await
 }
 
-pub(in super::super) async fn prepare_generated_projection_source_outbox_event(
+pub(in super::super) async fn prepare_projection_source_outbox_event(
     store: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
     tenant: vocab::TenantId,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    prepare_generated_projection_source_outbox_event_with_payload(
+    prepare_projection_source_outbox_event_with_payload(
         store,
         binding,
         event_id,
@@ -140,7 +164,7 @@ pub(in super::super) async fn prepare_generated_projection_source_outbox_event(
     .await
 }
 
-pub(in super::super) async fn prepare_generated_projection_source_outbox_event_with_payload(
+pub(in super::super) async fn prepare_projection_source_outbox_event_with_payload(
     store: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
@@ -177,13 +201,13 @@ pub(in super::super) async fn prepare_generated_projection_source_outbox_event_w
     Ok(metadata)
 }
 
-pub(in super::super) async fn append_generated_projection_source_event_for_tenant(
+pub(in super::super) async fn append_projection_source_event_for_tenant(
     app: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
     tenant: vocab::TenantId,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
-    append_generated_projection_source_event_with_payload_for_tenant(
+    append_projection_source_event_with_payload_for_tenant(
         app,
         binding,
         event_id,
@@ -193,7 +217,7 @@ pub(in super::super) async fn append_generated_projection_source_event_for_tenan
     .await
 }
 
-pub(in super::super) async fn append_generated_projection_source_event_with_payload_for_tenant(
+pub(in super::super) async fn append_projection_source_event_with_payload_for_tenant(
     app: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
@@ -446,6 +470,17 @@ pub(in super::super) fn make_entry(event_id: &str) -> EventEntry {
     )
 }
 
+pub(in super::super) fn projection_conformance_entry(
+    event_id: &str,
+) -> Result<EventEntry, TestError> {
+    let binding = ProjectionConformanceFixture::primary().binding();
+    Ok(EventEntry::new(
+        EventTopic::parse(binding.topic())?,
+        IdemKey::parse(event_id)?,
+        reviewed_payload(b"payload"),
+    ))
+}
+
 #[allow(clippy::unwrap_used)]
 pub(in super::super) fn generated_entry<P: serde::Serialize>(
     fact: vocab::EventFactBinding,
@@ -595,6 +630,43 @@ pub(in super::super) fn make_test_env(domain: &str, contract_id: &str) -> Outbox
     )
 }
 
+pub(in super::super) fn projection_conformance_env() -> OutboxEnvelope {
+    let binding = ProjectionConformanceFixture::primary().binding();
+    OutboxEnvelope::new(
+        binding.source_domain().to_owned(),
+        binding.contract_id().to_owned(),
+        OutboxMetadata::new(
+            0,
+            test_tenant(),
+            vocab::ContractBinding::from_static(
+                binding.source_domain(),
+                binding.contract_id(),
+                binding.contract_version(),
+                binding.schema_hash(),
+            ),
+        ),
+    )
+}
+
+pub(in super::super) fn projection_conformance_env_with_unbound_routing_for_negative_test()
+-> OutboxEnvelope {
+    let binding = ProjectionConformanceFixture::primary().binding();
+    OutboxEnvelope::new(
+        binding.source_domain().to_owned(),
+        "test.projection-source.unbound".to_owned(),
+        OutboxMetadata::new(
+            0,
+            test_tenant(),
+            vocab::ContractBinding::from_static(
+                binding.source_domain(),
+                binding.contract_id(),
+                binding.contract_version(),
+                binding.schema_hash(),
+            ),
+        ),
+    )
+}
+
 pub(in super::super) fn make_test_env_with_contract_metadata(
     domain: &str,
     contract_id: &str,
@@ -710,35 +782,16 @@ pub(in super::super) struct ProjectionHighWaterFixture {
     pub(in super::super) tenant: vocab::TenantId,
     pub(in super::super) other_tenant: vocab::TenantId,
     pub(in super::super) binding: vocab::ProjectionInputBinding,
+    pub(in super::super) foreign_binding: vocab::ProjectionInputBinding,
     pub(in super::super) scope: eventexec::ProjectionSourceScope,
     pub(in super::super) other_tenant_scope: eventexec::ProjectionSourceScope,
 }
-
-pub(in super::super) static MULTI_BINDING_HIGH_WATER_INPUTS: &[vocab::ProjectionInputBinding] = &[
-    test_projection_input_binding(
-        "test.multi-binding-projection",
-        "multi-a",
-        "projection.multi-a",
-        "v1",
-        TEST_SCHEMA_HASH,
-        "test.multi-a",
-    ),
-    test_projection_input_binding(
-        "test.multi-binding-projection",
-        "multi-b",
-        "projection.multi-b",
-        "v1",
-        TEST_SCHEMA_HASH,
-        "test.multi-b",
-    ),
-];
 
 impl ProjectionHighWaterFixture {
     pub(in super::super) async fn setup() -> Result<Self, TestError> {
         let (pg, owner) = connect_pg().await?;
         provision_runtime_logins(&pg).await?;
         setup_outbox(&owner).await?;
-        register_generated_projection_input_catalog(&owner).await?;
         let app = connect_pg_rss_app_role(&pg, &owner).await?;
         let operator_store = crate::PgStore::connect_verified_projection_operator(
             &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
@@ -758,21 +811,20 @@ impl ProjectionHighWaterFixture {
         .await?;
         let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-        let binding = *generated::event::PROJECTION_INPUTS
-            .first()
-            .ok_or_else(|| std::io::Error::other("generated Projection input fixture is empty"))?;
+        let fixture = ProjectionConformanceFixture::primary();
+        let binding = projection_conformance_inputs(fixture)
+            .into_iter()
+            .next()
+            .ok_or("primary projection conformance fixture must contain a binding")?;
+        let foreign_binding =
+            projection_conformance_inputs(ProjectionConformanceFixture::foreign())
+                .into_iter()
+                .next()
+                .ok_or("foreign projection conformance fixture must contain a binding")?;
         let projection = eventexec::ProjectionId::parse(binding.projection_id())?;
-        let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
-            &projection,
-            tenant,
-        )
-        .ok_or_else(|| std::io::Error::other("generated registry did not mint source scope"))?;
-        let other_tenant_scope =
-            eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
-                &projection,
-                other_tenant,
-            )
-            .ok_or_else(|| std::io::Error::other("generated registry did not mint source scope"))?;
+        let registry = projection_conformance_registry(fixture)?;
+        let scope = registry.source_scope(&projection, tenant)?;
+        let other_tenant_scope = registry.source_scope(&projection, other_tenant)?;
         Ok(Self {
             _pg: pg,
             owner,
@@ -782,6 +834,7 @@ impl ProjectionHighWaterFixture {
             tenant,
             other_tenant,
             binding,
+            foreign_binding,
             scope,
             other_tenant_scope,
         })
@@ -797,17 +850,8 @@ impl ProjectionHighWaterFixture {
         )
     }
 
-    pub(in super::super) fn foreign_binding(
-        &self,
-    ) -> Result<vocab::ProjectionInputBinding, TestError> {
-        generated::event::PROJECTION_INPUTS
-            .iter()
-            .copied()
-            .find(|candidate| candidate.projection_id() != self.binding.projection_id())
-            .ok_or_else(|| {
-                std::io::Error::other("cross-projection fixture requires two generated projections")
-                    .into()
-            })
+    pub(in super::super) fn foreign_binding(&self) -> vocab::ProjectionInputBinding {
+        self.foreign_binding
     }
 
     pub(in super::super) async fn shutdown(self) -> TestResult {
@@ -824,7 +868,7 @@ pub(in super::super) async fn append_projection_high_water_fixture_event(
     label: &str,
 ) -> Result<(String, i64), TestError> {
     let event_id = unique_event_id(label);
-    let lsn = append_generated_projection_source_event_for_tenant(
+    let lsn = append_projection_source_event_for_tenant(
         &fixture.app,
         fixture.binding,
         &event_id,

@@ -2503,10 +2503,14 @@ fn target(store: DemoStore) -> Target {{
 async fn attempt(target: Target, checkpoint: Checkpoint) -> Attempt {{
     let before = checkpoint.offset();
     let selector = selector();
-    let execution = WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
+    let registry = ProjectionTargetRegistry::from_conformance_fixture(
+        target.definition(),
+        target.bindings(),
+    ).expect("conformance registry");
+    let execution = registry.operator_execution_context(
         selector.projection(),
         selector.tenant(),
-    ).expect("generated projection execution");
+    ).expect("conformance projection execution");
     let harness = ProjectionHarness::new(
         ProjectionProjector::with_execution(execution, selector, target)
             .expect("plan-issued execution matches selector"),
@@ -2592,10 +2596,14 @@ fn target(store: DemoStore) -> Target {{
 async fn attempt(target: Target, checkpoint: Checkpoint) -> Attempt {{
     let before = checkpoint.offset();
     let selector = selector();
-    let execution = WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
+    let registry = ProjectionTargetRegistry::from_conformance_fixture(
+        target.definition(),
+        target.bindings(),
+    ).expect("conformance registry");
+    let execution = registry.operator_execution_context(
         selector.projection(),
         selector.tenant(),
-    ).expect("generated projection execution");
+    ).expect("conformance projection execution");
     let harness = ProjectionHarness::new(
         ProjectionProjector::with_execution(execution, selector, target)
             .expect("plan-issued execution matches selector"),

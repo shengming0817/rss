@@ -485,6 +485,14 @@ outbox 行带表级单调 `seq`（应用不可写、允许 gap）+ 可空 `parti
   rollback-failed。typed/private input funnel、sealed target 与 macro exact-set 是 Hard；production AST
   enrollment 及真实事务/故障事实是 Medium。enrollment alone 不得授权 production activation 或作为 T3
   acceptance；lifecycle 与 production acceptance carrier 未闭合时，production activation 必须保持 disabled。
+- T2 carrier 的 identity 只能从 `ProjectionConformanceFixture::{primary,foreign}` 的完整 typed binding 降为各消费
+  crate 的 production-shaped types；primary 同时封闭双 binding high-water 事实，foreign 封闭 projection/scope 隔离事实，
+  二者共享同一 exact catalog generation。fixture 不进入 generated catalog、manifest 或 RuntimePlan。source scope
+  与 operator execution 由 feature-gated typed registry 统一铸造；registry 在铸权前验证完整 definition + sorted
+  binding tuple 的 canonical SHA-256 fingerprint；铸造的 execution 保留该 fingerprint，projector 原子校验 tenant、
+  selector projection 与完整 target identity，empty/mismatch/duplicate/ad-hoc/cross-target identity 一律 fail-closed。
+  `eventexec/test-support` 进入 shipped feature closure 会被 LAYER-DEPS-09 拒绝。真实 generated/Settings 测试继续
+  证明 production catalog 语义，不作为中性 fixture fallback。
 - reference carrier 只证明 canonical contract 与强制 enrollment 机制，不等同于 PostgreSQL production
   acceptance；真实 store 仍须用同一 conformance enrollment 证明其事务与故障事实。
 - 载体：`INVARIANT: PROJECTION-SERIAL-WITNESS-01` / `PARTITION-SERIAL-IMPL-ALLOWLIST-01` /

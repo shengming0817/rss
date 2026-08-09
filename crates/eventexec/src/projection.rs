@@ -110,6 +110,7 @@ impl ProjectionSystemIdentity {
 pub struct ProjectionExecutionContext {
     tenant: vocab::TenantId,
     identity: ProjectionSystemIdentity,
+    target_identity_fingerprint: Option<[u8; 32]>,
 }
 
 impl ProjectionExecutionContext {
@@ -117,6 +118,7 @@ impl ProjectionExecutionContext {
         Self {
             tenant,
             identity: ProjectionSystemIdentity::background_worker(),
+            target_identity_fingerprint: None,
         }
     }
 
@@ -124,6 +126,19 @@ impl ProjectionExecutionContext {
         Self {
             tenant,
             identity: ProjectionSystemIdentity::operator_replay(),
+            target_identity_fingerprint: None,
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    const fn conformance_operator_replay(
+        tenant: vocab::TenantId,
+        target_identity_fingerprint: [u8; 32],
+    ) -> Self {
+        Self {
+            tenant,
+            identity: ProjectionSystemIdentity::operator_replay(),
+            target_identity_fingerprint: Some(target_identity_fingerprint),
         }
     }
 
@@ -677,9 +692,16 @@ pub enum ProjectionTargetConfigError {
     /// exact binding set 内存在重复项。
     #[error("projection target binding is duplicated")]
     DuplicateBinding,
+    /// test-support registry identity is not one of the closed canonical fixture tuples.
+    #[cfg(feature = "test-support")]
+    #[error("projection conformance identity is not canonical")]
+    NonCanonicalConformanceIdentity,
     /// plan-issued execution tenant differs from the selected target tenant.
     #[error("projection execution tenant does not match selector")]
     ExecutionTenantMismatch,
+    /// plan-issued execution identity differs from the selected projection target.
+    #[error("projection execution identity does not match selector and target")]
+    ExecutionTargetMismatch,
 }
 
 impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
@@ -689,22 +711,7 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
         bindings: Vec<ProjectionInputBinding>,
         store: Arc<S>,
     ) -> Result<Self, ProjectionTargetConfigError> {
-        if bindings.is_empty() {
-            return Err(ProjectionTargetConfigError::EmptyBindings);
-        }
-        if bindings
-            .iter()
-            .any(|binding| binding.projection_id() != definition.projection().as_str())
-        {
-            return Err(ProjectionTargetConfigError::ProjectionMismatch);
-        }
-        if bindings
-            .iter()
-            .enumerate()
-            .any(|(index, binding)| bindings[..index].contains(binding))
-        {
-            return Err(ProjectionTargetConfigError::DuplicateBinding);
-        }
+        validate_projection_target_bindings(&definition, &bindings)?;
         Ok(Self {
             definition,
             bindings,
@@ -772,6 +779,101 @@ impl<S: ProjectionTargetStore> ConformingProjectionTarget<S> {
             fact_digest,
         }))
     }
+}
+
+fn validate_projection_target_bindings(
+    definition: &ProjectionTargetDefinition,
+    bindings: &[ProjectionInputBinding],
+) -> Result<(), ProjectionTargetConfigError> {
+    if bindings.is_empty() {
+        return Err(ProjectionTargetConfigError::EmptyBindings);
+    }
+    if bindings
+        .iter()
+        .any(|binding| binding.projection_id() != definition.projection().as_str())
+    {
+        return Err(ProjectionTargetConfigError::ProjectionMismatch);
+    }
+    if bindings
+        .iter()
+        .enumerate()
+        .any(|(index, binding)| bindings[..index].contains(binding))
+    {
+        return Err(ProjectionTargetConfigError::DuplicateBinding);
+    }
+    Ok(())
+}
+
+fn projection_target_identity_fingerprint(
+    definition: &ProjectionTargetDefinition,
+    bindings: &[ProjectionInputBinding],
+) -> [u8; 32] {
+    // SHA-256 over the definition tuple followed by lexicographically sorted binding tuples;
+    // every UTF-8 field is prefixed by its big-endian u64 byte length. These fingerprints are the
+    // dependency-free provenance bridge to testkit's closed primary/foreign fixtures.
+    fn update(digest: &mut Sha256, value: &str) {
+        digest.update((value.len() as u64).to_be_bytes());
+        digest.update(value.as_bytes());
+    }
+
+    let contract = definition.contract();
+    let mut digest = Sha256::new();
+    for value in [
+        contract.domain(),
+        contract.contract_id(),
+        contract.version(),
+        contract.schema_hash(),
+        definition.input_generation().as_str(),
+    ] {
+        update(&mut digest, value);
+    }
+    let mut ordered = bindings.to_vec();
+    ordered.sort_unstable_by_key(|binding| {
+        (
+            binding.projection_id(),
+            binding.domain(),
+            binding.contract_id(),
+            binding.version(),
+            binding.schema_hash(),
+            binding.topic(),
+        )
+    });
+    for binding in ordered {
+        for value in [
+            binding.projection_id(),
+            binding.domain(),
+            binding.contract_id(),
+            binding.version(),
+            binding.schema_hash(),
+            binding.topic(),
+        ] {
+            update(&mut digest, value);
+        }
+    }
+    digest.finalize().into()
+}
+
+#[cfg(feature = "test-support")]
+fn validate_canonical_projection_conformance_identity(
+    definition: &ProjectionTargetDefinition,
+    bindings: &[ProjectionInputBinding],
+) -> Result<[u8; 32], ProjectionTargetConfigError> {
+    const PRIMARY: [u8; 32] = [
+        0x89, 0xde, 0x8a, 0x99, 0x5e, 0xb5, 0x8c, 0x5d, 0x5a, 0x7b, 0x2d, 0xeb, 0xfa, 0xdf, 0xfa,
+        0xf8, 0x36, 0x80, 0x42, 0xed, 0x59, 0x42, 0x4f, 0x41, 0x21, 0x7e, 0x26, 0x9e, 0x4e, 0xb9,
+        0x76, 0x43,
+    ];
+    const FOREIGN: [u8; 32] = [
+        0xbc, 0x90, 0x99, 0x5d, 0x60, 0x94, 0xa7, 0xf5, 0x27, 0x90, 0xdf, 0xa8, 0x9d, 0x4e, 0xd5,
+        0x0f, 0x7e, 0x8e, 0x56, 0xd7, 0x20, 0x8a, 0x78, 0x50, 0x2b, 0x3d, 0x17, 0x5a, 0xa0, 0xf5,
+        0x3a, 0x02,
+    ];
+
+    let actual = projection_target_identity_fingerprint(definition, bindings);
+    if actual != PRIMARY && actual != FOREIGN {
+        return Err(ProjectionTargetConfigError::NonCanonicalConformanceIdentity);
+    }
+    Ok(actual)
 }
 
 fn projection_fact_digest(
@@ -864,7 +966,9 @@ struct PlannedProjection {
     bindings: Vec<ProjectionInputBinding>,
     definition_version: Box<str>,
     definition_schema_digest: Box<str>,
-    input_generation: &'static str,
+    input_generation: Box<str>,
+    #[cfg(feature = "test-support")]
+    execution_target_identity_fingerprint: Option<[u8; 32]>,
 }
 
 impl ProjectionTargetRegistry {
@@ -892,7 +996,9 @@ impl ProjectionTargetRegistry {
                     bindings: entry.bindings().to_vec(),
                     definition_version: entry.workflow().definition_version().into(),
                     definition_schema_digest: entry.workflow().definition_schema_digest().into(),
-                    input_generation: entry.input_generation(),
+                    input_generation: entry.input_generation().into(),
+                    #[cfg(feature = "test-support")]
+                    execution_target_identity_fingerprint: None,
                 },
             );
             targets.insert(projection, target);
@@ -932,12 +1038,46 @@ impl ProjectionTargetRegistry {
                     bindings: capability.inputs,
                     definition_version: capability.definition.version().into(),
                     definition_schema_digest: capability.definition.schema_hash().into(),
-                    input_generation: capability.input_generation,
+                    input_generation: capability.input_generation.into(),
+                    #[cfg(feature = "test-support")]
+                    execution_target_identity_fingerprint: None,
                 },
             );
             targets.insert(projection, capability.target);
         }
         Ok(Self { planned, targets })
+    }
+
+    /// Build a target-less registry from one closed, production-shaped conformance identity.
+    ///
+    /// This entry point is absent from production builds. It accepts neither raw authority fields
+    /// nor actor/purpose overrides; source and execution authority remain minted by the existing
+    /// registry methods after the exact binding set passes normal target validation.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn from_conformance_fixture(
+        definition: &ProjectionTargetDefinition,
+        bindings: &[ProjectionInputBinding],
+    ) -> Result<Self, ProjectionTargetConfigError> {
+        validate_projection_target_bindings(definition, bindings)?;
+        let target_identity_fingerprint =
+            validate_canonical_projection_conformance_identity(definition, bindings)?;
+        let projection = definition.projection().clone();
+        let mut planned = BTreeMap::new();
+        planned.insert(
+            projection,
+            PlannedProjection {
+                bindings: bindings.to_vec(),
+                definition_version: definition.contract().version().into(),
+                definition_schema_digest: definition.contract().schema_hash().into(),
+                input_generation: definition.input_generation().as_str().into(),
+                execution_target_identity_fingerprint: Some(target_identity_fingerprint),
+            },
+        );
+        Ok(Self {
+            planned,
+            targets: BTreeMap::new(),
+        })
     }
 
     /// Mint a generated source scope for downstream adapter integration tests without inventing a
@@ -964,7 +1104,9 @@ impl ProjectionTargetRegistry {
                     bindings: bindings.to_vec(),
                     definition_version: workflow.definition_version().into(),
                     definition_schema_digest: workflow.definition_schema_digest().into(),
-                    input_generation: generation,
+                    input_generation: generation.into(),
+                    #[cfg(feature = "test-support")]
+                    execution_target_identity_fingerprint: None,
                 },
             );
         }
@@ -997,7 +1139,10 @@ impl ProjectionTargetRegistry {
                         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                             .into(),
                     input_generation:
-                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                        "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                            .into(),
+                    #[cfg(feature = "test-support")]
+                    execution_target_identity_fingerprint: None,
                 },
             );
         }
@@ -1070,7 +1215,7 @@ impl ProjectionTargetRegistry {
             projection: projection.clone(),
             definition_version: planned.definition_version.clone(),
             definition_schema_digest: planned.definition_schema_digest.clone(),
-            input_generation: planned.input_generation,
+            input_generation: planned.input_generation.clone(),
         })
     }
 
@@ -1080,11 +1225,20 @@ impl ProjectionTargetRegistry {
         projection: &ProjectionId,
         tenant: vocab::TenantId,
     ) -> Result<ProjectionExecutionContext, ProjectionRegistryError> {
-        if !self.planned.contains_key(projection) {
-            return Err(ProjectionRegistryError::UnknownProjection {
+        let planned = self.planned.get(projection).ok_or_else(|| {
+            ProjectionRegistryError::UnknownProjection {
                 projection: projection.clone(),
-            });
+            }
+        })?;
+        #[cfg(feature = "test-support")]
+        if let Some(fingerprint) = planned.execution_target_identity_fingerprint {
+            return Ok(ProjectionExecutionContext::conformance_operator_replay(
+                tenant,
+                fingerprint,
+            ));
         }
+        #[cfg(not(feature = "test-support"))]
+        let _ = planned;
         Ok(ProjectionExecutionContext::operator_replay(tenant))
     }
 
@@ -1140,6 +1294,16 @@ impl ProjectionProjector {
     ) -> Result<Self, ProjectionTargetConfigError> {
         if execution.tenant() != selector.tenant() {
             return Err(ProjectionTargetConfigError::ExecutionTenantMismatch);
+        }
+        if target.projection() != selector.projection()
+            || execution
+                .target_identity_fingerprint
+                .is_some_and(|expected| {
+                    projection_target_identity_fingerprint(target.definition(), target.bindings())
+                        != expected
+                })
+        {
+            return Err(ProjectionTargetConfigError::ExecutionTargetMismatch);
         }
         Ok(Self {
             execution,

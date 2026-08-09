@@ -293,18 +293,72 @@ pub(in super::super) const TEST_SCHEMA_HASH: &str =
 pub(in super::super) const EMPTY_PROJECTION_INPUT_GENERATION: &str =
     "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
-pub(in super::super) const TEST_PROJECTION_INPUT_GENERATION: &str =
-    "sha256:6ceef61bfb723713a3d27682fb2597b6ed830e4497d97b78c044d9d999130286";
+const fn lower_projection_conformance_binding(
+    fixture: ProjectionConformanceFixture,
+    binding: ProjectionConformanceBinding,
+) -> vocab::ProjectionInputBinding {
+    test_projection_input_binding(
+        fixture.projection_id(),
+        binding.source_domain(),
+        binding.contract_id(),
+        binding.contract_version(),
+        binding.schema_hash(),
+        binding.topic(),
+    )
+}
 
-pub(in super::super) static TEST_PROJECTION_INPUTS: &[vocab::ProjectionInputBinding] =
-    &[test_projection_input_binding(
-        "test-projection",
-        "test",
-        "projection.bound",
-        "v1",
-        TEST_SCHEMA_HASH,
-        "test.event",
+pub(in super::super) fn projection_conformance_inputs(
+    fixture: ProjectionConformanceFixture,
+) -> Vec<vocab::ProjectionInputBinding> {
+    let mut bindings = vec![lower_projection_conformance_binding(
+        fixture,
+        fixture.binding(),
     )];
+    if let Some(binding) = fixture.secondary_binding() {
+        bindings.push(lower_projection_conformance_binding(fixture, binding));
+    }
+    bindings
+}
+
+#[allow(clippy::panic)]
+pub(in super::super) static PROJECTION_CONFORMANCE_INPUTS: &[vocab::ProjectionInputBinding] = &[
+    lower_projection_conformance_binding(
+        ProjectionConformanceFixture::primary(),
+        ProjectionConformanceFixture::primary().binding(),
+    ),
+    match ProjectionConformanceFixture::primary().secondary_binding() {
+        Some(binding) => {
+            lower_projection_conformance_binding(ProjectionConformanceFixture::primary(), binding)
+        }
+        None => panic!("primary conformance fixture must have its canonical secondary binding"),
+    },
+    lower_projection_conformance_binding(
+        ProjectionConformanceFixture::foreign(),
+        ProjectionConformanceFixture::foreign().binding(),
+    ),
+];
+
+pub(in super::super) fn projection_conformance_definition(
+    fixture: ProjectionConformanceFixture,
+) -> Result<eventexec::ProjectionTargetDefinition, eventexec::ProjectionTargetConfigError> {
+    eventexec::ProjectionTargetDefinition::new(
+        vocab::ContractBinding::from_static(
+            fixture.definition_domain(),
+            fixture.projection_id(),
+            fixture.definition_version(),
+            fixture.definition_schema_hash(),
+        ),
+        fixture.input_generation(),
+    )
+}
+
+pub(in super::super) fn projection_conformance_registry(
+    fixture: ProjectionConformanceFixture,
+) -> Result<eventexec::ProjectionTargetRegistry, eventexec::ProjectionTargetConfigError> {
+    let definition = projection_conformance_definition(fixture)?;
+    let bindings = projection_conformance_inputs(fixture);
+    eventexec::ProjectionTargetRegistry::from_conformance_fixture(&definition, &bindings)
+}
 
 pub(in super::super) const SESSION_PROJECTION_INPUT_GENERATION: &str =
     "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";

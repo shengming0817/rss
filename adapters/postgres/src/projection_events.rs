@@ -781,6 +781,7 @@ mod smoke {
     use consistency::{
         PartitionSerialDelivery, ProjectionEvent, ProjectionEventRecord, ProjectionEventSource,
     };
+    use sha2::{Digest as _, Sha256};
 
     fn assert_projection_event<T: ProjectionEvent>(_: PhantomData<T>) {}
 
@@ -945,6 +946,47 @@ mod smoke {
             forward,
             super::projection_input_generation(&[changed_topic, B])
         );
+    }
+
+    #[test]
+    fn projection_conformance_generation_matches_the_exact_neutral_catalog()
+    -> Result<(), &'static str> {
+        use testkit::projection_conformance::ProjectionConformanceFixture;
+
+        let primary = ProjectionConformanceFixture::primary();
+        let foreign = ProjectionConformanceFixture::foreign();
+        let secondary = primary
+            .secondary_binding()
+            .ok_or("primary fixture must seal one complete secondary binding")?;
+        let mut entries = vec![
+            (primary, primary.binding()),
+            (primary, secondary),
+            (foreign, foreign.binding()),
+        ];
+        entries.sort_unstable_by_key(|(fixture, binding)| {
+            (fixture.projection_id(), binding.contract_id())
+        });
+        let mut digest = Sha256::new();
+        for (fixture, binding) in entries {
+            for value in [
+                fixture.projection_id(),
+                fixture.definition_version(),
+                fixture.definition_schema_hash(),
+                binding.source_domain(),
+                binding.contract_id(),
+                binding.contract_version(),
+                binding.schema_hash(),
+                binding.topic(),
+            ] {
+                digest.update((value.len() as u64).to_be_bytes());
+                digest.update(value.as_bytes());
+            }
+        }
+        assert_eq!(
+            ProjectionConformanceFixture::primary().input_generation(),
+            format!("sha256:{:x}", digest.finalize())
+        );
+        Ok(())
     }
 
     #[test]

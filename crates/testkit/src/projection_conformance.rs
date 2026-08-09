@@ -7,8 +7,145 @@
 //!
 //! ref: serverlesstechnology/cqrs persistence/postgres-es/src/view_repository.rs@5097326888cdb8848eb36d0ad3decd470879b61c
 //! INVARIANT: PROJECTION-TARGET-CONFORMANCE-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed exact tuple rejects missing, duplicate, reordered, or unknown projection scenarios and fixes the behavior output type" }.
+//! INVARIANT: PROJECTION-CONFORMANCE-FIXTURE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields and no raw constructor limit external carriers to the canonical primary and foreign test identities" }.
 
 use crate::ConformanceErrorCategory;
+
+/// One complete provider-neutral Projection input identity.
+///
+/// Private fields and the absence of a public constructor prevent consumers from expressing a
+/// half-populated binding or recombining canonical scalar parts.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProjectionConformanceBinding {
+    source_domain: &'static str,
+    contract_id: &'static str,
+    contract_version: &'static str,
+    schema_hash: &'static str,
+    topic: &'static str,
+}
+
+impl ProjectionConformanceBinding {
+    pub const fn source_domain(self) -> &'static str {
+        self.source_domain
+    }
+
+    pub const fn contract_id(self) -> &'static str {
+        self.contract_id
+    }
+
+    pub const fn contract_version(self) -> &'static str {
+        self.contract_version
+    }
+
+    pub const fn schema_hash(self) -> &'static str {
+        self.schema_hash
+    }
+
+    pub const fn topic(self) -> &'static str {
+        self.topic
+    }
+}
+
+/// Closed, provider-neutral identity used by Projection T2 conformance carriers.
+///
+/// The fields deliberately remain private and there is no configurable constructor. Consumers
+/// can only lower one of the two canonical identities into their own production-shaped types.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProjectionConformanceFixture {
+    definition_domain: &'static str,
+    projection_id: &'static str,
+    definition_version: &'static str,
+    definition_schema_hash: &'static str,
+    binding: ProjectionConformanceBinding,
+    secondary_binding: Option<ProjectionConformanceBinding>,
+    input_generation: &'static str,
+    target_generation: &'static str,
+}
+
+impl ProjectionConformanceFixture {
+    const INPUT_GENERATION: &'static str =
+        "sha256:6adc35264f4f118f40d0b42f71260433dcc53b99b1355f82c4bcd821e002dd3b";
+
+    const PRIMARY: Self = Self {
+        definition_domain: "test.projection-conformance",
+        projection_id: "test.projection-conformance.primary",
+        definition_version: "v1",
+        definition_schema_hash: "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        binding: ProjectionConformanceBinding {
+            source_domain: "test.projection-source",
+            contract_id: "test.projection-source.primary",
+            contract_version: "v1",
+            schema_hash: "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+            topic: "test.projection-source.primary",
+        },
+        secondary_binding: Some(ProjectionConformanceBinding {
+            source_domain: "test.projection-source",
+            contract_id: "test.projection-source.primary-secondary",
+            contract_version: "v1",
+            schema_hash: "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+            topic: "test.projection-source.primary-secondary",
+        }),
+        input_generation: Self::INPUT_GENERATION,
+        target_generation: "t2-primary-v1",
+    };
+
+    const FOREIGN: Self = Self {
+        definition_domain: "test.projection-conformance",
+        projection_id: "test.projection-conformance.foreign",
+        definition_version: "v1",
+        definition_schema_hash: "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        binding: ProjectionConformanceBinding {
+            source_domain: "test.projection-source",
+            contract_id: "test.projection-source.foreign",
+            contract_version: "v1",
+            schema_hash: "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+            topic: "test.projection-source.foreign",
+        },
+        secondary_binding: None,
+        input_generation: Self::INPUT_GENERATION,
+        target_generation: "t2-foreign-v1",
+    };
+
+    pub const fn primary() -> Self {
+        Self::PRIMARY
+    }
+
+    pub const fn foreign() -> Self {
+        Self::FOREIGN
+    }
+
+    pub const fn definition_domain(self) -> &'static str {
+        self.definition_domain
+    }
+
+    pub const fn projection_id(self) -> &'static str {
+        self.projection_id
+    }
+
+    pub const fn definition_version(self) -> &'static str {
+        self.definition_version
+    }
+
+    pub const fn definition_schema_hash(self) -> &'static str {
+        self.definition_schema_hash
+    }
+
+    pub const fn binding(self) -> ProjectionConformanceBinding {
+        self.binding
+    }
+
+    pub const fn secondary_binding(self) -> Option<ProjectionConformanceBinding> {
+        self.secondary_binding
+    }
+
+    pub const fn input_generation(self) -> &'static str {
+        self.input_generation
+    }
+
+    pub const fn target_generation(self) -> &'static str {
+        self.target_generation
+    }
+}
 
 /// Canonical projection target scenarios in required enrollment order.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -372,6 +509,92 @@ macro_rules! projection_target_conformance {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_primary_fixture_pins_the_complete_neutral_tuple() -> Result<(), &'static str> {
+        let primary = ProjectionConformanceFixture::primary();
+
+        assert_eq!(primary.definition_domain(), "test.projection-conformance");
+        assert_eq!(
+            primary.projection_id(),
+            "test.projection-conformance.primary"
+        );
+        let binding = primary.binding();
+        assert_eq!(binding.source_domain(), "test.projection-source");
+        assert_eq!(binding.contract_id(), "test.projection-source.primary");
+        assert_eq!(binding.topic(), "test.projection-source.primary");
+        assert_eq!(primary.definition_version(), "v1");
+        assert_eq!(binding.contract_version(), "v1");
+        assert_eq!(primary.target_generation(), "t2-primary-v1");
+        let secondary = primary
+            .secondary_binding()
+            .ok_or("primary fixture must seal one complete secondary binding")?;
+        assert_eq!(
+            secondary.contract_id(),
+            "test.projection-source.primary-secondary"
+        );
+        assert_eq!(
+            secondary.topic(),
+            "test.projection-source.primary-secondary"
+        );
+        assert_eq!(
+            secondary.schema_hash(),
+            "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+        );
+        assert_eq!(
+            primary.definition_schema_hash(),
+            "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+        );
+        assert_eq!(
+            binding.schema_hash(),
+            "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn canonical_foreign_fixture_pins_the_complete_neutral_tuple() {
+        let foreign = ProjectionConformanceFixture::foreign();
+
+        assert_eq!(foreign.definition_domain(), "test.projection-conformance");
+        assert_eq!(
+            foreign.projection_id(),
+            "test.projection-conformance.foreign"
+        );
+        let binding = foreign.binding();
+        assert_eq!(binding.source_domain(), "test.projection-source");
+        assert_eq!(binding.contract_id(), "test.projection-source.foreign");
+        assert_eq!(binding.topic(), "test.projection-source.foreign");
+        assert_eq!(foreign.definition_version(), "v1");
+        assert_eq!(binding.contract_version(), "v1");
+        assert_eq!(foreign.target_generation(), "t2-foreign-v1");
+        assert_eq!(foreign.secondary_binding(), None);
+        assert_eq!(
+            foreign.definition_schema_hash(),
+            "sha256:3333333333333333333333333333333333333333333333333333333333333333"
+        );
+        assert_eq!(
+            binding.schema_hash(),
+            "sha256:4444444444444444444444444444444444444444444444444444444444444444"
+        );
+    }
+
+    #[test]
+    fn canonical_fixtures_are_distinct_members_of_one_input_generation() {
+        let primary = ProjectionConformanceFixture::primary();
+        let foreign = ProjectionConformanceFixture::foreign();
+
+        assert_ne!(primary, foreign);
+        assert_ne!(
+            primary.definition_schema_hash(),
+            foreign.definition_schema_hash()
+        );
+        assert_ne!(
+            primary.binding().schema_hash(),
+            foreign.binding().schema_hash()
+        );
+        assert_eq!(primary.input_generation(), foreign.input_generation());
+    }
 
     fn canonical(case: ProjectionCase) -> ProjectionObservation {
         match case {

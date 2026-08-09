@@ -3,26 +3,40 @@
 use super::support::*;
 
 #[tokio::test(flavor = "multi_thread")]
-async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> TestResult {
+async fn projection_writer_funnel_mirrors_only_registered_bound_insert_once() -> TestResult {
     use crate::projection_events::ProjectionWriteRegistry;
 
     let (_pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
 
-    let registry = ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS);
-    let domain = "test";
+    let registry = ProjectionWriteRegistry::from_selected(PROJECTION_CONFORMANCE_INPUTS);
     let bound_event_id = unique_event_id("projection-bound");
     let unbound_event_id = unique_event_id("projection-unbound");
     let schema_mismatch_event_id = unique_event_id("projection-schema-mismatch");
-    let bound_entry = make_entry(&bound_event_id);
-    let unbound_entry = make_entry(&unbound_event_id);
-    let schema_mismatch_entry = make_entry(&schema_mismatch_event_id);
-    let bound_env = make_test_env(domain, "projection.bound");
-    let unbound_env = make_test_env(domain, "projection.unbound");
+    let bound_entry = projection_conformance_entry(&bound_event_id)?;
+    let unbound_entry = projection_conformance_entry(&unbound_event_id)?;
+    let schema_mismatch_entry = projection_conformance_entry(&schema_mismatch_event_id)?;
+    let bound_env = projection_conformance_env();
+    let unbound_env = projection_conformance_env_with_unbound_routing_for_negative_test();
     let schema_mismatch_env = make_test_env_with_contract_metadata(
-        domain,
-        "projection.bound",
-        vocab::ContractBinding::from_static("test", "projection.bound", "v2", TEST_SCHEMA_HASH),
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .source_domain(),
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_id(),
+        vocab::ContractBinding::from_static(
+            ProjectionConformanceFixture::primary()
+                .binding()
+                .source_domain(),
+            ProjectionConformanceFixture::primary()
+                .binding()
+                .contract_id(),
+            "v2",
+            ProjectionConformanceFixture::primary()
+                .binding()
+                .schema_hash(),
+        ),
     );
 
     eventing_test_db(&store)
@@ -79,12 +93,22 @@ async fn projection_writer_funnel_mirrors_only_generated_bound_insert_once() -> 
     assert_eq!(
         projection_rows.len(),
         1,
-        "only generated-bound outbox inserts should mirror to projection_events"
+        "only registered-bound outbox inserts should mirror to projection_events"
     );
     assert_eq!(projection_rows[0].0, bound_event_id);
-    assert_eq!(projection_rows[0].1, "projection.bound");
+    assert_eq!(
+        projection_rows[0].1,
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_id()
+    );
     assert_eq!(projection_rows[0].2, "v1");
-    assert_eq!(projection_rows[0].3, TEST_SCHEMA_HASH);
+    assert_eq!(
+        projection_rows[0].3,
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .schema_hash()
+    );
     assert_eq!(projection_rows[0].4, COTX_TENANT_A);
 
     let outbox_count: (i64,) =
@@ -161,15 +185,14 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     provision_runtime_logins(&pg).await?;
     setup_outbox(&store).await?;
 
-    let registry = ProjectionWriteRegistry::from_selected(TEST_PROJECTION_INPUTS);
+    let registry = ProjectionWriteRegistry::from_selected(PROJECTION_CONFORMANCE_INPUTS);
     let first_registry = registry.clone();
-    let domain = "test";
     let first_event_id = unique_event_id("projection-order-first");
     let second_event_id = unique_event_id("projection-order-second");
-    let first_entry = make_entry(&first_event_id);
-    let second_entry = make_entry(&second_event_id);
-    let first_env = make_test_env(domain, "projection.bound");
-    let second_env = make_test_env(domain, "projection.bound");
+    let first_entry = projection_conformance_entry(&first_event_id)?;
+    let second_entry = projection_conformance_entry(&second_event_id)?;
+    let first_env = projection_conformance_env();
+    let second_env = projection_conformance_env();
 
     let db_a = eventing_test_db(&store);
     let db_b = eventing_test_db(&store);
@@ -276,21 +299,23 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
         issue_projection_source_capability(
             &operator_store,
             uuid::Uuid::parse_str(COTX_TENANT_A)?,
-            "test-projection",
-            "v1",
-            TEST_SCHEMA_HASH,
-            TEST_PROJECTION_INPUT_GENERATION,
+            ProjectionConformanceFixture::primary().projection_id(),
+            ProjectionConformanceFixture::primary().definition_version(),
+            ProjectionConformanceFixture::primary().definition_schema_hash(),
+            ProjectionConformanceFixture::primary().input_generation(),
         )
         .await?;
     let high_water: Option<i64> = sqlx::query_scalar(
         "SELECT public.rss_projection_source_high_water_scoped(\
-         $1::uuid, $2::uuid, $3::uuid, 'test-projection', 'v1', $4, $5)",
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)",
     )
     .bind(high_water_capability_first)
     .bind(high_water_capability_second)
     .bind(COTX_TENANT_A)
-    .bind(TEST_SCHEMA_HASH)
-    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .bind(ProjectionConformanceFixture::primary().projection_id())
+    .bind(ProjectionConformanceFixture::primary().definition_version())
+    .bind(ProjectionConformanceFixture::primary().definition_schema_hash())
+    .bind(ProjectionConformanceFixture::primary().input_generation())
     .fetch_one(source_store.pool())
     .await?;
     assert_eq!(
@@ -301,21 +326,23 @@ async fn projection_writer_funnel_serializes_lsn_with_commit_order() -> TestResu
     let (read_capability_first, read_capability_second) = issue_projection_source_capability(
         &operator_store,
         uuid::Uuid::parse_str(COTX_TENANT_A)?,
-        "test-projection",
-        "v1",
-        TEST_SCHEMA_HASH,
-        TEST_PROJECTION_INPUT_GENERATION,
+        ProjectionConformanceFixture::primary().projection_id(),
+        ProjectionConformanceFixture::primary().definition_version(),
+        ProjectionConformanceFixture::primary().definition_schema_hash(),
+        ProjectionConformanceFixture::primary().input_generation(),
     )
     .await?;
     let replay_suffix: Vec<(String, i64)> = sqlx::query_as(
         "SELECT event_id, id FROM public.rss_read_projection_events_scoped(\
-         $1::uuid, $2::uuid, $3::uuid, 'test-projection', 'v1', $4, $5, $6, 10)",
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, $8, 10)",
     )
     .bind(read_capability_first)
     .bind(read_capability_second)
     .bind(COTX_TENANT_A)
-    .bind(TEST_SCHEMA_HASH)
-    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .bind(ProjectionConformanceFixture::primary().projection_id())
+    .bind(ProjectionConformanceFixture::primary().definition_version())
+    .bind(ProjectionConformanceFixture::primary().definition_schema_hash())
+    .bind(ProjectionConformanceFixture::primary().input_generation())
     .bind(rows[0].1)
     .fetch_all(source_store.pool())
     .await?;
@@ -428,24 +455,36 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         "SELECT projection_id, projection_definition_version, \
                 projection_definition_schema_digest, source_domain, contract_id, \
                 contract_version, schema_hash, topic \
-         FROM public.rss_read_projection_input_generation($1)",
+         FROM public.rss_read_projection_input_generation($1) \
+         ORDER BY projection_id, contract_id",
     )
-    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .bind(ProjectionConformanceFixture::primary().input_generation())
     .fetch_all(&app.pool)
     .await?;
-    assert_eq!(
-        registered,
-        vec![(
-            "test-projection".to_owned(),
-            "v1".to_owned(),
-            TEST_SCHEMA_HASH.to_owned(),
-            "test".to_owned(),
-            "projection.bound".to_owned(),
-            "v1".to_owned(),
-            TEST_SCHEMA_HASH.to_owned(),
-            "test.event".to_owned(),
-        )]
-    );
+    let mut expected = [
+        ProjectionConformanceFixture::foreign(),
+        ProjectionConformanceFixture::primary(),
+    ]
+    .into_iter()
+    .flat_map(|fixture| {
+        projection_conformance_inputs(fixture)
+            .into_iter()
+            .map(move |binding| {
+                (
+                    fixture.projection_id().to_owned(),
+                    fixture.definition_version().to_owned(),
+                    fixture.definition_schema_hash().to_owned(),
+                    binding.domain().to_owned(),
+                    binding.contract_id().to_owned(),
+                    binding.version().to_owned(),
+                    binding.schema_hash().to_owned(),
+                    binding.topic().to_owned(),
+                )
+            })
+    })
+    .collect::<Vec<_>>();
+    expected.sort_unstable_by(|left, right| (&left.0, &left.4).cmp(&(&right.0, &right.4)));
+    assert_eq!(registered, expected);
 
     assert!(
         generated::event::PROJECTION_INPUTS.len() >= 2,
@@ -459,8 +498,7 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
             .find(|definition| definition.contract_id() == binding.projection_id())
             .ok_or_else(|| std::io::Error::other("generated projection input lacks definition"))?;
         let source_event_id = unique_event_id(binding.projection_id());
-        let source_lsn =
-            append_generated_projection_source_event(&app, binding, &source_event_id).await?;
+        let source_lsn = append_projection_source_event(&app, binding, &source_event_id).await?;
         generated_sources.push((*definition, binding, source_event_id, source_lsn));
     }
     assert_ne!(generated_sources[0].0, generated_sources[1].0);
@@ -522,12 +560,12 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         );
     }
 
-    let entry = make_entry(&event_id);
-    let env = make_test_env("test", "projection.bound");
+    let entry = projection_conformance_entry(&event_id)?;
+    let env = projection_conformance_env();
     let metadata = env.metadata_json();
     let unbound_event_id = unique_event_id("projection-fn-unbound");
-    let unbound_entry = make_entry(&unbound_event_id);
-    let unbound_env = make_test_env("test", "projection.unbound");
+    let unbound_entry = projection_conformance_entry(&unbound_event_id)?;
+    let unbound_env = projection_conformance_env_with_unbound_routing_for_negative_test();
     let unbound_metadata = unbound_env.metadata_json();
     eventing_test_db(&store)
         .test_write(
@@ -568,12 +606,30 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     .bind(&event_id)
     .fetch_one(&store.pool)
     .await?;
-    assert_eq!(appended_outbox.0, "test");
-    assert_eq!(appended_outbox.1, "test.event");
+    assert_eq!(
+        appended_outbox.0,
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .source_domain()
+    );
+    assert_eq!(
+        appended_outbox.1,
+        ProjectionConformanceFixture::primary().binding().topic()
+    );
     assert_eq!(appended_outbox.2, b"payload");
-    assert_eq!(appended_outbox.3, "projection.bound");
+    assert_eq!(
+        appended_outbox.3,
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_id()
+    );
     assert_eq!(appended_outbox.4, "v1");
-    assert_eq!(appended_outbox.5, TEST_SCHEMA_HASH);
+    assert_eq!(
+        appended_outbox.5,
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .schema_hash()
+    );
     let expected_metadata: serde_json::Value = serde_json::from_str(&metadata)?;
     assert_eq!(appended_outbox.6, expected_metadata);
     assert_eq!(appended_outbox.7, None);
@@ -590,13 +646,13 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
              AND binding.schema_hash = outbox_row.schema_hash
              AND binding.topic = outbox_row.topic
             WHERE outbox_row.event_id = $1
-              AND outbox_row.domain = 'test'
-              AND outbox_row.topic = 'test.event'
+              AND outbox_row.domain = $3
+              AND outbox_row.topic = $4
               AND outbox_row.payload = $2
-              AND outbox_row.contract_id = 'projection.bound'
-              AND outbox_row.contract_version = 'v1'
-              AND outbox_row.schema_hash = $3
-              AND outbox_row.metadata = $4::jsonb
+              AND outbox_row.contract_id = $5
+              AND outbox_row.contract_version = $6
+              AND outbox_row.schema_hash = $7
+              AND outbox_row.metadata = $8::jsonb
               AND outbox_row.partition_key IS NULL
               AND outbox_row.causation_id IS NULL
               AND COALESCE(outbox_row.partition_key, outbox_row.event_id) = $1
@@ -605,7 +661,27 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     )
     .bind(&event_id)
     .bind(b"payload".as_slice())
-    .bind(TEST_SCHEMA_HASH)
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .source_domain(),
+    )
+    .bind(ProjectionConformanceFixture::primary().binding().topic())
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_id(),
+    )
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_version(),
+    )
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .schema_hash(),
+    )
     .bind(&metadata)
     .fetch_one(&store.pool)
     .await?;
@@ -619,14 +695,34 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     let (lsn,): (i64,) = sqlx::query_as(
         r#"
         SELECT rss_append_projection_event(
-            $1, 'test', $1, 'test.event', $2, NULL,
-            'projection.bound', 'v1', $3, $4::jsonb, NULL, NULL
+            $1, $3, $1, $4, $2, NULL,
+            $5, $6, $7, $8::jsonb, NULL, NULL
         )
         "#,
     )
     .bind(&event_id)
     .bind(b"payload".as_slice())
-    .bind(TEST_SCHEMA_HASH)
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .source_domain(),
+    )
+    .bind(ProjectionConformanceFixture::primary().binding().topic())
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_id(),
+    )
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_version(),
+    )
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .schema_hash(),
+    )
     .bind(&metadata)
     .fetch_one(&mut *app_tx)
     .await?;
@@ -743,10 +839,10 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         issue_projection_source_capability(
             &operator_store,
             uuid::Uuid::parse_str(COTX_TENANT_A)?,
-            "test-projection",
-            "v1",
-            TEST_SCHEMA_HASH,
-            TEST_PROJECTION_INPUT_GENERATION,
+            ProjectionConformanceFixture::primary().projection_id(),
+            ProjectionConformanceFixture::primary().definition_version(),
+            ProjectionConformanceFixture::primary().definition_schema_hash(),
+            ProjectionConformanceFixture::primary().input_generation(),
         )
         .await?
     };
@@ -754,15 +850,17 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         r#"
         SELECT id
         FROM public.rss_read_projection_events_scoped(
-            $1::uuid, $2::uuid, $3::uuid, 'test-projection', 'v1', $4, $5, 0, 10
+            $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 0, 10
         )
         "#,
     )
     .bind(scoped_capability_first)
     .bind(scoped_capability_second)
     .bind(COTX_TENANT_A)
-    .bind(TEST_SCHEMA_HASH)
-    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .bind(ProjectionConformanceFixture::primary().projection_id())
+    .bind(ProjectionConformanceFixture::primary().definition_version())
+    .bind(ProjectionConformanceFixture::primary().definition_schema_hash())
+    .bind(ProjectionConformanceFixture::primary().input_generation())
     .fetch_all(source_store.pool())
     .await?;
     assert_eq!(scoped_ids, vec![(lsn,)]);
@@ -770,10 +868,10 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         issue_projection_source_capability(
             &operator_store,
             uuid::Uuid::parse_str(COTX_TENANT_A)?,
-            "test-projection",
-            "v1",
-            TEST_SCHEMA_HASH,
-            TEST_PROJECTION_INPUT_GENERATION,
+            ProjectionConformanceFixture::primary().projection_id(),
+            ProjectionConformanceFixture::primary().definition_version(),
+            ProjectionConformanceFixture::primary().definition_schema_hash(),
+            ProjectionConformanceFixture::primary().input_generation(),
         )
         .await?
     };
@@ -781,15 +879,17 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         r#"
         SELECT count(*)::bigint
         FROM public.rss_read_projection_events_scoped(
-            $1::uuid, $2::uuid, $3::uuid, 'test-projection', 'v1', $4, $5, 0, 10
+            $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 0, 10
         )
         "#,
     )
     .bind(cross_tenant_capability_first)
     .bind(cross_tenant_capability_second)
     .bind(COTX_TENANT_B)
-    .bind(TEST_SCHEMA_HASH)
-    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .bind(ProjectionConformanceFixture::primary().projection_id())
+    .bind(ProjectionConformanceFixture::primary().definition_version())
+    .bind(ProjectionConformanceFixture::primary().definition_schema_hash())
+    .bind(ProjectionConformanceFixture::primary().input_generation())
     .fetch_one(source_store.pool())
     .await;
     let Err(cross_tenant_error) = cross_tenant else {
@@ -804,38 +904,38 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
             "projection",
             "other-projection",
             "v1",
-            TEST_SCHEMA_HASH,
-            TEST_PROJECTION_INPUT_GENERATION,
+            ProjectionConformanceFixture::primary().definition_schema_hash(),
+            ProjectionConformanceFixture::primary().input_generation(),
         ),
         (
             "definition-version",
-            "test-projection",
+            ProjectionConformanceFixture::primary().projection_id(),
             "v2",
-            TEST_SCHEMA_HASH,
-            TEST_PROJECTION_INPUT_GENERATION,
+            ProjectionConformanceFixture::primary().definition_schema_hash(),
+            ProjectionConformanceFixture::primary().input_generation(),
         ),
         (
             "definition-digest",
-            "test-projection",
-            "v1",
+            ProjectionConformanceFixture::primary().projection_id(),
+            ProjectionConformanceFixture::primary().definition_version(),
             "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
-            TEST_PROJECTION_INPUT_GENERATION,
+            ProjectionConformanceFixture::primary().input_generation(),
         ),
         (
             "generation",
-            "test-projection",
-            "v1",
-            TEST_SCHEMA_HASH,
+            ProjectionConformanceFixture::primary().projection_id(),
+            ProjectionConformanceFixture::primary().definition_version(),
+            ProjectionConformanceFixture::primary().definition_schema_hash(),
             "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         ),
     ] {
         let (capability_first, capability_second) = issue_projection_source_capability(
             &operator_store,
             uuid::Uuid::parse_str(COTX_TENANT_A)?,
-            "test-projection",
-            "v1",
-            TEST_SCHEMA_HASH,
-            TEST_PROJECTION_INPUT_GENERATION,
+            ProjectionConformanceFixture::primary().projection_id(),
+            ProjectionConformanceFixture::primary().definition_version(),
+            ProjectionConformanceFixture::primary().definition_schema_hash(),
+            ProjectionConformanceFixture::primary().input_generation(),
         )
         .await?;
         let result = sqlx::query_as::<_, (i64,)>(
@@ -878,33 +978,38 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         "scoped reader must never inspect the source capability catalog"
     );
     for (label, tenant_id, projection_id) in [
-        ("missing-tenant", None, Some("test-projection")),
+        (
+            "missing-tenant",
+            None,
+            Some(ProjectionConformanceFixture::primary().projection_id()),
+        ),
         ("missing-projection", Some(COTX_TENANT_A), None),
         (
             "nil-tenant",
             Some("00000000-0000-0000-0000-000000000000"),
-            Some("test-projection"),
+            Some(ProjectionConformanceFixture::primary().projection_id()),
         ),
     ] {
         let (capability_first, capability_second) = issue_projection_source_capability(
             &operator_store,
             uuid::Uuid::parse_str(COTX_TENANT_A)?,
-            "test-projection",
-            "v1",
-            TEST_SCHEMA_HASH,
-            TEST_PROJECTION_INPUT_GENERATION,
+            ProjectionConformanceFixture::primary().projection_id(),
+            ProjectionConformanceFixture::primary().definition_version(),
+            ProjectionConformanceFixture::primary().definition_schema_hash(),
+            ProjectionConformanceFixture::primary().input_generation(),
         )
         .await?;
         let result = sqlx::query(
             "SELECT * FROM public.rss_read_projection_events_scoped(\
-             $1::uuid, $2::uuid, $3::uuid, $4, 'v1', $5, $6, 0, 10)",
+             $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 0, 10)",
         )
         .bind(capability_first)
         .bind(capability_second)
         .bind(tenant_id)
         .bind(projection_id)
-        .bind(TEST_SCHEMA_HASH)
-        .bind(TEST_PROJECTION_INPUT_GENERATION)
+        .bind(ProjectionConformanceFixture::primary().definition_version())
+        .bind(ProjectionConformanceFixture::primary().definition_schema_hash())
+        .bind(ProjectionConformanceFixture::primary().input_generation())
         .execute(source_store.pool())
         .await;
         let Err(error) = result else {
@@ -921,11 +1026,13 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
             "SELECT * FROM public.rss_read_projection_events_scoped(\
              '00000000-0000-4000-8000-000000000001'::uuid, \
              '00000000-0000-4000-8000-000000000002'::uuid, \
-             $1::uuid, 'test-projection', 'v1', $2, $3, 0, 10)",
+             $1::uuid, $2, $3, $4, $5, 0, 10)",
         )
         .bind(COTX_TENANT_A)
-        .bind(TEST_SCHEMA_HASH)
-        .bind(TEST_PROJECTION_INPUT_GENERATION)
+        .bind(ProjectionConformanceFixture::primary().projection_id())
+        .bind(ProjectionConformanceFixture::primary().definition_version())
+        .bind(ProjectionConformanceFixture::primary().definition_schema_hash())
+        .bind(ProjectionConformanceFixture::primary().input_generation())
         .execute(&operator_store.store_arc().pool)
         .await
         .is_err(),
@@ -1027,14 +1134,34 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     let no_outbox_result = sqlx::query(
         r#"
         SELECT rss_append_projection_event(
-            $1, 'test', $1, 'test.event', $2, NULL,
-            'projection.bound', 'v1', $3, $4::jsonb, NULL, NULL
+            $1, $3, $1, $4, $2, NULL,
+            $5, $6, $7, $8::jsonb, NULL, NULL
         )
         "#,
     )
     .bind(&no_outbox_event_id)
     .bind(b"payload".as_slice())
-    .bind(TEST_SCHEMA_HASH)
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .source_domain(),
+    )
+    .bind(ProjectionConformanceFixture::primary().binding().topic())
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_id(),
+    )
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_version(),
+    )
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .schema_hash(),
+    )
     .bind(&metadata)
     .execute(&app.pool)
     .await;
@@ -1046,14 +1173,29 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
     let unbound_result = sqlx::query(
         r#"
         SELECT rss_append_projection_event(
-            $1, 'test', $1, 'test.event', $2, NULL,
-            'projection.unbound', 'v1', $3, $4::jsonb, NULL, NULL
+            $1, $3, $1, $4, $2, NULL,
+            'projection.unbound', $5, $6, $7::jsonb, NULL, NULL
         )
         "#,
     )
     .bind(&unbound_event_id)
     .bind(b"payload".as_slice())
-    .bind(TEST_SCHEMA_HASH)
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .source_domain(),
+    )
+    .bind(ProjectionConformanceFixture::primary().binding().topic())
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .contract_version(),
+    )
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .schema_hash(),
+    )
     .bind(&unbound_metadata)
     .execute(&app.pool)
     .await;
@@ -1107,14 +1249,34 @@ async fn projection_events_runtime_uses_fixed_functions_not_direct_table_privile
         let result = sqlx::query(
             r#"
             SELECT rss_append_projection_event(
-                $1, 'test', $1, 'test.event', $2, NULL,
-                'projection.bound', 'v1', $3, $4::jsonb, NULL, NULL
+                $1, $3, $1, $4, $2, NULL,
+                $5, $6, $7, $8::jsonb, NULL, NULL
             )
             "#,
         )
         .bind(unique_event_id(&format!("projection-fn-{label}")))
         .bind(b"payload".as_slice())
-        .bind(TEST_SCHEMA_HASH)
+        .bind(
+            ProjectionConformanceFixture::primary()
+                .binding()
+                .source_domain(),
+        )
+        .bind(ProjectionConformanceFixture::primary().binding().topic())
+        .bind(
+            ProjectionConformanceFixture::primary()
+                .binding()
+                .contract_id(),
+        )
+        .bind(
+            ProjectionConformanceFixture::primary()
+                .binding()
+                .contract_version(),
+        )
+        .bind(
+            ProjectionConformanceFixture::primary()
+                .binding()
+                .schema_hash(),
+        )
         .bind(serde_json::json!({ "tenantId": tenant_id }).to_string())
         .execute(&app.pool)
         .await;
@@ -1156,10 +1318,10 @@ async fn projection_source_capabilities_expire_and_sweep_orphans_boundedly() -> 
     let (capability_first, capability_second) = issue_projection_source_capability(
         &operator_store,
         uuid::Uuid::parse_str(COTX_TENANT_A)?,
-        "test-projection",
-        "v1",
-        TEST_SCHEMA_HASH,
-        TEST_PROJECTION_INPUT_GENERATION,
+        ProjectionConformanceFixture::primary().projection_id(),
+        ProjectionConformanceFixture::primary().definition_version(),
+        ProjectionConformanceFixture::primary().definition_schema_hash(),
+        ProjectionConformanceFixture::primary().input_generation(),
     )
     .await?;
     let expires_in_seconds: f64 = sqlx::query_scalar(
@@ -1186,13 +1348,15 @@ async fn projection_source_capabilities_expire_and_sweep_orphans_boundedly() -> 
     .await?;
     let expired_read = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT public.rss_projection_source_high_water_scoped(\
-         $1::uuid,$2::uuid,$3::uuid,'test-projection','v1',$4,$5)",
+         $1::uuid,$2::uuid,$3::uuid,$4,$5,$6,$7)",
     )
     .bind(capability_first)
     .bind(capability_second)
     .bind(COTX_TENANT_A)
-    .bind(TEST_SCHEMA_HASH)
-    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .bind(ProjectionConformanceFixture::primary().projection_id())
+    .bind(ProjectionConformanceFixture::primary().definition_version())
+    .bind(ProjectionConformanceFixture::primary().definition_schema_hash())
+    .bind(ProjectionConformanceFixture::primary().input_generation())
     .fetch_one(source_store.pool())
     .await;
     let Err(error) = expired_read else {
@@ -1205,13 +1369,15 @@ async fn projection_source_capabilities_expire_and_sweep_orphans_boundedly() -> 
              capability_digest, scope_tenant_id, projection_id, projection_definition_version, \
              projection_definition_schema_digest, input_generation, expires_at\
          ) SELECT pg_catalog.sha256(pg_catalog.int8send(item)), $1::uuid, \
-                  'test-projection', 'v1', $2, $3, \
+                  $2, $3, $4, $5, \
                   pg_catalog.clock_timestamp() - interval '1 second' \
            FROM pg_catalog.generate_series(1::bigint, 1000::bigint) AS item",
     )
     .bind(COTX_TENANT_A)
-    .bind(TEST_SCHEMA_HASH)
-    .bind(TEST_PROJECTION_INPUT_GENERATION)
+    .bind(ProjectionConformanceFixture::primary().projection_id())
+    .bind(ProjectionConformanceFixture::primary().definition_version())
+    .bind(ProjectionConformanceFixture::primary().definition_schema_hash())
+    .bind(ProjectionConformanceFixture::primary().input_generation())
     .execute(&owner.pool)
     .await?;
     let first_sweep: i64 =
@@ -1247,11 +1413,9 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     let (pg, owner) = connect_pg().await?;
     provision_runtime_logins(&pg).await?;
     setup_outbox(&owner).await?;
-    let generation =
-        crate::projection_events::projection_input_generation(MULTI_BINDING_HIGH_WATER_INPUTS);
-    owner
-        .register_projection_input_bindings(&generation, MULTI_BINDING_HIGH_WATER_INPUTS)
-        .await?;
+    let fixture = ProjectionConformanceFixture::primary();
+    let inputs = projection_conformance_inputs(fixture);
+    assert_eq!(inputs.len(), 2, "primary fixture must seal two bindings");
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let operator_store = crate::PgStore::connect_verified_projection_operator(
         &crate::PgProjectionOperatorConfig::new(runtime_pg_config(
@@ -1278,25 +1442,25 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     let second_payload = b"multi-binding-b";
     let noise_payload = b"other-tenant-noise";
 
-    let first_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+    let first_lsn = append_projection_source_event_with_payload_for_tenant(
         &app,
-        MULTI_BINDING_HIGH_WATER_INPUTS[0],
+        inputs[0],
         &first_event_id,
         tenant,
         first_payload,
     )
     .await?;
-    let second_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+    let second_lsn = append_projection_source_event_with_payload_for_tenant(
         &app,
-        MULTI_BINDING_HIGH_WATER_INPUTS[1],
+        inputs[1],
         &second_event_id,
         tenant,
         second_payload,
     )
     .await?;
-    let noise_lsn = append_generated_projection_source_event_with_payload_for_tenant(
+    let noise_lsn = append_projection_source_event_with_payload_for_tenant(
         &app,
-        MULTI_BINDING_HIGH_WATER_INPUTS[1],
+        inputs[1],
         &noise_event_id,
         other_tenant,
         noise_payload,
@@ -1311,22 +1475,23 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
         issue_projection_source_capability(
             &operator_store,
             tenant.as_uuid(),
-            MULTI_BINDING_HIGH_WATER_INPUTS[0].projection_id(),
-            "v1",
-            TEST_SCHEMA_HASH,
-            &generation,
+            fixture.projection_id(),
+            fixture.definition_version(),
+            fixture.definition_schema_hash(),
+            fixture.input_generation(),
         )
         .await?;
     let high_water: Option<i64> = sqlx::query_scalar(
         "SELECT public.rss_projection_source_high_water_scoped(\
-         $1::uuid, $2::uuid, $3::uuid, $4, 'v1', $5, $6)",
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)",
     )
     .bind(&high_water_capability_first)
     .bind(&high_water_capability_second)
     .bind(tenant.to_string())
-    .bind(MULTI_BINDING_HIGH_WATER_INPUTS[0].projection_id())
-    .bind(TEST_SCHEMA_HASH)
-    .bind(&generation)
+    .bind(fixture.projection_id())
+    .bind(fixture.definition_version())
+    .bind(fixture.definition_schema_hash())
+    .bind(fixture.input_generation())
     .fetch_one(source_store.pool())
     .await?;
     assert_eq!(
@@ -1336,14 +1501,15 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     );
     let replayed_capability = sqlx::query_scalar::<_, Option<i64>>(
         "SELECT public.rss_projection_source_high_water_scoped(\
-         $1::uuid, $2::uuid, $3::uuid, $4, 'v1', $5, $6)",
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7)",
     )
     .bind(&high_water_capability_first)
     .bind(&high_water_capability_second)
     .bind(tenant.to_string())
-    .bind(MULTI_BINDING_HIGH_WATER_INPUTS[0].projection_id())
-    .bind(TEST_SCHEMA_HASH)
-    .bind(&generation)
+    .bind(fixture.projection_id())
+    .bind(fixture.definition_version())
+    .bind(fixture.definition_schema_hash())
+    .bind(fixture.input_generation())
     .fetch_one(source_store.pool())
     .await;
     let Err(replay_error) = replayed_capability else {
@@ -1357,23 +1523,24 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
     let (read_capability_first, read_capability_second) = issue_projection_source_capability(
         &operator_store,
         tenant.as_uuid(),
-        MULTI_BINDING_HIGH_WATER_INPUTS[0].projection_id(),
-        "v1",
-        TEST_SCHEMA_HASH,
-        &generation,
+        fixture.projection_id(),
+        fixture.definition_version(),
+        fixture.definition_schema_hash(),
+        fixture.input_generation(),
     )
     .await?;
     let records: Vec<(i64, String, Vec<u8>)> = sqlx::query_as(
         "SELECT id, event_id, payload \
          FROM public.rss_read_projection_events_scoped(\
-         $1::uuid, $2::uuid, $3::uuid, $4, 'v1', $5, $6, 0, 10)",
+         $1::uuid, $2::uuid, $3::uuid, $4, $5, $6, $7, 0, 10)",
     )
     .bind(read_capability_first)
     .bind(read_capability_second)
     .bind(tenant.to_string())
-    .bind(MULTI_BINDING_HIGH_WATER_INPUTS[0].projection_id())
-    .bind(TEST_SCHEMA_HASH)
-    .bind(&generation)
+    .bind(fixture.projection_id())
+    .bind(fixture.definition_version())
+    .bind(fixture.definition_schema_hash())
+    .bind(fixture.input_generation())
     .fetch_all(source_store.pool())
     .await?;
     assert_eq!(
@@ -1492,7 +1659,7 @@ async fn projection_scoped_high_water_validates_scope_and_transaction_visibility
     );
 
     let rolled_back_event_id = unique_event_id("projection-high-water-rollback");
-    let rolled_back_metadata = prepare_generated_projection_source_outbox_event(
+    let rolled_back_metadata = prepare_projection_source_outbox_event(
         &fixture.owner,
         fixture.binding,
         &rolled_back_event_id,
@@ -1550,7 +1717,7 @@ async fn projection_scoped_high_water_isolates_tenant_projection_and_payload() -
             .await?;
 
     let other_tenant_event_id = unique_event_id("projection-high-water-other-tenant");
-    let other_tenant_lsn = append_generated_projection_source_event_for_tenant(
+    let other_tenant_lsn = append_projection_source_event_for_tenant(
         &fixture.app,
         fixture.binding,
         &other_tenant_event_id,
@@ -1567,9 +1734,9 @@ async fn projection_scoped_high_water_isolates_tenant_projection_and_payload() -
         Some(other_tenant_lsn)
     );
 
-    let foreign_binding = fixture.foreign_binding()?;
+    let foreign_binding = fixture.foreign_binding();
     let foreign_event_id = unique_event_id("projection-high-water-other-projection");
-    append_generated_projection_source_event_for_tenant(
+    append_projection_source_event_for_tenant(
         &fixture.app,
         foreign_binding,
         &foreign_event_id,
@@ -1604,7 +1771,7 @@ async fn projection_scoped_high_water_isolates_tenant_projection_and_payload() -
 #[tokio::test(flavor = "multi_thread")]
 async fn projection_scoped_high_water_stays_fixed_cost_under_mixed_scope_capacity() -> TestResult {
     let fixture = ProjectionHighWaterFixture::setup().await?;
-    let foreign_binding = fixture.foreign_binding()?;
+    let foreign_binding = fixture.foreign_binding();
     let (first_event_id, first_lsn) =
         append_projection_high_water_fixture_event(&fixture, "projection-high-water-capacity")
             .await?;
@@ -1794,7 +1961,11 @@ async fn projection_source_rejects_unknown_same_generation_binding_before_payloa
          'review', 'review.unknown-event', 'v1', $2, 'review.unknown-event')",
     )
     .bind(fixture.scope.input_generation())
-    .bind(TEST_SCHEMA_HASH)
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .schema_hash(),
+    )
     .execute(&fixture.owner.pool)
     .await?;
 
@@ -1865,44 +2036,31 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
     let (pg, owner) = connect_pg().await?;
     provision_runtime_logins(&pg).await?;
     setup_outbox(&owner).await?;
-    register_generated_projection_input_catalog(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
 
     let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let binding = *generated::event::PROJECTION_INPUTS
-        .iter()
-        .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
-        .ok_or_else(|| std::io::Error::other("generated Settings Projection input is missing"))?;
+    let fixture = ProjectionConformanceFixture::primary();
+    let bindings = projection_conformance_inputs(fixture);
+    let binding = bindings
+        .first()
+        .copied()
+        .ok_or("primary projection conformance fixture must contain a binding")?;
+    let definition = projection_conformance_definition(fixture)?;
+    let registry = projection_conformance_registry(fixture)?;
     let projection = eventexec::ProjectionId::parse(binding.projection_id())?;
-    let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
-        &projection,
-        tenant,
-    )
-    .ok_or_else(|| std::io::Error::other("generated registry did not mint source scope"))?;
+    let scope = registry.source_scope(&projection, tenant)?;
+    let execution = registry.operator_execution_context(&projection, tenant)?;
     let selector = eventexec::ProjectionSelector::new(
         tenant,
         projection.clone(),
-        eventexec::ProjectionVersion::parse(&format!("replay-{}", uuid::Uuid::new_v4().simple()))?,
+        eventexec::ProjectionVersion::parse(fixture.target_generation())?,
     );
-    let target_bindings = generated::event::PROJECTION_INPUTS
-        .iter()
-        .copied()
-        .filter(|candidate| candidate.projection_id() == binding.projection_id())
-        .collect::<Vec<_>>();
     let target_store = std::sync::Arc::new(RecordingProjectionTargetStore::default());
     let target: std::sync::Arc<dyn eventexec::ProjectionTarget> =
         std::sync::Arc::new(eventexec::ConformingProjectionTarget::new(
-            eventexec::ProjectionTargetDefinition::new(
-                *generated::event::PROJECTION_DEFINITIONS
-                    .iter()
-                    .find(|definition| definition.contract_id() == binding.projection_id())
-                    .ok_or_else(|| {
-                        std::io::Error::other("projection definition fixture is missing")
-                    })?,
-                generated::event::PROJECTION_INPUT_GENERATION,
-            )?,
-            target_bindings,
+            definition,
+            bindings,
             std::sync::Arc::clone(&target_store),
         )?);
     let deps = crate::PgProjectionOperatorDeps::connect(
@@ -1928,23 +2086,12 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
     let first_event_id = unique_event_id("projection-replay-first");
     let second_event_id = unique_event_id("projection-replay-second");
     let first_lsn =
-        append_generated_projection_source_event_for_tenant(&app, binding, &first_event_id, tenant)
-            .await?;
-    let second_lsn = append_generated_projection_source_event_for_tenant(
-        &app,
-        binding,
-        &second_event_id,
-        tenant,
-    )
-    .await?;
+        append_projection_source_event_for_tenant(&app, binding, &first_event_id, tenant).await?;
+    let second_lsn =
+        append_projection_source_event_for_tenant(&app, binding, &second_event_id, tenant).await?;
     let other_tenant_event_id = unique_event_id("projection-replay-other-tenant");
-    append_generated_projection_source_event_for_tenant(
-        &app,
-        binding,
-        &other_tenant_event_id,
-        other_tenant,
-    )
-    .await?;
+    append_projection_source_event_for_tenant(&app, binding, &other_tenant_event_id, other_tenant)
+        .await?;
 
     let replay = deps
         .authorize_projection_target(
@@ -1958,7 +2105,7 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
             scope.clone(),
         )?
         .into_replay_stores(
-            settings_operator_execution(tenant),
+            execution.clone(),
             std::sync::Arc::clone(&target),
             test_dlx_payload_protector(),
         )?;
@@ -1997,7 +2144,7 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
             scope,
         )?
         .into_replay_stores(
-            settings_operator_execution(tenant),
+            execution,
             std::sync::Arc::clone(&target),
             test_dlx_payload_protector(),
         )?;
@@ -2008,8 +2155,7 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
 
     let third_event_id = unique_event_id("projection-replay-after-restart");
     let third_lsn =
-        append_generated_projection_source_event_for_tenant(&app, binding, &third_event_id, tenant)
-            .await?;
+        append_projection_source_event_for_tenant(&app, binding, &third_event_id, tenant).await?;
     let resumed = restarted.run_once(runner_config).await;
     assert_eq!(resumed.stop, eventexec::ProjectionStop::Completed);
     assert_eq!(resumed.scanned, 1);
@@ -2349,7 +2495,11 @@ async fn projection_credentials_fail_startup_when_exact_capabilities_drift() -> 
           'review.event', 'v1', $1, \
           '{\"tenantId\":\"00000000-0000-4000-8000-000000000099\"}'::jsonb)",
     )
-    .bind(TEST_SCHEMA_HASH)
+    .bind(
+        ProjectionConformanceFixture::primary()
+            .binding()
+            .schema_hash(),
+    )
     .execute(&owner.pool)
     .await?;
     sqlx::query("DROP INDEX public.idx_projection_events_scoped_tail")
