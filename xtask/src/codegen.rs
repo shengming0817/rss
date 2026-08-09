@@ -50,7 +50,12 @@ pub(crate) fn run(check: bool) -> Result<()> {
 
 fn run_root(root: &Path, check: bool) -> Result<()> {
     let governance = ContractGovernanceIr::load_consumer_workspace(root)?;
-    let mut transaction = governance.read(|contracts| plan_codegen_transaction(root, contracts))?;
+    let fixture_governance = ContractGovernanceIr::load_codegen_fixture_root(
+        &root.join("crates/testkit/fixtures/contracts"),
+    )?;
+    let mut transaction = governance.read(|contracts| {
+        fixture_governance.read(|fixtures| plan_codegen_transaction(root, contracts, fixtures))
+    })?;
     if check {
         return transaction.check();
     }
@@ -193,12 +198,19 @@ impl CodegenTransaction {
 fn plan_codegen_transaction(
     root: &Path,
     contracts: &[GovernedContract],
+    saga_test_fixtures: &[GovernedContract],
 ) -> Result<CodegenTransaction> {
     let gen_src = root.join("generated/src");
     let rendered = render_all(contracts)?;
     let mut outputs = Vec::new();
     let mut expected_paths = BTreeSet::new();
     for (relative, source) in rendered {
+        let path = gen_src.join(relative);
+        let content = normalize(&format_rust(&source)?).into_bytes();
+        expected_paths.insert(path.clone());
+        outputs.push(planned_output(path, Some(content))?);
+    }
+    for (relative, source) in render_saga_test_support(saga_test_fixtures)? {
         let path = gen_src.join(relative);
         let content = normalize(&format_rust(&source)?).into_bytes();
         expected_paths.insert(path.clone());
@@ -450,7 +462,7 @@ fn render_all(contracts: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> 
     }
     for ((kind_dir, module), (_mod_kind, group)) in &groups {
         let rel = PathBuf::from(kind_dir).join(format!("{module}.rs"));
-        files.push((rel, render_module_file(group, contracts)?));
+        files.push((rel, render_module_file(group, contracts, "contracts")?));
     }
     for (kind_dir, (modules, mod_kind)) in &kinds {
         let mut mod_rs = render_mod_rs(modules, *mod_kind);
@@ -465,11 +477,56 @@ fn render_all(contracts: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> 
             mod_rs.push_str(&render_event_root_producer_domains(contracts)?);
         }
         if *mod_kind == ModKind::Saga {
-            mod_rs.push_str(&render_saga_root_specs(contracts)?);
+            mod_rs.push_str(&render_saga_root_specs(
+                contracts,
+                SagaCatalogKind::Production,
+            )?);
+            mod_rs.push_str(
+                "\n#[cfg(feature = \"test-support\")]\n/// Sealed test-only Saga definitions generated from the testkit fixture source.\npub mod test_support;\n",
+            );
         }
         files.push((PathBuf::from(kind_dir).join("mod.rs"), mod_rs));
     }
     files.push((PathBuf::from("lib.rs"), render_lib_rs(kinds.keys())));
+    Ok(files)
+}
+
+fn render_saga_test_support(fixtures: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> {
+    if fixtures
+        .iter()
+        .any(|fixture| fixture.manifest().kind != ContractKind::Saga)
+    {
+        bail!("testkit Saga fixture root may contain only Saga contracts");
+    }
+    let mut groups: BTreeMap<String, Vec<&GovernedContract>> = BTreeMap::new();
+    for fixture in fixtures {
+        groups
+            .entry(module_name(
+                &fixture.manifest().domain,
+                &fixture.manifest().version,
+            ))
+            .or_default()
+            .push(fixture);
+    }
+    let mut files = Vec::new();
+    for (module, group) in &groups {
+        let rendered = render_module_file(group, fixtures, "crates/testkit/fixtures/contracts")?;
+        files.push((
+            PathBuf::from("saga/test_support").join(format!("{module}.rs")),
+            rendered,
+        ));
+    }
+    let modules = groups
+        .keys()
+        .map(|module| format!("pub mod {module};"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let specs = render_saga_root_specs(fixtures, SagaCatalogKind::TestSupport)?;
+    let root = format!(
+        "{}\npub(crate) use super::sealed;\npub use super::{{Definition, End, Receipt, SagaSpec, Step, StepMarker}};\n{modules}\n{specs}",
+        generated_header("crates/testkit/fixtures/contracts/saga/")
+    );
+    files.push((PathBuf::from("saga/test_support/mod.rs"), root));
     Ok(files)
 }
 
@@ -492,12 +549,13 @@ fn typify_regex_unwrap_lint(body: &str) -> &'static str {
 fn render_module_file(
     group: &[&GovernedContract],
     contracts: &[GovernedContract],
+    source_root: &str,
 ) -> Result<String> {
     let first = group
         .first()
         .context("空契约 group（codegen 不变式被破坏）")?;
     let source = format!(
-        "contracts/{}/{}/{}/",
+        "{source_root}/{}/{}/{}/",
         first.manifest().kind.as_dir(),
         first.manifest().domain,
         first.manifest().version
@@ -3496,7 +3554,16 @@ pub const PROJECTION_DEFINITIONS: &[::vocab::ContractBinding] = &[{body}];
     ))
 }
 
-fn render_saga_root_specs(contracts: &[GovernedContract]) -> Result<String> {
+#[derive(Clone, Copy)]
+enum SagaCatalogKind {
+    Production,
+    TestSupport,
+}
+
+fn render_saga_root_specs(
+    contracts: &[GovernedContract],
+    catalog: SagaCatalogKind,
+) -> Result<String> {
     let mut sagas = contracts
         .iter()
         .filter(|contract| contract.manifest().kind == ContractKind::Saga)
@@ -3517,14 +3584,21 @@ fn render_saga_root_specs(contracts: &[GovernedContract]) -> Result<String> {
     } else {
         format!("\n{},\n", entries.join(",\n"))
     };
+    let rustdoc = match catalog {
+        SagaCatalogKind::Production => {
+            "Complete repository Saga definition catalog.\n\nDraft and inactive definitions remain visible for identity validation but never imply runtime\naction, store, worker, or probe activation."
+        }
+        SagaCatalogKind::TestSupport => {
+            "Complete test-only Saga conformance fixture catalog.\n\nThese sealed definitions are generated only for compile-time and T2 provider/runtime conformance;\nthey never participate in the production Saga catalog or imply runtime activation."
+        }
+    };
+    let rustdoc = rustdoc
+        .lines()
+        .map(|line| format!("/// {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok(format!(
-        r#"
-/// Complete repository Saga definition catalog.
-///
-/// Draft and inactive definitions remain visible for identity validation but never imply runtime
-/// action, store, worker, or probe activation.
-pub const SPECS: &[SagaSpec] = &[{body}];
-"#
+        "\n{rustdoc}\npub const SPECS: &[SagaSpec] = &[{body}];\n"
     ))
 }
 

@@ -1,75 +1,18 @@
-error[E0277]: the trait bound `generated::saga::billing_v1::ReserveFundsStep: generated::saga::Step<OtherDefinition>` is not satisfied
- --> tests/ui/typed_saga_cross_definition_step_fail.rs:7:18
-  |
-7 |     type Start = ReserveFundsStep;
-  |                  ^^^^^^^^^^^^^^^^ the trait `generated::saga::Step<OtherDefinition>` is not implemented for `generated::saga::billing_v1::ReserveFundsStep`
-  |
-help: the trait `Step<OtherDefinition>` is not implemented for `generated::saga::billing_v1::ReserveFundsStep`
-      but trait `Step<generated::saga::billing_v1::Definition>` is implemented for it
- --> $WORKSPACE/generated/src/saga/billing_v1.rs
-  |
-  | impl super::Step<Definition> for ReserveFundsStep {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = help: for that trait implementation, expected `generated::saga::billing_v1::Definition`, found `OtherDefinition`
-note: required by a bound in `generated::saga::Definition::Start`
- --> $WORKSPACE/generated/src/saga/mod.rs
-  |
-  |     type Start: Step<Self>;
-  |                 ^^^^^^^^^^ required by this bound in `Definition::Start`
-
-error[E0277]: the trait bound `OtherDefinition: saga::sealed::Definition` is not satisfied
- --> tests/ui/typed_saga_cross_definition_step_fail.rs:6:21
-  |
-6 | impl Definition for OtherDefinition {
-  |                     ^^^^^^^^^^^^^^^ unsatisfied trait bound
-  |
-help: the trait `saga::sealed::Definition` is not implemented for `OtherDefinition`
- --> tests/ui/typed_saga_cross_definition_step_fail.rs:4:1
-  |
-4 | struct OtherDefinition;
-  | ^^^^^^^^^^^^^^^^^^^^^^
-  = note: `OtherDefinition` implements similarly named trait `generated::saga::Definition`, but not `saga::sealed::Definition`
-help: the following other types implement trait `saga::sealed::Definition`
- --> $WORKSPACE/generated/src/saga/billing_v1.rs
-  |
-  | impl super::sealed::Definition for Definition {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::saga::billing_v1::Definition`
-  |
- ::: $WORKSPACE/generated/src/saga/audit_v1.rs
-  |
-  | impl super::sealed::Definition for Definition {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::saga::audit_v1::Definition`
-  |
- ::: $WORKSPACE/generated/src/saga/billing_v2.rs
-  |
-  | impl super::sealed::Definition for Definition {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::saga::billing_v2::Definition`
-note: required by a bound in `generated::saga::Definition`
- --> $WORKSPACE/generated/src/saga/mod.rs
-  |
-  | pub trait Definition: sealed::Definition + Sized {
-  |                       ^^^^^^^^^^^^^^^^^^ required by this bound in `Definition`
-  = note: `Definition` is a "sealed trait", because to implement it you also need to implement `generated::saga::sealed::Definition`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
-  = help: the following types implement the trait:
-            generated::saga::audit_v1::Definition
-            generated::saga::billing_v1::Definition
-            generated::saga::billing_v2::Definition
-
-error[E0277]: the trait bound `generated::saga::billing_v1::ReserveFundsStep: generated::saga::Step<OtherDefinition>` is not satisfied
-  --> tests/ui/typed_saga_cross_definition_step_fail.rs:14:38
+error[E0277]: the trait bound `PrepareStep: generated::saga::Step<generated::saga::test_support::test_v1::foreign::Definition>` is not satisfied
+  --> tests/ui/typed_saga_cross_definition_step_fail.rs:10:40
    |
-14 |     requires_other_definition_step::<ReserveFundsStep>();
-   |                                      ^^^^^^^^^^^^^^^^ the trait `generated::saga::Step<OtherDefinition>` is not implemented for `generated::saga::billing_v1::ReserveFundsStep`
+10 |     requires_foreign_definition_step::<PrepareStep>();
+   |                                        ^^^^^^^^^^^ the trait `generated::saga::Step<generated::saga::test_support::test_v1::foreign::Definition>` is not implemented for `PrepareStep`
    |
-help: the trait `Step<OtherDefinition>` is not implemented for `generated::saga::billing_v1::ReserveFundsStep`
-      but trait `Step<generated::saga::billing_v1::Definition>` is implemented for it
-  --> $WORKSPACE/generated/src/saga/billing_v1.rs
+help: the trait `Step<generated::saga::test_support::test_v1::foreign::Definition>` is not implemented for `PrepareStep`
+      but trait `Step<generated::saga::test_support::test_v1::primary::Definition>` is implemented for it
+  --> $WORKSPACE/generated/src/saga/test_support/test_v1.rs
    |
-   | impl super::Step<Definition> for ReserveFundsStep {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-   = help: for that trait implementation, expected `generated::saga::billing_v1::Definition`, found `OtherDefinition`
-note: required by a bound in `requires_other_definition_step`
-  --> tests/ui/typed_saga_cross_definition_step_fail.rs:11:38
+   |     impl super::super::Step<Definition> for PrepareStep {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `generated::saga::test_support::test_v1::primary::Definition`, found `generated::saga::test_support::test_v1::foreign::Definition`
+note: required by a bound in `requires_foreign_definition_step`
+  --> tests/ui/typed_saga_cross_definition_step_fail.rs:7:40
    |
-11 | fn requires_other_definition_step<S: Step<OtherDefinition>>() {}
-   |                                      ^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_other_definition_step`
+ 7 | fn requires_foreign_definition_step<S: Step<ForeignDefinition>>() {}
+   |                                        ^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `requires_foreign_definition_step`

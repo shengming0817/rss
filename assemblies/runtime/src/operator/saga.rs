@@ -586,35 +586,10 @@ impl SagaCommandRuntime for ProductionSagaCommandRuntime<'_> {
         )
         .await
         .context("setup plan-selected Saga operator serving capabilities")?;
-        let handle = serving.handle();
-        let (vault, _signer, _settings_key) =
-            crate::infra::vault::VaultRuntimeConfig::from_snapshot(self.config)?.into_runtime()?;
-        let dlx = postgres::DlxPayloadProtector::new(
-            vault.for_domain::<vault::caps::Settings>().key_provider(),
-            eventexec::DlxHotKeyName::try_new("rss-saga-operator-dlx")?,
-        );
-        crate::saga_runtime::bind_and_wire_selected_sagas(&mut plan, &handle, || {
-            Ok(crate::saga_runtime::SagaProviderDependencies {
-                receipt_key_provider: vault.for_domain::<vault::caps::Settings>().key_provider(),
-                receipt_integrity_key_b64url: self
-                    .config
-                    .value(crate::saga_runtime::SAGA_RECEIPT_INTEGRITY_KEY_ENV)
-                    .map(str::to_owned)
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "missing required env var: {}",
-                            crate::saga_runtime::SAGA_RECEIPT_INTEGRITY_KEY_ENV
-                        )
-                    })?,
-                dead_letter_protector: dlx,
-                worker_config: eventexec::SagaWorkerConfig::default(),
-            })
-        })?;
+        crate::saga_runtime::bind_and_wire_selected_sagas(&mut plan)?;
         let target =
             select_saga_operator_target(plan.workflow_runtime().sagas(), &parsed.identity)?;
-        let (mut resources, _sampler) =
-            serving.into_runtime_parts(std::time::Duration::from_secs(30));
-        resources.extend(vault.runtime_resources());
+        let (resources, _sampler) = serving.into_runtime_parts(std::time::Duration::from_secs(30));
         Ok(ProductionSagaTarget { target, resources })
     }
 

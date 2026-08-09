@@ -1,5 +1,5 @@
 use eventexec::TypedSagaActionFactory;
-use generated::saga::billing_v1::Definition;
+use generated::saga::test_support::test_v1::primary::Definition;
 
 fn main() {
     let _ = TypedSagaActionFactory::<Definition>::builder().finish();

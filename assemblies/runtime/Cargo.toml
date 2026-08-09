@@ -184,6 +184,7 @@ operator-cli = ["dep:clap"]
 # explicit-value route assembly seam（仅 integration 测试用；默认生产 library 不编译这些入口）。
 integration = [
   "testkit/containers",
+  "eventexec/test-support",
   "identity/seed-login",
   "amqp/integration-test-support",
   "httpserve/test-util",

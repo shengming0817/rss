@@ -3,57 +3,58 @@ use eventexec::{
     SagaAttemptOutcome, SagaCompensationContext, SagaForwardContext, SagaProbeOutcome, SagaStep,
     TypedSagaActionFactory,
 };
-use generated::saga::billing_v1::{
-    BillingCaptureReceipt, BillingReserveFundsReceipt, CaptureStep, Definition, ReserveFundsStep,
+use generated::saga::test_support::test_v1::primary::{
+    CommitStep, Definition, PrepareStep, SagaConformanceCommitReceipt,
+    SagaConformancePrepareReceipt,
 };
 
 #[derive(Debug)]
-struct Reserve;
+struct Prepare;
 
-impl SagaStep<ReserveFundsStep> for Reserve {
-    async fn execute(&self, _: SagaForwardContext) -> SagaAttemptOutcome<BillingReserveFundsReceipt> {
-        SagaAttemptOutcome::Applied(BillingReserveFundsReceipt { reservation_id: "r".into() })
+impl SagaStep<PrepareStep> for Prepare {
+    async fn execute(&self, _: SagaForwardContext) -> SagaAttemptOutcome<SagaConformancePrepareReceipt> {
+        SagaAttemptOutcome::Applied(SagaConformancePrepareReceipt { operation_id: "p".into() })
     }
-    async fn probe(&self, _: SagaForwardContext) -> SagaProbeOutcome<BillingReserveFundsReceipt> {
+    async fn probe(&self, _: SagaForwardContext) -> SagaProbeOutcome<SagaConformancePrepareReceipt> {
         SagaProbeOutcome::NotApplied
     }
     async fn compensate(
         &self,
         _: SagaCompensationContext,
-        _: BillingReserveFundsReceipt,
+        _: SagaConformancePrepareReceipt,
     ) -> SagaAttemptOutcome<CompensationOutcome> {
         SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
     }
     async fn probe_compensation(
         &self,
         _: SagaCompensationContext,
-        _: BillingReserveFundsReceipt,
+        _: SagaConformancePrepareReceipt,
     ) -> SagaProbeOutcome<CompensationOutcome> {
         SagaProbeOutcome::NotApplied
     }
 }
 
 #[derive(Debug)]
-struct Capture;
+struct Commit;
 
-impl SagaStep<CaptureStep> for Capture {
-    async fn execute(&self, _: SagaForwardContext) -> SagaAttemptOutcome<BillingCaptureReceipt> {
-        SagaAttemptOutcome::Applied(BillingCaptureReceipt { capture_id: "c".into() })
+impl SagaStep<CommitStep> for Commit {
+    async fn execute(&self, _: SagaForwardContext) -> SagaAttemptOutcome<SagaConformanceCommitReceipt> {
+        SagaAttemptOutcome::Applied(SagaConformanceCommitReceipt { operation_id: "c".into() })
     }
-    async fn probe(&self, _: SagaForwardContext) -> SagaProbeOutcome<BillingCaptureReceipt> {
+    async fn probe(&self, _: SagaForwardContext) -> SagaProbeOutcome<SagaConformanceCommitReceipt> {
         SagaProbeOutcome::NotApplied
     }
     async fn compensate(
         &self,
         _: SagaCompensationContext,
-        _: BillingCaptureReceipt,
+        _: SagaConformanceCommitReceipt,
     ) -> SagaAttemptOutcome<CompensationOutcome> {
         SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
     }
     async fn probe_compensation(
         &self,
         _: SagaCompensationContext,
-        _: BillingCaptureReceipt,
+        _: SagaConformanceCommitReceipt,
     ) -> SagaProbeOutcome<CompensationOutcome> {
         SagaProbeOutcome::NotApplied
     }
@@ -61,7 +62,7 @@ impl SagaStep<CaptureStep> for Capture {
 
 fn main() {
     let _factory = TypedSagaActionFactory::<Definition>::builder()
-        .register::<Reserve, _>(|| Reserve)
-        .register::<Capture, _>(|| Capture)
+        .register::<Prepare, _>(|| Prepare)
+        .register::<Commit, _>(|| Commit)
         .finish();
 }

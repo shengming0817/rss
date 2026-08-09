@@ -1,0 +1,28 @@
+# Foreign sealed definition used only by cross-definition compile-fail coverage.
+id = "test.saga-conformance.foreign"
+kind = "saga"
+domain = "test"
+version = "v1"
+owner = "testkit"
+consistencyLevel = "WorkflowEventual"
+lifecycle = "draft"
+
+[schemas]
+payload = "payload.schema.json"
+
+[saga]
+compensationOrder = "reverse"
+steps = [
+    { name = "observe", receiptSchema = "observe.schema.json", effectScope = "test.saga-conformance.observe", compensationEffectScope = "test.saga-conformance.unobserve", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "never" },
+]
+
+[saga.retry]
+maxAttempts = 1
+timeBudgetMillis = 1000
+backoff = "fixed"
+initialBackoffMillis = 1
+maxBackoffMillis = 1
+jitter = "none"
+
+[capabilities.workflow]
+mode = "saga"

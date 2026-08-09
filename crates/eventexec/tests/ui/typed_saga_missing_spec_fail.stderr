@@ -6,10 +6,13 @@ error[E0283]: type annotations needed for `TypedSagaActionFactoryBuilder<_, _>`
   |
   = note: the type must implement `generated::saga::Definition`
 help: the following types implement trait `generated::saga::Definition`
- --> $WORKSPACE/generated/src/saga/audit_v1.rs
+ --> $WORKSPACE/generated/src/saga/test_support/test_v1.rs
   |
-  | impl super::Definition for Definition {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `generated::saga::audit_v1::Definition`
+  |     impl super::super::Definition for Definition {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `eventexec::saga_test_support::foreign::Definition`
+...
+  |     impl super::super::Definition for Definition {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `eventexec::saga_test_support::primary::Definition`
   |
  ::: $WORKSPACE/generated/src/saga/billing_v1.rs
   |

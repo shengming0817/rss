@@ -1,0 +1,29 @@
+# Canonical provider-neutral Saga fixture for T2 runtime and compile-time conformance.
+id = "test.saga-conformance.primary"
+kind = "saga"
+domain = "test"
+version = "v1"
+owner = "testkit"
+consistencyLevel = "WorkflowEventual"
+lifecycle = "draft"
+
+[schemas]
+payload = "payload.schema.json"
+
+[saga]
+compensationOrder = "reverse"
+steps = [
+    { name = "prepare", receiptSchema = "prepare.schema.json", effectScope = "test.saga-conformance.prepare", compensationEffectScope = "test.saga-conformance.unprepare", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "transient" },
+    { name = "commit", receiptSchema = "commit.schema.json", effectScope = "test.saga-conformance.commit", compensationEffectScope = "test.saga-conformance.uncommit", idempotencyClass = "deterministic-key", compensationInput = "receipt", retryClass = "never" },
+]
+
+[saga.retry]
+maxAttempts = 2
+timeBudgetMillis = 10000
+backoff = "fixed"
+initialBackoffMillis = 25
+maxBackoffMillis = 25
+jitter = "none"
+
+[capabilities.workflow]
+mode = "saga"

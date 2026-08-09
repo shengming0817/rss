@@ -363,6 +363,19 @@ pub(crate) fn catalog_validation_plan()
         })
 }
 
+const CODEGEN_FIXTURE_CATALOG_EXCLUSIONS: &[ContractRuleId] = &[
+    ContractRuleId::IdentityAbacOperatorSsot,
+    ContractRuleId::DeviceCertificateHttpClosure,
+];
+
+/// Canonical catalog-rule view for isolated codegen fixtures. New catalog rules are included by
+/// default and therefore fail closed; only production canonical-family/owner anti-vacuity rules
+/// may be explicitly excluded here.
+pub(crate) fn codegen_fixture_catalog_validation_plan()
+-> impl Iterator<Item = (ContractRuleId, CatalogValidationHandler)> {
+    catalog_validation_plan().filter(|(rule, _)| !CODEGEN_FIXTURE_CATALOG_EXCLUSIONS.contains(rule))
+}
+
 pub(crate) fn breaking_execution_plan() -> Vec<BreakingDetector> {
     let mut detectors = breaking_rule_specs()
         .filter_map(|spec| match spec.execution {
@@ -575,6 +588,24 @@ impl ContractGovernanceIr {
             return Self::from_repository(inspection.contracts_root, inspection.repository, false);
         }
         Self::from_inspection(inspection, false)
+    }
+
+    /// Load the checked-in testkit contract fixture root consumed only by code generation.
+    ///
+    /// Fixture contracts deliberately do not participate in production workspace governance or
+    /// owner enrollment; they still pass the complete isolated-contract semantic validator before
+    /// entering the canonical typed IR.
+    pub(crate) fn load_codegen_fixture_root(contracts_root: &Path) -> Result<Self> {
+        let repository = load_nonempty_repository(contracts_root)?;
+        let findings = super::validate::validate_discovered_codegen_fixtures(&repository);
+        Self::from_inspection(
+            ContractGovernanceInspection {
+                contracts_root: contracts_root.to_path_buf(),
+                repository,
+                findings,
+            },
+            true,
+        )
     }
 
     /// Explicit test-only seam for focused consumer fixtures. The name makes the skipped semantic
@@ -935,6 +966,36 @@ role = "fact"
     }
 
     #[test]
+    fn codegen_fixture_catalog_plan_has_an_explicit_exact_partition() {
+        let included = codegen_fixture_catalog_validation_plan()
+            .map(|(rule, _)| rule)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            included,
+            BTreeSet::from([
+                ContractRuleId::DuplicateId,
+                ContractRuleId::SlugMixing,
+                ContractRuleId::ConsistencyCapability,
+            ])
+        );
+        assert_eq!(
+            CODEGEN_FIXTURE_CATALOG_EXCLUSIONS
+                .iter()
+                .copied()
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                ContractRuleId::IdentityAbacOperatorSsot,
+                ContractRuleId::DeviceCertificateHttpClosure,
+            ])
+        );
+        assert_eq!(
+            included.len() + CODEGEN_FIXTURE_CATALOG_EXCLUSIONS.len(),
+            catalog_validation_plan().count(),
+            "every catalog rule must be explicitly classified for fixture codegen"
+        );
+    }
+
+    #[test]
     fn catalog_projects_every_required_field() {
         for spec in governance_rule_specs() {
             assert!(!spec.id().as_str().is_empty());
@@ -1105,6 +1166,34 @@ role = "fact"
             error.to_string().contains("  [R3] http/identity/v1:"),
             "{error}"
         );
+
+        std::fs::remove_dir_all(contracts_root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn codegen_fixture_loader_rejects_invalid_saga_semantics() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let source = root.join("crates/testkit/fixtures/contracts/saga/test/v1/primary");
+        let contracts_root = crate::testutil::unique_tmp("codegen-fixture-semantic-red");
+        let target = contracts_root.join("saga/test/v1/primary");
+        std::fs::create_dir_all(&target)?;
+        for name in [
+            "contract.toml",
+            "payload.schema.json",
+            "prepare.schema.json",
+            "commit.schema.json",
+        ] {
+            std::fs::copy(source.join(name), target.join(name))?;
+        }
+        let manifest_path = target.join("contract.toml");
+        let manifest =
+            std::fs::read_to_string(&manifest_path)?.replace("maxAttempts = 2", "maxAttempts = 0");
+        std::fs::write(&manifest_path, manifest)?;
+
+        let error = ContractGovernanceIr::load_codegen_fixture_root(&contracts_root)
+            .expect_err("invalid Saga retry semantics must block fixture codegen");
+        assert!(error.to_string().contains("maxAttempts"), "{error}");
 
         std::fs::remove_dir_all(contracts_root)?;
         Ok(())

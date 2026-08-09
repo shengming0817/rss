@@ -166,35 +166,9 @@ impl<'a> InfraBuilt<'a> {
             let s3_canary_module =
                 wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
             provider_build.record_domain(s3_canary_module);
-            let saga_integrity_key = context
-                .config()
-                .value(crate::saga_runtime::SAGA_RECEIPT_INTEGRITY_KEY_ENV)
-                .map(str::to_owned);
-            let saga_dlx = event_transport.dlx_payload_protector();
             let (saga_module, active_saga_count) =
-                crate::saga_runtime::bind_and_wire_selected_sagas(
-                    &mut context.runtime_plan,
-                    &deps.pg,
-                    || {
-                        Ok(crate::saga_runtime::SagaProviderDependencies {
-                            receipt_key_provider: deps
-                                .vault
-                                .for_domain::<vault::caps::Settings>()
-                                .key_provider(),
-                            receipt_integrity_key_b64url: saga_integrity_key.ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "missing required env var: {}",
-                                    crate::saga_runtime::SAGA_RECEIPT_INTEGRITY_KEY_ENV
-                                )
-                            })?,
-                            dead_letter_protector: saga_dlx.context(
-                                "durable DLX protector required by active Saga provider",
-                            )?,
-                            worker_config: eventexec::SagaWorkerConfig::default(),
-                        })
-                    },
-                )
-                .context("bind and wire plan-selected Saga providers")?;
+                crate::saga_runtime::bind_and_wire_selected_sagas(&mut context.runtime_plan)
+                    .context("bind and wire plan-selected Saga providers")?;
             provider_build.record_domain(saga_module);
             let saga_retention_module = wire_saga_terminal_sweeper(&deps.pg, active_saga_count)
                 .context("wire terminal Saga retention")?;

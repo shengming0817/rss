@@ -637,6 +637,23 @@ where
 
 /// Unbound assembly selection. Active Saga permits are taken from the selection map and must return
 /// as a complete [`SagaRuntimeCapability`] before the plan can be bound.
+#[derive(Clone, Copy)]
+enum SagaDefinitionCatalog {
+    Production,
+    #[cfg(feature = "test-support")]
+    Conformance,
+}
+
+impl SagaDefinitionCatalog {
+    fn specs(self) -> &'static [generated::saga::SagaSpec] {
+        match self {
+            Self::Production => generated::saga::SPECS,
+            #[cfg(feature = "test-support")]
+            Self::Conformance => generated::saga::test_support::SPECS,
+        }
+    }
+}
+
 pub struct WorkflowActivationPlan {
     activations: Vec<WorkflowActivation>,
     capabilities: SelectedWorkflowCapabilities,
@@ -644,6 +661,7 @@ pub struct WorkflowActivationPlan {
     source_runtime_plan_fingerprint: String,
     projection_permits: BTreeMap<String, ProjectionActivationPermit>,
     saga_permits: BTreeMap<String, SagaActivationPermit>,
+    saga_catalog: SagaDefinitionCatalog,
 }
 
 impl WorkflowActivationPlan {
@@ -652,9 +670,44 @@ impl WorkflowActivationPlan {
             .workflow_plans()
             .iter()
             .map(|plan| plan.activation().clone())
+            .collect();
+        Self::select_from_catalog(runtime, activations, SagaDefinitionCatalog::Production)
+    }
+
+    /// Select the one closed, generated Saga conformance catalog for integration tests.
+    #[cfg(feature = "test-support")]
+    pub fn select_saga_conformance_for_test(
+        runtime: &RuntimePlan,
+    ) -> Result<Self, WorkflowRuntimeError> {
+        let mut activations = runtime
+            .workflow_plans()
+            .iter()
+            .map(|plan| plan.activation().clone())
             .collect::<Vec<_>>();
+        let definition = generated::saga::test_support::test_v1::primary::SPEC.contract();
+        let definition_schema_digest =
+            vocab::CanonicalSha256Digest::parse(definition.schema_hash()).map_err(|_| {
+                WorkflowRuntimeError::DefinitionMismatch {
+                    workflow: definition.contract_id().to_owned(),
+                    field: "schema-digest",
+                }
+            })?;
+        activations.push(WorkflowActivation::Saga {
+            id: definition.contract_id().to_owned(),
+            definition_version: definition.version().to_owned(),
+            definition_schema_digest,
+            activation: SagaActivation::Active,
+        });
+        Self::select_from_catalog(runtime, activations, SagaDefinitionCatalog::Conformance)
+    }
+
+    fn select_from_catalog(
+        runtime: &RuntimePlan,
+        activations: Vec<WorkflowActivation>,
+        saga_catalog: SagaDefinitionCatalog,
+    ) -> Result<Self, WorkflowRuntimeError> {
         let fingerprint = runtime.runtime_plan_fingerprint().as_str().to_owned();
-        let generated_sagas = unique_saga_definitions(generated::saga::SPECS)?;
+        let generated_sagas = unique_saga_definitions(saga_catalog.specs())?;
         let generated_projections =
             unique_projection_definitions(generated::event::PROJECTION_DEFINITIONS)?;
         validate_projection_inputs(generated::event::PROJECTION_INPUTS, &generated_projections)?;
@@ -778,7 +831,7 @@ impl WorkflowActivationPlan {
             &fingerprint,
             generated::event::PROJECTION_DEFINITIONS,
             generated::event::PROJECTION_INPUTS,
-            generated::saga::SPECS,
+            saga_catalog.specs(),
         )?;
         Ok(Self {
             activations,
@@ -787,6 +840,7 @@ impl WorkflowActivationPlan {
             source_runtime_plan_fingerprint: fingerprint,
             projection_permits,
             saga_permits,
+            saga_catalog,
         })
     }
 
@@ -875,7 +929,7 @@ impl WorkflowActivationPlan {
             &self.source_runtime_plan_fingerprint,
             generated::event::PROJECTION_DEFINITIONS,
             generated::event::PROJECTION_INPUTS,
-            generated::saga::SPECS,
+            self.saga_catalog.specs(),
         )
     }
 }
@@ -2058,6 +2112,7 @@ mod tests {
                     source_runtime_plan_fingerprint: fingerprint,
                 },
             )]),
+            saga_catalog: SagaDefinitionCatalog::Production,
         }
     }
 
@@ -2097,6 +2152,7 @@ mod tests {
                 },
             )]),
             saga_permits: BTreeMap::new(),
+            saga_catalog: SagaDefinitionCatalog::Production,
         }
     }
 

@@ -135,7 +135,7 @@ PostgreSQL retention 终态精确为 `Succeeded | Compensated | Expired | Termin
 迁移固定 30 天 eligibility 与每批最多 1000 个 root 的 operator-invoked maintenance 函数，删除 root 后经 FK
 cascade 原子清理 instance/journal/receipt。
 #1924 不注册周期 worker 或 probe，因此不承诺自动 retention SLA；只有真实 production adopter 在 canonical
-assembly 中激活后才能闭合该 live requirement。synthetic test-profile provider fixture 仅是 T2，不得声明 T3
+assembly 中激活后才能闭合该 live requirement。feature-gated neutral conformance fixture 仅是 T2，不得声明 T3
 production activation。runtime 与 operator 均无 caller-controlled retain 或 batch 参数。
 
 ## Activation 与 backend selection
@@ -156,6 +156,11 @@ production activation。runtime 与 operator 均无 caller-controlled retain 或
 - production Saga registry/worker 只能消费 sealed `WorkflowRuntimePlan` 借出的 `SagaRuntimeView`；generated
   definition 存在不等于 activation。omitted/disabled Saga 不得注册 action、store、worker 或 probe，active
   Saga 缺少任一 requirement 必须在 provider 初始化前 fail-closed。
+- `generated::saga::SPECS` 只承载 production repository definitions。T2 conformance definitions 从
+  `crates/testkit/fixtures/contracts` 单独生成到 `generated/test-support`，只能由 feature-gated、无调用方参数的
+  `WorkflowActivationPlan::select_saga_conformance_for_test` 选择；该入口固定附加唯一 primary activation，并把
+  catalog provenance 封入 plan 供 bind 复用。它不得进入 production feature closure、assembly manifest、lock、
+  runtime plan 或 acceptance evidence。
 
 ## 构造器
 

@@ -3,7 +3,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context as _;
+use base64::Engine as _;
+
 use super::{DistributedRuntimeDeps, SharedRuntimeDeps};
+
+/// Exact assembly identity shared by the neutral Saga conformance plan and its journey carrier.
+pub const SAGA_CONFORMANCE_ASSEMBLY_ID: &str = "sagat2conformance";
 
 /// Output of the same plan-selected provider join consumed by production `WireDomains`.
 pub struct SagaProviderIntegration {
@@ -25,14 +31,17 @@ impl SagaProviderIntegration {
 
 pub fn bind_saga_provider_integration(
     typed_plan: assembly_schema::RuntimePlan,
+    execution: eventexec::saga_test_support::ConformanceExecution,
     pg: &postgres::PgRuntimeHandle,
     receipt_key_provider: Box<diport::DynKeyProvider<'static>>,
     receipt_integrity_key_b64url: String,
     dead_letter_protector: postgres::DlxPayloadProtector,
     worker_config: eventexec::SagaWorkerConfig,
 ) -> anyhow::Result<SagaProviderIntegration> {
-    let mut plan =
-        crate::plan::RuntimePlan::from_integration_typed(typed_plan, "sagaactivationfixture")?;
+    let mut plan = crate::plan::RuntimePlan::from_saga_conformance_typed(
+        typed_plan,
+        SAGA_CONFORMANCE_ASSEMBLY_ID,
+    )?;
     let mut activation_listeners = plan
         .listener_execution_plan()
         .into_listeners()
@@ -45,15 +54,22 @@ pub fn bind_saga_provider_integration(
         activation_listeners.next().is_none(),
         "Saga provider fixture must select exactly one Health listener"
     );
-    let (mut module, active_count) =
-        crate::saga_runtime::bind_and_wire_selected_sagas(&mut plan, pg, || {
-            Ok(crate::saga_runtime::SagaProviderDependencies {
-                receipt_key_provider,
-                receipt_integrity_key_b64url,
-                dead_letter_protector,
-                worker_config,
-            })
-        })?;
+    let permit = plan
+        .take_saga_conformance_permit()
+        .context("select neutral Saga conformance permit")?;
+    let capability = bind_saga_conformance_provider(
+        permit,
+        execution,
+        pg,
+        receipt_key_provider,
+        receipt_integrity_key_b64url,
+        dead_letter_protector,
+        worker_config,
+    )?;
+    plan.bind_workflow_runtime([capability])?;
+    let mut module = bootstrap::DomainModuleResult::default();
+    crate::saga_runtime::wire_saga_worker(plan.workflow_runtime().sagas(), &mut module)?;
+    let active_count = plan.workflow_runtime().sagas().entries().len();
     module.merge(crate::phase::maintenance::wire_saga_terminal_sweeper(
         pg,
         active_count,
@@ -72,6 +88,63 @@ pub fn bind_saga_provider_integration(
         operator: entry.operator_target(),
         activation_listener,
     })
+}
+
+fn bind_saga_conformance_provider(
+    permit: eventexec::SagaActivationPermit,
+    execution: eventexec::saga_test_support::ConformanceExecution,
+    pg: &postgres::PgRuntimeHandle,
+    receipt_key_provider: Box<diport::DynKeyProvider<'static>>,
+    receipt_integrity_key_b64url: String,
+    dead_letter_protector: postgres::DlxPayloadProtector,
+    worker_config: eventexec::SagaWorkerConfig,
+) -> anyhow::Result<eventexec::SagaRuntimeCapability> {
+    let integrity_bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(receipt_integrity_key_b64url.as_bytes())
+        .context("Saga conformance receipt key must be base64url")?;
+    let integrity = secure::SagaReceiptIntegrityKeyring::new(
+        secure::VersionedSagaReceiptIntegrityKey::new(
+            secure::SagaReceiptIntegrityKeyId::parse("saga-receipt-v1")?,
+            secure::RedactionHashKey::from_bytes(integrity_bytes)
+                .context("Saga conformance receipt key must decode to at least 32 bytes")?,
+        ),
+        Vec::new(),
+    )?;
+    let infra = pg.infra();
+    let store = Arc::new(
+        infra.saga_durable_store(postgres::PgSagaReceiptProtection::new(
+            receipt_key_provider,
+            integrity,
+        )),
+    );
+    let dead_letter = Arc::new(infra.dead_letter(dead_letter_protector));
+    let factory = eventexec::saga_test_support::conformance_factory(execution);
+    let config = eventexec::SagaExecutorConfig::from_typed_factory(
+        diport::CheckpointOwner::new("test"),
+        "runtime-saga-conformance-primary",
+        Duration::from_secs(30),
+        &factory,
+    )?;
+    let identity = config.identity().clone();
+    let registry = eventexec::SagaDefinitionRegistry::builder()
+        .register(factory)?
+        .finish();
+    let executor = Arc::new(eventexec::SagaExecutorImpl::new(
+        eventexec::SagaExecutorDeps::new(Arc::clone(&store), dead_letter, registry),
+        config,
+    )?);
+    let operator = executor.operator_service();
+    eventexec::SagaRuntimeCapability::bind_worker(
+        permit,
+        identity,
+        Arc::clone(&store),
+        store,
+        executor,
+        Arc::new(crate::support::SystemClock),
+        worker_config,
+        operator,
+    )
+    .map_err(Into::into)
 }
 
 struct SagaJourneyMetrics;

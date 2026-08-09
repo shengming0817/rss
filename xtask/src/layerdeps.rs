@@ -36,12 +36,13 @@
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
 //!   （例如 `allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`，Example
 //!   分类也不会自行阻止 root/其它允许边把 iotdevice 带入 shipped 图）。
-//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_eventexec_testsupport_feature_closure_is_shipped|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
+//! INVARIANT: LAYER-DEPS-09 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::red_runctx_testsupport_in_dependencies|tests::red_testsupport_features_follow_direct_and_workspace_package_aliases|tests::red_testsupport_feature_closure_follows_default_alias_recursion_and_cycle|tests::red_eventexec_testsupport_feature_closure_is_shipped|tests::red_generated_testsupport_direct_alias_and_forwarding_are_shipped|tests::red_testsupport_feature_closure_follows_dep_activation_and_dependency_default|tests::red_domain_scope_testsupport_in_dependencies|tests::red_bootstrap_testsupport_in_dependencies", anti_vacuity = "tests::green_runctx_without_testsupport|tests::real_workspace_testsupport_forwarding_graph_is_nonempty|tests::real_workspace_green" }—— scoped construction 的
 //!   `test-support` **feature** 只准经 `[dev-dependencies]` 启用，禁在任一 shipped feature 闭包
 //!   （成员默认 feature + `[dependencies]`/`[build-dependencies]`/`[target.*]` activation）启用。闭包解析
 //!   Cargo `default`、本地递归/循环、`dep:`、依赖 feature forwarding 与 package alias。覆盖 `runctx/test-support`
 //!   （构造 `AppCtx`）、`identity`/`settings`/`audit` 的 `TenantRepoScope::for_test`、
-//!   `eventexec/test-support`（构造 Projection conformance source/operator authority）、以及
+//!   `eventexec/test-support`（构造 Projection conformance source/operator authority）、
+//!   `generated/test-support`（暴露 sealed test-only contract catalog）、以及
 //!   `bootstrap/test-support`（`forge_topology_for_test`）与 `identity-composition|deviceidentity/test-support`
 //!   （暂停 application-receipt relay 的测试控制）；生产构建启用即可伪造 tenant scope / 事件拓扑或
 //!   暴露 relay 控制，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
@@ -1139,6 +1140,10 @@ pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Fi
 /// shipped 依赖表禁止启用的 scoped-construction test feature（LAYER-DEPS-09 守卫常量）。
 const TEST_SUPPORT_FEATURE: &str = "test-support";
 const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str)] = &[
+    (
+        "generated",
+        "sealed test-only contract definitions and catalogs must stay outside every shipped feature closure",
+    ),
     (
         "assembly-schema",
         "RepositoryContractTestBuilder bypasses manifest-backed contract owner provenance",
@@ -2566,6 +2571,79 @@ postgres = { path = "../../adapters/postgres", features = ["integration"] }
             findings[0].detail.contains(
                 "postgres/integration → postgres/eventexec/test-support → eventexec/test-support",
             ),
+            "{findings:#?}"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn red_generated_testsupport_direct_alias_and_forwarding_are_shipped() -> Result<()> {
+        let direct = scan_shipped_testsupport_features(&[ShippedDep {
+            from: "direct-consumer".to_owned(),
+            manifest_file: "crates/direct-consumer/Cargo.toml".to_owned(),
+            section: "[dependencies]".to_owned(),
+            key: "generated_alias".to_owned(),
+            package_name: "generated".to_owned(),
+            features: vec!["test-support".to_owned()],
+            is_workspace_internal: true,
+        }]);
+        assert_eq!(direct.len(), 1, "{direct:#?}");
+        assert!(direct[0].detail.contains("generated_alias"));
+
+        let root = crate::testutil::unique_tmp("generated-testsupport-feature-closure-red");
+        let manifests = [
+            (
+                "generated/Cargo.toml",
+                r#"
+[package]
+name = "generated"
+
+[features]
+default = []
+test-support = []
+"#,
+            ),
+            (
+                "crates/feature-bridge/Cargo.toml",
+                r#"
+[package]
+name = "feature-bridge"
+
+[features]
+default = []
+fixtures = ["generated_alias/test-support"]
+
+[dependencies]
+generated_alias = { package = "generated", path = "../../generated" }
+"#,
+            ),
+            (
+                "crates/consumer/Cargo.toml",
+                r#"
+[package]
+name = "consumer"
+
+[dependencies]
+bridge = { package = "feature-bridge", path = "../feature-bridge", features = ["fixtures"] }
+"#,
+            ),
+        ];
+        for (relative, source) in manifests {
+            let path = root.join(relative);
+            std::fs::create_dir_all(path.parent().context("feature fixture parent")?)?;
+            std::fs::write(path, source)?;
+        }
+        let members = [
+            m("generated", "generated", Some(Layer::Generated)),
+            m("feature-bridge", "crates/feature-bridge", Some(Layer::Root)),
+            m("consumer", "crates/consumer", Some(Layer::Root)),
+        ];
+        let findings = scan_workspace_testsupport_features(&root, &members, &BTreeMap::new())?;
+        assert!(
+            findings.iter().any(|finding| {
+                finding.subject == "consumer"
+                    && finding.detail.contains("generated_alias/test-support")
+            }),
             "{findings:#?}"
         );
         Ok(())

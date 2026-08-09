@@ -7,7 +7,7 @@ publish = false
 
 [features]
 default = []
-test-support = []
+test-support = ["generated/test-support"]
 
 [lints]
 workspace = true
@@ -75,4 +75,9 @@ metrics-exporter-prometheus = { workspace = true }
 [[test]]
 name = "projection_target_conformance"
 path = "tests/projection_target_conformance.rs"
+required-features = ["test-support"]
+
+[[test]]
+name = "typed_saga_trybuild"
+path = "tests/typed_saga_trybuild.rs"
 required-features = ["test-support"]

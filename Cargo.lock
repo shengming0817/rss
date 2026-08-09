@@ -394,7 +394,6 @@ dependencies = [
  "diagctx",
  "diport",
  "dynosaur",
- "eventexec",
  "generated",
  "httpserve",
  "ids",

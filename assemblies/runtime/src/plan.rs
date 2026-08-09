@@ -181,38 +181,25 @@ impl RuntimePlan {
         Ok(())
     }
 
-    pub(crate) fn take_saga_activation_permit(
+    #[cfg(feature = "integration")]
+    pub(crate) fn take_saga_conformance_permit(
         &mut self,
-        contract_id: &str,
-    ) -> Result<Option<eventexec::SagaActivationPermit>, RuntimePlanError> {
-        let active = self.plan.workflow_plans().iter().any(|workflow| {
-            matches!(
-                workflow.activation(),
-                assembly_schema::WorkflowActivation::Saga {
-                    id,
-                    activation: assembly_schema::SagaActivation::Active,
-                    ..
-                } if id == contract_id
-            )
-        });
-        if !active {
-            return Ok(None);
-        }
+    ) -> Result<eventexec::SagaActivationPermit, RuntimePlanError> {
         self.workflow_activation
             .as_mut()
             .ok_or(RuntimePlanError::WorkflowRuntimeAlreadyBound)?
-            .take_saga_permit(contract_id)
-            .map(Some)
+            .take_saga_permit(generated::saga::test_support::test_v1::primary::CONTRACT_ID)
             .map_err(RuntimePlanError::WorkflowRuntime)
     }
 
     #[cfg(feature = "integration")]
-    pub(crate) fn from_integration_typed(
+    pub(crate) fn from_saga_conformance_typed(
         plan: TypedRuntimePlan,
         assembly_identity: impl Into<String>,
     ) -> Result<Self, RuntimePlanError> {
-        let workflow_activation = eventexec::WorkflowActivationPlan::select(&plan)
-            .map_err(RuntimePlanError::WorkflowRuntime)?;
+        let workflow_activation =
+            eventexec::WorkflowActivationPlan::select_saga_conformance_for_test(&plan)
+                .map_err(RuntimePlanError::WorkflowRuntime)?;
         let assembly_identity = assembly_identity.into();
         let telemetry_resource = observ::TelemetryResource::try_new(
             assembly_identity.as_str(),

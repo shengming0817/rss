@@ -149,7 +149,155 @@ pub mod saga_worker;
 /// Generated saga fixtures exposed only to non-shipped integration harnesses.
 #[cfg(feature = "test-support")]
 pub mod saga_test_support {
-    pub use generated::saga::billing_v1;
+    use consistency::{CompensationOutcome, EngineError, EngineErrorKind};
+    use generated::saga::test_support::test_v1::primary::{
+        CommitStep, Definition, PrepareStep, SagaConformanceCommitReceipt,
+        SagaConformancePrepareReceipt,
+    };
+
+    use super::{
+        SagaAttemptOutcome, SagaCompensationContext, SagaForwardContext, SagaProbeOutcome,
+        SagaStep, TypedSagaActionFactory,
+    };
+
+    pub use generated::saga::test_support::test_v1::{foreign, primary};
+
+    /// Closed execution modes owned by the neutral fixture. Callers may select conformance
+    /// coverage, but cannot inject a definition, action, registry, or failure implementation.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub enum ConformanceExecution {
+        Complete,
+        RequirePrepareRepair,
+        FailCommit,
+    }
+
+    #[derive(Debug)]
+    struct Prepare {
+        execution: ConformanceExecution,
+    }
+
+    impl SagaStep<PrepareStep> for Prepare {
+        async fn execute(
+            &self,
+            context: SagaForwardContext,
+        ) -> SagaAttemptOutcome<SagaConformancePrepareReceipt> {
+            match self.execution {
+                ConformanceExecution::RequirePrepareRepair => SagaAttemptOutcome::Unknown,
+                ConformanceExecution::Complete | ConformanceExecution::FailCommit => {
+                    SagaAttemptOutcome::Applied(SagaConformancePrepareReceipt {
+                        operation_id: context.saga_id().as_uuid().to_string(),
+                    })
+                }
+            }
+        }
+
+        async fn probe(
+            &self,
+            context: SagaForwardContext,
+        ) -> SagaProbeOutcome<SagaConformancePrepareReceipt> {
+            match self.execution {
+                ConformanceExecution::RequirePrepareRepair => SagaProbeOutcome::Unknown,
+                ConformanceExecution::FailCommit => {
+                    SagaProbeOutcome::Applied(SagaConformancePrepareReceipt {
+                        operation_id: context.saga_id().as_uuid().to_string(),
+                    })
+                }
+                ConformanceExecution::Complete => SagaProbeOutcome::NotApplied,
+            }
+        }
+
+        async fn compensate(
+            &self,
+            context: SagaCompensationContext,
+            receipt: SagaConformancePrepareReceipt,
+        ) -> SagaAttemptOutcome<CompensationOutcome> {
+            if receipt.operation_id == context.saga_id().as_uuid().to_string() {
+                SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
+            } else {
+                SagaAttemptOutcome::Applied(CompensationOutcome::Failed)
+            }
+        }
+
+        async fn probe_compensation(
+            &self,
+            _context: SagaCompensationContext,
+            _receipt: SagaConformancePrepareReceipt,
+        ) -> SagaProbeOutcome<CompensationOutcome> {
+            SagaProbeOutcome::NotApplied
+        }
+    }
+
+    #[derive(Debug)]
+    struct Commit {
+        execution: ConformanceExecution,
+    }
+
+    impl SagaStep<CommitStep> for Commit {
+        async fn execute(
+            &self,
+            context: SagaForwardContext,
+        ) -> SagaAttemptOutcome<SagaConformanceCommitReceipt> {
+            match self.execution {
+                ConformanceExecution::Complete => {
+                    SagaAttemptOutcome::Applied(SagaConformanceCommitReceipt {
+                        operation_id: context.saga_id().as_uuid().to_string(),
+                    })
+                }
+                ConformanceExecution::FailCommit => {
+                    SagaAttemptOutcome::NotApplied(EngineError::new(EngineErrorKind::Permanent))
+                }
+                ConformanceExecution::RequirePrepareRepair => SagaAttemptOutcome::Unknown,
+            }
+        }
+
+        async fn probe(
+            &self,
+            _context: SagaForwardContext,
+        ) -> SagaProbeOutcome<SagaConformanceCommitReceipt> {
+            match self.execution {
+                ConformanceExecution::RequirePrepareRepair => SagaProbeOutcome::Unknown,
+                ConformanceExecution::Complete | ConformanceExecution::FailCommit => {
+                    SagaProbeOutcome::NotApplied
+                }
+            }
+        }
+
+        async fn compensate(
+            &self,
+            _context: SagaCompensationContext,
+            _receipt: SagaConformanceCommitReceipt,
+        ) -> SagaAttemptOutcome<CompensationOutcome> {
+            SagaAttemptOutcome::Applied(CompensationOutcome::Compensated)
+        }
+
+        async fn probe_compensation(
+            &self,
+            _context: SagaCompensationContext,
+            _receipt: SagaConformanceCommitReceipt,
+        ) -> SagaProbeOutcome<CompensationOutcome> {
+            SagaProbeOutcome::NotApplied
+        }
+    }
+
+    /// Return the one exact neutral typed factory owned by the conformance fixture.
+    #[must_use]
+    pub fn conformance_factory(
+        execution: ConformanceExecution,
+    ) -> TypedSagaActionFactory<Definition> {
+        TypedSagaActionFactory::<Definition>::builder()
+            .register::<Prepare, _>(move || Prepare { execution })
+            .register::<Commit, _>(move || Commit { execution })
+            .finish()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        #[test]
+        fn canonical_factory_is_bound_to_the_primary_generated_spec() {
+            let factory = super::conformance_factory(super::ConformanceExecution::Complete);
+            assert_eq!(factory.spec(), super::primary::SPEC);
+        }
+    }
 }
 pub use saga_worker::{
     SAGA_EXECUTOR_PROBE, SagaWorker, SagaWorkerConfig, SagaWorkerRuntime, saga_executor_probe_name,

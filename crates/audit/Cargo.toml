@@ -23,7 +23,6 @@ primitives = { path = "../primitives" }
 httpserve = { path = "../httpserve" }
 authn = { path = "../authn" }
 bootstrap = { path = "../bootstrap" }
-eventexec = { path = "../eventexec" }
 generated = { path = "../../generated" }
 # Audit read/write 域形 repo ports（ADR-005 Option 2）：async dyn 派发 = trait_variant Send 变体 + dynosaur wrappers
 # （DIPORT-MACRO-CONFINE-02 白名单：定义自身 repo port 的域 crate 可依赖；deny.toml + xtask 两侧同步加 audit）。

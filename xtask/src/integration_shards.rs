@@ -2002,7 +2002,7 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
-    fn synthetic_saga_fixture_is_not_a_production_runtime_carrier() {
+    fn neutral_saga_fixture_is_not_a_production_runtime_carrier() {
         let spec = IntegrationUnitId::SagaRuntimeProviderIntegration.spec();
         assert_eq!(spec.shard, IntegrationShard::CdcProjectionSaga);
         assert!(!spec.id.as_str().contains("production"));

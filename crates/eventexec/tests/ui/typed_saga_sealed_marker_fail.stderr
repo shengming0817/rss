@@ -1,16 +1,16 @@
-error[E0277]: the trait bound `generated::saga::billing_v1::BillingReserveFundsReceipt: Receipt<Forged>` is not satisfied
+error[E0277]: the trait bound `SagaConformancePrepareReceipt: Receipt<Forged>` is not satisfied
  --> tests/ui/typed_saga_sealed_marker_fail.rs:4:20
   |
-4 |     type Receipt = generated::saga::billing_v1::BillingReserveFundsReceipt;
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Receipt<Forged>` is not implemented for `generated::saga::billing_v1::BillingReserveFundsReceipt`
+4 |     type Receipt = generated::saga::test_support::test_v1::primary::SagaConformancePrepareReceipt;
+  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `Receipt<Forged>` is not implemented for `SagaConformancePrepareReceipt`
   |
-help: the trait `Receipt<Forged>` is not implemented for `generated::saga::billing_v1::BillingReserveFundsReceipt`
-      but trait `Receipt<generated::saga::billing_v1::ReserveFundsStep>` is implemented for it
- --> $WORKSPACE/generated/src/saga/billing_v1.rs
+help: the trait `Receipt<Forged>` is not implemented for `SagaConformancePrepareReceipt`
+      but trait `Receipt<PrepareStep>` is implemented for it
+ --> $WORKSPACE/generated/src/saga/test_support/test_v1.rs
   |
-  | impl super::Receipt<ReserveFundsStep> for BillingReserveFundsReceipt {}
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = help: for that trait implementation, expected `generated::saga::billing_v1::ReserveFundsStep`, found `Forged`
+  |     impl super::super::Receipt<PrepareStep> for SagaConformancePrepareReceipt {}
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `PrepareStep`, found `Forged`
 note: required by a bound in `generated::saga::StepMarker::Receipt`
  --> $WORKSPACE/generated/src/saga/mod.rs
   |
@@ -30,7 +30,9 @@ help: the trait `saga::sealed::StepMarker` is not implemented for `Forged`
   | ^^^^^^^^^^^^^
   = note: `Forged` implements similarly named trait `StepMarker`, but not `saga::sealed::StepMarker`
   = help: the following other types implement trait `saga::sealed::StepMarker`:
-            RecordMarkerStep
+            CommitStep
+            ObserveStep
+            PrepareStep
             generated::saga::billing_v1::CaptureStep
             generated::saga::billing_v1::ReserveFundsStep
             generated::saga::billing_v2::CaptureStep
@@ -42,8 +44,10 @@ note: required by a bound in `StepMarker`
   |                       ^^^^^^^^^^^^^^^^^^ required by this bound in `StepMarker`
   = note: `StepMarker` is a "sealed trait", because to implement it you also need to implement `generated::saga::sealed::StepMarker`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
   = help: the following types implement the trait:
-            generated::saga::audit_v1::RecordMarkerStep
             generated::saga::billing_v1::ReserveFundsStep
             generated::saga::billing_v1::CaptureStep
             generated::saga::billing_v2::CaptureStep
             generated::saga::billing_v2::ReserveFundsStep
+            generated::saga::test_support::test_v1::foreign::ObserveStep
+            generated::saga::test_support::test_v1::primary::PrepareStep
+            generated::saga::test_support::test_v1::primary::CommitStep

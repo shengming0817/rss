@@ -180,6 +180,22 @@ pub(crate) fn validate_discovered_contracts(contracts: &[RepositoryContract]) ->
     findings
 }
 
+/// Validate an isolated codegen fixture repository with every per-contract rule plus the generic
+/// repository closure rules. Workspace-specific canonical-family and production-owner
+/// anti-vacuity rules intentionally remain exclusive to the production catalog.
+pub(crate) fn validate_discovered_codegen_fixtures(
+    contracts: &[RepositoryContract],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    for contract in contracts {
+        findings.extend(validate_contract(contract));
+    }
+    for (_, handler) in super::governance::codegen_fixture_catalog_validation_plan() {
+        findings.extend(handler(contracts));
+    }
+    findings
+}
+
 /// Execute catalog-scoped rules from the canonical rule plan.
 fn validate_cross(contracts: &[RepositoryContract]) -> Vec<Finding> {
     let mut out = Vec::new();

@@ -1,18 +1,18 @@
-error[E0277]: the trait bound `Capture: SagaStep<generated::saga::billing_v1::ReserveFundsStep>` is not satisfied
+error[E0277]: the trait bound `common::Commit: SagaStep<PrepareStep>` is not satisfied
  --> tests/ui/typed_saga_reordered_step_fail.rs:8:21
   |
-8 |         .register::<common::Capture, _>(|| common::Capture);
-  |          --------   ^^^^^^^^^^^^^^^ unsatisfied trait bound
+8 |         .register::<common::Commit, _>(|| common::Commit);
+  |          --------   ^^^^^^^^^^^^^^ unsatisfied trait bound
   |          |
   |          required by a bound introduced by this call
   |
-help: the trait `SagaStep<generated::saga::billing_v1::ReserveFundsStep>` is not implemented for `Capture`
-      but trait `SagaStep<generated::saga::billing_v1::CaptureStep>` is implemented for it
+help: the trait `SagaStep<PrepareStep>` is not implemented for `common::Commit`
+      but trait `SagaStep<CommitStep>` is implemented for it
  --> tests/ui/common/mod.rs
   |
-  | impl SagaStep<CaptureStep> for Capture {
-  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-  = help: for that trait implementation, expected `generated::saga::billing_v1::CaptureStep`, found `generated::saga::billing_v1::ReserveFundsStep`
+  | impl SagaStep<CommitStep> for Commit {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  = help: for that trait implementation, expected `CommitStep`, found `PrepareStep`
 note: required by a bound in `TypedSagaActionFactoryBuilder::<D, C>::register`
  --> src/saga.rs
   |
