@@ -15,7 +15,7 @@ test-support = []
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
 runctx = { path = "../runctx" }
-diagctx = { path = "../diagctx" }
+diagctx = { package = "rss-diag-context", path = "../diagctx", version = "0.1.0" }
 secure = { path = "../secure" }
 consistency = { path = "../consistency" }
 observ = { path = "../observ" }

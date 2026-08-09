@@ -24,6 +24,14 @@ pub(crate) struct RawMetadata {
 pub(crate) struct RawPackage {
     pub(crate) id: String,
     pub(crate) name: String,
+    pub(crate) description: Option<String>,
+    pub(crate) license: Option<String>,
+    pub(crate) license_file: Option<String>,
+    pub(crate) repository: Option<String>,
+    pub(crate) readme: Option<String>,
+    pub(crate) categories: BTreeSet<String>,
+    pub(crate) keywords: BTreeSet<String>,
+    pub(crate) features: BTreeMap<String, BTreeSet<String>>,
     pub(crate) dependencies: Vec<RawDependency>,
 }
 
@@ -35,6 +43,9 @@ pub(crate) struct RawDependency {
     target: Option<String>,
     path: Option<String>,
     source: Option<String>,
+    requirement: String,
+    optional: bool,
+    uses_default_features: bool,
     features: BTreeSet<String>,
 }
 
@@ -125,6 +136,14 @@ pub(crate) fn parse_raw_metadata(metadata_json: &str) -> Result<RawMetadata, Wor
 fn parse_raw_package(value: &Value) -> Result<RawPackage, WorkspaceFactsError> {
     let id = required_string(value, "id")?;
     let name = required_string(value, "name")?;
+    let description = optional_string(value, "description")?;
+    let license = optional_string(value, "license")?;
+    let license_file = optional_string(value, "license_file")?;
+    let repository = optional_string(value, "repository")?;
+    let readme = optional_string(value, "readme")?;
+    let categories = required_string_set(value, "categories")?;
+    let keywords = required_string_set(value, "keywords")?;
+    let features = required_string_set_map(value, "features")?;
     let dependencies = value
         .get("dependencies")
         .and_then(Value::as_array)
@@ -137,6 +156,14 @@ fn parse_raw_package(value: &Value) -> Result<RawPackage, WorkspaceFactsError> {
     Ok(RawPackage {
         id,
         name,
+        description,
+        license,
+        license_file,
+        repository,
+        readme,
+        categories,
+        keywords,
+        features,
         dependencies,
     })
 }
@@ -149,6 +176,9 @@ fn parse_raw_dependency(value: &Value) -> Result<RawDependency, WorkspaceFactsEr
         target: optional_string(value, "target")?,
         path: optional_string(value, "path")?,
         source: optional_string(value, "source")?,
+        requirement: required_string(value, "req")?,
+        optional: required_bool(value, "optional")?,
+        uses_default_features: required_bool(value, "uses_default_features")?,
         features: required_string_set(value, "features")?,
     })
 }
@@ -240,6 +270,45 @@ fn optional_string(value: &Value, field: &str) -> Result<Option<String>, Workspa
     }
 }
 
+fn required_bool(value: &Value, field: &str) -> Result<bool, WorkspaceFactsError> {
+    value.get(field).and_then(Value::as_bool).ok_or_else(|| {
+        WorkspaceFactsError::InvalidMetadata(format!("missing boolean field `{field}`"))
+    })
+}
+
+fn required_string_set_map(
+    value: &Value,
+    field: &str,
+) -> Result<BTreeMap<String, BTreeSet<String>>, WorkspaceFactsError> {
+    value
+        .get(field)
+        .and_then(Value::as_object)
+        .ok_or_else(|| {
+            WorkspaceFactsError::InvalidMetadata(format!("missing object field `{field}`"))
+        })?
+        .iter()
+        .map(|(key, values)| {
+            let values = values
+                .as_array()
+                .ok_or_else(|| {
+                    WorkspaceFactsError::InvalidMetadata(format!(
+                        "field `{field}.{key}` must be an array"
+                    ))
+                })?
+                .iter()
+                .map(|entry| {
+                    entry.as_str().map(str::to_owned).ok_or_else(|| {
+                        WorkspaceFactsError::InvalidMetadata(format!(
+                            "field `{field}.{key}` entries must be strings"
+                        ))
+                    })
+                })
+                .collect::<Result<BTreeSet<_>, _>>()?;
+            Ok((key.clone(), values))
+        })
+        .collect()
+}
+
 fn required_string_set(
     value: &Value,
     field: &str,
@@ -298,12 +367,21 @@ pub(crate) fn project_direct_declarations(
             graph,
             workspace_root,
         )?;
+        let version_requirement = declaration.requirement.parse().map_err(|error| {
+            WorkspaceFactsError::InvalidMetadata(format!(
+                "dependency `{name}` has invalid version requirement `{}`: {error}",
+                declaration.requirement
+            ))
+        })?;
         facts.push(DirectDependencyFacts {
             dependent: dependent.clone(),
             resolution,
             name,
             kind: declaration.kind,
             source,
+            version_requirement,
+            optional: declaration.optional,
+            uses_default_features: declaration.uses_default_features,
             unconditional: declaration.target.is_none(),
             requested_features: declaration.features.clone(),
         });

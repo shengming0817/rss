@@ -1,10 +1,15 @@
 [package]
-name = "tracewire"
-version.workspace = true
+name = "rss-trace-context"
+version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
 publish = false
 license-file = "../../LICENSE"
+repository.workspace = true
+readme = "README.md"
+description = "W3C Trace Context capture and restoration for tracing spans"
+categories = ["development-tools::debugging", "web-programming"]
+keywords = ["tracing", "opentelemetry", "trace-context", "traceparent", "observability"]
 
 [lints]
 workspace = true
@@ -12,19 +17,20 @@ workspace = true
 [dependencies]
 # 唯一碰 opentelemetry 的新落点：W3C Trace Context capture/remote-parent restore 单源，
 # httpserve/eventexec/postgres 只依赖本 crate、不直接 import otel。Engine 档（被 service + adapter 依赖）。
-tracing = { workspace = true }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 # Span::current().context() / Span::set_parent(cx)：tracing span ↔ OTel Context 桥（OpenTelemetrySpanExt）。
-tracing-opentelemetry = { workspace = true }
+tracing-opentelemetry = { version = "0.33", default-features = false }
 # opentelemetry::Context + propagation traits（TextMapPropagator / Injector / Extractor，HashMap<String,String> 自带 impl）。
-opentelemetry = { workspace = true }
+opentelemetry = { version = "0.32", default-features = false, features = ["trace"] }
 # W3C TraceContextPropagator（opentelemetry_sdk::propagation，trace feature）——producer inject / consumer extract 单源。
-opentelemetry_sdk = { workspace = true, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace"] }
 # `test-util` feature 装配确定性测试 subscriber（registry().with(otel layer)）；optional——默认 build 不引入。
 tracing-subscriber = { workspace = true, optional = true }
 # `test-util` owns a current-thread runtime so async capture cannot escape its dispatcher boundary.
 tokio = { workspace = true, features = ["rt"], optional = true }
 
 [features]
+default = []
 # 跨 crate 测试脚手架（同 identity/authn 的 `test-support` 范式）：导出 `with_test_subscriber`，
 # 使下游 postgres/eventexec 测试复用 otel subscriber 装配而**不直接 import otel**（otel 收口在本 crate）。
 test-util = ["dep:tracing-subscriber", "dep:tokio", "opentelemetry_sdk/testing"]

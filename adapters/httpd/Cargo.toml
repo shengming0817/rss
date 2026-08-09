@@ -27,8 +27,8 @@ diport = { path = "../../crates/diport" }
 authn = { path = "../../crates/authn" }
 httpserve = { path = "../../crates/httpserve" }
 distributed = { path = "../../crates/distributed" }
-diagctx = { path = "../../crates/diagctx" }
-tracewire = { path = "../../crates/tracewire" }
+diagctx = { package = "rss-diag-context", path = "../../crates/diagctx", version = "0.1.0" }
+tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0" }
 vocab = { path = "../../crates/vocab" }
 axum = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls-manual-roots"] }
@@ -52,7 +52,7 @@ rcgen = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net", "test-util"] }
 rcgen = { workspace = true }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
-tracewire = { path = "../../crates/tracewire", features = ["test-util"] }
+tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0", features = ["test-util"] }
 metrics-exporter-prometheus = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }

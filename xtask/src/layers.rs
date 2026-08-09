@@ -26,7 +26,7 @@
 /// crate import diagctx）见 follow-up #1400。
 pub(crate) const BASIS_CRATES: &[&str] = &[
     "postgres-migration-inventory",
-    "diagctx",
+    "rss-diag-context",
     "authmint",
     "sagaauthmint",
     "requestidmint",
@@ -42,15 +42,19 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
 /// 独立根基础 crate：任何涉及这些 crate 的 intra-base 边（双向）均不 sanction。
 /// `diagctx` 是诊断独立根；其余 mint crates 是 production capability 独立根
 /// （deny.toml wrappers 另收窄持有方）。
-pub(crate) const ISOLATED_BASIS_CRATES: &[&str] =
-    &["diagctx", "authmint", "sagaauthmint", "requestidmint"];
+pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &[
+    "rss-diag-context",
+    "authmint",
+    "sagaauthmint",
+    "requestidmint",
+];
 /// 引擎 / 原语层（依赖基础）。
 ///
 /// `tracewire` 是 W3C Trace Context capture/remote-parent restore 单源（唯一新 otel 落点）：domain-neutral
 /// 纯 infra、无 workspace 内部边（出边全是外部 opentelemetry/tracing crate），被 service `httpserve` +
 /// `eventexec` 和 adapter `postgres` 依赖（`allows(Service,Engine)` / `allows(Adapter,Engine)` 均放行；
 /// `service→service` 禁故不可置 Service 档）。
-pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives", "tracewire"];
+pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives", "rss-trace-context"];
 /// DI-infra 层（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费）——可替换 provider 的
 /// DI port trait 单源 + dynosaur 单一 dyn-dispatch 依赖点（ADR-003）。
 pub(crate) const DIPORT_CRATES: &[&str] = &["diport"];
@@ -294,7 +298,7 @@ mod tests {
     #[rstest]
     #[case("vocab", "crates/vocab", Some(Layer::Basis))]
     #[case("runctx", "crates/runctx", Some(Layer::Basis))]
-    #[case("diagctx", "crates/diagctx", Some(Layer::Basis))]
+    #[case("rss-diag-context", "crates/diagctx", Some(Layer::Basis))]
     #[case("authmint", "crates/authmint", Some(Layer::Basis))]
     #[case("requestidmint", "crates/requestidmint", Some(Layer::Basis))]
     #[case("consistency", "crates/consistency", Some(Layer::Engine))]
@@ -402,10 +406,10 @@ mod tests {
     #[case("runctx", "consistency", false)]
     #[case("httpserve", "vocab", false)]
     // diagctx 独立根：双向均不 sanction（anti-vacuity，证明 X→diagctx 不被高 rank 误放行）。
-    #[case("runctx", "diagctx", false)]
-    #[case("vocab", "diagctx", false)]
-    #[case("diagctx", "vocab", false)]
-    #[case("diagctx", "runctx", false)]
+    #[case("runctx", "rss-diag-context", false)]
+    #[case("vocab", "rss-diag-context", false)]
+    #[case("rss-diag-context", "vocab", false)]
+    #[case("rss-diag-context", "runctx", false)]
     // authmint 独立根：与 diagctx 对称的 anti-vacuity（AUTH-EVIDENCE-MINT-01 Hard 半段）。
     #[case("runctx", "authmint", false)]
     #[case("vocab", "authmint", false)]

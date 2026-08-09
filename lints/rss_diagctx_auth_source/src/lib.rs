@@ -80,7 +80,7 @@ fn is_diagctx_path(cx: &LateContext<'_>, path: &Path<'_>) -> bool {
     let Res::Def(_, did) = path.res else {
         return false;
     };
-    cx.tcx.crate_name(did.krate).as_str() == "diagctx"
+    cx.tcx.crate_name(did.krate).as_str() == "rss_diag_context"
 }
 
 fn is_guarded_context(cx: &LateContext<'_>, hir_id: HirId) -> bool {

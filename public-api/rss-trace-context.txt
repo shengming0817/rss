@@ -1,0 +1,15 @@
+pub mod rss_trace_context
+pub struct rss_trace_context::W3cTraceContext
+impl rss_trace_context::W3cTraceContext
+pub fn rss_trace_context::W3cTraceContext::into_traceparent(self) -> alloc::string::String
+pub fn rss_trace_context::W3cTraceContext::traceparent(&self) -> &str
+pub fn rss_trace_context::W3cTraceContext::tracestate(&self) -> core::option::Option<&str>
+impl core::marker::Freeze for rss_trace_context::W3cTraceContext
+impl core::marker::Send for rss_trace_context::W3cTraceContext
+impl core::marker::Sync for rss_trace_context::W3cTraceContext
+impl core::marker::Unpin for rss_trace_context::W3cTraceContext
+impl core::marker::UnsafeUnpin for rss_trace_context::W3cTraceContext
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::W3cTraceContext
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::W3cTraceContext
+pub fn rss_trace_context::capture_current() -> core::option::Option<rss_trace_context::W3cTraceContext>
+pub fn rss_trace_context::restore_remote_parent(&tracing::span::Span, &str, core::option::Option<&str>)

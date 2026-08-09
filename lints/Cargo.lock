@@ -539,14 +539,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "diagctx"
-version = "0.0.0"
-dependencies = [
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -794,6 +786,7 @@ dependencies = [
  "generated",
  "metrics",
  "primitives",
+ "rss-trace-context",
  "secure",
  "serde",
  "serde_json",
@@ -802,7 +795,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
- "tracewire",
  "tracing",
  "uuid",
  "vocab",
@@ -944,9 +936,12 @@ dependencies = [
 name = "generated"
 version = "0.0.0"
 dependencies = [
+ "axum",
  "regress",
+ "requestidmint",
  "secure",
  "serde",
+ "serde_json",
  "uuid",
  "vocab",
 ]
@@ -1130,11 +1125,12 @@ version = "0.0.0"
 dependencies = [
  "authmint",
  "axum",
- "diagctx",
  "diport",
  "futures",
  "http-body-util",
  "primitives",
+ "requestidmint",
+ "rss-diag-context",
  "runctx",
  "serde",
  "serde_json",
@@ -1303,6 +1299,7 @@ dependencies = [
  "ids",
  "observ",
  "primitives",
+ "regex",
  "runctx",
  "secure",
  "serde",
@@ -1674,7 +1671,6 @@ dependencies = [
  "js-sys",
  "pin-project-lite",
  "thiserror 2.0.18",
- "tracing",
 ]
 
 [[package]]
@@ -1987,6 +1983,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "requestidmint"
+version = "0.0.0"
+
+[[package]]
+name = "rss-diag-context"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
+name = "rss-trace-context"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "tracing",
+ "tracing-opentelemetry",
+]
+
+[[package]]
 name = "rss_adapter_no_business_fsm"
 version = "0.0.0"
 dependencies = [
@@ -2037,11 +2055,11 @@ name = "rss_diagctx_auth_source"
 version = "0.0.0"
 dependencies = [
  "clippy_utils",
- "diagctx",
  "diport",
  "dylint_linting",
  "dylint_testing",
  "httpserve",
+ "rss-diag-context",
 ]
 
 [[package]]
@@ -2974,16 +2992,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
 
 [[package]]
-name = "tracewire"
-version = "0.0.0"
-dependencies = [
- "opentelemetry",
- "opentelemetry_sdk",
- "tracing",
- "tracing-opentelemetry",
-]
-
-[[package]]
 name = "tracing"
 version = "0.1.44"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3017,17 +3025,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tracing-log"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee855f1f400bd0e5c02d150ae5de3840039a3f54b025156404e34c23c03f47c3"
-dependencies = [
- "log",
- "once_cell",
- "tracing-core",
-]
-
-[[package]]
 name = "tracing-opentelemetry"
 version = "0.33.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3035,10 +3032,8 @@ checksum = "adbc64cba7137545b8044cb1fe9814f7aacf3c6b5f9b45be8bb5db538befdb26"
 dependencies = [
  "js-sys",
  "opentelemetry",
- "smallvec",
  "tracing",
  "tracing-core",
- "tracing-log",
  "tracing-subscriber",
  "web-time",
 ]

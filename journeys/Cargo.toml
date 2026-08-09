@@ -124,7 +124,7 @@ consistency = { path = "../crates/consistency" }
 diport = { path = "../crates/diport", features = ["test-support"] }
 secure = { path = "../crates/secure", features = ["test-support"] }
 # #1160 durable journey：correlation ambient 信道，端到端断言 outbox→relay→broker→consumer metadata 保真。
-diagctx = { path = "../crates/diagctx" }
+diagctx = { package = "rss-diag-context", path = "../crates/diagctx", version = "0.1.0" }
 runctx = { path = "../crates/runctx", features = ["test-support"] }
 primitives = { path = "../crates/primitives" }
 assembly-schema = { path = "../crates/assembly-schema" }

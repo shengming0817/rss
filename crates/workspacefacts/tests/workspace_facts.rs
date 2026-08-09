@@ -454,7 +454,7 @@ fn workspace_package_catalog_is_owned_key_ordered_and_excludes_registry()
 
     drop(facts);
     let owned_roots: Vec<(String, PathBuf)> = catalog
-        .into_iter()
+        .iter()
         .map(|pkg| {
             (
                 pkg.key().as_str().to_owned(),
@@ -536,6 +536,100 @@ fn release_package_facts_project_version_msrv_and_publish_policy_as_owned_values
     assert_eq!(top.publish_policy(), &PublishPolicy::Disabled);
     assert!(!top.publish_policy().is_publishable());
     assert!(consumer.publish_policy().is_publishable());
+    Ok(())
+}
+
+#[test]
+fn release_package_facts_project_publish_metadata_and_feature_map_as_owned_values()
+-> Result<(), Box<dyn Error>> {
+    let mut metadata: serde_json::Value = serde_json::from_str(&synthetic_metadata())?;
+    let packages = metadata["packages"]
+        .as_array_mut()
+        .ok_or("synthetic packages must be an array")?;
+    let consumer = packages
+        .iter_mut()
+        .find(|package| package["name"] == "consumer")
+        .ok_or("missing synthetic consumer")?;
+    consumer["description"] = json!("A publish-ready component");
+    consumer["license_file"] = json!("/workspace/LICENSE");
+    consumer["repository"] = json!("https://github.com/example/repo");
+    consumer["readme"] = json!("/workspace/crates/consumer/README.md");
+    consumer["categories"] = json!(["development-tools::debugging"]);
+    consumer["keywords"] = json!(["diagnostics", "context"]);
+    consumer["features"] = json!({"default": [], "extra": ["leaf/remote"]});
+
+    let facts = WorkspaceFacts::from_metadata_json(
+        Path::new("/workspace"),
+        &serde_json::to_string(&metadata)?,
+    )?;
+    let package = facts
+        .workspace_packages()
+        .into_iter()
+        .find(|package| package.key().as_str() == "consumer")
+        .ok_or("missing projected consumer")?;
+    let publish = package.publish_metadata();
+    assert_eq!(publish.description(), Some("A publish-ready component"));
+    assert_eq!(publish.license(), None);
+    assert_eq!(
+        publish.license_file(),
+        Some(Path::new("/workspace/LICENSE"))
+    );
+    assert_eq!(
+        publish.repository(),
+        Some("https://github.com/example/repo")
+    );
+    assert_eq!(
+        publish.readme(),
+        Some(Path::new("/workspace/crates/consumer/README.md"))
+    );
+    assert_eq!(
+        publish.categories(),
+        &BTreeSet::from(["development-tools::debugging".to_owned()])
+    );
+    assert_eq!(
+        publish.keywords(),
+        &BTreeSet::from(["context".to_owned(), "diagnostics".to_owned()])
+    );
+    assert_eq!(publish.features().get("default"), Some(&BTreeSet::new()));
+    assert_eq!(
+        publish.features().get("extra"),
+        Some(&BTreeSet::from(["leaf/remote".to_owned()]))
+    );
+    Ok(())
+}
+
+#[test]
+fn direct_dependency_facts_project_version_optional_and_default_feature_policy()
+-> Result<(), Box<dyn Error>> {
+    let mut metadata: serde_json::Value = serde_json::from_str(&synthetic_metadata())?;
+    let packages = metadata["packages"]
+        .as_array_mut()
+        .ok_or("synthetic packages must be an array")?;
+    let consumer = packages
+        .iter_mut()
+        .find(|package| package["name"] == "consumer")
+        .ok_or("missing synthetic consumer")?;
+    let dependency = consumer["dependencies"]
+        .as_array_mut()
+        .and_then(|dependencies| dependencies.first_mut())
+        .ok_or("missing synthetic dependency")?;
+    dependency["req"] = json!("^0.0.0");
+    dependency["optional"] = json!(true);
+    dependency["uses_default_features"] = json!(false);
+
+    let facts = WorkspaceFacts::from_metadata_json(
+        Path::new("/workspace"),
+        &serde_json::to_string(&metadata)?,
+    )?;
+    let consumer_key = facts.package_key("consumer")?;
+    let dependency = facts
+        .direct_dependencies_for(&consumer_key)?
+        .iter()
+        .find(|dependency| dependency.name() == "leaf")
+        .ok_or("missing projected dependency")?;
+    assert_eq!(dependency.version_requirement().to_string(), "^0.0.0");
+    assert!(dependency.optional());
+    assert!(!dependency.uses_default_features());
     Ok(())
 }
 

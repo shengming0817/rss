@@ -30,7 +30,7 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 上述 concat/no-dash/no-`rss-` 规则只约束仓内 workspace identity。进入正向 Release Surface 的公开 registry
 package 使用品牌 **RSS** 与 `rss-` 前缀；首批两个 Standalone Component 的映射固定为：
 
-| internal package | public package | registry owner |
+| repository path / internal dependency key | public Cargo package | registry owner |
 |---|---|---|
 | `diagctx` | `rss-diag-context` | `github:shengming0817:rss-maintainers` |
 | `tracewire` | `rss-trace-context` | `github:shengming0817:rss-maintainers` |
@@ -38,8 +38,10 @@ package 使用品牌 **RSS** 与 `rss-` 前缀；首批两个 Standalone Compone
 规范源码仓库是 [`shengming0817/rss`](https://github.com/shengming0817/rss)。2026-08-09 UTC 的 crates.io
 检查确认精确名称 `rss` 已被无关的 RSS feed 读写 crate 占用，而 `rss-diag-context` 与
 `rss-trace-context` 当时未登记。未登记只是一项带时间的冲突检查，不构成名称保留、ownership 或发布授权；首次
-发布前必须重新查询精确名称，并在 crate 创建后验证 registry owner 列表。内部 package 在其 Cargo closure PBI
-完成前继续保持原名和 `publish = false`，不得因本映射提前重命名、选择进 Release Surface 或声明 RC/published。
+发布前必须重新查询精确名称，并在 crate 创建后验证 registry owner 列表。`crates/diagctx` / `diagctx` 与
+`crates/tracewire` / `tracewire` 分别是仓内路径与 dependency rename key，不构成旧 package alias。Cargo closure
+PBI 直接采用上表公开 package identity，但在最终 API 与同 revision artifact proof 完成前继续保持
+`publish = false`，且不得选择进 Release Surface、声明 RC 或 published。
 
 ## 核心载体
 

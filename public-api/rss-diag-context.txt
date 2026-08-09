@@ -1,0 +1,131 @@
+pub mod rss_diag_context
+pub mod rss_diag_context::ctx
+pub enum rss_diag_context::ctx::CorrelationIdError
+pub rss_diag_context::ctx::CorrelationIdError::Empty
+pub rss_diag_context::ctx::CorrelationIdError::InvalidChar
+pub rss_diag_context::ctx::CorrelationIdError::TooLong
+impl core::clone::Clone for rss_diag_context::ctx::CorrelationIdError
+pub fn rss_diag_context::ctx::CorrelationIdError::clone(&self) -> rss_diag_context::ctx::CorrelationIdError
+impl core::cmp::Eq for rss_diag_context::ctx::CorrelationIdError
+impl core::cmp::PartialEq for rss_diag_context::ctx::CorrelationIdError
+pub fn rss_diag_context::ctx::CorrelationIdError::eq(&self, &rss_diag_context::ctx::CorrelationIdError) -> bool
+impl core::error::Error for rss_diag_context::ctx::CorrelationIdError
+impl core::fmt::Debug for rss_diag_context::ctx::CorrelationIdError
+pub fn rss_diag_context::ctx::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_diag_context::ctx::CorrelationIdError
+pub fn rss_diag_context::ctx::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::Freeze for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::Send for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::Sync for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::Unpin for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::UnsafeUnpin for rss_diag_context::ctx::CorrelationIdError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::ctx::CorrelationIdError
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::ctx::CorrelationIdError
+pub struct rss_diag_context::ctx::CorrelationId(_)
+impl rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::CorrelationId::as_str(&self) -> &str
+pub fn rss_diag_context::ctx::CorrelationId::parse(&str) -> core::result::Result<Self, rss_diag_context::ctx::CorrelationIdError>
+impl core::clone::Clone for rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::CorrelationId::clone(&self) -> rss_diag_context::ctx::CorrelationId
+impl core::cmp::Eq for rss_diag_context::ctx::CorrelationId
+impl core::cmp::PartialEq for rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::CorrelationId::eq(&self, &rss_diag_context::ctx::CorrelationId) -> bool
+impl core::fmt::Debug for rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::CorrelationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rss_diag_context::ctx::CorrelationId
+impl core::marker::Freeze for rss_diag_context::ctx::CorrelationId
+impl core::marker::Send for rss_diag_context::ctx::CorrelationId
+impl core::marker::Sync for rss_diag_context::ctx::CorrelationId
+impl core::marker::Unpin for rss_diag_context::ctx::CorrelationId
+impl core::marker::UnsafeUnpin for rss_diag_context::ctx::CorrelationId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::ctx::CorrelationId
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::ctx::CorrelationId
+pub struct rss_diag_context::ctx::DiagnosticCtx
+impl rss_diag_context::ctx::DiagnosticCtx
+pub fn rss_diag_context::ctx::DiagnosticCtx::correlation(&self) -> &rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::DiagnosticCtx::new(rss_diag_context::ctx::CorrelationId) -> Self
+impl core::clone::Clone for rss_diag_context::ctx::DiagnosticCtx
+pub fn rss_diag_context::ctx::DiagnosticCtx::clone(&self) -> rss_diag_context::ctx::DiagnosticCtx
+impl core::cmp::Eq for rss_diag_context::ctx::DiagnosticCtx
+impl core::cmp::PartialEq for rss_diag_context::ctx::DiagnosticCtx
+pub fn rss_diag_context::ctx::DiagnosticCtx::eq(&self, &rss_diag_context::ctx::DiagnosticCtx) -> bool
+impl core::fmt::Debug for rss_diag_context::ctx::DiagnosticCtx
+pub fn rss_diag_context::ctx::DiagnosticCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::Freeze for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::Send for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::Sync for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::Unpin for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::UnsafeUnpin for rss_diag_context::ctx::DiagnosticCtx
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::ctx::DiagnosticCtx
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::ctx::DiagnosticCtx
+pub const rss_diag_context::ctx::MAX_CORRELATION_ID_LEN: usize
+pub mod rss_diag_context::local
+pub fn rss_diag_context::local::correlation() -> core::option::Option<rss_diag_context::ctx::CorrelationId>
+pub fn rss_diag_context::local::current() -> core::option::Option<rss_diag_context::ctx::DiagnosticCtx>
+pub fn rss_diag_context::local::scope<F>(rss_diag_context::ctx::DiagnosticCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
+pub enum rss_diag_context::CorrelationIdError
+pub rss_diag_context::CorrelationIdError::Empty
+pub rss_diag_context::CorrelationIdError::InvalidChar
+pub rss_diag_context::CorrelationIdError::TooLong
+impl core::clone::Clone for rss_diag_context::ctx::CorrelationIdError
+pub fn rss_diag_context::ctx::CorrelationIdError::clone(&self) -> rss_diag_context::ctx::CorrelationIdError
+impl core::cmp::Eq for rss_diag_context::ctx::CorrelationIdError
+impl core::cmp::PartialEq for rss_diag_context::ctx::CorrelationIdError
+pub fn rss_diag_context::ctx::CorrelationIdError::eq(&self, &rss_diag_context::ctx::CorrelationIdError) -> bool
+impl core::error::Error for rss_diag_context::ctx::CorrelationIdError
+impl core::fmt::Debug for rss_diag_context::ctx::CorrelationIdError
+pub fn rss_diag_context::ctx::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_diag_context::ctx::CorrelationIdError
+pub fn rss_diag_context::ctx::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::Freeze for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::Send for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::Sync for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::Unpin for rss_diag_context::ctx::CorrelationIdError
+impl core::marker::UnsafeUnpin for rss_diag_context::ctx::CorrelationIdError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::ctx::CorrelationIdError
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::ctx::CorrelationIdError
+pub struct rss_diag_context::CorrelationId(_)
+impl rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::CorrelationId::as_str(&self) -> &str
+pub fn rss_diag_context::ctx::CorrelationId::parse(&str) -> core::result::Result<Self, rss_diag_context::ctx::CorrelationIdError>
+impl core::clone::Clone for rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::CorrelationId::clone(&self) -> rss_diag_context::ctx::CorrelationId
+impl core::cmp::Eq for rss_diag_context::ctx::CorrelationId
+impl core::cmp::PartialEq for rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::CorrelationId::eq(&self, &rss_diag_context::ctx::CorrelationId) -> bool
+impl core::fmt::Debug for rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::CorrelationId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rss_diag_context::ctx::CorrelationId
+impl core::marker::Freeze for rss_diag_context::ctx::CorrelationId
+impl core::marker::Send for rss_diag_context::ctx::CorrelationId
+impl core::marker::Sync for rss_diag_context::ctx::CorrelationId
+impl core::marker::Unpin for rss_diag_context::ctx::CorrelationId
+impl core::marker::UnsafeUnpin for rss_diag_context::ctx::CorrelationId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::ctx::CorrelationId
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::ctx::CorrelationId
+pub struct rss_diag_context::DiagnosticCtx
+impl rss_diag_context::ctx::DiagnosticCtx
+pub fn rss_diag_context::ctx::DiagnosticCtx::correlation(&self) -> &rss_diag_context::ctx::CorrelationId
+pub fn rss_diag_context::ctx::DiagnosticCtx::new(rss_diag_context::ctx::CorrelationId) -> Self
+impl core::clone::Clone for rss_diag_context::ctx::DiagnosticCtx
+pub fn rss_diag_context::ctx::DiagnosticCtx::clone(&self) -> rss_diag_context::ctx::DiagnosticCtx
+impl core::cmp::Eq for rss_diag_context::ctx::DiagnosticCtx
+impl core::cmp::PartialEq for rss_diag_context::ctx::DiagnosticCtx
+pub fn rss_diag_context::ctx::DiagnosticCtx::eq(&self, &rss_diag_context::ctx::DiagnosticCtx) -> bool
+impl core::fmt::Debug for rss_diag_context::ctx::DiagnosticCtx
+pub fn rss_diag_context::ctx::DiagnosticCtx::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::Freeze for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::Send for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::Sync for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::Unpin for rss_diag_context::ctx::DiagnosticCtx
+impl core::marker::UnsafeUnpin for rss_diag_context::ctx::DiagnosticCtx
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::ctx::DiagnosticCtx
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::ctx::DiagnosticCtx
+pub const rss_diag_context::MAX_CORRELATION_ID_LEN: usize
+pub fn rss_diag_context::correlation() -> core::option::Option<rss_diag_context::ctx::CorrelationId>
+pub fn rss_diag_context::current() -> core::option::Option<rss_diag_context::ctx::DiagnosticCtx>
+pub fn rss_diag_context::scope<F>(rss_diag_context::ctx::DiagnosticCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future

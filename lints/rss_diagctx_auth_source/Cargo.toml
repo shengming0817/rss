@@ -26,7 +26,7 @@ dylint_linting = "6.0.1"
 
 [dev-dependencies]
 dylint_testing = "6.0.1"
-diagctx = { path = "../../crates/diagctx" }
+diagctx = { package = "rss-diag-context", path = "../../crates/diagctx", version = "0.1.0" }
 diport = { path = "../../crates/diport" }
 httpserve = { path = "../../crates/httpserve" }
 

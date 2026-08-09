@@ -1,21 +1,27 @@
 //! Positive Release Surface derived from Cargo facts and selected assembly artifacts.
 
-use semver::Version;
+use semver::{Op, Version, VersionReq};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use workspacefacts::{
-    ApiStability, OfficialProfile, PublicApiOwner, PublishPolicy, TargetKind, WorkspaceFacts,
+    ApiStability, DependencyKind, DependencyResolution, DependencySource, OfficialProfile,
+    PublicApiOwner, PublishPolicy, TargetKind, WorkspaceFacts,
 };
 
 use crate::assembly::{Finding, Rule};
 use crate::assembly_governance::{ArtifactLifecycle, ArtifactsJoined, AssemblyGovernanceIr};
 use crate::diagnostic::finding;
 
+const CRATES_IO_REGISTRY: &str = "crates-io";
+const CRATES_IO_GIT_INDEX: &str = "https://github.com/rust-lang/crates.io-index";
+const CRATES_IO_SPARSE_INDEX: &str = "https://index.crates.io/";
+
 /// INVARIANT: RELEASE-SURFACE-EXACT-SET-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::exact_set_and_reference_conflicts_are_aggregated_and_sorted", anti_vacuity = "tests::real_workspace_release_surface_joins_live_facts_without_snapshot_golden" } -- Cargo-publishable workspace packages and the positive package selection are an exact set; selected profile artifacts require independent activation authority and join the existing assembly artifact IR.
 #[derive(Debug)]
 pub(crate) struct ReleaseSurface {
     packages: Vec<ReleasePackage>,
     profile_artifacts: Vec<ReleaseProfileArtifact>,
+    publish_order: Vec<String>,
 }
 
 impl ReleaseSurface {
@@ -25,6 +31,11 @@ impl ReleaseSurface {
 
     pub(crate) fn profile_artifacts(&self) -> &[ReleaseProfileArtifact] {
         &self.profile_artifacts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publish_order(&self) -> &[String] {
+        &self.publish_order
     }
 
     pub(crate) fn observed_summary(&self) -> String {
@@ -81,8 +92,356 @@ impl ReleaseSurface {
                 artifact.image_target()
             );
         }
+        output.push_str("], publish order=[");
+        output.push_str(&self.publish_order.join(", "));
         output.push(']');
         output
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub(crate) struct PublishClosurePlan {
+    order: Vec<String>,
+}
+
+impl PublishClosurePlan {
+    #[cfg(test)]
+    pub(crate) fn order(&self) -> &[String] {
+        &self.order
+    }
+}
+
+/// Validate an explicitly requested candidate set and derive a stable dependency-first order.
+///
+/// The requested set is deliberately supplied by the caller: this function is closure policy,
+/// not a second package inventory. Dev dependencies never enter the registry publish closure.
+///
+/// INVARIANT: RELEASE-PUBLISH-CLOSURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::closure_planner_rejects_wildcard_outside_and_disabled_edges", anti_vacuity = "tests::real_workspace_release_surface_joins_live_facts_without_snapshot_golden" } -- selected Cargo packages and every normal/build dependency must form an exact, versioned crates.io closure with a stable dependency-first order.
+pub(crate) fn plan_publish_closure(
+    facts: &WorkspaceFacts,
+    requested: &BTreeSet<String>,
+) -> (Option<PublishClosurePlan>, Vec<Finding>) {
+    let catalog = facts.workspace_packages();
+    let packages_by_name = catalog
+        .iter()
+        .map(|package| (package.key().as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    let mut findings = Vec::new();
+    let mut dependency_to_dependents = requested
+        .iter()
+        .map(|name| (name.clone(), BTreeSet::new()))
+        .collect::<BTreeMap<_, BTreeSet<String>>>();
+    let mut indegree = requested
+        .iter()
+        .map(|name| (name.clone(), 0_usize))
+        .collect::<BTreeMap<_, _>>();
+
+    for name in requested {
+        let Some(package) = packages_by_name.get(name.as_str()).copied() else {
+            findings.push(finding(
+                Rule::ReleasePublishClosure,
+                "publish-closure/requested-package",
+                "requested publish-closure package is not a workspace member",
+            ));
+            continue;
+        };
+
+        validate_publish_metadata(package, &mut findings);
+
+        let Ok(package_key) = facts.package_key(name) else {
+            findings.push(finding(
+                Rule::ReleasePublishClosure,
+                format!("package:{name}"),
+                "requested package identity cannot be resolved",
+            ));
+            continue;
+        };
+        let Ok(dependencies) = facts.direct_dependencies_for(&package_key) else {
+            findings.push(finding(
+                Rule::ReleasePublishClosure,
+                format!("package:{name}"),
+                "direct dependency facts are unavailable",
+            ));
+            continue;
+        };
+
+        for dependency in dependencies {
+            if dependency.kind() == DependencyKind::Dev {
+                continue;
+            }
+            let dependency_subject = format!("package:{name}/dependency:{}", dependency.name());
+            if let Some(detail) =
+                dependency_version_requirement_error(dependency.version_requirement())
+            {
+                findings.push(finding(
+                    Rule::ReleasePublishClosure,
+                    dependency_subject.clone(),
+                    detail,
+                ));
+            }
+            match dependency.source() {
+                DependencySource::Workspace { .. } => {
+                    let DependencyResolution::Resolved(target_key) = dependency.resolution() else {
+                        findings.push(finding(
+                            Rule::ReleasePublishClosure,
+                            dependency_subject,
+                            "workspace path dependency does not resolve to a package identity",
+                        ));
+                        continue;
+                    };
+                    let target_name = target_key.as_str();
+                    let Some(target) = packages_by_name.get(target_name).copied() else {
+                        findings.push(finding(
+                            Rule::ReleasePublishClosure,
+                            dependency_subject,
+                            "workspace path dependency does not resolve to a workspace member",
+                        ));
+                        continue;
+                    };
+                    if let Some(detail) = workspace_dependency_version_error(
+                        dependency.version_requirement(),
+                        target.version(),
+                    ) {
+                        findings.push(finding(
+                            Rule::ReleasePublishClosure,
+                            dependency_subject.clone(),
+                            detail,
+                        ));
+                    }
+                    if !requested.contains(target_name) {
+                        findings.push(finding(
+                            Rule::ReleasePublishClosure,
+                            dependency_subject.clone(),
+                            "workspace path dependency is outside the requested publish closure",
+                        ));
+                        continue;
+                    }
+                    if !publish_policy_targets_crates_io(target.publish_policy()) {
+                        findings.push(finding(
+                            Rule::ReleasePublishClosure,
+                            dependency_subject.clone(),
+                            "workspace path dependency is not restricted to the crates.io registry",
+                        ));
+                    }
+                    if dependency_to_dependents
+                        .get_mut(target_name)
+                        .is_some_and(|dependents| dependents.insert(name.clone()))
+                    {
+                        if let Some(degree) = indegree.get_mut(name) {
+                            *degree += 1;
+                        } else {
+                            findings.push(finding(
+                                Rule::ReleasePublishClosure,
+                                dependency_subject,
+                                "requested package is missing from the closure topology",
+                            ));
+                        }
+                    }
+                }
+                DependencySource::Path { .. } => findings.push(finding(
+                    Rule::ReleasePublishClosure,
+                    dependency_subject,
+                    "non-workspace path dependency cannot enter a registry publish closure",
+                )),
+                source @ (DependencySource::Registry { .. }
+                | DependencySource::Sparse { .. }
+                | DependencySource::Git { .. }
+                | DependencySource::UnknownExternal { .. }) => {
+                    if let Some(detail) = invalid_external_source_detail(source) {
+                        findings.push(finding(
+                            Rule::ReleasePublishClosure,
+                            dependency_subject,
+                            detail,
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let order = stable_publish_order(&dependency_to_dependents, &mut indegree, &mut findings);
+    if order.len() != requested.len() {
+        findings.push(finding(
+            Rule::ReleasePublishClosure,
+            "publish-closure",
+            "workspace path dependency cycle prevents a publish order",
+        ));
+    }
+
+    findings.sort_by(|left, right| {
+        (&left.subject, left.rule, &left.detail).cmp(&(&right.subject, right.rule, &right.detail))
+    });
+    if findings.is_empty() {
+        (Some(PublishClosurePlan { order }), findings)
+    } else {
+        (None, findings)
+    }
+}
+
+fn workspace_dependency_version_error(
+    requirement: &VersionReq,
+    target: &Version,
+) -> Option<&'static str> {
+    if !requirement.matches(target) {
+        Some(
+            "workspace path dependency version requirement does not match the resolved package version",
+        )
+    } else {
+        None
+    }
+}
+
+fn dependency_version_requirement_error(requirement: &VersionReq) -> Option<&'static str> {
+    if requirement == &VersionReq::STAR
+        || requirement
+            .comparators
+            .iter()
+            .any(|comparator| comparator.op == Op::Wildcard)
+    {
+        Some("normal/build dependency must declare a non-wildcard version requirement")
+    } else {
+        None
+    }
+}
+
+fn publish_policy_targets_crates_io(policy: &PublishPolicy) -> bool {
+    matches!(
+        policy,
+        PublishPolicy::Registries(registries)
+            if registries.len() == 1 && registries.contains(CRATES_IO_REGISTRY)
+    )
+}
+
+fn invalid_external_source_detail(source: &DependencySource) -> Option<&'static str> {
+    match source {
+        DependencySource::Registry { url } if url == CRATES_IO_GIT_INDEX => None,
+        DependencySource::Sparse { url } if url == CRATES_IO_SPARSE_INDEX => None,
+        DependencySource::Registry { .. } | DependencySource::Sparse { .. } => {
+            Some("external dependency resolves from a non-crates.io registry")
+        }
+        DependencySource::Git { .. } => {
+            Some("Git dependency cannot enter a crates.io publish closure")
+        }
+        DependencySource::UnknownExternal { .. } => {
+            Some("unknown external dependency source cannot enter a crates.io publish closure")
+        }
+        DependencySource::Workspace { .. } | DependencySource::Path { .. } => None,
+    }
+}
+
+fn stable_publish_order(
+    dependency_to_dependents: &BTreeMap<String, BTreeSet<String>>,
+    indegree: &mut BTreeMap<String, usize>,
+    findings: &mut Vec<Finding>,
+) -> Vec<String> {
+    let mut ready = indegree
+        .iter()
+        .filter_map(|(name, degree)| (*degree == 0).then_some(name.clone()))
+        .collect::<BTreeSet<_>>();
+    let mut order = Vec::with_capacity(indegree.len());
+    while let Some(name) = ready.pop_first() {
+        order.push(name.clone());
+        for dependent in dependency_to_dependents.get(&name).into_iter().flatten() {
+            let Some(degree) = indegree.get_mut(dependent) else {
+                findings.push(finding(
+                    Rule::ReleasePublishClosure,
+                    "publish-closure",
+                    "dependent package is missing from the closure topology",
+                ));
+                continue;
+            };
+            *degree -= 1;
+            if *degree == 0 {
+                ready.insert(dependent.clone());
+            }
+        }
+    }
+    order
+}
+
+fn validate_publish_metadata(
+    package: &workspacefacts::WorkspacePackageFacts,
+    findings: &mut Vec<Finding>,
+) {
+    let subject = format!("package:{}", package.key().as_str());
+    if package.version() == &Version::new(0, 0, 0) {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "candidate package must use an independent non-0.0.0 version",
+        ));
+    }
+    if package.minimum_rust_version().is_none() {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "candidate package must declare a minimum Rust version",
+        ));
+    }
+    if package.publish_policy().is_publishable()
+        && !publish_policy_targets_crates_io(package.publish_policy())
+    {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "publishable candidate must be restricted to the crates.io registry",
+        ));
+    }
+    let metadata = package.publish_metadata();
+    if metadata.description().is_none_or(str::is_empty) {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "candidate package description is missing",
+        ));
+    }
+    if metadata.license().is_none() && metadata.license_file().is_none() {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "candidate package license or license-file is missing",
+        ));
+    }
+    if metadata.repository().is_none_or(str::is_empty) {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "candidate package repository is missing",
+        ));
+    }
+    if metadata.readme().is_none() {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "candidate package README is missing",
+        ));
+    }
+    if metadata.categories().is_empty() {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "candidate package categories are missing",
+        ));
+    }
+    if metadata.keywords().is_empty() {
+        findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject.clone(),
+            "candidate package keywords are missing",
+        ));
+    }
+    match metadata.features().get("default") {
+        Some(default) if default.is_empty() => {}
+        Some(_) => findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject,
+            "candidate package default feature must be explicitly empty",
+        )),
+        None => findings.push(finding(
+            Rule::ReleasePackageMetadata,
+            subject,
+            "candidate package must explicitly declare an empty default feature",
+        )),
     }
 }
 
@@ -246,6 +605,7 @@ pub(crate) fn validate(
     let mut surface = ReleaseSurface {
         packages: Vec::new(),
         profile_artifacts: Vec::new(),
+        publish_order: Vec::new(),
     };
     let selection = match facts.release_selection() {
         Ok(Some(selection)) => selection,
@@ -287,6 +647,8 @@ pub(crate) fn validate(
         .map(|package| package.package().to_owned())
         .collect::<BTreeSet<_>>();
     let mut findings = Vec::new();
+
+    findings.extend(project_publish_order(facts, &selected, &mut surface));
 
     for package in publishable.difference(&selected) {
         findings.push(finding(
@@ -461,6 +823,18 @@ pub(crate) fn validate(
     }
 }
 
+fn project_publish_order(
+    facts: &WorkspaceFacts,
+    selected: &BTreeSet<String>,
+    surface: &mut ReleaseSurface,
+) -> Vec<Finding> {
+    let (closure, findings) = plan_publish_closure(facts, selected);
+    if let Some(closure) = closure {
+        surface.publish_order = closure.order;
+    }
+    findings
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -470,8 +844,21 @@ mod tests {
     use std::path::Path;
     use workspacefacts::WorkspaceFacts;
     use workspacefacts::testing::{
-        metadata_json, path_package, path_package_id, resolve_node, target,
+        metadata_json, path_dependency, path_package, path_package_id, registry_package,
+        resolve_node, resolve_node_with_dep_kinds, target,
     };
+
+    fn make_release_ready(package: &mut Value, absolute_path: &str) {
+        package["version"] = json!("0.1.0");
+        package["id"] = json!(format!("path+file://{absolute_path}#0.1.0"));
+        package["description"] = json!("Synthetic release candidate");
+        package["license_file"] = json!(format!("{absolute_path}/LICENSE"));
+        package["repository"] = json!("https://example.invalid/repository");
+        package["readme"] = json!(format!("{absolute_path}/README.md"));
+        package["categories"] = json!(["development-tools"]);
+        package["keywords"] = json!(["synthetic"]);
+        package["features"] = json!({"default": []});
+    }
 
     fn facts_with_selection(
         selection: Value,
@@ -495,6 +882,7 @@ mod tests {
             vec![],
             json!({}),
         );
+        make_release_ready(&mut alpha, alpha_path);
         alpha["publish"] = alpha_publish;
         alpha["rust_version"] = alpha_msrv;
         let mut beta = path_package(
@@ -524,7 +912,10 @@ mod tests {
             vec![],
             json!({}),
         );
-        let alpha_id = path_package_id(alpha_path);
+        let alpha_id = alpha["id"]
+            .as_str()
+            .context("synthetic alpha id")?
+            .to_owned();
         let beta_id = path_package_id(beta_path);
         let server_id = path_package_id(server_path);
         let metadata = metadata_json(
@@ -550,8 +941,282 @@ mod tests {
         ArtifactProjection::supported("runtime", "server", "server", "Dockerfile", "runtime")
     }
 
+    fn two_package_closure_findings(
+        requirement: &str,
+        dependency_publish: Value,
+        include_dependency: bool,
+        kind: Option<&str>,
+    ) -> Result<Vec<Finding>> {
+        let dependency_path = "/workspace/crates/dependency";
+        let root_path = "/workspace/crates/root";
+        let mut dependency = path_package(
+            "dependency",
+            dependency_path,
+            vec![target(
+                "dependency",
+                "lib",
+                "/workspace/crates/dependency/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![],
+            json!({}),
+        );
+        make_release_ready(&mut dependency, dependency_path);
+        dependency["publish"] = dependency_publish;
+        let mut declaration = path_dependency("dependency", dependency_path);
+        declaration["req"] = json!(requirement);
+        declaration["kind"] = json!(kind);
+        let mut root = path_package(
+            "root",
+            root_path,
+            vec![target(
+                "root",
+                "lib",
+                "/workspace/crates/root/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![declaration],
+            json!({}),
+        );
+        make_release_ready(&mut root, root_path);
+        let dependency_id = dependency["id"]
+            .as_str()
+            .context("dependency id")?
+            .to_owned();
+        let root_id = root["id"].as_str().context("root id")?.to_owned();
+        let metadata = metadata_json(
+            "/workspace",
+            vec![root, dependency],
+            vec![root_id.clone(), dependency_id.clone()],
+            vec![
+                resolve_node_with_dep_kinds(&root_id, &[("dependency", &dependency_id, kind)], &[]),
+                resolve_node(&dependency_id, &[]),
+            ],
+        );
+        let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &metadata)?;
+        let mut requested = BTreeSet::from(["root".to_owned()]);
+        if include_dependency {
+            requested.insert("dependency".to_owned());
+        }
+        Ok(plan_publish_closure(&facts, &requested).1)
+    }
+
+    fn external_dependency_findings(requirement: &str, source: &str) -> Result<Vec<Finding>> {
+        let root_path = "/workspace/crates/root";
+        let external = registry_package(
+            "external",
+            "1.0.0",
+            "/registry/external/Cargo.toml",
+            vec![target(
+                "external",
+                "lib",
+                "/registry/external/src/lib.rs",
+                true,
+                &[],
+            )],
+        );
+        let external_id = external["id"].as_str().context("external id")?.to_owned();
+        let declaration = json!({
+            "name": "external",
+            "source": source,
+            "req": requirement,
+            "kind": null,
+            "rename": null,
+            "optional": false,
+            "uses_default_features": false,
+            "features": [],
+            "target": null,
+            "registry": null,
+            "path": null
+        });
+        let mut root = path_package(
+            "root",
+            root_path,
+            vec![target(
+                "root",
+                "lib",
+                "/workspace/crates/root/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![declaration],
+            json!({}),
+        );
+        make_release_ready(&mut root, root_path);
+        let root_id = root["id"].as_str().context("root id")?.to_owned();
+        let metadata = metadata_json(
+            "/workspace",
+            vec![root, external],
+            vec![root_id.clone()],
+            vec![
+                resolve_node(&root_id, &[("external", &external_id)]),
+                resolve_node(&external_id, &[]),
+            ],
+        );
+        let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &metadata)?;
+        Ok(plan_publish_closure(&facts, &BTreeSet::from(["root".to_owned()])).1)
+    }
+
     #[test]
-    fn synthetic_nonempty_surface_derives_cargo_facts() -> Result<()> {
+    fn closure_planner_rejects_incomplete_publish_metadata() -> Result<()> {
+        let path = "/workspace/crates/incomplete";
+        let mut package = path_package(
+            "incomplete",
+            path,
+            vec![target(
+                "incomplete",
+                "lib",
+                "/workspace/crates/incomplete/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![],
+            json!({}),
+        );
+        package["rust_version"] = Value::Null;
+        let id = path_package_id(path);
+        let metadata = metadata_json(
+            "/workspace",
+            vec![package],
+            vec![id.clone()],
+            vec![resolve_node(&id, &[])],
+        );
+        let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &metadata)?;
+        let requested = BTreeSet::from(["incomplete".to_owned()]);
+        let (plan, findings) = plan_publish_closure(&facts, &requested);
+        assert!(plan.is_none());
+        assert!(
+            findings
+                .iter()
+                .all(|finding| finding.rule == Rule::ReleasePackageMetadata)
+        );
+        assert_eq!(
+            findings
+                .iter()
+                .map(|finding| finding.detail.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "candidate package categories are missing",
+                "candidate package description is missing",
+                "candidate package keywords are missing",
+                "candidate package license or license-file is missing",
+                "candidate package must declare a minimum Rust version",
+                "candidate package must explicitly declare an empty default feature",
+                "candidate package must use an independent non-0.0.0 version",
+                "candidate package README is missing",
+                "candidate package repository is missing",
+            ])
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn closure_planner_rejects_wildcard_outside_and_disabled_edges() -> Result<()> {
+        let wildcard = two_package_closure_findings("*", json!(null), true, None)?;
+        assert!(wildcard.iter().any(|finding| {
+            finding.rule == Rule::ReleasePublishClosure && finding.detail.contains("non-wildcard")
+        }));
+
+        let outside = two_package_closure_findings("^0.1", json!(null), false, None)?;
+        assert!(outside.iter().any(|finding| {
+            finding.rule == Rule::ReleasePublishClosure
+                && finding
+                    .detail
+                    .contains("outside the requested publish closure")
+        }));
+
+        let disabled = two_package_closure_findings("^0.1", json!([]), true, None)?;
+        assert!(disabled.iter().any(|finding| {
+            finding.rule == Rule::ReleasePublishClosure
+                && finding.detail.contains("not restricted to the crates.io")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn closure_planner_rejects_wildcard_crates_io_dependency() -> Result<()> {
+        for source in [
+            format!("registry+{CRATES_IO_GIT_INDEX}"),
+            format!("sparse+{CRATES_IO_SPARSE_INDEX}"),
+        ] {
+            let findings = external_dependency_findings("*", &source)?;
+            assert!(findings.iter().any(|finding| {
+                finding.rule == Rule::ReleasePublishClosure
+                    && finding.detail.contains("non-wildcard")
+            }));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn build_dependencies_share_the_publish_closure_policy() -> Result<()> {
+        let wildcard = two_package_closure_findings("*", json!(null), true, Some("build"))?;
+        assert!(wildcard.iter().any(|finding| {
+            finding.rule == Rule::ReleasePublishClosure && finding.detail.contains("non-wildcard")
+        }));
+
+        let outside = two_package_closure_findings("^0.1", json!(null), false, Some("build"))?;
+        assert!(outside.iter().any(|finding| {
+            finding.rule == Rule::ReleasePublishClosure
+                && finding
+                    .detail
+                    .contains("outside the requested publish closure")
+        }));
+
+        // Guppy rejects a resolve graph whose selected package cannot satisfy the declared
+        // requirement before the planner can observe it. The typed policy helper therefore owns
+        // this otherwise-unconstructable RED, while the build fixture above proves build edges
+        // reach the same workspace-source branch.
+        let mismatch =
+            workspace_dependency_version_error(&"^0.2".parse()?, &Version::parse("0.1.0")?);
+        assert!(mismatch.is_some_and(|detail| detail.contains("does not match")));
+        Ok(())
+    }
+
+    #[test]
+    fn closure_policy_rejects_version_mismatch_and_non_crates_io_sources() -> Result<()> {
+        let mismatch =
+            workspace_dependency_version_error(&"^0.2".parse()?, &Version::parse("0.1.0")?);
+        assert!(mismatch.is_some_and(|detail| detail.contains("does not match")));
+        assert!(
+            invalid_external_source_detail(&DependencySource::Registry {
+                url: "https://example.invalid/index".to_owned(),
+            })
+            .is_some()
+        );
+        assert!(
+            invalid_external_source_detail(&DependencySource::Git {
+                repository: "https://example.invalid/repo".to_owned(),
+                req: workspacefacts::GitDependencyReq::Default,
+                resolved: "deadbeef".to_owned(),
+            })
+            .is_some()
+        );
+        assert!(
+            invalid_external_source_detail(&DependencySource::UnknownExternal {
+                source: "mystery".to_owned(),
+            })
+            .is_some()
+        );
+        assert!(
+            invalid_external_source_detail(&DependencySource::Registry {
+                url: CRATES_IO_GIT_INDEX.to_owned(),
+            })
+            .is_none()
+        );
+        assert!(publish_policy_targets_crates_io(
+            &PublishPolicy::Registries(BTreeSet::from([CRATES_IO_REGISTRY.to_owned()]),)
+        ));
+        assert!(!publish_policy_targets_crates_io(
+            &PublishPolicy::Unrestricted
+        ));
+        Ok(())
+    }
+
+    #[test]
+    fn publishable_candidate_must_be_restricted_to_crates_io() -> Result<()> {
         let facts = facts_with_selection(
             json!({
                 "packages": [{
@@ -567,11 +1232,123 @@ mod tests {
             json!([]),
         )?;
         let (surface, findings) = validate(&facts, &[]);
+        assert!(surface.is_none());
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::ReleasePackageMetadata
+                && finding.detail.contains("restricted to the crates.io")
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn closure_planner_is_dependency_first_and_dev_edges_do_not_expand_it() -> Result<()> {
+        let leaf_path = "/workspace/crates/leaf";
+        let dev_path = "/workspace/crates/dev-only";
+        let root_path = "/workspace/crates/root";
+        let mut leaf = path_package(
+            "leaf",
+            leaf_path,
+            vec![target(
+                "leaf",
+                "lib",
+                "/workspace/crates/leaf/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![],
+            json!({}),
+        );
+        make_release_ready(&mut leaf, leaf_path);
+        leaf["publish"] = json!(["crates-io"]);
+        let mut dev_only = path_package(
+            "dev-only",
+            dev_path,
+            vec![target(
+                "dev_only",
+                "lib",
+                "/workspace/crates/dev-only/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![],
+            json!({}),
+        );
+        make_release_ready(&mut dev_only, dev_path);
+        let mut normal = path_dependency("leaf", leaf_path);
+        normal["req"] = json!("^0.1.0");
+        normal["optional"] = json!(true);
+        normal["target"] = json!("cfg(unix)");
+        let mut dev = path_dependency("dev-only", dev_path);
+        dev["kind"] = json!("dev");
+        let mut root = path_package(
+            "root",
+            root_path,
+            vec![target(
+                "root",
+                "lib",
+                "/workspace/crates/root/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![normal, dev],
+            json!({}),
+        );
+        make_release_ready(&mut root, root_path);
+        root["features"] = json!({"default": [], "leaf": ["dep:leaf"]});
+
+        let leaf_id = leaf["id"].as_str().context("leaf id")?.to_owned();
+        let dev_id = dev_only["id"].as_str().context("dev id")?.to_owned();
+        let root_id = root["id"].as_str().context("root id")?.to_owned();
+        let mut root_node = resolve_node_with_dep_kinds(
+            &root_id,
+            &[("leaf", &leaf_id, None), ("dev_only", &dev_id, Some("dev"))],
+            &["leaf"],
+        );
+        root_node["deps"][0]["dep_kinds"][0]["target"] = json!("cfg(unix)");
+        let metadata = metadata_json(
+            "/workspace",
+            vec![root, leaf, dev_only],
+            vec![root_id.clone(), leaf_id.clone(), dev_id.clone()],
+            vec![
+                root_node,
+                resolve_node(&leaf_id, &[]),
+                resolve_node(&dev_id, &[]),
+            ],
+        );
+        let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &metadata)?;
+        let requested = BTreeSet::from(["root".to_owned(), "leaf".to_owned()]);
+        let (plan, findings) = plan_publish_closure(&facts, &requested);
+        assert!(findings.is_empty(), "unexpected findings: {findings:?}");
+        assert_eq!(
+            plan.context("valid closure")?.order(),
+            &["leaf".to_owned(), "root".to_owned()]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn synthetic_nonempty_surface_derives_cargo_facts() -> Result<()> {
+        let facts = facts_with_selection(
+            json!({
+                "packages": [{
+                    "package": "alpha",
+                    "public-api-owner": "standalone-component",
+                    "api-stability": "experimental",
+                    "profiles": []
+                }],
+                "profile-artifacts": []
+            }),
+            json!(["crates-io"]),
+            json!("1.86"),
+            json!([]),
+        )?;
+        let (surface, findings) = validate(&facts, &[]);
         assert!(findings.is_empty(), "unexpected findings: {findings:?}");
         let surface = surface.context("valid selection must mint a ReleaseSurface")?;
         assert_eq!(surface.packages().len(), 1);
         assert_eq!(surface.packages()[0].package(), "alpha");
-        assert_eq!(surface.packages()[0].version().to_string(), "0.0.0");
+        assert_eq!(surface.packages()[0].version().to_string(), "0.1.0");
+        assert_eq!(surface.publish_order(), &["alpha"]);
         assert_eq!(
             surface.packages()[0].minimum_rust_version().to_string(),
             "1.86.0"
@@ -637,6 +1414,8 @@ mod tests {
             BTreeSet::from([
                 Rule::ReleaseSurfaceExactSet,
                 Rule::ReleaseSurfacePackage,
+                Rule::ReleasePackageMetadata,
+                Rule::ReleasePublishClosure,
                 Rule::ReleaseSurfaceProfile,
             ])
         );
@@ -787,6 +1566,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::cognitive_complexity)] // reason: one anti-vacuity test joins the live selection, closure, metadata, and dependency budgets.
     fn real_workspace_release_surface_joins_live_facts_without_snapshot_golden() -> Result<()> {
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -850,6 +1630,93 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(surfaced, selected);
         assert!(surface.profile_artifacts().is_empty());
+        assert!(surface.publish_order().is_empty());
+
+        // Issue #2050 acceptance input, not a production candidate registry. Spec 011 forbids a
+        // package inventory; Cargo publish policy plus the positive Release Surface remain the
+        // only lifecycle authorities, and later candidate PBIs must supply their own exact set.
+        let candidates = BTreeSet::from([
+            "rss-diag-context".to_owned(),
+            "rss-trace-context".to_owned(),
+        ]);
+        let (candidate_plan, candidate_findings) = plan_publish_closure(facts, &candidates);
+        assert!(
+            candidate_findings.is_empty(),
+            "real candidate closure findings: {candidate_findings:?}"
+        );
+        assert_eq!(
+            candidate_plan
+                .context("candidate closure must be ready")?
+                .order(),
+            &[
+                "rss-diag-context".to_owned(),
+                "rss-trace-context".to_owned(),
+            ]
+        );
+        for name in &candidates {
+            let key = facts.package_key(name)?;
+            let package = catalog
+                .iter()
+                .find(|package| package.key() == &key)
+                .context("candidate catalog row")?;
+            assert_eq!(package.publish_policy(), &PublishPolicy::Disabled);
+            assert!(!selected.contains(name.as_str()));
+        }
+
+        let diag = facts.package_key("rss-diag-context")?;
+        let diag_dependencies = facts.direct_dependencies_for(&diag)?;
+        assert_eq!(
+            diag_dependencies
+                .iter()
+                .filter(|dependency| {
+                    dependency.kind() == DependencyKind::Normal && !dependency.optional()
+                })
+                .map(|dependency| dependency.name())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["thiserror", "tokio"])
+        );
+        let diag_tokio = diag_dependencies
+            .iter()
+            .find(|dependency| {
+                dependency.kind() == DependencyKind::Normal && dependency.name() == "tokio"
+            })
+            .context("diag Tokio dependency")?;
+        assert!(!diag_tokio.optional());
+        assert!(!diag_tokio.uses_default_features());
+        assert_eq!(
+            diag_tokio.requested_features(),
+            &BTreeSet::from(["rt".to_owned()])
+        );
+
+        let trace = facts.package_key("rss-trace-context")?;
+        let trace_dependencies = facts.direct_dependencies_for(&trace)?;
+        let production = trace_dependencies
+            .iter()
+            .filter(|dependency| {
+                dependency.kind() == DependencyKind::Normal && !dependency.optional()
+            })
+            .map(|dependency| (dependency.name(), dependency))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            production.keys().copied().collect::<BTreeSet<_>>(),
+            BTreeSet::from([
+                "opentelemetry",
+                "opentelemetry_sdk",
+                "tracing",
+                "tracing-opentelemetry",
+            ])
+        );
+        assert!(
+            production
+                .values()
+                .all(|dependency| !dependency.uses_default_features())
+        );
+        for name in ["opentelemetry", "opentelemetry_sdk"] {
+            assert_eq!(
+                production[name].requested_features(),
+                &BTreeSet::from(["trace".to_owned()])
+            );
+        }
         Ok(())
     }
 }

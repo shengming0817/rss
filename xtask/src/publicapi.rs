@@ -1769,7 +1769,7 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
     use workspacefacts::testing::{
-        metadata_json, path_dependency, path_package, path_package_id, resolve_node, target,
+        metadata_json, path_dependency, path_package, resolve_node, target,
     };
 
     const HTTP_ROUTE_EVIDENCE_PRIVATE_FIELDS: &[&str] = &[
@@ -1834,6 +1834,19 @@ mod tests {
         })
     }
 
+    fn make_release_ready_package(package: &mut Value, path: &str) {
+        package["version"] = json!("0.1.0");
+        package["id"] = json!(format!("path+file://{path}#0.1.0"));
+        package["publish"] = json!(["crates-io"]);
+        package["description"] = json!("Synthetic release package");
+        package["license_file"] = json!(format!("{path}/LICENSE"));
+        package["repository"] = json!("https://github.com/shengming0817/rss");
+        package["readme"] = json!(format!("{path}/README.md"));
+        package["categories"] = json!(["development-tools"]);
+        package["keywords"] = json!(["synthetic"]);
+        package["features"] = json!({"default": []});
+    }
+
     fn facts_with_nonempty_release_surface() -> Result<WorkspaceFacts> {
         let mut names = target_crates(None);
         names.push("alpha-release");
@@ -1856,9 +1869,12 @@ mod tests {
                 json!({}),
             );
             if name == "alpha-release" {
-                package["publish"] = Value::Null;
+                make_release_ready_package(&mut package, &path);
             }
-            let id = path_package_id(&path);
+            let id = package["id"]
+                .as_str()
+                .context("synthetic release package id")?
+                .to_owned();
             member_ids.push(id.clone());
             nodes.push(resolve_node(&id, &[]));
             packages.push(package);
@@ -1885,10 +1901,9 @@ mod tests {
     fn facts_with_selected_renamed_dependency() -> Result<WorkspaceFacts> {
         let alpha_path = "/workspace/crates/alpha-release";
         let beta_path = "/workspace/crates/beta-release";
-        let alpha_id = path_package_id(alpha_path);
-        let beta_id = path_package_id(beta_path);
         let mut dependency = path_dependency("beta-release", beta_path);
         dependency["rename"] = json!("beta_api");
+        dependency["req"] = json!("^0.1.0");
         let mut alpha = path_package(
             "alpha-release",
             alpha_path,
@@ -1902,7 +1917,7 @@ mod tests {
             vec![dependency],
             json!({}),
         );
-        alpha["publish"] = Value::Null;
+        make_release_ready_package(&mut alpha, alpha_path);
         let mut beta = path_package(
             "beta-release",
             beta_path,
@@ -1916,7 +1931,15 @@ mod tests {
             vec![],
             json!({}),
         );
-        beta["publish"] = Value::Null;
+        make_release_ready_package(&mut beta, beta_path);
+        let alpha_id = alpha["id"]
+            .as_str()
+            .context("synthetic alpha release id")?
+            .to_owned();
+        let beta_id = beta["id"]
+            .as_str()
+            .context("synthetic beta release id")?
+            .to_owned();
         let metadata = metadata_json(
             "/workspace",
             vec![alpha, beta],
@@ -2377,7 +2400,7 @@ mod tests {
         assert!(target_crates(Some(InternalLayer::Basis)).contains(&"sagaauthmint"));
         assert!(target_crates(Some(InternalLayer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(InternalLayer::Engine)).contains(&"primitives"));
-        assert!(target_crates(Some(InternalLayer::Engine)).contains(&"tracewire"));
+        assert!(target_crates(Some(InternalLayer::Engine)).contains(&"rss-trace-context"));
     }
 
     #[test]
@@ -2388,7 +2411,7 @@ mod tests {
         assert!(target_crates(None).contains(&"runtimeexec"));
         assert!(target_crates(Some(InternalLayer::Basis)).contains(&"vocab"));
         assert!(target_crates(Some(InternalLayer::Engine)).contains(&"primitives"));
-        assert!(target_crates(Some(InternalLayer::Engine)).contains(&"tracewire"));
+        assert!(target_crates(Some(InternalLayer::Engine)).contains(&"rss-trace-context"));
     }
 
     #[test]

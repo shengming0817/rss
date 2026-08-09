@@ -67,6 +67,10 @@ pub(crate) enum Rule {
     ReleaseSurfaceExactSet,
     /// Selected package/API facts must resolve and remain internally consistent.
     ReleaseSurfacePackage,
+    /// Candidate packages must carry complete Cargo publish metadata and an explicit empty default feature.
+    ReleasePackageMetadata,
+    /// Candidate normal/build workspace path dependencies must form an exact, versioned publish closure.
+    ReleasePublishClosure,
     /// Official profile selection must explicitly join the designated supported artifact.
     ReleaseSurfaceProfile,
     /// `assemblies/*/Cargo.toml` 必须有同目录 `assembly.toml`。

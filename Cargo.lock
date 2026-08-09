@@ -391,7 +391,6 @@ dependencies = [
  "base64",
  "bootstrap",
  "consistency",
- "diagctx",
  "diport",
  "dynosaur",
  "generated",
@@ -399,6 +398,7 @@ dependencies = [
  "ids",
  "observ",
  "primitives",
+ "rss-diag-context",
  "rstest",
  "runctx",
  "secure",
@@ -1862,14 +1862,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "diagctx"
-version = "0.0.0"
-dependencies = [
- "thiserror",
- "tokio",
-]
-
-[[package]]
 name = "diff"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2122,6 +2114,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "primitives",
+ "rss-trace-context",
  "secure",
  "serde",
  "serde_json",
@@ -2131,7 +2124,6 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-util",
- "tracewire",
  "tracing",
  "tracing-subscriber",
  "trybuild",
@@ -2903,7 +2895,6 @@ version = "0.0.0"
 dependencies = [
  "authn",
  "axum",
- "diagctx",
  "diport",
  "distributed",
  "futures",
@@ -2914,6 +2905,8 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rcgen",
  "reqwest",
+ "rss-diag-context",
+ "rss-trace-context",
  "rustls",
  "spiffe",
  "spiffe-rustls",
@@ -2923,7 +2916,6 @@ dependencies = [
  "tokio-rustls",
  "tokio-util",
  "tower",
- "tracewire",
  "tracing",
  "url",
  "vocab",
@@ -2941,7 +2933,6 @@ version = "0.0.0"
 dependencies = [
  "authmint",
  "axum",
- "diagctx",
  "diport",
  "futures",
  "generated",
@@ -2949,6 +2940,7 @@ dependencies = [
  "httpserve",
  "primitives",
  "requestidmint",
+ "rss-diag-context",
  "runctx",
  "serde",
  "serde_json",
@@ -3519,7 +3511,6 @@ dependencies = [
  "crypto-adapter",
  "deviceidentity",
  "deviceloop",
- "diagctx",
  "diport",
  "distributed",
  "eventexec",
@@ -3542,6 +3533,7 @@ dependencies = [
  "prost",
  "rcgen",
  "reqwest",
+ "rss-diag-context",
  "runctx",
  "runtime",
  "secure",
@@ -4549,7 +4541,6 @@ dependencies = [
  "bootstrap",
  "consistency",
  "deviceloop",
- "diagctx",
  "diport",
  "eventexec",
  "futures",
@@ -4562,6 +4553,8 @@ dependencies = [
  "observ",
  "postgres-migration-inventory",
  "primitives",
+ "rss-diag-context",
+ "rss-trace-context",
  "runctx",
  "secure",
  "serde",
@@ -4576,7 +4569,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "toml 0.8.23",
- "tracewire",
  "tracing",
  "trybuild",
  "uuid",
@@ -5248,6 +5240,27 @@ dependencies = [
  "runtime",
  "runtimeexec",
  "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "rss-diag-context"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
+name = "rss-trace-context"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "static_assertions",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
  "tracing-subscriber",
 ]
 
@@ -7135,19 +7148,6 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
-
-[[package]]
-name = "tracewire"
-version = "0.0.0"
-dependencies = [
- "opentelemetry",
- "opentelemetry_sdk",
- "static_assertions",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "tracing"

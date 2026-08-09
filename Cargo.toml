@@ -129,6 +129,7 @@ libraries = [
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.96"
+repository = "https://github.com/shengming0817/rss"
 
 # 外部依赖版本单源（single source of truth）。成员经 `dep.workspace = true` opt-in。
 # 多数 pin 已有成员引用、进 Cargo.lock；少数前瞻预留（inert，暂无成员引用）须带注释标注。

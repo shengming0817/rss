@@ -27,7 +27,7 @@ use declarations::{
 use guppy::graph::{
     BuildTargetId, BuildTargetKind, DependencyDirection, PackageGraph, PackagePublish,
 };
-use semver::Version;
+use semver::{Version, VersionReq};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Component, Path, PathBuf};
 use thiserror::Error;
@@ -72,6 +72,7 @@ pub struct WorkspacePackageFacts {
     version: Version,
     minimum_rust_version: Option<Version>,
     publish_policy: PublishPolicy,
+    publish_metadata: PackagePublishMetadata,
 }
 
 impl WorkspacePackageFacts {
@@ -102,6 +103,66 @@ impl WorkspacePackageFacts {
     #[must_use]
     pub fn publish_policy(&self) -> &PublishPolicy {
         &self.publish_policy
+    }
+
+    #[must_use]
+    pub fn publish_metadata(&self) -> &PackagePublishMetadata {
+        &self.publish_metadata
+    }
+}
+
+/// Cargo-owned package metadata required before a package can enter the positive Release Surface.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackagePublishMetadata {
+    description: Option<String>,
+    license: Option<String>,
+    license_file: Option<PathBuf>,
+    repository: Option<String>,
+    readme: Option<PathBuf>,
+    categories: BTreeSet<String>,
+    keywords: BTreeSet<String>,
+    features: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl PackagePublishMetadata {
+    #[must_use]
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    #[must_use]
+    pub fn license(&self) -> Option<&str> {
+        self.license.as_deref()
+    }
+
+    #[must_use]
+    pub fn license_file(&self) -> Option<&Path> {
+        self.license_file.as_deref()
+    }
+
+    #[must_use]
+    pub fn repository(&self) -> Option<&str> {
+        self.repository.as_deref()
+    }
+
+    #[must_use]
+    pub fn readme(&self) -> Option<&Path> {
+        self.readme.as_deref()
+    }
+
+    #[must_use]
+    pub fn categories(&self) -> &BTreeSet<String> {
+        &self.categories
+    }
+
+    #[must_use]
+    pub fn keywords(&self) -> &BTreeSet<String> {
+        &self.keywords
+    }
+
+    #[must_use]
+    pub fn features(&self) -> &BTreeMap<String, BTreeSet<String>> {
+        &self.features
     }
 }
 
@@ -199,6 +260,9 @@ pub struct DirectDependencyFacts {
     name: String,
     kind: DependencyKind,
     source: DependencySource,
+    version_requirement: VersionReq,
+    optional: bool,
+    uses_default_features: bool,
     unconditional: bool,
     requested_features: BTreeSet<String>,
 }
@@ -237,6 +301,21 @@ impl DirectDependencyFacts {
     #[must_use]
     pub fn source(&self) -> &DependencySource {
         &self.source
+    }
+
+    #[must_use]
+    pub fn version_requirement(&self) -> &VersionReq {
+        &self.version_requirement
+    }
+
+    #[must_use]
+    pub const fn optional(&self) -> bool {
+        self.optional
+    }
+
+    #[must_use]
+    pub const fn uses_default_features(&self) -> bool {
+        self.uses_default_features
     }
 
     /// 该 declaration 的 `target` 是否为 `null`（无 target 条件）。
@@ -344,6 +423,7 @@ struct PackageRecord {
     version: Version,
     minimum_rust_version: Option<Version>,
     publish_policy: PublishPolicy,
+    publish_metadata: PackagePublishMetadata,
     targets: Vec<TargetFacts>,
     direct_dependencies: Vec<DirectDependencyFacts>,
 }
@@ -460,6 +540,16 @@ impl WorkspaceFacts {
                     "workspace member `{package_id}` missing from metadata packages"
                 ))
             })?;
+            let publish_metadata = PackagePublishMetadata {
+                description: raw_package.description.clone(),
+                license: raw_package.license.clone(),
+                license_file: raw_package.license_file.as_deref().map(PathBuf::from),
+                repository: raw_package.repository.clone(),
+                readme: raw_package.readme.as_deref().map(PathBuf::from),
+                categories: raw_package.categories.clone(),
+                keywords: raw_package.keywords.clone(),
+                features: raw_package.features.clone(),
+            };
             let resolve_deps = resolve_by_package.get(package_id).copied().unwrap_or(&[]);
             let direct_dependencies = project_direct_declarations(
                 &key,
@@ -478,6 +568,7 @@ impl WorkspaceFacts {
                     version,
                     minimum_rust_version,
                     publish_policy,
+                    publish_metadata,
                     targets,
                     direct_dependencies,
                 },
@@ -532,6 +623,7 @@ impl WorkspaceFacts {
                 version: record.version.clone(),
                 minimum_rust_version: record.minimum_rust_version.clone(),
                 publish_policy: record.publish_policy.clone(),
+                publish_metadata: record.publish_metadata.clone(),
             })
             .collect()
     }

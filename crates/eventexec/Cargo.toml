@@ -41,7 +41,7 @@ base64 = { workspace = true }
 primitives = { path = "../primitives" }
 # consumer Fresh 路径还原 producer 透传的 W3C traceparent（#1224，handle_fresh build_consume_span）；
 # 只依赖此 helper、不直接 import otel（otel 收口在 tracewire/adapters-otel）。
-tracewire = { path = "../tracewire" }
+tracewire = { package = "rss-trace-context", path = "../tracewire", version = "0.1.0" }
 # relay_loop / sweeper_loop interval 计时 + RelayWorker/SweeperWorker Mutex<JoinHandle>；
 # `rt`：ConsumerWorker 在专用 OS 线程建 current-thread runtime `block_on` 驱动 !Send 消费 future +
 # shutdown 经专用线程 completion channel 收敛，不向 Tokio blocking pool 注册 join（consumer_worker.rs）。
@@ -64,7 +64,7 @@ testkit = { path = "../testkit" }
 tokio = { workspace = true, features = ["test-util"] }
 # #1224 consume trace 还原单测：复用 tracewire `test-util` 脚手架装 otel subscriber，验证 handler span
 # 与 producer 同 trace_id——不直接 import otel（otel 收口在 tracewire）。
-tracewire = { path = "../tracewire", features = ["test-util"] }
+tracewire = { package = "rss-trace-context", path = "../tracewire", version = "0.1.0", features = ["test-util"] }
 # TC5 T007.5 tracing 字段断言：捕获 error 级事件字段名/值（CapLayer subscriber）。
 tracing-subscriber = { workspace = true }
 # RECONCILE-TENANCY-REQ-01（Hard）回归：Builder::new 缺 tenancy/trigger 位置参 → 编译错（compile_fail ui）。

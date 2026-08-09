@@ -1,7 +1,7 @@
 # Verification quickstart
 
 ```bash
-./hack/cargo.sh test -p tracewire
+./hack/cargo.sh test -p rss-trace-context
 ./hack/cargo.sh test -p httpserve --lib
 ./hack/cargo.sh test -p eventexec --lib build_consume_span_
 ./hack/cargo.sh xtask public-api internal --layer engine --check
