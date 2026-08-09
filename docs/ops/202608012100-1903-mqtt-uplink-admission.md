@@ -16,9 +16,12 @@ correlation data, payload, packet id and error text are forbidden labels.
 `DeliveryClosed` is a terminal session/lifecycle error and is intentionally not relabelled as queue
 saturation. The metric is emitted only when the adapter-private bounded `DeliveryQueue` rejects a
 push at capacity and returns `DeliverySaturated`; neither branch emits an application receipt or
-PUBACK. Only `DeliverySaturated` rejects that admission attempt without tearing down a healthy
-transport candidate. `AssertionRejected` is a trust-boundary failure and still enters transport
-recovery.
+success PUBACK. Only `DeliverySaturated` rejects that admission attempt without tearing down a
+healthy transport candidate. Pre-authentication assertion/topic rejection is instead consumed by
+an adapter-private carrier and sent as an MQTT v5 negative PUBACK (`>=0x80`): this terminates broker
+redelivery without minting delivery, commit, receipt, or acceptance authority. If the transport
+fails before that negative ACK is observed outgoing, the session stops fail-closed instead of
+reconnecting into an ambiguous poison replay.
 
 The uplink path uses a strictly bounded short-lock `VecDeque` + `Notify` + closed queue with a
 single driver producer and single ingress consumer, and `RECEIVE_MAXIMUM == DELIVERY_CAPACITY` as a

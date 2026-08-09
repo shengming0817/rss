@@ -9,6 +9,9 @@ not page by itself.
 1. Record deployment identity, first-seen time and the closed `contract=ack|report` label.
 2. Confirm matching `mqtt uplink admission rejected` WARN events with `reason=queue_full`.
 3. Check MQTT readiness/reconnect state, ingress worker throughput and PostgreSQL availability.
+   If readiness transitions directly from Degraded to Stopped, confirm the closed
+   `reason=negative_puback_outcome_unknown` error marker before treating it as terminal poison
+   disposition rather than ordinary transport recovery.
 4. Do not add tenant, device, topic, correlation, packet id or payload to metric labels. Use
    access-controlled traces or broker/database tooling when instance-level diagnosis is required.
 
@@ -19,8 +22,11 @@ not page by itself.
   prior-generation pending synchronously without PUBACK before any reconnect/backoff window.
 - Restore the stalled ingress consumer or database dependency first. A saturated attempt has no
   application receipt and remains eligible for persistent-session redelivery.
-  Only `DeliverySaturated` must not tear down a healthy transport; `AssertionRejected` is a
-  trust-boundary failure and still enters recovery.
+  Only `DeliverySaturated` must not tear down a healthy transport. Assertion/topic rejection uses
+  MQTT v5 negative PUBACK and keeps the same Ready session after the ACK is observed outgoing; it
+  does not mint authenticated delivery or durable acceptance. A transport failure while that ACK
+  outcome is unknown is terminal (`Degraded → Stopped`) and must not enter automatic poison
+  reconnect.
 - After recovery, verify the counter rate returns to zero and that the same stable envelope reaches
   one durable receipt/application receipt before settlement. Broker same-envelope persistent replay
   on the same endpoint with `session_present=true` after the old session closes is the only continue
@@ -39,4 +45,14 @@ not page by itself.
 
 Escalate when saturation continues after the ingress worker and PostgreSQL are healthy, or when
 broker redelivery does not repair the same envelope. Preserve broker/session and database evidence;
-never infer durable commit or PUBACK solely from this counter.
+never infer durable commit or positive PUBACK solely from this counter. A negative PUBACK means
+terminal rejection, not application acceptance.
+Escalate the `negative_puback_outcome_unknown` marker separately: automatic reconnect is
+intentionally disabled until an operator has established broker/session state. This marker is an
+independent runbook trigger even when `queue_full` is zero. Freeze automated restarts, record the
+deployment and broker instance, and inspect the stable RSS client session plus inflight/persistent
+queue state without deleting or expiring it. Restore broker transport, then recreate the stopped
+RSS session through the deployment's normal process restart. Recovery is complete only after the
+same client reaches Ready, the marker does not recur, and a new valid QoS1 probe is delivered. If
+the marker repeats, stop restart automation and escalate with the preserved broker/session evidence;
+do not clear the persistent session, synthesize a positive PUBACK, or claim application receipt.

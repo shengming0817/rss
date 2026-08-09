@@ -24,6 +24,12 @@ The Mosquitto v5 plugin is part of that transport trust boundary. It derives the
 
 The downlink PUBACK capability is named `BrokerAccepted` to preserve FR-022: it proves broker acceptance only. #1902 does not create a device ACK or an application receipt, does not own #1903's durable ingress transaction, does not absorb #1908's broker/backpressure-plus-ingress join hazards, and does not satisfy #1910's assembly-level provider closure, readiness or drain proof.
 
+Inbound success PUBACK remains gated by the non-forgeable authenticated delivery capability. MQTT
+v5 negative PUBACK is a separate adapter-private terminal-rejection path for invalid broker
+assertions/topics: it prevents persistent poison replay but never creates `BrokerAccepted`, durable
+commit, device ACK, or application receipt authority. If its transport outcome is unknown, the
+session stops fail-closed without automatic reconnect.
+
 Closure extends existing typed registry/code generation, validation, CI-impact and evidence paths. There is no subsystem-only gate, required CI job or additional deployment platform.
 
 #1895 performs an atomic, deliberately breaking cutover. Generated event payloads can only enter the production fact path through a sealed per-contract emit wrapper and the private `ReviewedEvent` carrier; production providers do not accept ordinary `EventEntry`. Manifest subscriptions can only enter `bootstrap::Registry` through their generated typed wrapper. The former open generated-payload conversion and raw subscriber registration APIs are deleted without aliases, adapters, dual paths or feature flags. The only Service → Generated bridge owners are `eventexec` and `bootstrap`, guarded as exact directed edges.

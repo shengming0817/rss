@@ -618,7 +618,10 @@ mod redis;
 mod vault;
 
 pub use minio::{MinioCredentials, MinioTlsFixture, minio_tls_archive};
-pub use mqtt::{MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture, mosquitto_mtls};
+pub use mqtt::{
+    MqttAssertionFault, MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture, mosquitto_mtls,
+    mosquitto_mtls_with_assertion_fault,
+};
 pub use postgres::{
     ExternalPgFixture, OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec,
     PgConnParams, PgFixture, PgTlsFixture, env_or_postgres, owned_postgres, postgres_tls,

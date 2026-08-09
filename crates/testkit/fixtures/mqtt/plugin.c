@@ -1,5 +1,6 @@
 #include <errno.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -29,6 +30,7 @@ static const unsigned char SIGNING_DOMAIN[] = "rss.mqtt.authn.v1";
 struct plugin_state {
     mosquitto_plugin_id_t *identifier;
     EVP_PKEY *signing_key;
+    atomic_bool corrupt_first_signature;
 };
 
 struct device_principal {
@@ -394,7 +396,7 @@ static int on_message(int event, void *event_data, void *userdata)
         return MOSQ_ERR_INVAL;
     }
     struct mosquitto_evt_message *message = event_data;
-    const struct plugin_state *state = userdata;
+    struct plugin_state *state = userdata;
     if (message->client == NULL || message->topic == NULL ||
         has_reserved_property(message->properties)) {
         return reject_message(message);
@@ -402,6 +404,12 @@ static int on_message(int event, void *event_data, void *userdata)
 
     if (strstr(message->topic, "/uplink/") == NULL) {
         return MOSQ_ERR_SUCCESS;
+    }
+
+    /* RSS subscribes at QoS 1 and owns only PUBACK settlement. Reject QoS 0 at the broker so it
+     * cannot consume the one-shot assertion fault or enter an unacknowledgeable RSS path. */
+    if (message->qos != 1) {
+        return reject_message(message);
     }
 
     struct device_principal principal = {0};
@@ -427,6 +435,10 @@ static int on_message(int event, void *event_data, void *userdata)
     free(correlation);
     if (sign_result != MOSQ_ERR_SUCCESS) {
         return sign_result;
+    }
+    if (atomic_exchange_explicit(
+            &state->corrupt_first_signature, false, memory_order_relaxed)) {
+        signature[0] = signature[0] == 'A' ? 'B' : 'A';
     }
 
     if (mosquitto_property_add_string_pair(
@@ -463,12 +475,30 @@ int mosquitto_plugin_init(
     struct mosquitto_opt *options,
     int option_count)
 {
-    if (identifier == NULL || userdata == NULL || options == NULL || option_count != 1 ||
-        options[0].key == NULL || options[0].value == NULL ||
-        strcmp(options[0].key, "signing_key") != 0) {
+    if (identifier == NULL || userdata == NULL || options == NULL ||
+        (option_count != 1 && option_count != 2)) {
         return MOSQ_ERR_INVAL;
     }
-    FILE *key_file = fopen(options[0].value, "r");
+    const char *signing_key_path = NULL;
+    bool corrupt_first_signature = false;
+    for (int index = 0; index < option_count; ++index) {
+        if (options[index].key == NULL || options[index].value == NULL) {
+            return MOSQ_ERR_INVAL;
+        }
+        if (strcmp(options[index].key, "signing_key") == 0 && signing_key_path == NULL) {
+            signing_key_path = options[index].value;
+        } else if (strcmp(options[index].key, "assertion_fault") == 0 &&
+                   strcmp(options[index].value, "corrupt_first_signature") == 0 &&
+                   !corrupt_first_signature) {
+            corrupt_first_signature = true;
+        } else {
+            return MOSQ_ERR_INVAL;
+        }
+    }
+    if (signing_key_path == NULL) {
+        return MOSQ_ERR_INVAL;
+    }
+    FILE *key_file = fopen(signing_key_path, "r");
     if (key_file == NULL) {
         return MOSQ_ERR_INVAL;
     }
@@ -486,6 +516,7 @@ int mosquitto_plugin_init(
     }
     state->identifier = identifier;
     state->signing_key = signing_key;
+    atomic_init(&state->corrupt_first_signature, corrupt_first_signature);
     const int acl_result = mosquitto_callback_register(
         identifier, MOSQ_EVT_ACL_CHECK, on_acl_check, NULL, state);
     if (acl_result != MOSQ_ERR_SUCCESS) {

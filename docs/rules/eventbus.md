@@ -46,8 +46,10 @@
   correlation data、SHA-256 payload digest、QoS 与 retain，签入 v1 assertion。RSS 只持 public verification
   key；payload、topic 或普通 user property 都不能构造、覆盖或降级 authenticated principal。
 - 入站固定 manual ACK。只有 assertion 验签、当前 scope/generation 匹配并进入有界 delivery queue 后才产生
-  不可复制的 `AuthenticatedDeviceDelivery`，且只有消费该 delivery 的一次性 capability 才能发 PUBACK。
-  验签失败、scope 漂移、stale generation、队列饱和或 session degraded 均不得提前 PUBACK。
+  不可复制的 `AuthenticatedDeviceDelivery`，且只有消费该 delivery 的一次性 capability 才能发 success
+  PUBACK。验签失败、scope 漂移、stale generation 或 topic 拒绝由 move-only adapter-private rejection
+  carrier 终结为 MQTT v5 `>=0x80` negative PUBACK；它只表示 broker delivery 被拒收，不表示 authenticated
+  delivery、durable commit、receipt 或 `BrokerAccepted`。队列饱和与 session degraded 仍不得提前 PUBACK。
 - adapter-private `DeliveryQueue` 是严格有界 short-lock `VecDeque` + `Notify` + closed：driver 单
   producer、ingress 单 consumer；`RECEIVE_MAXIMUM == DELIVERY_CAPACITY` 以 compile-time hard const
   锁定。invalidation 唯一 funnel：在 settlement 共享 short barrier 下做 checked atomic epoch bump，
@@ -58,8 +60,9 @@
   terminal settlement（durable post-commit 或 bounded unaddressable poison terminal）的
   `StaleTransportEpoch` 不关闭已恢复的新 session 并等待 broker 对同一 envelope 的
   persistent-session replay；`AckUnavailable`、receipt mismatch、commit failure 一律 fail-closed /
-  shutdown。只有 `DeliverySaturated` 不撕裂健康 transport；`AssertionRejected` 是 trust-boundary
-  failure，仍进入 recovery。本边界不扩 TLS / ACL / cert / sequence / redaction 证据面，也不新增
+  shutdown。negative PUBACK 排队期间 driver 暂停 command/reload 并优先 flush；观察到对应 outgoing ACK 后
+  保持同一 Ready epoch，若 flush 期间 transport outcome unknown 则 `Degraded → Stopped` 且禁止 poison
+  reconnect。`DeliverySaturated` 仍不撕裂健康 transport。本边界不扩 TLS / ACL / cert / sequence / redaction 证据面，也不新增
   metric label / dashboard / alert。
 - 下行 `send_command` 返回的 `BrokerAccepted` 只证明 broker PUBACK，即 **BrokerAccepted**；它不是设备 ACK、
   durable RSS ingress 或 application receipt。durable commit 后的 application receipt 由 #1903 ingress

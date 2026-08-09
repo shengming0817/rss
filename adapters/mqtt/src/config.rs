@@ -17,6 +17,61 @@ const MAX_CLIENT_ID_BYTES: usize = 64;
 const MAX_DNS_HOST_BYTES: usize = 253;
 const MAX_TLS_MATERIAL_BYTES: usize = 256 * 1024;
 
+/// Test-only synchronization point that lets broker T2 stop the transport after a negative
+/// PUBACK is queued and before the event loop attempts to write it.
+#[cfg(feature = "test-support")]
+#[derive(Clone, Default)]
+pub struct NegativeAckPollBarrier {
+    inner: Arc<NegativeAckPollBarrierInner>,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Default)]
+struct NegativeAckPollBarrierInner {
+    reached: std::sync::atomic::AtomicBool,
+    released: std::sync::atomic::AtomicBool,
+    reached_notify: tokio::sync::Notify,
+    release_notify: tokio::sync::Notify,
+}
+
+#[cfg(feature = "test-support")]
+impl NegativeAckPollBarrier {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub async fn wait_until_reached(&self) {
+        while !self
+            .inner
+            .reached
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.inner.reached_notify.notified().await;
+        }
+    }
+
+    pub fn release(&self) {
+        self.inner
+            .released
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.release_notify.notify_waiters();
+    }
+
+    pub(crate) async fn wait_before_poll(&self) {
+        self.inner
+            .reached
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.inner.reached_notify.notify_waiters();
+        while !self
+            .inner
+            .released
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            self.inner.release_notify.notified().await;
+        }
+    }
+}
+
 /// Parsed TLS-only broker authority.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MqttsEndpoint {
@@ -147,6 +202,8 @@ pub struct MqttSessionConfig {
     policy: MqttTopicPolicy,
     session_expiry: SessionExpiry,
     credential_revision: CredentialRevision,
+    #[cfg(feature = "test-support")]
+    negative_ack_poll_barrier: Option<NegativeAckPollBarrier>,
 }
 
 impl std::fmt::Debug for MqttSessionConfig {
@@ -184,7 +241,15 @@ impl MqttSessionConfig {
             policy,
             session_expiry,
             credential_revision,
+            #[cfg(feature = "test-support")]
+            negative_ack_poll_barrier: None,
         })
+    }
+
+    #[cfg(feature = "test-support")]
+    pub fn with_negative_ack_poll_barrier(mut self, barrier: NegativeAckPollBarrier) -> Self {
+        self.negative_ack_poll_barrier = Some(barrier);
+        self
     }
 
     pub fn endpoint(&self) -> &MqttsEndpoint {
@@ -216,6 +281,8 @@ impl MqttSessionConfig {
             policy: self.policy,
             session_expiry: self.session_expiry,
             credential_revision: self.credential_revision,
+            #[cfg(feature = "test-support")]
+            negative_ack_poll_barrier: self.negative_ack_poll_barrier,
         }
     }
 }
@@ -228,6 +295,8 @@ pub(crate) struct PreparedSessionConfig {
     pub(crate) policy: MqttTopicPolicy,
     pub(crate) session_expiry: SessionExpiry,
     pub(crate) credential_revision: CredentialRevision,
+    #[cfg(feature = "test-support")]
+    pub(crate) negative_ack_poll_barrier: Option<NegativeAckPollBarrier>,
 }
 
 fn validate_client_id(client_id: &str) -> Result<(), MqttConfigError> {

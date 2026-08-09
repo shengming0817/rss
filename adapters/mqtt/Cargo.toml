@@ -33,7 +33,7 @@ metrics = { workspace = true }
 
 [features]
 # Production MQTT is always compiled. This feature gates only the Docker-backed broker tests.
-broker-tests = ["testkit/containers"]
+broker-tests = ["test-support", "testkit/containers"]
 # Test-only uplink saturation probe. Must stay [dev-dependencies]-only (LAYER-DEPS-09).
 test-support = []
 

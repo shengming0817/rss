@@ -124,11 +124,12 @@ mod containers;
 #[cfg(feature = "containers")]
 pub use containers::{
     BridgeNetwork, ContainerService, ExternalPgFixture, FixtureError, MinioCredentials,
-    MinioTlsFixture, MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture, NetworkAttachment,
-    OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec, PgConnParams, PgFixture,
-    PgTlsFixture, RabbitFixture, RabbitTlsFixture, RedisFixture, RedisTlsFixture, VaultTlsFixture,
-    bridge_network, env_or_postgres, env_or_rabbitmq, env_or_redis, integration_container_labels,
-    minio_tls_archive, mosquitto_mtls, owned_postgres, postgres_tls, rabbitmq_tls, redis_tls,
+    MinioTlsFixture, MqttAssertionFault, MqttCredential, MqttFixtureTlsPem, MqttMtlsFixture,
+    NetworkAttachment, OwnedPgFixture, OwnedPostgresRequired, PgAppRole, PgAppRoleSpec,
+    PgConnParams, PgFixture, PgTlsFixture, RabbitFixture, RabbitTlsFixture, RedisFixture,
+    RedisTlsFixture, VaultTlsFixture, bridge_network, env_or_postgres, env_or_rabbitmq,
+    env_or_redis, integration_container_labels, minio_tls_archive, mosquitto_mtls,
+    mosquitto_mtls_with_assertion_fault, owned_postgres, postgres_tls, rabbitmq_tls, redis_tls,
     vault_tls,
 };
 

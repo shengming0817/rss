@@ -13,6 +13,8 @@ mod topic;
 pub use assertion::{
     BrokerAssertionError, BrokerAssertionVerifier, BrokerPublishFrame, VerifiedBrokerAssertion,
 };
+#[cfg(feature = "test-support")]
+pub use config::NegativeAckPollBarrier;
 pub use config::{
     CredentialRevision, MqttConfigError, MqttSessionConfig, MqttTlsMaterial, MqttsEndpoint,
     SessionExpiry,

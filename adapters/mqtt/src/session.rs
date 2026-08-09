@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex as StdMutex, MutexGuard as StdMutexGuard};
@@ -8,10 +8,10 @@ use diport::{BrokerAcceptanceMint, BrokerAccepted, ManagedResource, MessageId, S
 use identity::ports::device_certificate::{DeviceIngressContract, DeviceIngressDelivery};
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{
-    ConnectReturnCode, Filter, Packet, PubAckReason, Publish, PublishProperties,
+    ConnectReturnCode, Filter, Packet, PubAck, PubAckReason, Publish, PublishProperties,
     SubscribeReasonCode,
 };
-use rumqttc::v5::{AsyncClient, Event, EventLoop, MqttOptions};
+use rumqttc::v5::{AsyncClient, Event, EventLoop, MqttOptions, Request};
 use rumqttc::{Outgoing, TlsConfiguration, Transport};
 use tokio::sync::{Mutex, Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
@@ -37,6 +37,161 @@ const ACK_TIMEOUT: Duration = Duration::from_secs(10);
 const DISCONNECT_DRAIN_TIMEOUT: Duration = Duration::from_secs(2);
 const RECONNECT_MIN: Duration = Duration::from_millis(250);
 const RECONNECT_MAX: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BrokerRejectReason {
+    NotAuthorized,
+    TopicNameInvalid,
+}
+
+impl BrokerRejectReason {
+    const fn puback_reason(self) -> PubAckReason {
+        match self {
+            Self::NotAuthorized => PubAckReason::NotAuthorized,
+            Self::TopicNameInvalid => PubAckReason::TopicNameInvalid,
+        }
+    }
+}
+
+/// Adapter-private, move-only proof that a broker publish was rejected before authentication.
+struct RejectedBrokerPublish {
+    publish: Publish,
+    reason: BrokerRejectReason,
+}
+
+impl RejectedBrokerPublish {
+    fn new(publish: Publish, reason: BrokerRejectReason, label: &'static str) -> Self {
+        tracing::warn!(target: "mqtt", reason = label, "mqtt uplink rejected");
+        Self { publish, reason }
+    }
+
+    fn into_negative_puback(self) -> Result<(u16, Request), MqttSessionError> {
+        if self.publish.qos != QoS::AtLeastOnce || self.publish.pkid == 0 {
+            tracing::error!(
+                target: "mqtt",
+                reason = "negative_puback_protocol_state",
+                "mqtt rejected publish cannot be terminally acknowledged"
+            );
+            return Err(MqttSessionError::DriverFailed);
+        }
+        let packet_id = self.publish.pkid;
+        Ok((
+            packet_id,
+            Request::PubAck(PubAck {
+                pkid: packet_id,
+                reason: self.reason.puback_reason(),
+                properties: None,
+            }),
+        ))
+    }
+}
+
+struct PendingNegativeAcks {
+    packet_ids: HashSet<u16>,
+}
+
+struct DriverState {
+    unassigned: VecDeque<oneshot::Sender<Result<(), MqttSessionError>>>,
+    downlink_acks: HashMap<u16, oneshot::Sender<Result<(), MqttSessionError>>>,
+    negative_acks: PendingNegativeAcks,
+}
+
+impl DriverState {
+    fn new(negative_acks: PendingNegativeAcks) -> Self {
+        Self {
+            unassigned: VecDeque::new(),
+            downlink_acks: HashMap::new(),
+            negative_acks,
+        }
+    }
+
+    fn fail_downlinks(&mut self) {
+        fail_pending(&mut self.unassigned, &mut self.downlink_acks);
+    }
+}
+
+struct DriverContext<'a> {
+    deliveries: &'a DeliveryQueue,
+    readiness: &'a watch::Sender<MqttReadiness>,
+    cancel: &'a CancellationToken,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DriverEventDisposition {
+    Continue,
+    RecoverTransport,
+    StopNegativeAckUnknown,
+}
+
+enum ConnectionAttempt {
+    Connected { session_present: bool },
+    Recoverable(MqttSessionError),
+    NegativeAckOutcomeUnknown,
+}
+
+fn classify_connection_attempt(
+    result: Result<bool, MqttSessionError>,
+    negative_acks: &PendingNegativeAcks,
+) -> ConnectionAttempt {
+    match result {
+        Ok(session_present) => ConnectionAttempt::Connected { session_present },
+        Err(_) if !negative_acks.is_empty() => ConnectionAttempt::NegativeAckOutcomeUnknown,
+        Err(error) => ConnectionAttempt::Recoverable(error),
+    }
+}
+
+const fn driver_event_disposition(
+    event_failed: bool,
+    negative_ack_pending: bool,
+) -> DriverEventDisposition {
+    match (event_failed, negative_ack_pending) {
+        (false, _) => DriverEventDisposition::Continue,
+        (true, false) => DriverEventDisposition::RecoverTransport,
+        (true, true) => DriverEventDisposition::StopNegativeAckUnknown,
+    }
+}
+
+impl PendingNegativeAcks {
+    fn new() -> Self {
+        Self {
+            packet_ids: HashSet::with_capacity(usize::from(RECEIVE_MAXIMUM)),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.packet_ids.is_empty()
+    }
+
+    fn insert(&mut self, packet_id: u16) -> Result<(), MqttSessionError> {
+        if packet_id == 0
+            || self.packet_ids.len() >= usize::from(RECEIVE_MAXIMUM)
+            || !self.packet_ids.insert(packet_id)
+        {
+            tracing::error!(
+                target: "mqtt",
+                reason = "negative_puback_tracker",
+                "mqtt negative puback tracker rejected state"
+            );
+            return Err(MqttSessionError::DriverFailed);
+        }
+        Ok(())
+    }
+
+    fn observe(&mut self, packet_id: u16) -> bool {
+        self.packet_ids.remove(&packet_id)
+    }
+
+    fn enqueue(
+        &mut self,
+        eventloop: &mut EventLoop,
+        rejected: RejectedBrokerPublish,
+    ) -> Result<(), MqttSessionError> {
+        let (packet_id, request) = rejected.into_negative_puback()?;
+        self.insert(packet_id)?;
+        eventloop.pending.push_front(request);
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MqttReadiness {
@@ -665,6 +820,8 @@ struct DriverRuntime {
     session_expiry: crate::SessionExpiry,
     credential_revision: CredentialRevision,
     epoch_fence: Arc<TransportEpochFence>,
+    #[cfg(feature = "test-support")]
+    negative_ack_poll_barrier: Option<crate::NegativeAckPollBarrier>,
 }
 
 impl DriverRuntime {
@@ -678,6 +835,8 @@ impl DriverRuntime {
             session_expiry: config.session_expiry,
             credential_revision: config.credential_revision,
             epoch_fence,
+            #[cfg(feature = "test-support")]
+            negative_ack_poll_barrier: config.negative_ack_poll_barrier,
         }
     }
 }
@@ -694,9 +853,33 @@ async fn run_driver(
     let _close_guard = DeliveryQueueCloseGuard(Arc::clone(&deliveries));
     let mut runtime = DriverRuntime::from_prepared(prepared, epoch_fence);
     let (mut client, mut eventloop) = new_connection(&runtime);
-    let initial_result = match runtime.epoch_fence.begin_and_clear(&deliveries) {
-        Ok(_) => connect_once(&client, &mut eventloop, &runtime, &deliveries).await,
-        Err(error) => Err(error),
+    let mut negative_acks = PendingNegativeAcks::new();
+    let initial_attempt = match runtime.epoch_fence.begin_and_clear(&deliveries) {
+        Ok(_) => {
+            connect_once(
+                &client,
+                &mut eventloop,
+                &runtime,
+                &deliveries,
+                &mut negative_acks,
+            )
+            .await
+        }
+        Err(error) => ConnectionAttempt::Recoverable(error),
+    };
+    let initial_result = match initial_attempt {
+        ConnectionAttempt::Connected { session_present } => Ok(session_present),
+        ConnectionAttempt::Recoverable(error) => Err(error),
+        ConnectionAttempt::NegativeAckOutcomeUnknown => {
+            stop_negative_ack_unknown(
+                &runtime.epoch_fence,
+                runtime.credential_revision,
+                &deliveries,
+                &readiness,
+            );
+            let _ = initial.send(Err(MqttSessionError::DriverFailed));
+            return;
+        }
     };
     if !announce_initial_connection(initial_result, &runtime, &readiness, initial) {
         return;
@@ -706,9 +889,12 @@ async fn run_driver(
         &mut client,
         &mut eventloop,
         commands,
-        &deliveries,
-        &readiness,
-        &cancel,
+        DriverContext {
+            deliveries: &deliveries,
+            readiness: &readiness,
+            cancel: &cancel,
+        },
+        DriverState::new(negative_acks),
     )
     .await;
 }
@@ -785,37 +971,40 @@ async fn drive_session_loop(
     client: &mut AsyncClient,
     eventloop: &mut EventLoop,
     mut commands: mpsc::Receiver<DriverCommand>,
-    deliveries: &DeliveryQueue,
-    readiness: &watch::Sender<MqttReadiness>,
-    cancel: &CancellationToken,
+    context: DriverContext<'_>,
+    mut state: DriverState,
 ) {
-    let mut unassigned = VecDeque::new();
-    let mut pending = HashMap::new();
     loop {
+        if !state.negative_acks.is_empty() {
+            if !drive_pending_negative_ack(client, eventloop, runtime, &context, &mut state).await {
+                return;
+            }
+            continue;
+        }
         tokio::select! {
             biased;
-            () = cancel.cancelled() => {
-                fail_pending(&mut unassigned, &mut pending);
+            () = context.cancel.cancelled() => {
+                state.fail_downlinks();
                 graceful_disconnect(client, eventloop).await;
-                let _ = readiness.send(MqttReadiness::Stopped);
+                let _ = context.readiness.send(MqttReadiness::Stopped);
                 return;
             }
             command = commands.recv() => {
                 let Some(command) = command else {
                     graceful_disconnect(client, eventloop).await;
-                    let _ = readiness.send(MqttReadiness::Stopped);
+                    let _ = context.readiness.send(MqttReadiness::Stopped);
                     return;
                 };
-                handle_driver_command(
+                if !handle_driver_command(
                     command,
                     client,
                     eventloop,
                     runtime,
-                    deliveries,
-                    readiness,
-                    &mut unassigned,
-                    &mut pending,
-                ).await;
+                    &context,
+                    &mut state,
+                ).await {
+                    return;
+                }
             }
             polled = eventloop.poll() => {
                 if handle_polled_event(
@@ -823,11 +1012,8 @@ async fn drive_session_loop(
                     client,
                     eventloop,
                     runtime,
-                    deliveries,
-                    readiness,
-                    cancel,
-                    &mut unassigned,
-                    &mut pending,
+                    &context,
+                    &mut state,
                 ).await.is_err() {
                     return;
                 }
@@ -836,71 +1022,142 @@ async fn drive_session_loop(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+async fn drive_pending_negative_ack(
+    client: &mut AsyncClient,
+    eventloop: &mut EventLoop,
+    runtime: &DriverRuntime,
+    context: &DriverContext<'_>,
+    state: &mut DriverState,
+) -> bool {
+    #[cfg(feature = "test-support")]
+    if let Some(barrier) = &runtime.negative_ack_poll_barrier {
+        barrier.wait_before_poll().await;
+    }
+    tokio::select! {
+        biased;
+        () = context.cancel.cancelled() => {
+            state.fail_downlinks();
+            graceful_disconnect(client, eventloop).await;
+            let _ = context.readiness.send(MqttReadiness::Stopped);
+            false
+        }
+        polled = eventloop.poll() => {
+            handle_polled_event(polled, client, eventloop, runtime, context, state)
+                .await
+                .is_ok()
+        }
+    }
+}
+
 async fn handle_polled_event(
     polled: Result<Event, rumqttc::v5::ConnectionError>,
     client: &mut AsyncClient,
     eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
-    deliveries: &DeliveryQueue,
-    readiness: &watch::Sender<MqttReadiness>,
-    cancel: &CancellationToken,
-    unassigned: &mut VecDeque<oneshot::Sender<Result<(), MqttSessionError>>>,
-    pending: &mut HashMap<u16, oneshot::Sender<Result<(), MqttSessionError>>>,
+    context: &DriverContext<'_>,
+    state: &mut DriverState,
 ) -> Result<(), ()> {
     let needs_recover = match polled {
-        Ok(event) => handle_event(event, client, runtime, deliveries, unassigned, pending)
+        Ok(event) => handle_event(event, client, eventloop, runtime, context.deliveries, state)
             .await
             .is_err(),
         Err(_) => true,
     };
-    if !needs_recover {
-        return Ok(());
+    match driver_event_disposition(needs_recover, !state.negative_acks.is_empty()) {
+        DriverEventDisposition::Continue => return Ok(()),
+        DriverEventDisposition::StopNegativeAckUnknown => {
+            state.fail_downlinks();
+            stop_negative_ack_unknown(
+                &runtime.epoch_fence,
+                runtime.credential_revision,
+                context.deliveries,
+                context.readiness,
+            );
+            return Err(());
+        }
+        DriverEventDisposition::RecoverTransport => {}
     }
     // Invalidate: bump epoch + sync clear before any async disconnect or reconnect backoff.
-    if runtime.epoch_fence.begin_and_clear(deliveries).is_err() {
-        let _ = readiness.send(MqttReadiness::Stopped);
-        return Err(());
-    }
-    set_degraded(readiness, runtime.credential_revision);
-    fail_pending(unassigned, pending);
-    let _ = client.disconnect().await;
-    if reconnect(client, eventloop, runtime, deliveries, readiness, cancel)
-        .await
+    if runtime
+        .epoch_fence
+        .begin_and_clear(context.deliveries)
         .is_err()
     {
-        let _ = readiness.send(MqttReadiness::Stopped);
+        let _ = context.readiness.send(MqttReadiness::Stopped);
+        return Err(());
+    }
+    set_degraded(context.readiness, runtime.credential_revision);
+    state.fail_downlinks();
+    let _ = client.disconnect().await;
+    if reconnect(
+        client,
+        eventloop,
+        runtime,
+        context.deliveries,
+        context.readiness,
+        context.cancel,
+        &mut state.negative_acks,
+    )
+    .await
+    .is_err()
+    {
+        if state.negative_acks.is_empty() {
+            let _ = context.readiness.send(MqttReadiness::Stopped);
+        } else {
+            stop_negative_ack_unknown(
+                &runtime.epoch_fence,
+                runtime.credential_revision,
+                context.deliveries,
+                context.readiness,
+            );
+        }
         return Err(());
     }
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn handle_driver_command(
     command: DriverCommand,
     client: &mut AsyncClient,
     eventloop: &mut EventLoop,
     runtime: &mut DriverRuntime,
-    deliveries: &DeliveryQueue,
-    readiness: &watch::Sender<MqttReadiness>,
-    unassigned: &mut VecDeque<oneshot::Sender<Result<(), MqttSessionError>>>,
-    pending: &mut HashMap<u16, oneshot::Sender<Result<(), MqttSessionError>>>,
-) {
+    context: &DriverContext<'_>,
+    state: &mut DriverState,
+) -> bool {
     match command {
         DriverCommand::Publish(publish) => {
-            enqueue_publish(client, &runtime.policy, publish, unassigned).await;
+            enqueue_publish(client, &runtime.policy, publish, &mut state.unassigned).await;
+            true
         }
         DriverCommand::Reload {
             tls,
             revision,
             response,
         } => {
-            fail_pending(unassigned, pending);
+            state.fail_downlinks();
             let result = reload(
-                client, eventloop, runtime, tls, revision, deliveries, readiness,
+                client,
+                eventloop,
+                runtime,
+                tls,
+                revision,
+                context,
+                &mut state.negative_acks,
             )
             .await;
             let _ = response.send(result);
+            if state.negative_acks.is_empty() {
+                true
+            } else {
+                state.fail_downlinks();
+                stop_negative_ack_unknown(
+                    &runtime.epoch_fence,
+                    runtime.credential_revision,
+                    context.deliveries,
+                    context.readiness,
+                );
+                false
+            }
         }
     }
 }
@@ -929,16 +1186,19 @@ async fn connect_once(
     eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
     deliveries: &DeliveryQueue,
-) -> Result<bool, MqttSessionError> {
-    tokio::time::timeout(
+    negative_acks: &mut PendingNegativeAcks,
+) -> ConnectionAttempt {
+    let result = tokio::time::timeout(
         CONNECT_TIMEOUT,
-        connect_and_restore(client, eventloop, runtime, deliveries),
+        connect_and_restore(client, eventloop, runtime, deliveries, negative_acks),
     )
     .await
     .map_err(|_| {
         tracing::warn!(target: "mqtt", reason = "connect_timeout", "mqtt connect timed out");
         MqttSessionError::BrokerTimeout
-    })?
+    })
+    .and_then(|result| result);
+    classify_connection_attempt(result, negative_acks)
 }
 
 async fn connect_and_restore(
@@ -946,12 +1206,13 @@ async fn connect_and_restore(
     eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
     deliveries: &DeliveryQueue,
+    negative_acks: &mut PendingNegativeAcks,
 ) -> Result<bool, MqttSessionError> {
     let session_present = wait_connack_session_present(eventloop).await?;
     if session_present_skips_subscribe(session_present) {
         return Ok(true);
     }
-    restore_uplink_subscriptions(client, eventloop, runtime, deliveries).await?;
+    restore_uplink_subscriptions(client, eventloop, runtime, deliveries, negative_acks).await?;
     Ok(false)
 }
 
@@ -978,6 +1239,7 @@ async fn restore_uplink_subscriptions(
     eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
     deliveries: &DeliveryQueue,
+    negative_acks: &mut PendingNegativeAcks,
 ) -> Result<(), MqttSessionError> {
     let filters: Vec<_> = runtime
         .policy
@@ -990,20 +1252,38 @@ async fn restore_uplink_subscriptions(
         tracing::warn!(target: "mqtt", reason = "subscribe_enqueue", "mqtt subscribe failed");
         MqttSessionError::BrokerRejected
     })?;
+    let mut subscriptions_granted = false;
     loop {
         match eventloop.poll().await.map_err(|_| {
             tracing::warn!(target: "mqtt", reason = "subscribe_transport", "mqtt subscribe failed");
             MqttSessionError::BrokerRejected
         })? {
             Event::Incoming(Packet::SubAck(ack)) => {
-                if suback_grants_exact_uplinks(&ack.return_codes, expected) {
+                if !suback_grants_exact_uplinks(&ack.return_codes, expected) {
+                    tracing::warn!(target: "mqtt", reason = "suback_rejected", "mqtt subscribe rejected");
+                    return Err(MqttSessionError::BrokerRejected);
+                }
+                subscriptions_granted = true;
+                if negative_acks.is_empty() {
                     return Ok(());
                 }
-                tracing::warn!(target: "mqtt", reason = "suback_rejected", "mqtt subscribe rejected");
-                return Err(MqttSessionError::BrokerRejected);
             }
             Event::Incoming(Packet::Publish(publish)) => {
-                admit_uplink_or_keep_transport(client, runtime, deliveries, publish).await?;
+                admit_uplink_or_keep_transport(
+                    client,
+                    eventloop,
+                    runtime,
+                    deliveries,
+                    negative_acks,
+                    publish,
+                )
+                .await?;
+            }
+            Event::Outgoing(Outgoing::PubAck(packet_id)) => {
+                let _ = negative_acks.observe(packet_id);
+                if subscriptions_granted && negative_acks.is_empty() {
+                    return Ok(());
+                }
             }
             _ => {}
         }
@@ -1054,22 +1334,27 @@ async fn enqueue_publish(
 async fn handle_event(
     event: Event,
     client: &AsyncClient,
+    eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
     deliveries: &DeliveryQueue,
-    unassigned: &mut VecDeque<oneshot::Sender<Result<(), MqttSessionError>>>,
-    pending: &mut HashMap<u16, oneshot::Sender<Result<(), MqttSessionError>>>,
+    state: &mut DriverState,
 ) -> Result<(), MqttSessionError> {
     match event {
+        Event::Outgoing(Outgoing::PubAck(packet_id)) => {
+            let _ = state.negative_acks.observe(packet_id);
+        }
         Event::Outgoing(Outgoing::Publish(packet_id)) => {
-            let response = unassigned
+            let response = state
+                .unassigned
                 .pop_front()
                 .ok_or(MqttSessionError::DriverFailed)?;
-            if pending.insert(packet_id, response).is_some() {
+            if state.downlink_acks.insert(packet_id, response).is_some() {
                 return Err(MqttSessionError::DriverFailed);
             }
         }
         Event::Incoming(Packet::PubAck(ack)) => {
-            let response = pending
+            let response = state
+                .downlink_acks
                 .remove(&ack.pkid)
                 .ok_or(MqttSessionError::DriverFailed)?;
             let accepted = matches!(
@@ -1083,34 +1368,40 @@ async fn handle_event(
             });
         }
         Event::Incoming(Packet::Publish(publish)) => {
-            admit_uplink_or_keep_transport(client, runtime, deliveries, publish).await?;
+            admit_uplink_or_keep_transport(
+                client,
+                eventloop,
+                runtime,
+                deliveries,
+                &mut state.negative_acks,
+                publish,
+            )
+            .await?;
         }
         _ => {}
     }
     Ok(())
 }
 
-/// Queue-full drops must not tear down a healthy transport candidate.
-const fn uplink_admission_keeps_transport(error: MqttSessionError) -> bool {
-    matches!(error, MqttSessionError::DeliverySaturated)
+enum UplinkDisposition {
+    Continue,
+    Reject(Box<RejectedBrokerPublish>),
+    Fail(MqttSessionError),
 }
 
 async fn admit_uplink_or_keep_transport(
     client: &AsyncClient,
+    eventloop: &mut EventLoop,
     runtime: &DriverRuntime,
     deliveries: &DeliveryQueue,
+    negative_acks: &mut PendingNegativeAcks,
     publish: Publish,
 ) -> Result<(), MqttSessionError> {
     match deliver_publish(client, runtime, deliveries, publish).await {
-        Ok(()) => Ok(()),
-        Err(error) if uplink_admission_keeps_transport(error) => Ok(()),
-        Err(error) => Err(error),
+        UplinkDisposition::Continue => Ok(()),
+        UplinkDisposition::Reject(rejected) => negative_acks.enqueue(eventloop, *rejected),
+        UplinkDisposition::Fail(error) => Err(error),
     }
-}
-
-fn log_uplink_dropped(reason: &'static str) -> MqttSessionError {
-    tracing::warn!(target: "mqtt", reason, "mqtt uplink dropped");
-    MqttSessionError::AssertionRejected
 }
 
 async fn deliver_publish(
@@ -1118,9 +1409,25 @@ async fn deliver_publish(
     runtime: &DriverRuntime,
     deliveries: &DeliveryQueue,
     publish: Publish,
-) -> Result<(), MqttSessionError> {
-    let topic = std::str::from_utf8(publish.topic.as_ref())
-        .map_err(|_| log_uplink_dropped("uplink_topic_utf8"))?;
+) -> UplinkDisposition {
+    if publish.qos == QoS::AtMostOnce {
+        tracing::warn!(
+            target: "mqtt",
+            reason = "uplink_qos0_no_terminal_ack",
+            "mqtt qos0 uplink rejected without changing transport"
+        );
+        return UplinkDisposition::Continue;
+    }
+    let topic = match std::str::from_utf8(publish.topic.as_ref()) {
+        Ok(topic) => topic,
+        Err(_) => {
+            return UplinkDisposition::Reject(Box::new(RejectedBrokerPublish::new(
+                publish,
+                BrokerRejectReason::TopicNameInvalid,
+                "uplink_topic_utf8",
+            )));
+        }
+    };
     let properties = publish.properties.as_ref();
     let user_properties = properties
         .map(|properties| properties.user_properties.as_slice())
@@ -1139,18 +1446,36 @@ async fn deliver_publish(
         publish.retain,
         user_properties,
     );
-    let verified = runtime
-        .verifier
-        .verify(&runtime.policy, &frame)
-        .map_err(|_| log_uplink_dropped("assertion_rejected"))?;
-    let (_, contract) = runtime
-        .policy
-        .resolve_uplink(topic)
-        .ok_or_else(|| log_uplink_dropped("uplink_policy"))?;
-    let exact_topic = runtime
-        .policy
-        .exact_verified_topic(topic)
-        .ok_or_else(|| log_uplink_dropped("uplink_topic"))?;
+    let verified = match runtime.verifier.verify(&runtime.policy, &frame) {
+        Ok(verified) => verified,
+        Err(_) => {
+            return UplinkDisposition::Reject(Box::new(RejectedBrokerPublish::new(
+                publish,
+                BrokerRejectReason::NotAuthorized,
+                "assertion_rejected",
+            )));
+        }
+    };
+    let (_, contract) = match runtime.policy.resolve_uplink(topic) {
+        Some(resolved) => resolved,
+        None => {
+            return UplinkDisposition::Reject(Box::new(RejectedBrokerPublish::new(
+                publish,
+                BrokerRejectReason::TopicNameInvalid,
+                "uplink_policy",
+            )));
+        }
+    };
+    let exact_topic = match runtime.policy.exact_verified_topic(topic) {
+        Some(exact) => exact,
+        None => {
+            return UplinkDisposition::Reject(Box::new(RejectedBrokerPublish::new(
+                publish,
+                BrokerRejectReason::TopicNameInvalid,
+                "uplink_topic",
+            )));
+        }
+    };
     let delivery = AuthenticatedDeviceDelivery {
         scope: verified.into_scope(),
         contract,
@@ -1164,7 +1489,10 @@ async fn deliver_publish(
             fence: Arc::clone(&runtime.epoch_fence),
         }),
     };
-    admit_delivery(deliveries, delivery, contract)
+    match admit_delivery(deliveries, delivery, contract) {
+        Ok(()) | Err(MqttSessionError::DeliverySaturated) => UplinkDisposition::Continue,
+        Err(error) => UplinkDisposition::Fail(error),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1214,24 +1542,32 @@ async fn reconnect(
     deliveries: &DeliveryQueue,
     readiness: &watch::Sender<MqttReadiness>,
     cancel: &CancellationToken,
+    negative_acks: &mut PendingNegativeAcks,
 ) -> Result<(), MqttSessionError> {
     // Caller already minted the candidate epoch before disconnect/backoff. Rebuild the local
     // request queue after a transport failure.
     let mut backoff = RECONNECT_MIN;
     loop {
         let (candidate_client, mut candidate_eventloop) = new_connection(runtime);
-        if let Ok(session_present) = connect_once(
+        match connect_once(
             &candidate_client,
             &mut candidate_eventloop,
             runtime,
             deliveries,
+            negative_acks,
         )
         .await
         {
-            *client = candidate_client;
-            *eventloop = candidate_eventloop;
-            set_ready(readiness, session_present, runtime.credential_revision);
-            return Ok(());
+            ConnectionAttempt::Connected { session_present } => {
+                *client = candidate_client;
+                *eventloop = candidate_eventloop;
+                set_ready(readiness, session_present, runtime.credential_revision);
+                return Ok(());
+            }
+            ConnectionAttempt::NegativeAckOutcomeUnknown => {
+                return Err(MqttSessionError::DriverFailed);
+            }
+            ConnectionAttempt::Recoverable(_) => {}
         }
         // Failed candidate: bump + clear before the next await/backoff.
         runtime.epoch_fence.begin_and_clear(deliveries)?;
@@ -1243,24 +1579,23 @@ async fn reconnect(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn reload(
     client: &mut AsyncClient,
     eventloop: &mut EventLoop,
     runtime: &mut DriverRuntime,
     candidate_tls: Arc<rustls::ClientConfig>,
     candidate_revision: CredentialRevision,
-    deliveries: &DeliveryQueue,
-    readiness: &watch::Sender<MqttReadiness>,
+    context: &DriverContext<'_>,
+    negative_acks: &mut PendingNegativeAcks,
 ) -> Result<(), MqttSessionError> {
     let previous_tls = Arc::clone(&runtime.tls);
     let previous_revision = runtime.credential_revision;
-    let _ = readiness.send(MqttReadiness::Reloading {
+    let _ = context.readiness.send(MqttReadiness::Reloading {
         from_revision: previous_revision.get(),
         to_revision: candidate_revision.get(),
     });
     // Invalidate live generation (bump + clear) before any disconnect drain await.
-    runtime.epoch_fence.begin_and_clear(deliveries)?;
+    runtime.epoch_fence.begin_and_clear(context.deliveries)?;
     graceful_disconnect(client, eventloop).await;
 
     runtime.tls = candidate_tls;
@@ -1272,19 +1607,30 @@ async fn reload(
             &candidate_client,
             &mut candidate_eventloop,
             runtime,
-            deliveries,
+            context.deliveries,
+            negative_acks,
         ),
     )
     .await;
-    if let Ok(Ok(session_present)) = candidate {
-        *client = candidate_client;
-        *eventloop = candidate_eventloop;
-        set_ready(readiness, session_present, candidate_revision);
-        return Ok(());
+    let candidate_attempt = match candidate {
+        Ok(result) => classify_connection_attempt(result, negative_acks),
+        Err(_) => classify_connection_attempt(Err(MqttSessionError::BrokerTimeout), negative_acks),
+    };
+    match candidate_attempt {
+        ConnectionAttempt::Connected { session_present } => {
+            *client = candidate_client;
+            *eventloop = candidate_eventloop;
+            set_ready(context.readiness, session_present, candidate_revision);
+            return Ok(());
+        }
+        ConnectionAttempt::NegativeAckOutcomeUnknown => {
+            return Err(MqttSessionError::DriverFailed);
+        }
+        ConnectionAttempt::Recoverable(_) => {}
     }
 
     // Failed reload candidate: bump + clear before the rollback connect attempt.
-    runtime.epoch_fence.begin_and_clear(deliveries)?;
+    runtime.epoch_fence.begin_and_clear(context.deliveries)?;
     runtime.tls = previous_tls;
     runtime.credential_revision = previous_revision;
     let (rollback_client, mut rollback_eventloop) = new_connection(runtime);
@@ -1292,14 +1638,20 @@ async fn reload(
         &rollback_client,
         &mut rollback_eventloop,
         runtime,
-        deliveries,
+        context.deliveries,
+        negative_acks,
     )
     .await;
     *client = rollback_client;
     *eventloop = rollback_eventloop;
     match rollback {
-        Ok(session_present) => set_ready(readiness, session_present, previous_revision),
-        Err(_) => set_degraded(readiness, previous_revision),
+        ConnectionAttempt::Connected { session_present } => {
+            set_ready(context.readiness, session_present, previous_revision);
+        }
+        ConnectionAttempt::Recoverable(_) => set_degraded(context.readiness, previous_revision),
+        ConnectionAttempt::NegativeAckOutcomeUnknown => {
+            return Err(MqttSessionError::DriverFailed);
+        }
     }
     tracing::warn!(
         target: "mqtt",
@@ -1365,6 +1717,22 @@ fn set_degraded(readiness: &watch::Sender<MqttReadiness>, revision: CredentialRe
     });
 }
 
+fn stop_negative_ack_unknown(
+    epoch_fence: &TransportEpochFence,
+    credential_revision: CredentialRevision,
+    deliveries: &DeliveryQueue,
+    readiness: &watch::Sender<MqttReadiness>,
+) {
+    tracing::error!(
+        target: "mqtt",
+        reason = "negative_puback_outcome_unknown",
+        "mqtt session stopped with terminal rejection outcome unknown"
+    );
+    let _ = epoch_fence.begin_and_clear(deliveries);
+    set_degraded(readiness, credential_revision);
+    let _ = readiness.send(MqttReadiness::Stopped);
+}
+
 /// Closed non-PII reasons for MQTT session operation failures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum MqttSessionError {
@@ -1392,8 +1760,6 @@ pub enum MqttSessionError {
     StaleTransportEpoch,
     #[error("mqtt transport epoch exhausted")]
     TransportEpochExhausted,
-    #[error("mqtt broker assertion rejected")]
-    AssertionRejected,
     #[error("mqtt session driver failed")]
     DriverFailed,
     #[error("mqtt credential reload failed")]
@@ -1447,6 +1813,116 @@ mod tests {
     #[test]
     fn receive_maximum_equals_delivery_capacity() {
         assert_eq!(RECEIVE_MAXIMUM as usize, DELIVERY_CAPACITY);
+    }
+
+    #[test]
+    fn negative_puback_reasons_are_terminal_rejections() {
+        assert_eq!(
+            BrokerRejectReason::NotAuthorized.puback_reason(),
+            PubAckReason::NotAuthorized
+        );
+        assert_eq!(
+            BrokerRejectReason::TopicNameInvalid.puback_reason(),
+            PubAckReason::TopicNameInvalid
+        );
+    }
+
+    #[test]
+    fn rejected_publish_mints_one_negative_puback() {
+        let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
+        publish.pkid = 7;
+        let rejected = RejectedBrokerPublish::new(
+            publish,
+            BrokerRejectReason::NotAuthorized,
+            "assertion_rejected",
+        );
+        let (packet_id, request) = rejected.into_negative_puback().expect("negative puback");
+        assert_eq!(packet_id, 7);
+        assert!(matches!(
+            request,
+            rumqttc::v5::Request::PubAck(rumqttc::v5::mqttbytes::v5::PubAck {
+                pkid: 7,
+                reason: PubAckReason::NotAuthorized,
+                properties: None,
+            })
+        ));
+    }
+
+    #[test]
+    fn pending_negative_acks_are_bounded_and_unique() {
+        let mut pending = PendingNegativeAcks::new();
+        for packet_id in 1..=RECEIVE_MAXIMUM {
+            pending.insert(packet_id).expect("bounded packet id");
+        }
+        assert_eq!(
+            pending.insert(1),
+            Err(MqttSessionError::DriverFailed),
+            "duplicate packet id fails closed"
+        );
+        assert_eq!(
+            pending.insert(RECEIVE_MAXIMUM + 1),
+            Err(MqttSessionError::DriverFailed),
+            "tracker cannot exceed RECEIVE_MAXIMUM"
+        );
+        assert!(pending.observe(RECEIVE_MAXIMUM));
+        assert!(!pending.observe(RECEIVE_MAXIMUM));
+    }
+
+    #[test]
+    fn negative_ack_unknown_is_terminal_not_recoverable() {
+        assert_eq!(
+            driver_event_disposition(true, true),
+            DriverEventDisposition::StopNegativeAckUnknown
+        );
+        assert_eq!(
+            driver_event_disposition(true, false),
+            DriverEventDisposition::RecoverTransport
+        );
+        assert_eq!(
+            driver_event_disposition(false, true),
+            DriverEventDisposition::Continue
+        );
+    }
+
+    #[test]
+    fn connection_attempts_close_negative_ack_unknown_for_every_entry_path() {
+        for entry_path in ["initial", "reload", "reconnect"] {
+            let mut pending = PendingNegativeAcks::new();
+            pending.insert(7).expect("pending negative ack");
+            assert!(
+                matches!(
+                    classify_connection_attempt(Err(MqttSessionError::BrokerRejected), &pending,),
+                    ConnectionAttempt::NegativeAckOutcomeUnknown
+                ),
+                "{entry_path} must not classify unknown negative ACK outcome as recoverable"
+            );
+        }
+
+        assert!(matches!(
+            classify_connection_attempt(
+                Err(MqttSessionError::BrokerRejected),
+                &PendingNegativeAcks::new(),
+            ),
+            ConnectionAttempt::Recoverable(MqttSessionError::BrokerRejected)
+        ));
+    }
+
+    #[test]
+    fn negative_ack_terminal_funnel_invalidates_and_stops() {
+        let fence = TransportEpochFence::new(1);
+        let deliveries = DeliveryQueue::new();
+        let (readiness, receiver) = watch::channel(MqttReadiness::Ready {
+            session_present: false,
+            credential_revision: 1,
+        });
+        stop_negative_ack_unknown(
+            &fence,
+            CredentialRevision::new(1).expect("revision"),
+            &deliveries,
+            &readiness,
+        );
+        assert_eq!(*receiver.borrow(), MqttReadiness::Stopped);
+        assert_eq!(fence.current().get(), 2);
     }
 
     #[test]
@@ -1587,16 +2063,6 @@ mod tests {
             Err(MqttSessionError::StaleTransportEpoch)
         );
         assert_eq!(fence.current().get(), 3);
-    }
-
-    #[test]
-    fn assertion_rejected_requires_transport_recovery() {
-        assert!(!uplink_admission_keeps_transport(
-            MqttSessionError::AssertionRejected
-        ));
-        assert!(uplink_admission_keeps_transport(
-            MqttSessionError::DeliverySaturated
-        ));
     }
 
     #[test]

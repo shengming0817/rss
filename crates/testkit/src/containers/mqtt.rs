@@ -28,6 +28,12 @@ pub(super) const MQTT_RSS_A_SERIAL: u64 = 1001;
 pub(super) const MQTT_RSS_B_SERIAL: u64 = 1002;
 pub(super) const MOSQUITTO_READY_STDOUT: &str = "mosquitto version 2.0.22 running";
 
+/// Closed broker assertion fault set for hermetic MQTT boundary tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MqttAssertionFault {
+    CorruptFirstSignature,
+}
+
 /// Client-side MQTT trust and identity material. PEM fields are intentionally absent from Debug.
 #[derive(Clone)]
 pub struct MqttFixtureTlsPem {
@@ -143,6 +149,7 @@ pub(super) struct MqttBrokerBundle {
     pub(super) server_private_key_pem: String,
     pub(super) assertion_signing_key_pem: String,
     pub(super) acl: String,
+    pub(super) assertion_fault: Option<MqttAssertionFault>,
 }
 
 impl MqttMtlsFixture {
@@ -560,8 +567,8 @@ pub(super) fn mqtt_exact_acl(primary_client_id: &str, cross_client_id: &str) -> 
     acl
 }
 
-pub(super) fn mqtt_broker_config() -> &'static str {
-    "per_listener_settings false\
+pub(super) fn mqtt_broker_config(fault: Option<MqttAssertionFault>) -> String {
+    let mut config = "per_listener_settings false\
 \nlistener 8883\
 \nprotocol mqtt\
 \nallow_anonymous false\
@@ -580,9 +587,18 @@ pub(super) fn mqtt_broker_config() -> &'static str {
 \nautosave_on_changes true\
 \nplugin /usr/lib/rss_mqtt_authn.so\
 \nplugin_opt_signing_key /mosquitto/config/assertion-key.pem\
+"
+    .to_owned();
+    if matches!(fault, Some(MqttAssertionFault::CorruptFirstSignature)) {
+        config.push_str("\nplugin_opt_assertion_fault corrupt_first_signature");
+    }
+    config.push_str(
+        "\
 \nlog_dest stdout\
 \nlog_type all\
-\nconnection_messages true\n"
+\nconnection_messages true\n",
+    );
+    config
 }
 
 pub(super) struct StartedMosquittoMtls {
@@ -609,7 +625,7 @@ pub(super) async fn start_mosquitto_mtls_container(
     let request = image
         .with_copy_to(
             "/mosquitto/config/mosquitto.conf",
-            mqtt_broker_config().as_bytes().to_vec(),
+            mqtt_broker_config(bundle.assertion_fault).into_bytes(),
         )
         .with_copy_to("/mosquitto/config/acl", bundle.acl.as_bytes().to_vec())
         .with_copy_to(
@@ -642,6 +658,19 @@ pub(super) async fn start_mosquitto_mtls_container(
 /// Starts the one production-shaped MQTT test broker. There is deliberately no environment URL
 /// fallback and no plaintext listener: T2 always exercises the same mTLS/plugin/ACL boundary.
 pub async fn mosquitto_mtls() -> Result<MqttMtlsFixture> {
+    mosquitto_mtls_with_optional_assertion_fault(None).await
+}
+
+/// Starts the production-shaped fixture with one closed, one-shot assertion fault.
+pub async fn mosquitto_mtls_with_assertion_fault(
+    fault: MqttAssertionFault,
+) -> Result<MqttMtlsFixture> {
+    mosquitto_mtls_with_optional_assertion_fault(Some(fault)).await
+}
+
+async fn mosquitto_mtls_with_optional_assertion_fault(
+    assertion_fault: Option<MqttAssertionFault>,
+) -> Result<MqttMtlsFixture> {
     let material = mqtt_generated_material()?;
     let broker_bundle = MqttBrokerBundle {
         ca_pem: material.ca_pem,
@@ -649,6 +678,7 @@ pub async fn mosquitto_mtls() -> Result<MqttMtlsFixture> {
         server_private_key_pem: material.server_private_key_pem,
         assertion_signing_key_pem: material.assertion_signing_key_pem,
         acl: material.acl,
+        assertion_fault,
     };
     let started = start_mosquitto_mtls_container(&broker_bundle, &material.empty_crl_pem).await?;
 

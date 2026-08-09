@@ -9,7 +9,7 @@ use ids::DeviceId;
 use mqtt::{
     BrokerAssertionVerifier, CredentialGeneration, CredentialRevision, DeviceScope, MqttReadiness,
     MqttSession, MqttSessionConfig, MqttSessionError, MqttTlsMaterial, MqttTopicPolicy,
-    MqttsEndpoint, SessionExpiry,
+    MqttsEndpoint, NegativeAckPollBarrier, SessionExpiry,
 };
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{Filter, Packet, PublishProperties};
@@ -18,7 +18,7 @@ use rumqttc::{TlsConfiguration, Transport};
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::pem::PemObject as _;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
-use testkit::{MqttCredential, MqttMtlsFixture};
+use testkit::{MqttAssertionFault, MqttCredential, MqttMtlsFixture};
 use vocab::TenantId;
 
 const TENANT: &str = "11111111-1111-4111-8111-111111111111";
@@ -274,6 +274,175 @@ async fn device_uplink_yields_sealed_principal_and_rejects_override() -> anyhow:
     // This transport test intentionally cannot settle the delivery. A broker-only fixture has no
     // PostgreSQL commit proof and therefore must not claim to prove durable ingress or mint PUBACK.
     drop(delivery);
+    device_pump.abort();
+    session.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn persistent_assertion_poison_is_negatively_acked_without_reconnect() -> anyhow::Result<()> {
+    let fixture =
+        testkit::mosquitto_mtls_with_assertion_fault(MqttAssertionFault::CorruptFirstSignature)
+            .await?;
+    let session = connect_session(&fixture, fixture.rss_a()).await;
+    let topic = policy_current()
+        .command_acked_topic(&scope(TENANT, CURRENT_GENERATION))
+        .expect("topic");
+    let (device, mut device_loop) = device_client(&fixture, fixture.device_current());
+    assert!(wait_connack(&mut device_loop).await);
+    let device_pump = tokio::spawn(async move { while device_loop.poll().await.is_ok() {} });
+
+    for (correlation, payload) in [
+        (b"poison-1".as_slice(), b"rejected".as_slice()),
+        (b"valid-2".as_slice(), b"accepted".as_slice()),
+    ] {
+        let mut properties = PublishProperties::default();
+        properties.correlation_data = Some(correlation.to_vec().into());
+        device
+            .publish_with_properties(
+                topic.as_str(),
+                QoS::AtLeastOnce,
+                false,
+                payload.to_vec(),
+                properties,
+            )
+            .await
+            .expect("uplink queued");
+    }
+
+    let delivery = tokio::time::timeout(Duration::from_secs(10), session.next_uplink())
+        .await
+        .expect("valid uplink timeout")
+        .expect("valid uplink");
+    assert_eq!(delivery.payload(), b"accepted");
+    assert_eq!(delivery.correlation_data(), Some(b"valid-2".as_slice()));
+    assert!(matches!(
+        session.readiness(),
+        MqttReadiness::Ready {
+            session_present: false,
+            credential_revision: 1,
+        }
+    ));
+    drop(delivery);
+    session.shutdown().await?;
+
+    // The valid delivery was deliberately left unacknowledged. A persistent reconnect must replay
+    // that envelope, proving the broker session was restored, while the negatively acknowledged
+    // poison must be absent from the same broker queue.
+    let restored = connect_session(&fixture, fixture.rss_a()).await;
+    assert!(matches!(
+        restored.readiness(),
+        MqttReadiness::Ready {
+            session_present: true,
+            credential_revision: 1,
+        }
+    ));
+    let replay = tokio::time::timeout(Duration::from_secs(10), restored.next_uplink())
+        .await
+        .expect("persistent replay timeout")
+        .expect("persistent replay");
+    assert_eq!(replay.payload(), b"accepted");
+    assert_eq!(replay.correlation_data(), Some(b"valid-2".as_slice()));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(750), restored.next_uplink())
+            .await
+            .is_err(),
+        "negative PUBACK must remove poison while preserving unrelated unacknowledged delivery"
+    );
+
+    drop(replay);
+    device_pump.abort();
+    restored.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn qos0_uplink_is_rejected_without_poisoning_the_session() -> anyhow::Result<()> {
+    let fixture = testkit::mosquitto_mtls().await?;
+    let session = connect_session(&fixture, fixture.rss_a()).await;
+    let topic = policy_current()
+        .command_acked_topic(&scope(TENANT, CURRENT_GENERATION))
+        .expect("topic");
+    let (device, mut device_loop) = device_client(&fixture, fixture.device_current());
+    assert!(wait_connack(&mut device_loop).await);
+    let device_pump = tokio::spawn(async move { while device_loop.poll().await.is_ok() {} });
+
+    device
+        .publish(topic.as_str(), QoS::AtMostOnce, false, b"qos0".to_vec())
+        .await
+        .expect("qos0 queued");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), session.next_uplink())
+            .await
+            .is_err(),
+        "broker-rejected qos0 must not mint authenticated delivery"
+    );
+
+    device
+        .publish(topic.as_str(), QoS::AtLeastOnce, false, b"qos1".to_vec())
+        .await
+        .expect("qos1 queued");
+    let delivery = tokio::time::timeout(Duration::from_secs(10), session.next_uplink())
+        .await
+        .expect("qos1 timeout")
+        .expect("qos1 delivery");
+    assert_eq!(delivery.payload(), b"qos1");
+    assert!(matches!(session.readiness(), MqttReadiness::Ready { .. }));
+
+    drop(delivery);
+    device_pump.abort();
+    session.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn negative_puback_write_failure_stops_without_reconnect() -> anyhow::Result<()> {
+    let mut fixture =
+        testkit::mosquitto_mtls_with_assertion_fault(MqttAssertionFault::CorruptFirstSignature)
+            .await?;
+    let barrier = NegativeAckPollBarrier::new();
+    let session = MqttSession::connect(
+        session_config(&fixture, fixture.rss_a(), 3600)
+            .with_negative_ack_poll_barrier(barrier.clone()),
+    )
+    .await
+    .expect("connect");
+    let topic = policy_current()
+        .command_acked_topic(&scope(TENANT, CURRENT_GENERATION))
+        .expect("topic");
+    let (device, mut device_loop) = device_client(&fixture, fixture.device_current());
+    assert!(wait_connack(&mut device_loop).await);
+    let device_pump = tokio::spawn(async move { while device_loop.poll().await.is_ok() {} });
+
+    device
+        .publish(topic.as_str(), QoS::AtLeastOnce, false, b"poison".to_vec())
+        .await
+        .expect("poison queued");
+    tokio::time::timeout(Duration::from_secs(10), barrier.wait_until_reached())
+        .await
+        .expect("negative ack was not queued");
+    fixture.stop().await?;
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    barrier.release();
+
+    let mut readiness = session.readiness_changes();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while *readiness.borrow_and_update() != MqttReadiness::Stopped {
+            readiness.changed().await.expect("readiness sender");
+        }
+    })
+    .await
+    .expect("negative ack outcome unknown must stop");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert_eq!(session.readiness(), MqttReadiness::Stopped);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(500), session.next_uplink())
+            .await
+            .expect("closed delivery queue")
+            .is_err(),
+        "poison must not mint authenticated delivery"
+    );
+
     device_pump.abort();
     session.shutdown().await?;
     Ok(())

@@ -336,11 +336,16 @@ fn vault_fixture_pins_image_and_maps_host_https_endpoint() {
 
 #[test]
 fn mqtt_fixture_keeps_the_exact_acl_available_to_offline_sessions() {
-    let config = mqtt_broker_config();
+    let config = mqtt_broker_config(None);
     assert_eq!(config.matches("listener 8883").count(), 1);
     assert!(config.contains("per_listener_settings false"));
     assert!(!config.contains("per_listener_settings true"));
     assert!(config.contains("acl_file /mosquitto/config/acl"));
+    assert!(!config.contains("plugin_opt_assertion_fault"));
+
+    let faulted = mqtt_broker_config(Some(MqttAssertionFault::CorruptFirstSignature));
+    assert_eq!(faulted.matches("plugin_opt_assertion_fault").count(), 1);
+    assert!(faulted.contains("corrupt_first_signature"));
 }
 
 #[test]
