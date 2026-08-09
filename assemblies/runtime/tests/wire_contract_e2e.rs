@@ -4,8 +4,8 @@
 //! **正向集成（常态 CI 必跑，无 ambient env 依赖）**：用测试内 wiremock Vault Transit 构造 stub `VaultRuntimeDeps`
 //! （无外部 vault 也成功），与 pg testcontainer 组 `SharedRuntimeDeps`，验：
 //! - `wire_settings`（resolver 经 bundle dispatch 注入，env-独立）返回 `DomainBinding`，
-//!   module 产物包含 `configs_ready` + `keyprovider_ready`，并注册 keyprovider readiness sampler；
-//! - bundle `runtime_resources()` 单源派生 resolver + keyprovider 两个 guard（#1498 D5 单源 rollback）。
+//!   domain output 保持为空；同一 readiness generation 产出的 PostgreSQL / Vault typed provider
+//!   outputs 分别持有 `configs_ready`、`keyprovider_ready` 与 `vault_secret_resolver_ready`；
 //!
 //! 对标 `controller-runtime/envtest`：负例查外部 env 缺失，**正向路径用测试内受控依赖继续执行**，不让核心
 //! 正向集成依赖 ambient env 才跑（避无 env 时 `return` 空转）。fail-closed（缺 `RSS_VAULT_ADDR`/`TOKEN`/`TRANSIT_MOUNT`）的
@@ -15,17 +15,17 @@
 //!
 //! `integration` feature 门控；`cargo nextest run -p runtime --features integration --no-run` 能编译即满足验收。
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
 use bootstrap::compose_bindings;
-use diport::ManagedResource;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
 use runtime::CONFIGS_READY_PROBE_NAME;
 use runtime::test_support::{
-    build_s3_runtime_deps_from_values, build_shared_runtime_deps, build_unused_redis_runtime_deps,
-    test_private_ca_pem, wire_settings,
+    build_s3_runtime_deps_from_values, build_settings_wire_fixture,
+    build_unused_redis_runtime_deps, test_private_ca_pem, wire_settings,
 };
 use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 use vault::{
@@ -79,6 +79,14 @@ impl distributed::HttpContractTransport for NoopDomainTransport {
 
 fn noop_domain_transport() -> std::sync::Arc<dyn distributed::HttpContractTransport> {
     std::sync::Arc::new(NoopDomainTransport)
+}
+
+fn probe_identity_multiset(output: &bootstrap::DomainModuleResult) -> BTreeMap<String, usize> {
+    let mut identities = BTreeMap::new();
+    for (name, _) in &output.probes {
+        *identities.entry(name.as_str().to_owned()).or_default() += 1;
+    }
+    identities
 }
 
 /// testkit fixture + postgres capability bundle（`setup` 内含 connect + run_migrations）。
@@ -139,8 +147,8 @@ fn readiness_context_b64(tenant: &str) -> String {
 }
 
 /// 正向集成：pg testcontainer + stub vault bundle（测试内固定 addr/token，无 ambient env）→ `wire_settings`
-/// 产出恰一条 configs_ready 探针、无 detached 资源 / worker；bundle `runtime_resources()` 单源派生恰一条
-/// resolver guard（#1498）。**无 env 二分**——核心正向接线在无外部 vault env 的常态 CI 也必跑（review F1）。
+/// domain output 保持为空；同 generation 的三个 typed provider outputs 持有稳定且唯一的
+/// PostgreSQL / Vault probe identity。**无 env 二分**——核心正向接线在无外部 vault env 的常态 CI 也必跑。
 #[tokio::test(flavor = "multi_thread")]
 async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -> TestResult {
     let (_fixture, pg) = connect_pg().await?;
@@ -211,7 +219,7 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         redis_ca,
     )?;
 
-    let deps = build_shared_runtime_deps(
+    let fixture = build_settings_wire_fixture(
         Arc::new(crypto::load_password_blocklist_from_reader(
             std::io::Cursor::new(include_bytes!(
                 "../../../deploy/password-blocklist.demo.sha256"
@@ -231,57 +239,74 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         )?),
         diport::KeyName::try_new("settings-config")?,
         noop_domain_transport(),
-    );
+    )
+    .await?;
+    let (deps, postgres_output, key_provider_output, secret_resolver_output) = fixture.into_parts();
 
-    // wire_settings env-独立（resolver 经 bundle dispatch 注入）→ 返回唯一 DomainBinding；
-    // compose_bindings 是 module output 的唯一转换出口。
+    // Domain wiring consumes only readiness handles; provider lifecycle remains in its three
+    // non-interchangeable, move-only outputs.
     let mut bindings = vec![wire_settings(&deps).await?];
-    let (_, result) = compose_bindings(&mut bindings)?;
+    let (_, domain_output) = compose_bindings(&mut bindings)?;
     assert!(bindings.is_empty(), "compose 后 binding 必须排空");
-    assert_eq!(
-        result.probes.len(),
-        3,
-        "settings 暴露 configs_ready + keyprovider_ready + vault_secret_resolver_ready"
-    );
-    assert_eq!(
-        result.probes[0].0.as_str(),
-        CONFIGS_READY_PROBE_NAME,
-        "探针名 = configs_ready"
-    );
-    assert_eq!(
-        result.probes[1].0.as_str(),
-        KEYPROVIDER_READY_PROBE_NAME,
-        "探针名 = keyprovider_ready"
-    );
-    assert_eq!(
-        result.probes[2].0.as_str(),
-        settings_composition::SECRET_RESOLVER_READY_PROBE_NAME,
-        "探针名 = vault_secret_resolver_ready"
-    );
-    // settings wire_X 产物本身无 detached 资源；vault guard 由 runtime-local ProviderOutput 汇入
-    // provider_module，再经 assembly 的 DomainModuleResult::merge 单源排入。
     assert!(
-        result.resources.is_empty(),
-        "settings wire_X 产物无 detached 资源"
+        domain_output.probes.is_empty(),
+        "domain 不拥有 provider probes"
     );
-    assert_eq!(
-        result.workers.len(),
-        2,
-        "settings 产出 keyprovider 与 secret resolver readiness workers"
+    assert!(
+        domain_output.resources.is_empty(),
+        "domain 不拥有 provider resources"
+    );
+    assert!(
+        domain_output.workers.is_empty(),
+        "domain 不拥有 provider workers"
     );
 
-    // #1676 单源装配：vault bundle 的 diport-only runtime_resources 由 runtime-local
-    // ProviderOutput 转为 provider_module，再经 DomainModuleResult::merge 统一消费。
-    let vault_resources = deps.vault.runtime_resources();
-    assert_eq!(vault_resources.len(), 2, "vault 单源派生两条 guard");
+    let postgres_output = postgres_output.into_output();
     assert_eq!(
-        vault_resources[0].name(),
-        "vault-secret-resolver",
-        "vault 单源 resource 即 resolver guard"
+        probe_identity_multiset(&postgres_output),
+        BTreeMap::from([(CONFIGS_READY_PROBE_NAME.to_owned(), 1)])
     );
-    assert_eq!(vault_resources[1].name(), "vault-key-provider");
-    // Redis 为生产硬依赖；取 pool guard 单源验收。
-    let redis_resources = deps.redis.runtime_resources();
-    assert_eq!(redis_resources.len(), 1, "redis 单源派生 pool guard");
+    assert!(postgres_output.resources.is_empty());
+    assert!(postgres_output.workers.is_empty());
+
+    let key_provider_output = key_provider_output.into_output();
+    assert_eq!(
+        probe_identity_multiset(&key_provider_output),
+        BTreeMap::from([(KEYPROVIDER_READY_PROBE_NAME.to_owned(), 1)])
+    );
+    assert!(key_provider_output.resources.is_empty());
+    assert_eq!(key_provider_output.workers.len(), 1);
+
+    let secret_resolver_output = secret_resolver_output.into_output();
+    assert_eq!(
+        probe_identity_multiset(&secret_resolver_output),
+        BTreeMap::from([(
+            settings_composition::SECRET_RESOLVER_READY_PROBE_NAME.to_owned(),
+            1,
+        )])
+    );
+    assert!(secret_resolver_output.resources.is_empty());
+    assert_eq!(secret_resolver_output.workers.len(), 1);
+
+    let expected = BTreeMap::from([
+        (CONFIGS_READY_PROBE_NAME.to_owned(), 1),
+        (KEYPROVIDER_READY_PROBE_NAME.to_owned(), 1),
+        (
+            settings_composition::SECRET_RESOLVER_READY_PROBE_NAME.to_owned(),
+            1,
+        ),
+    ]);
+    let mut provider_output = bootstrap::DomainModuleResult::default();
+    provider_output.extend([postgres_output, key_provider_output, secret_resolver_output]);
+    assert_eq!(probe_identity_multiset(&provider_output), expected);
+    assert_eq!(provider_output.workers.len(), 2);
+
+    provider_output.merge(domain_output);
+    assert_eq!(
+        probe_identity_multiset(&provider_output),
+        expected,
+        "最终 carrier 必须保留每个 provider probe identity 恰好一次"
+    );
+    assert_eq!(provider_output.workers.len(), 2);
     Ok(())
 }

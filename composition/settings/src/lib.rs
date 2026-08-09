@@ -339,12 +339,12 @@ impl Clock for SharedClock {
     }
 }
 
-/// Build the settings domain and its lifecycle output as one owned binding.
+/// Build the settings domain as one owned binding.
 ///
 /// Startup performs a real encrypt/decrypt/AAD-mismatch self-check before constructing durable
-/// repositories. Probe/resource/worker ordering is stable: `configs_ready`,
-/// `keyprovider_ready`, `vault_secret_resolver_ready`, no detached resources, then the key-provider
-/// and secret-resolver readiness workers.
+/// repositories. Provider readiness lifecycle is not copied into the domain binding output: the
+/// same construction generation already returned it through [`SettingsPostgresReadinessOutput`],
+/// [`SettingsKeyProviderReadinessOutput`], and [`SettingsSecretResolverReadinessOutput`].
 ///
 /// # Errors
 ///
@@ -1152,8 +1152,17 @@ mod tests {
         let key = key.into_output();
         let resolver = resolver.into_output();
         assert_eq!((postgres.probes.len(), postgres.workers.len()), (1, 0));
+        assert_eq!(postgres.probes[0].0.as_str(), CONFIGS_READY_PROBE_NAME);
+        assert!(postgres.resources.is_empty());
         assert_eq!((key.probes.len(), key.workers.len()), (1, 1));
+        assert_eq!(key.probes[0].0.as_str(), KEYPROVIDER_READY_PROBE_NAME);
+        assert!(key.resources.is_empty());
         assert_eq!((resolver.probes.len(), resolver.workers.len()), (1, 1));
+        assert_eq!(
+            resolver.probes[0].0.as_str(),
+            SECRET_RESOLVER_READY_PROBE_NAME
+        );
+        assert!(resolver.resources.is_empty());
         Ok(())
     }
 

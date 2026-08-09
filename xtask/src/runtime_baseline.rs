@@ -7,7 +7,7 @@
 //! INVARIANT: RUNTIME-CONFIG-ESCAPE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::risk_residuals_reject_each_cross_file_bypass", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- reachable production consumers cannot open ambient environment readers or introduce demo/no-op/in-memory configuration fallbacks outside the closed config and purpose-bound maintenance grants.
 //! INVARIANT: RUNTIME-SECRET-TRANSFER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::risk_residuals_track_secret_bindings_into_diagnostics", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- raw secret extraction/transfer is restricted to purpose-bound extraction sites and typed sinks; bindings, destructuring, helpers, assertions, macros, diagnostics, and parallel handoffs cannot leak it.
 //! INVARIANT: RUNTIME-PROVIDER-BYPASS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::provider_protocol_rejects_missing_duplicate_and_wrong_owner_edges", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- production code cannot construct raw/legacy providers or bypass the unique from-plan, event-output receipt, and completed-owner handoff.
-//! INVARIANT: RUNTIME-LIFECYCLE-BYPASS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::risk_residuals_resolve_aliases_and_function_values + tests::runtime_binary_lifecycle_rejects_help_prepare_run_and_shutdown_mutations", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- runtimeexec remains the sole launch/signal/drain owner; assembly code cannot mint another lifecycle owner or raw listener handoff, and the rss binary must preserve classify/help-before-prepare plus exact typed run/shutdown transfer.
+//! INVARIANT: RUNTIME-LIFECYCLE-BYPASS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::risk_residuals_resolve_aliases_and_function_values + tests::runtime_binary_lifecycle_rejects_unreachable_duplicate_and_nontransparent_owners + tests::runtime_binary_lifecycle_rejects_help_prepare_run_and_shutdown_mutations", anti_vacuity = "tests::risk_residuals_accept_workspace + tests::runtime_binary_lifecycle_rejects_help_prepare_run_and_shutdown_mutations" } -- runtimeexec remains the sole launch/signal/drain owner; assembly code cannot mint another lifecycle owner or raw listener handoff, and the rss binary must reach exactly one same-file lifecycle owner while preserving classify/help-before-prepare plus exact typed run/shutdown transfer.
 //! INVARIANT: RUNTIME-PLAN-BINDING-BYPASS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::risk_residuals_reject_each_cross_file_bypass", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- handwritten factories, raw generated workflow catalogs, alternate compose/wire paths, and second workflow activation owners cannot bypass the typed generated binding closure.
 //! INVARIANT: RUNTIME-SERVICE-TOKEN-REPLAY-BYPASS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::risk_residuals_reject_each_cross_file_bypass", anti_vacuity = "tests::risk_residuals_accept_workspace" } -- service-token replay evidence must remain PostgreSQL-owned; process-local replay sets and raw verifier/store seams are forbidden in production assembly code.
 //! INVARIANT: POSTGRES-SETUP-TRANSACTION-LIVE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::postgres_setup_transaction_rejects_missing_live_edges", anti_vacuity = "tests::postgres_setup_transaction_accepts_live_workspace" } -- serving setup registers constructed pools immediately, rolls back partial construction, and commits only after the complete typed owner exists.
@@ -419,27 +419,30 @@ impl ImportAliasCollector {
         collector.aliases
     }
 
-    fn collect_tree(&mut self, prefix: &mut Vec<String>, tree: &syn::UseTree) {
+    fn collect_tree(
+        aliases: &mut BTreeMap<String, String>,
+        prefix: &mut Vec<String>,
+        tree: &syn::UseTree,
+    ) {
         match tree {
             syn::UseTree::Path(path) => {
                 prefix.push(path.ident.to_string());
-                self.collect_tree(prefix, &path.tree);
+                Self::collect_tree(aliases, prefix, &path.tree);
                 prefix.pop();
             }
             syn::UseTree::Name(name) => {
                 let mut path = prefix.clone();
                 path.push(name.ident.to_string());
-                self.aliases.insert(name.ident.to_string(), path.join("::"));
+                aliases.insert(name.ident.to_string(), path.join("::"));
             }
             syn::UseTree::Rename(rename) => {
                 let mut path = prefix.clone();
                 path.push(rename.ident.to_string());
-                self.aliases
-                    .insert(rename.rename.to_string(), path.join("::"));
+                aliases.insert(rename.rename.to_string(), path.join("::"));
             }
             syn::UseTree::Group(group) => {
                 for item in &group.items {
-                    self.collect_tree(prefix, item);
+                    Self::collect_tree(aliases, prefix, item);
                 }
             }
             syn::UseTree::Glob(_) => {}
@@ -456,7 +459,7 @@ impl<'ast> Visit<'ast> for ImportAliasCollector {
 
     fn visit_item_use(&mut self, item: &'ast syn::ItemUse) {
         let mut prefix = Vec::new();
-        self.collect_tree(&mut prefix, &item.tree);
+        Self::collect_tree(&mut self.aliases, &mut prefix, &item.tree);
     }
 }
 
@@ -1253,32 +1256,352 @@ fn provider_protocol_residuals(root: &Path) -> Result<Vec<ResidualFinding>> {
     Ok(findings)
 }
 
+fn production_free_functions(
+    file: &syn::File,
+) -> std::result::Result<BTreeMap<String, &syn::ItemFn>, String> {
+    let mut functions = BTreeMap::new();
+    for item in &file.items {
+        let syn::Item::Fn(function) = item else {
+            continue;
+        };
+        if !attrs_may_be_production(&function.attrs) {
+            continue;
+        }
+        let name = function.sig.ident.to_string();
+        if functions.insert(name.clone(), function).is_some() {
+            return Err(format!(
+                "rss binary repeats production free function `{name}`"
+            ));
+        }
+    }
+    Ok(functions)
+}
+
+fn canonical_lifecycle_call_path(
+    expression: &syn::Expr,
+    aliases: &BTreeMap<String, String>,
+) -> Option<String> {
+    let path = ResidualVisitor::path(expression)?;
+    let (first, rest) = path.split_first()?;
+    let head = aliases.get(first).cloned().unwrap_or_else(|| first.clone());
+    let mut resolved = if rest.is_empty() {
+        head
+    } else {
+        format!("{head}::{}", rest.join("::"))
+    };
+    while let Some(stripped) = resolved
+        .strip_prefix("crate::")
+        .or_else(|| resolved.strip_prefix("self::"))
+    {
+        resolved = stripped.to_owned();
+    }
+    Some(resolved)
+}
+
+fn lifecycle_module_aliases(file: &syn::File) -> BTreeMap<String, String> {
+    let mut aliases = BTreeMap::new();
+    for item in &file.items {
+        let syn::Item::Use(item) = item else {
+            continue;
+        };
+        if !attrs_may_be_production(&item.attrs) {
+            continue;
+        }
+        ImportAliasCollector::collect_tree(&mut aliases, &mut Vec::new(), &item.tree);
+    }
+    aliases
+}
+
+fn lifecycle_owner_landmarks(
+    function: &syn::ItemFn,
+    module_aliases: &BTreeMap<String, String>,
+) -> bool {
+    #[derive(Default)]
+    struct Landmarks {
+        classify: bool,
+        prepare: bool,
+    }
+
+    struct LandmarkVisitor {
+        landmarks: Landmarks,
+        aliases: BTreeMap<String, String>,
+    }
+
+    impl<'ast> Visit<'ast> for LandmarkVisitor {
+        fn visit_block(&mut self, block: &'ast syn::Block) {
+            let parent_aliases = self.aliases.clone();
+            for statement in &block.stmts {
+                let syn::Stmt::Item(syn::Item::Use(item)) = statement else {
+                    continue;
+                };
+                if attrs_may_be_production(&item.attrs) {
+                    ImportAliasCollector::collect_tree(
+                        &mut self.aliases,
+                        &mut Vec::new(),
+                        &item.tree,
+                    );
+                }
+            }
+            for statement in &block.stmts {
+                self.visit_stmt(statement);
+            }
+            self.aliases = parent_aliases;
+        }
+
+        fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+            if let Some(path) = canonical_lifecycle_call_path(&call.func, &self.aliases) {
+                match path.as_str() {
+                    "classify_command" => self.landmarks.classify = true,
+                    "runtime::operator::prepare_runtime" | "runtime::prepare_runtime" => {
+                        self.landmarks.prepare = true;
+                    }
+                    _ => {}
+                }
+            }
+            syn::visit::visit_expr_call(self, call);
+        }
+
+        fn visit_item_fn(&mut self, _function: &'ast syn::ItemFn) {}
+
+        fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+
+        fn visit_expr_async(&mut self, _async_: &'ast syn::ExprAsync) {}
+    }
+
+    let mut visitor = LandmarkVisitor {
+        landmarks: Landmarks::default(),
+        aliases: module_aliases.clone(),
+    };
+    visitor.visit_block(&function.block);
+    visitor.landmarks.classify && visitor.landmarks.prepare
+}
+
+fn lifecycle_owner_contains_nested_carrier(function: &syn::ItemFn) -> bool {
+    #[derive(Default)]
+    struct NestedCarrier {
+        present: bool,
+    }
+
+    impl<'ast> Visit<'ast> for NestedCarrier {
+        fn visit_item_fn(&mut self, _function: &'ast syn::ItemFn) {
+            self.present = true;
+        }
+
+        fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {
+            self.present = true;
+        }
+
+        fn visit_expr_async(&mut self, _async_: &'ast syn::ExprAsync) {
+            self.present = true;
+        }
+    }
+
+    let mut carrier = NestedCarrier::default();
+    carrier.visit_block(&function.block);
+    carrier.present
+}
+
+fn function_contains_nested_lifecycle_carrier(function: &syn::ItemFn) -> bool {
+    #[derive(Default)]
+    struct NestedLifecycleCarrier {
+        present: bool,
+    }
+
+    impl NestedLifecycleCarrier {
+        fn record<T: quote::ToTokens>(&mut self, carrier: &T) {
+            let tokens = compact_tokens(carrier);
+            self.present |=
+                tokens.contains("classify_command") && tokens.contains("prepare_runtime");
+        }
+    }
+
+    impl<'ast> Visit<'ast> for NestedLifecycleCarrier {
+        fn visit_item_fn(&mut self, function: &'ast syn::ItemFn) {
+            self.record(function);
+            if !self.present {
+                syn::visit::visit_item_fn(self, function);
+            }
+        }
+
+        fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+            self.record(closure);
+            if !self.present {
+                syn::visit::visit_expr_closure(self, closure);
+            }
+        }
+
+        fn visit_expr_async(&mut self, async_: &'ast syn::ExprAsync) {
+            self.record(async_);
+            if !self.present {
+                syn::visit::visit_expr_async(self, async_);
+            }
+        }
+    }
+
+    let mut carrier = NestedLifecycleCarrier::default();
+    carrier.visit_block(&function.block);
+    carrier.present
+}
+
+fn transparent_tail_expression(block: &syn::Block) -> Option<&syn::Expr> {
+    let [syn::Stmt::Expr(expression, semicolon)] = block.stmts.as_slice() else {
+        return None;
+    };
+    if semicolon.is_none() || matches!(transparent_expr(expression), syn::Expr::Return(_)) {
+        Some(transparent_expr(expression))
+    } else {
+        None
+    }
+}
+
+fn local_call_name(expression: &syn::Expr) -> Option<String> {
+    let syn::Expr::Path(path) = transparent_expr(expression) else {
+        return None;
+    };
+    if path.qself.is_some() || path.path.leading_colon.is_some() || path.path.segments.len() != 1 {
+        return None;
+    }
+    let segment = path.path.segments.first()?;
+    matches!(segment.arguments, syn::PathArguments::None).then(|| segment.ident.to_string())
+}
+
+fn collect_transparent_owner_calls(
+    expression: &syn::Expr,
+    functions: &BTreeMap<String, &syn::ItemFn>,
+    owner: &str,
+    stack: &mut Vec<String>,
+    owner_paths: &mut Vec<String>,
+) -> std::result::Result<(), String> {
+    match transparent_expr(expression) {
+        syn::Expr::Call(call) => {
+            let Some(callee) = local_call_name(&call.func) else {
+                return Err(format!(
+                    "rss binary transparent lifecycle chain permits only direct same-file free-function calls; chain={}",
+                    stack.join(" -> ")
+                ));
+            };
+            if callee != owner && !functions.contains_key(&callee) {
+                return Err(format!(
+                    "rss binary transparent lifecycle chain calls unknown local function `{callee}`; chain={}",
+                    stack.join(" -> ")
+                ));
+            }
+            for argument in &call.args {
+                collect_transparent_owner_calls(argument, functions, owner, stack, owner_paths)?;
+            }
+            if callee == owner {
+                let mut path = stack.clone();
+                path.push(callee);
+                owner_paths.push(path.join(" -> "));
+                return Ok(());
+            }
+            let Some(function) = functions.get(&callee) else {
+                return Ok(());
+            };
+            let Some(next) = transparent_tail_expression(&function.block) else {
+                return Ok(());
+            };
+            if stack.iter().any(|name| name == &callee) {
+                let mut cycle = stack.clone();
+                cycle.push(callee);
+                return Err(format!(
+                    "rss binary transparent lifecycle wrapper cycle: {}",
+                    cycle.join(" -> ")
+                ));
+            }
+            stack.push(callee);
+            let result =
+                collect_transparent_owner_calls(next, functions, owner, stack, owner_paths);
+            stack.pop();
+            result
+        }
+        syn::Expr::Await(await_) => {
+            collect_transparent_owner_calls(&await_.base, functions, owner, stack, owner_paths)
+        }
+        syn::Expr::Try(try_) => {
+            collect_transparent_owner_calls(&try_.expr, functions, owner, stack, owner_paths)
+        }
+        syn::Expr::Return(return_) => match return_.expr.as_deref() {
+            Some(expression) => {
+                collect_transparent_owner_calls(expression, functions, owner, stack, owner_paths)
+            }
+            None => Ok(()),
+        },
+        _ => Ok(()),
+    }
+}
+
+fn resolve_runtime_binary_lifecycle_owner<'a>(
+    file: &'a syn::File,
+) -> std::result::Result<(&'a syn::ItemFn, String), String> {
+    let functions = production_free_functions(file)?;
+    let module_aliases = lifecycle_module_aliases(file);
+    let main = functions
+        .get("main")
+        .copied()
+        .ok_or_else(|| "rss binary must have exactly one production `main`".to_owned())?;
+    let nested_carriers = functions
+        .iter()
+        .filter(|(_, function)| function_contains_nested_lifecycle_carrier(function))
+        .map(|(name, _)| name.as_str())
+        .collect::<Vec<_>>();
+    if !nested_carriers.is_empty() {
+        return Err(format!(
+            "rss binary forbids nested function, closure, or async-block lifecycle carriers; functions={nested_carriers:?}"
+        ));
+    }
+    let candidates = functions
+        .iter()
+        .filter(|(name, function)| {
+            name.as_str() != "main" && lifecycle_owner_landmarks(function, &module_aliases)
+        })
+        .collect::<Vec<_>>();
+    let [(owner_name, owner)] = candidates.as_slice() else {
+        let names = candidates
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        return Err(format!(
+            "rss binary must declare one non-main production lifecycle owner; candidates={names:?}"
+        ));
+    };
+    if lifecycle_owner_contains_nested_carrier(owner) {
+        return Err(format!(
+            "rss binary lifecycle owner `{owner_name}` cannot contain nested function, closure, or async-block carriers"
+        ));
+    }
+    let entry = transparent_tail_expression(&main.block).ok_or_else(|| {
+        "rss binary `main` must be one transparent tail expression reaching its lifecycle owner"
+            .to_owned()
+    })?;
+    let mut stack = vec!["main".to_owned()];
+    let mut owner_paths = Vec::new();
+    collect_transparent_owner_calls(entry, &functions, owner_name, &mut stack, &mut owner_paths)?;
+    let [path] = owner_paths.as_slice() else {
+        return Err(format!(
+            "rss binary `main` must reach lifecycle owner `{owner_name}` exactly once through a same-file transparent call chain; paths={owner_paths:?}"
+        ));
+    };
+    Ok((owner, path.clone()))
+}
+
 fn runtime_binary_lifecycle_residuals(root: &Path) -> Result<Vec<ResidualFinding>> {
     let path = root.join(RSS_MAIN_PATH);
     if !path.exists() {
         return Ok(Vec::new());
     }
     let file = parse_rust_file(&path)?;
-    let mains = file
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Fn(function)
-                if function.sig.ident == "main" && attrs_may_be_production(&function.attrs) =>
-            {
-                Some(function)
-            }
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let [main] = mains.as_slice() else {
-        return Ok(vec![ResidualFinding {
-            risk: ResidualRiskKey::Lifecycle,
-            subject: RSS_MAIN_PATH.to_owned(),
-            detail: "rss binary must have one production main lifecycle owner".to_owned(),
-        }]);
+    let (owner, owner_path) = match resolve_runtime_binary_lifecycle_owner(&file) {
+        Ok(owner) => owner,
+        Err(detail) => {
+            return Ok(vec![ResidualFinding {
+                risk: ResidualRiskKey::Lifecycle,
+                subject: RSS_MAIN_PATH.to_owned(),
+                detail,
+            }]);
+        }
     };
-    let body = compact_tokens(&main.block);
+    let body = compact_tokens(&owner.block);
     let ordered = |parts: &[&str]| {
         let mut rest = body.as_str();
         parts.iter().all(|part| {
@@ -1302,8 +1625,8 @@ fn runtime_binary_lifecycle_residuals(root: &Path) -> Result<Vec<ResidualFinding
             "ProjectionCommandPreparation::Help=>returnOk(())",
             "prepare_projection_runtime()?",
             "run_projection_control_command(prepared,&runtime_inputs).await",
-            "shutdown_projection_runtime(runtime_inputs).await?",
-            "returnoperator_result",
+            "cleanup_result=runtime::operator::shutdown_projection_runtime(runtime_inputs).await",
+            "returnruntime::operator::combine_command_and_cleanup(operator_result,cleanup_result)",
         ],
         &[
             "Saga=command",
@@ -1318,8 +1641,8 @@ fn runtime_binary_lifecycle_residuals(root: &Path) -> Result<Vec<ResidualFinding
             "DeviceLatentCommandPreparation::Help=>returnOk(())",
             "prepare_device_latent_runtime()?",
             "run_device_latent_inspection_command(prepared,&runtime_inputs).await",
-            "shutdown_device_latent_runtime(runtime_inputs).await?",
-            "returnoperator_result",
+            "cleanup_result=runtime::operator::shutdown_device_latent_runtime(runtime_inputs).await",
+            "returnruntime::operator::combine_command_and_cleanup(operator_result,cleanup_result)",
         ],
         &[
             "L2DrRecovery=command",
@@ -1334,8 +1657,8 @@ fn runtime_binary_lifecycle_residuals(root: &Path) -> Result<Vec<ResidualFinding
             "ReconcileTargetCommandPreparation::Help=>returnOk(())",
             "runtime::operator::prepare_runtime()?",
             "run_reconcile_target_command(prepared,&runtime_inputs).await",
-            "shutdown_runtime(runtime_inputs).await?",
-            "returnoperator_result",
+            "cleanup_result=runtime::operator::shutdown_runtime(runtime_inputs).await",
+            "returnruntime::operator::combine_command_and_cleanup(operator_result,cleanup_result)",
         ],
         &[
             "AuditLedgerVerify=command",
@@ -1343,8 +1666,8 @@ fn runtime_binary_lifecycle_residuals(root: &Path) -> Result<Vec<ResidualFinding
             "AuditLedgerVerifyCommandPreparation::Help=>returnOk(())",
             "runtime::operator::prepare_runtime()?",
             "run_audit_ledger_verify_command(prepared,&runtime_inputs).await",
-            "shutdown_runtime(runtime_inputs).await?",
-            "returnoperator_result",
+            "cleanup_result=runtime::operator::shutdown_runtime(runtime_inputs).await",
+            "returnruntime::operator::combine_command_and_cleanup(operator_result,cleanup_result)",
         ],
         &[
             "SettingsConfigValueMaintenance=command",
@@ -1352,8 +1675,8 @@ fn runtime_binary_lifecycle_residuals(root: &Path) -> Result<Vec<ResidualFinding
             "SettingsConfigValueMaintenanceCommandPreparation::Help=>returnOk(())",
             "runtime::operator::prepare_runtime()?",
             "run_settings_config_value_maintenance(prepared,&runtime_inputs).await",
-            "shutdown_runtime(runtime_inputs).await?",
-            "returnoperator_result",
+            "cleanup_result=runtime::operator::shutdown_runtime(runtime_inputs).await",
+            "returnruntime::operator::combine_command_and_cleanup(operator_result,cleanup_result)",
         ],
         &[
             "Dlq=command",
@@ -1361,19 +1684,20 @@ fn runtime_binary_lifecycle_residuals(root: &Path) -> Result<Vec<ResidualFinding
             "DlqCommandPreparation::Help=>returnOk(())",
             "runtime::operator::prepare_runtime()?",
             "run_dlq_control_command(prepared,&runtime_inputs).await",
-            "shutdown_runtime(runtime_inputs).await?",
-            "returnoperator_result",
+            "cleanup_result=runtime::operator::shutdown_runtime(runtime_inputs).await",
+            "returnruntime::operator::combine_command_and_cleanup(operator_result,cleanup_result)",
         ],
     ];
-    let counts_are_closed = body
+    let operator_prepare_count = body
         .matches("runtime::operator::prepare_runtime()?")
-        .count()
-        == 7
-        && body.matches("runtime::prepare_runtime()?").count() == 1
-        && body
-            .matches("runtime::operator::shutdown_runtime(runtime_inputs).await?")
-            .count()
-            == 5
+        .count();
+    let serving_prepare_count = body.matches("runtime::prepare_runtime()?").count();
+    let shutdown_count = body
+        .matches("runtime::operator::shutdown_runtime(runtime_inputs).await")
+        .count();
+    let counts_are_closed = operator_prepare_count == 7
+        && serving_prepare_count == 1
+        && shutdown_count == 5
         && body.matches("run_rss_access_jwks_export_command").count() == 1;
     let protocol_status = protocols
         .iter()
@@ -1386,12 +1710,8 @@ fn runtime_binary_lifecycle_residuals(root: &Path) -> Result<Vec<ResidualFinding
         risk: ResidualRiskKey::Lifecycle,
         subject: RSS_MAIN_PATH.to_owned(),
         detail: format!(
-            "rss binary must classify/help-prepare before runtime construction and preserve each typed run/shutdown handoff exactly once; operator_prepare={} serving_prepare={} shutdown={} protocols={protocol_status:?}",
-            body.matches("runtime::operator::prepare_runtime()?")
-                .count(),
-            body.matches("runtime::prepare_runtime()?").count(),
-            body.matches("runtime::operator::shutdown_runtime(runtime_inputs).await?")
-                .count(),
+            "rss binary lifecycle owner `{owner_path}` must classify/help-prepare before runtime construction and preserve each typed run/shutdown handoff exactly once; operator_prepare={} serving_prepare={} shutdown={} protocols={protocol_status:?}",
+            operator_prepare_count, serving_prepare_count, shutdown_count,
         ),
     }])
 }
@@ -2792,6 +3112,205 @@ mod tests {
     }
 
     #[test]
+    fn runtime_binary_lifecycle_rejects_unreachable_duplicate_and_nontransparent_owners()
+    -> Result<()> {
+        let workspace = workspace_root()?;
+        let canonical = fs::read_to_string(workspace.join(RSS_MAIN_PATH))?;
+        let owner_start = canonical
+            .find("#[tokio::main]\nasync fn run_main()")
+            .context("canonical rss main must contain the lifecycle owner")?;
+        let owner_end = canonical[owner_start..]
+            .find("\nfn process_exit(")
+            .map(|offset| owner_start + offset)
+            .context("canonical rss main must contain the process exit adapter")?;
+        let owner_source = &canonical[owner_start..owner_end];
+        let owner_body_start = owner_source
+            .find("{\n")
+            .map(|offset| offset + 2)
+            .context("canonical lifecycle owner must have a block")?;
+        let owner_body_end = owner_source
+            .rfind("\n}")
+            .context("canonical lifecycle owner block must close")?;
+        let owner_body = &owner_source[owner_body_start..owner_body_end];
+        let duplicate_owner = owner_source.replacen(
+            "async fn run_main()",
+            "async fn duplicate_lifecycle_owner()",
+            1,
+        );
+        let renamed_duplicate_owner = duplicate_owner
+            .replace("args", "argv")
+            .replace("std::env::argv()", "std::env::args()");
+        let qualified_duplicate_owner = duplicate_owner.replacen(
+            "classify_command(&args)?",
+            "crate::classify_command(&args)?",
+            1,
+        );
+        let classify_alias_duplicate_owner = duplicate_owner
+            .replacen(
+                "async fn duplicate_lifecycle_owner() -> anyhow::Result<()> {",
+                "async fn duplicate_lifecycle_owner() -> anyhow::Result<()> {\n    use crate::classify_command as classify;",
+                1,
+            )
+            .replacen("classify_command(&args)?", "classify(&args)?", 1);
+        let colliding_classify_alias_source = format!(
+            "{canonical}\n{classify_alias_duplicate_owner}\nfn unrelated_alias_owner() {{\n    use std::convert::identity as classify;\n    let _ = classify(1_u8);\n}}"
+        );
+        let nested_colliding_alias_owner = classify_alias_duplicate_owner.replacen(
+            "        let cleanup_result =",
+            "        {\n            use std::convert::identity as classify;\n            let _ = classify(1_u8);\n        }\n        let cleanup_result =",
+            1,
+        );
+        assert_ne!(
+            nested_colliding_alias_owner, classify_alias_duplicate_owner,
+            "nested alias collision mutation must be live"
+        );
+        let runtime_alias_duplicate_owner = duplicate_owner
+            .replacen(
+                "async fn duplicate_lifecycle_owner() -> anyhow::Result<()> {",
+                "async fn duplicate_lifecycle_owner() -> anyhow::Result<()> {\n    use runtime as runtime_alias;",
+                1,
+            )
+            .replace(
+                "runtime::operator::prepare_runtime()?",
+                "runtime_alias::operator::prepare_runtime()?",
+            )
+            .replace(
+                "runtime::prepare_runtime()?",
+                "runtime_alias::prepare_runtime()?",
+            );
+        let dead_local_owner = format!(
+            "#[tokio::main]\nasync fn run_main() -> anyhow::Result<()> {{\n    async fn dead_lifecycle_owner() -> anyhow::Result<()> {{\n{owner_body}\n    }}\n    Ok(())\n}}"
+        );
+        let dead_closure_owner = format!(
+            "#[tokio::main]\nasync fn run_main() -> anyhow::Result<()> {{\n    let _dead_lifecycle_owner = || async {{\n{owner_body}\n    }};\n    Ok(())\n}}"
+        );
+        let hidden_nested_owner = format!(
+            "fn lifecycle_container() {{\n    async fn hidden_lifecycle_owner() -> anyhow::Result<()> {{\n{owner_body}\n    }}\n}}"
+        );
+        let cases = [
+            (
+                "lifecycle owner is unreachable",
+                canonical.replacen(
+                    "process_exit(run_main())",
+                    "std::process::ExitCode::SUCCESS",
+                    1,
+                ),
+                "must reach lifecycle owner `run_main` exactly once",
+            ),
+            (
+                "lifecycle owner is called twice",
+                canonical.replacen(
+                    "process_exit(run_main())",
+                    "{ let _duplicate = run_main(); process_exit(run_main()) }",
+                    1,
+                ),
+                "must reach lifecycle owner `run_main` exactly once",
+            ),
+            (
+                "dead duplicate lifecycle owner remains in the file",
+                format!("{canonical}\n{duplicate_owner}"),
+                "must declare one non-main production lifecycle owner",
+            ),
+            (
+                "renamed dead duplicate lifecycle owner remains in the file",
+                format!("{canonical}\n{renamed_duplicate_owner}"),
+                "must declare one non-main production lifecycle owner",
+            ),
+            (
+                "qualified dead duplicate lifecycle owner remains in the file",
+                format!("{canonical}\n{qualified_duplicate_owner}"),
+                "must declare one non-main production lifecycle owner",
+            ),
+            (
+                "classify alias cannot hide a dead duplicate lifecycle owner",
+                format!("{canonical}\n{classify_alias_duplicate_owner}"),
+                "must declare one non-main production lifecycle owner",
+            ),
+            (
+                "unrelated lexical alias cannot overwrite lifecycle evidence",
+                colliding_classify_alias_source,
+                "must declare one non-main production lifecycle owner",
+            ),
+            (
+                "nested block alias cannot overwrite parent lifecycle evidence",
+                format!("{canonical}\n{nested_colliding_alias_owner}"),
+                "must declare one non-main production lifecycle owner",
+            ),
+            (
+                "runtime alias cannot hide a dead duplicate lifecycle owner",
+                format!("{canonical}\n{runtime_alias_duplicate_owner}"),
+                "must declare one non-main production lifecycle owner",
+            ),
+            (
+                "dead local async function cannot carry the lifecycle owner",
+                canonical.replacen(owner_source, &dead_local_owner, 1),
+                "forbids nested function, closure, or async-block lifecycle carriers",
+            ),
+            (
+                "dead closure cannot carry the lifecycle owner",
+                canonical.replacen(owner_source, &dead_closure_owner, 1),
+                "forbids nested function, closure, or async-block lifecycle carriers",
+            ),
+            (
+                "nested lifecycle carrier cannot hide in another helper",
+                format!("{canonical}\n{hidden_nested_owner}"),
+                "forbids nested function, closure, or async-block lifecycle carriers",
+            ),
+            (
+                "branching wrapper is not transparent",
+                canonical.replacen(
+                    "process_exit(run_main())",
+                    "if std::env::args().len() > 1 { process_exit(run_main()) } else { std::process::ExitCode::SUCCESS }",
+                    1,
+                ),
+                "must reach lifecycle owner `run_main` exactly once",
+            ),
+            (
+                "cyclic wrapper cannot reach the lifecycle owner",
+                format!(
+                    "{}\nfn lifecycle_cycle() -> std::process::ExitCode {{ lifecycle_cycle() }}",
+                    canonical.replacen(
+                        "process_exit(run_main())",
+                        "lifecycle_cycle()",
+                        1,
+                    )
+                ),
+                "transparent lifecycle wrapper cycle",
+            ),
+            (
+                "qualified call cannot carry the lifecycle owner",
+                canonical.replacen(
+                    "process_exit(run_main())",
+                    "std::mem::drop(run_main())",
+                    1,
+                ),
+                "permits only direct same-file free-function calls",
+            ),
+            (
+                "closure call cannot carry the lifecycle owner",
+                canonical.replacen(
+                    "process_exit(run_main())",
+                    "(|result| { drop(result); std::process::ExitCode::SUCCESS })(run_main())",
+                    1,
+                ),
+                "permits only direct same-file free-function calls",
+            ),
+        ];
+        for (label, source, expected_detail) in cases {
+            assert_ne!(source, canonical, "{label} mutation must be live");
+            let root = unique_tmp(&format!("rss-main-owner-red-{}", label.replace(' ', "-")));
+            write(&root.join(RSS_MAIN_PATH), &source)?;
+            let findings = runtime_binary_lifecycle_residuals(&root)?;
+            assert_eq!(findings.len(), 1, "{label} must fail closed exactly once");
+            assert!(
+                findings[0].detail.contains(expected_detail),
+                "{label} diagnostic must remain stable: {findings:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     fn runtime_binary_lifecycle_rejects_help_prepare_run_and_shutdown_mutations() -> Result<()> {
         let workspace = workspace_root()?;
         let canonical = fs::read_to_string(workspace.join(RSS_MAIN_PATH))?;
@@ -2810,12 +3329,17 @@ mod tests {
             ),
             (
                 "projection shutdown omitted",
-                "runtime::operator::shutdown_projection_runtime(runtime_inputs).await?;",
+                "runtime::operator::shutdown_projection_runtime(runtime_inputs).await;",
                 "drop(runtime_inputs);",
             ),
             (
                 "serving typed handoff omitted",
                 "return runtime::run(runtime::prepare_runtime()?).await;",
+                "return Ok(());",
+            ),
+            (
+                "operator run omitted",
+                "return runtime::operator::run_saga_command(prepared, runtime_inputs).await;",
                 "return Ok(());",
             ),
         ];

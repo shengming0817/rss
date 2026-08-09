@@ -105,11 +105,12 @@ impl WorkerSpec {
 ///
 /// Redis / S3 / Vault capability bundle 经 `runtime_resources(&self) ->
 /// Vec<Box<DynManagedResource>>`（仅 `diport` 类型）单源派生受管资源；adapter **不依赖 bootstrap**。
-/// 组合根以 crate-private `ProviderOutput` 把这些原语转换为本结构，再经
-/// [`DomainModuleResult::merge`] 进入统一生命周期路径，避免暴露裸 channel 或逐项手写
-/// `register_detached`（GoCell D5 多通道漂移根因）。PG readiness 还需要 interval / cancel token，不适用
-/// 此 seam；#1677 已由 runtime-private、单次消费的显式 PG output 收口，且不实现通用 `ProviderOutput`。
-/// AMQP 归 event-infra 生命周期，不把异质输出塞进宽泛 provider trait。
+/// 组合根以 role-specific、单次消费的 provider output 把这些原语转换为本三通道载体，再进入
+/// provider lifecycle batch，避免暴露裸 channel 或逐项手写 `register_detached`（GoCell D5 多通道
+/// 漂移根因）。复用载体只做类型擦除，不会把 semantic owner 从 provider 转移给 domain；owner 仍由
+/// assembly 的 provider transaction 槽位决定。PG readiness 还需要 interval / cancel token，不适用
+/// runtime-resource seam；#1677 已由显式 PG output 收口。AMQP 归 event-infra 生命周期，不把异质
+/// 输出塞进宽泛 provider trait。
 #[derive(Default)]
 pub struct DomainModuleResult {
     /// readiness / liveness 探针，组合根排空进 [`Registry::probe`]（须先于 `take_health_reporter`，readyz 才聚合）。
@@ -125,9 +126,10 @@ pub struct DomainModuleResult {
 }
 
 impl DomainModuleResult {
-    /// 把另一个域的产物聚合进来（跨域统一 fold；组合根只聚合 result，ADR-010 §2.2）。
+    /// 把另一个三通道载体保序搬入当前载体（domain fold；provider transaction 也可内部复用）。
     ///
-    /// 这是契约唯一聚合原语——未来域只需多一行 `module.merge(wire_X(&deps).await?)`，组合根形态恒定。
+    /// `merge` 不改变 lifecycle output 的 semantic owner；owner 由调用方所在的 typed transaction
+    /// 决定。未来域只需多一行 `module.merge(wire_X(&deps).await?)`，组合根形态恒定。
     pub fn merge(&mut self, other: DomainModuleResult) {
         self.probes.extend(other.probes);
         self.resources.extend(other.resources);

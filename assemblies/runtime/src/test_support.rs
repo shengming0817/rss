@@ -329,6 +329,103 @@ pub fn build_shared_runtime_deps(
     domain_transport: Arc<dyn distributed::HttpContractTransport>,
 ) -> SharedRuntimeDeps {
     let settings_readiness = settings_composition::test_support::readiness(pg.readiness_handle());
+    shared_runtime_deps_from_parts(
+        password_blocklist,
+        pg,
+        redis,
+        s3,
+        vault,
+        identity_signer,
+        settings_config_value_key_name,
+        settings_readiness,
+        domain_transport,
+    )
+}
+
+/// Purpose-bound Settings fixture which preserves the three non-interchangeable provider outputs.
+///
+/// The fixture is consumed once; it neither merges lifecycle carriers nor recreates the production
+/// provider transaction's record order.
+pub struct SettingsWireFixture {
+    deps: SharedRuntimeDeps,
+    postgres_output: settings_composition::SettingsPostgresReadinessOutput,
+    key_provider_output: settings_composition::SettingsKeyProviderReadinessOutput,
+    secret_resolver_output: settings_composition::SettingsSecretResolverReadinessOutput,
+}
+
+impl SettingsWireFixture {
+    /// Consume the fixture into domain inputs and the exact typed provider outputs.
+    #[must_use]
+    pub fn into_parts(
+        self,
+    ) -> (
+        SharedRuntimeDeps,
+        settings_composition::SettingsPostgresReadinessOutput,
+        settings_composition::SettingsKeyProviderReadinessOutput,
+        settings_composition::SettingsSecretResolverReadinessOutput,
+    ) {
+        (
+            self.deps,
+            self.postgres_output,
+            self.key_provider_output,
+            self.secret_resolver_output,
+        )
+    }
+}
+
+/// Build the Settings domain inputs and its PG/Vault readiness outputs from one generation.
+#[allow(clippy::too_many_arguments)]
+pub async fn build_settings_wire_fixture(
+    password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+    pg: postgres::PgRuntimeHandle,
+    redis: redis::RedisRuntimeDeps,
+    s3: s3::S3RuntimeDeps,
+    vault: vault::VaultRuntimeDeps,
+    identity_signer: Arc<vault::VaultSigner>,
+    settings_config_value_key_name: diport::KeyName,
+    domain_transport: Arc<dyn distributed::HttpContractTransport>,
+) -> anyhow::Result<SettingsWireFixture> {
+    let generation = settings_composition::SettingsProviderReadiness::new(
+        &vault.for_domain::<vault::caps::Settings>(),
+        settings_config_value_key_name.clone(),
+        settings_composition::KeyProviderReadinessInterval::default(),
+    )
+    .await?;
+    let (pending_postgres, key_provider_output, secret_resolver_output) =
+        generation.into_vault_parts();
+    let (settings_readiness, postgres_output) =
+        pending_postgres.bind_postgres(pg.readiness_handle())?;
+    let deps = shared_runtime_deps_from_parts(
+        password_blocklist,
+        pg,
+        redis,
+        s3,
+        vault,
+        identity_signer,
+        settings_config_value_key_name,
+        settings_readiness,
+        domain_transport,
+    );
+    Ok(SettingsWireFixture {
+        deps,
+        postgres_output,
+        key_provider_output,
+        secret_resolver_output,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn shared_runtime_deps_from_parts(
+    password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+    pg: postgres::PgRuntimeHandle,
+    redis: redis::RedisRuntimeDeps,
+    s3: s3::S3RuntimeDeps,
+    vault: vault::VaultRuntimeDeps,
+    identity_signer: Arc<vault::VaultSigner>,
+    settings_config_value_key_name: diport::KeyName,
+    settings_readiness: settings_composition::SettingsReadinessDeps,
+    domain_transport: Arc<dyn distributed::HttpContractTransport>,
+) -> SharedRuntimeDeps {
     SharedRuntimeDeps::from_integration_parts(
         password_blocklist,
         pg,
