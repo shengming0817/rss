@@ -1045,37 +1045,6 @@ fn build_vault_client(ca_path: Option<std::path::PathBuf>) -> anyhow::Result<req
     client.build().context("build settingsonly Vault client")
 }
 
-/// Sealed, move-only JWKS lifecycle evidence with the exact probe+resource shape.
-/// Must be committed through the generated listener-pdp finish path.
-pub(crate) struct ListenerPdpJwksLifecycle {
-    probe_name: primitives::ProbeName,
-    probe: Box<dyn bootstrap::HealthProbe>,
-    managed_resource: Box<DynManagedResource<'static>>,
-}
-
-impl ListenerPdpJwksLifecycle {
-    pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
-        bootstrap::DomainModuleResult {
-            probes: vec![(self.probe_name, self.probe)],
-            resources: vec![self.managed_resource],
-            ..Default::default()
-        }
-    }
-
-    #[cfg(test)]
-    fn for_test(
-        probe_name: primitives::ProbeName,
-        probe: Box<dyn bootstrap::HealthProbe>,
-        managed_resource: Box<DynManagedResource<'static>>,
-    ) -> Self {
-        Self {
-            probe_name,
-            probe,
-            managed_resource,
-        }
-    }
-}
-
 struct FederatedProvider {
     provider: Arc<oidc::OidcProvider<diport::FederatedAccessProfile>>,
     provider_constructor: crate::providers_gen::ListenerPdpConstructor,
@@ -1100,7 +1069,7 @@ fn build_federated_listener_pdp_jwks_lifecycle(
     federated: FederatedProvider,
 ) -> (
     crate::providers_gen::ListenerPdpConstructor,
-    ListenerPdpJwksLifecycle,
+    crate::providers_gen::ListenerPdpJwksLifecycle,
 ) {
     let managed_resource = federated.managed_resource();
     let ready_probe = AccessTokenJwksReadyProbe::federated_access(
@@ -1115,17 +1084,16 @@ fn build_federated_listener_pdp_jwks_lifecycle(
     } = federated;
     (
         provider_constructor,
-        ListenerPdpJwksLifecycle {
-            probe_name,
-            probe: Box::new(ready_probe),
+        crate::providers_gen::ListenerPdpJwksLifecycle::single(
+            (probe_name, Box::new(ready_probe)),
             managed_resource,
-        },
+        ),
     )
 }
 
 fn commit_listener_pdp_jwks_lifecycle(
     constructor: crate::providers_gen::ListenerPdpConstructor,
-    lifecycle: ListenerPdpJwksLifecycle,
+    lifecycle: crate::providers_gen::ListenerPdpJwksLifecycle,
 ) -> anyhow::Result<crate::providers_gen::ListenerPdpBatch> {
     constructor.finish(lifecycle)
 }
@@ -1201,6 +1169,7 @@ impl bootstrap::HealthProbe for AccessTokenJwksReadyProbe {
 mod tests {
     #![allow(clippy::expect_used)]
 
+    use crate::providers_gen::ListenerPdpJwksLifecycle;
     use diport::ManagedResource as _;
 
     use super::*;
@@ -1472,9 +1441,11 @@ mod tests {
         let listener_pdp = roles.listener_pdp().expect("listener-pdp constructor");
         let listener_pdp_probe = primitives::ProbeName::parse(crate::readiness::FEDERATED_JWKS)
             .expect("valid listener-pdp probe name");
-        let listener_pdp_output = ListenerPdpJwksLifecycle::for_test(
-            listener_pdp_probe.clone(),
-            Box::new(TestProbe(listener_pdp_probe.clone())),
+        let listener_pdp_output = ListenerPdpJwksLifecycle::single(
+            (
+                listener_pdp_probe.clone(),
+                Box::new(TestProbe(listener_pdp_probe.clone())),
+            ),
             DynManagedResource::new_box(TestResource),
         );
         let listener_pdp = commit_listener_pdp_jwks_lifecycle(listener_pdp, listener_pdp_output)

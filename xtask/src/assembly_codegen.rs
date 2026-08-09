@@ -39,7 +39,7 @@ const DEFAULT_PROVIDER_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
 };
 
 const LISTENER_PDP_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
-    input_type: "crate::providers::ListenerPdpJwksLifecycle",
+    input_type: "ListenerPdpJwksLifecycle",
     materializer: Some("into_output"),
 };
 
@@ -48,39 +48,6 @@ const fn provider_finish_shape(role: ProviderRole) -> ProviderFinishShape {
         ProviderRole::ListenerPdp => LISTENER_PDP_FINISH_SHAPE,
         _ => DEFAULT_PROVIDER_FINISH_SHAPE,
     }
-}
-
-fn provider_finish_shape_for_constructor_target(target: &str) -> Option<ProviderFinishShape> {
-    let variant = target.strip_suffix("Constructor")?;
-    Some(match variant {
-        "DeviceCertificateStore" => provider_finish_shape(ProviderRole::DeviceCertificateStore),
-        "DeviceCommandStore" => provider_finish_shape(ProviderRole::DeviceCommandStore),
-        "DeviceDraftArtifactSource" => {
-            provider_finish_shape(ProviderRole::DeviceDraftArtifactSource)
-        }
-        "DeviceMqttSession" => provider_finish_shape(ProviderRole::DeviceMqttSession),
-        "DeviceRevocationStore" => provider_finish_shape(ProviderRole::DeviceRevocationStore),
-        "EventPublisher" => provider_finish_shape(ProviderRole::EventPublisher),
-        "EventSubscriber" => provider_finish_shape(ProviderRole::EventSubscriber),
-        "IdentitySigner" => provider_finish_shape(ProviderRole::IdentitySigner),
-        "SettingsKeyProvider" => provider_finish_shape(ProviderRole::SettingsKeyProvider),
-        "SettingsSecretResolver" => provider_finish_shape(ProviderRole::SettingsSecretResolver),
-        "ListenerPdp" => provider_finish_shape(ProviderRole::ListenerPdp),
-        "ServiceTokenReplayStore" => provider_finish_shape(ProviderRole::ServiceTokenReplayStore),
-        "AuthAuditSink" => provider_finish_shape(ProviderRole::AuthAuditSink),
-        "ListenerRateLimiter" => provider_finish_shape(ProviderRole::ListenerRateLimiter),
-        "DistributedLockStore" => provider_finish_shape(ProviderRole::DistributedLockStore),
-        "DistributedCasStore" => provider_finish_shape(ProviderRole::DistributedCasStore),
-        "DistributedCasStoreAlternative" => {
-            provider_finish_shape(ProviderRole::DistributedCasStoreAlternative)
-        }
-        "RuntimeObjectStore" => provider_finish_shape(ProviderRole::RuntimeObjectStore),
-        "DlxLifecycleRepository" => provider_finish_shape(ProviderRole::DlxLifecycleRepository),
-        "DlxArchiveStore" => provider_finish_shape(ProviderRole::DlxArchiveStore),
-        "DlxArchiveKeyProvider" => provider_finish_shape(ProviderRole::DlxArchiveKeyProvider),
-        "DlxHotKeyProvider" => provider_finish_shape(ProviderRole::DlxHotKeyProvider),
-        _ => return None,
-    })
 }
 
 fn finish_matches_provider_shape(finish: &syn::ImplItemFn, shape: ProviderFinishShape) -> bool {
@@ -705,12 +672,7 @@ fn ensure_owned(path: &Path, bytes: &[u8], kind: ArtifactKind) -> Result<()> {
 }
 
 fn render_providers(manifest: &CanonicalAssemblyManifestV2, source_label: &str) -> Result<String> {
-    let mut providers = manifest
-        .diport_providers()
-        .iter()
-        .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
-        .collect::<Vec<_>>();
-    providers.sort_by_key(|provider| provider.id.as_str());
+    let providers = active_providers(manifest);
 
     let mut code = format!(
         "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,\n    ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
@@ -776,12 +738,73 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV2, source_label: &str) 
         code.push_str("    ),\n");
     }
     code.push_str("];\n");
-    if matches!(manifest.name(), "settingsonly" | "identityaudit") {
+    if providers
+        .iter()
+        .any(|provider| provider.id == ProviderRole::ListenerPdp)
+    {
+        render_listener_pdp_lifecycle(&mut code);
+    }
+    let emits_role_batches = matches!(manifest.name(), "settingsonly" | "identityaudit");
+    if emits_role_batches {
         render_provider_role_batches(&mut code, manifest.name(), &providers)?;
     }
     let formatted = crate::codegen::format_rust(&code)?;
-    validate_provider_catalog_syntax(&formatted)?;
+    validate_provider_catalog_syntax(&formatted, &providers, emits_role_batches)?;
     Ok(formatted)
+}
+
+fn active_providers(
+    manifest: &CanonicalAssemblyManifestV2,
+) -> Vec<&assembly_schema::DiportProvider> {
+    let mut providers = manifest
+        .diport_providers()
+        .iter()
+        .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
+        .collect::<Vec<_>>();
+    providers.sort_by_key(|provider| provider.id.as_str());
+    providers
+}
+
+fn render_listener_pdp_lifecycle(code: &mut String) {
+    code.push_str(
+        "\nstruct ListenerPdpJwksEntry {\n\
+             probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),\n\
+             resource: Box<diport::DynManagedResource<'static>>,\n\
+         }\n\
+         \n#[must_use = \"listener PDP JWKS lifecycle must be committed through its typed provider transaction\"]\n\
+         pub(crate) struct ListenerPdpJwksLifecycle {\n\
+             head: ListenerPdpJwksEntry,\n\
+             tail: Vec<ListenerPdpJwksEntry>,\n\
+         }\n\
+         \nimpl ListenerPdpJwksLifecycle {\n\
+             pub(crate) fn single(\n\
+                 probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),\n\
+                 resource: Box<diport::DynManagedResource<'static>>,\n\
+             ) -> Self {\n\
+                 Self {\n\
+                     head: ListenerPdpJwksEntry { probe, resource },\n\
+                     tail: Vec::new(),\n\
+                 }\n\
+             }\n\
+             \n             #[allow(dead_code, reason = \"single-entry assemblies share the canonical carrier API\")]\n\
+             pub(crate) fn merge(mut self, other: Self) -> Self {\n\
+                 self.tail.push(other.head);\n\
+                 self.tail.extend(other.tail);\n\
+                 self\n\
+             }\n\
+             \n             pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {\n\
+                 let (probes, resources) = std::iter::once(self.head)\n\
+                     .chain(self.tail)\n\
+                     .map(|entry| (entry.probe, entry.resource))\n\
+                     .unzip();\n\
+                 bootstrap::DomainModuleResult {\n\
+                     probes,\n\
+                     resources,\n\
+                     workers: Vec::new(),\n\
+                 }\n\
+             }\n\
+         }\n",
+    );
 }
 
 fn render_provider_role_batches(
@@ -951,7 +974,11 @@ fn render_provider_role_batches(
     Ok(())
 }
 
-fn validate_provider_catalog_syntax(source: &str) -> Result<()> {
+fn validate_provider_catalog_syntax(
+    source: &str,
+    providers: &[&assembly_schema::DiportProvider],
+    emits_role_batches: bool,
+) -> Result<()> {
     let syntax = syn::parse_file(source).context("解析 provider catalog Rust AST 失败")?;
     let Some((syn::Item::Use(import), remaining)) = syntax.items.split_first() else {
         bail!("provider catalog 缺少固定 import");
@@ -996,10 +1023,50 @@ fn validate_provider_catalog_syntax(source: &str) -> Result<()> {
         validate_provider_catalog_entry(entry)?;
         roles.push(provider_catalog_entry_role_variant(entry)?);
     }
-    if role_batch_items.is_empty() {
+    let expected_roles = providers
+        .iter()
+        .map(|provider| provider_role_variant(provider.id))
+        .collect::<Vec<_>>();
+    ensure!(
+        roles == expected_roles,
+        "provider catalog role 集合必须直接匹配 typed provider IR: expected={expected_roles:?} actual={roles:?}"
+    );
+
+    let mut remaining = role_batch_items;
+    if providers
+        .iter()
+        .any(|provider| provider.id == ProviderRole::ListenerPdp)
+    {
+        let expected = listener_pdp_lifecycle_items()?;
+        ensure!(
+            remaining.len() >= expected.len(),
+            "provider catalog 缺少 generated listener-PDP lifecycle carrier"
+        );
+        for (actual, expected) in remaining.iter().zip(&expected) {
+            ensure!(
+                compact_tokens(actual) == compact_tokens(expected),
+                "generated listener-PDP lifecycle carrier 漂移"
+            );
+        }
+        remaining = &remaining[expected.len()..];
+    }
+
+    if !emits_role_batches {
+        ensure!(
+            remaining.is_empty(),
+            "provider catalog data-only target 含额外 generated item"
+        );
         return Ok(());
     }
-    validate_provider_role_batch_syntax(role_batch_items, &roles)
+    validate_provider_role_batch_syntax(remaining, providers)
+}
+
+fn listener_pdp_lifecycle_items() -> Result<Vec<syn::Item>> {
+    let mut source = String::new();
+    render_listener_pdp_lifecycle(&mut source);
+    Ok(syn::parse_file(&source)
+        .context("解析 canonical listener-PDP lifecycle carrier 失败")?
+        .items)
 }
 
 fn provider_catalog_entry_role_variant(expression: &syn::Expr) -> Result<String> {
@@ -1016,7 +1083,14 @@ fn provider_catalog_entry_role_variant(expression: &syn::Expr) -> Result<String>
         .context("provider catalog role 缺少 variant")
 }
 
-fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) -> Result<()> {
+fn validate_provider_role_batch_syntax(
+    items: &[syn::Item],
+    providers: &[&assembly_schema::DiportProvider],
+) -> Result<()> {
+    let roles = providers
+        .iter()
+        .map(|provider| provider_role_variant(provider.id))
+        .collect::<Vec<_>>();
     let mut expected_structs = vec![
         "CompletedProviderRoles".to_owned(),
         "ProviderRoleBatches".to_owned(),
@@ -1035,7 +1109,7 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
             vec!["into_probe_bindings".to_owned()],
         ),
     ];
-    for role in roles {
+    for role in &roles {
         expected_structs.extend([
             format!("{role}Constructor"),
             format!("{role}Batch"),
@@ -1056,9 +1130,12 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
     let mut impls = Vec::new();
     let mut functions = Vec::new();
     let mut exact_residual_guard = false;
+    let mut finish_shapes = std::collections::BTreeMap::<String, ProviderFinishShape>::new();
     let mut finish_shapes_ok = std::collections::BTreeMap::<String, bool>::new();
-    for role in roles {
-        finish_shapes_ok.insert(format!("{role}Constructor"), false);
+    for provider in providers {
+        let target = format!("{}Constructor", provider_role_variant(provider.id));
+        finish_shapes.insert(target.clone(), provider_finish_shape(provider.id));
+        finish_shapes_ok.insert(target, false);
     }
     for item in items {
         match item {
@@ -1107,7 +1184,7 @@ fn validate_provider_role_batch_syntax(items: &[syn::Item], roles: &[String]) ->
                     .all(|required| body.contains(required))
                         && !body.contains(">=staged[");
                 }
-                if let Some(shape) = provider_finish_shape_for_constructor_target(&target)
+                if let Some(shape) = finish_shapes.get(&target).copied()
                     && let Some(syn::ImplItem::Fn(finish)) = item.items.iter().find(
                         |member| matches!(member, syn::ImplItem::Fn(method) if method.sig.ident == "finish"),
                     )
@@ -1708,6 +1785,18 @@ mod tests {
 
     const RATE_PROVIDER: &str = r#"{ id = "listener-rate-limiter", port = "diport::RateLimiter", provider = "ratelimit::GovernorLimiter", providerCrate = "ratelimit", consumer = "httpserve", lifecycle = "active", durability = "ephemeral-memory", purpose = "test", outputs = [] }"#;
     const PDP_PROVIDER: &str = r#"{ id = "listener-pdp", port = "diport::Pdp", provider = "oidc::OidcProvider", providerCrate = "oidc", requiredFeatures = ["backend"], consumer = "httpserve", lifecycle = "active", durability = "persistent", purpose = "authorization", outputs = ["probes", "resources"] }"#;
+
+    fn validate_provider_catalog_for_manifest(
+        source: &str,
+        manifest: &CanonicalAssemblyManifestV2,
+    ) -> Result<()> {
+        let providers = active_providers(manifest);
+        validate_provider_catalog_syntax(
+            source,
+            &providers,
+            matches!(manifest.name(), "settingsonly" | "identityaudit"),
+        )
+    }
 
     fn manifest(domains: &str) -> String {
         format!(
@@ -2334,7 +2423,6 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             "TypeId",
             "HashMap",
             "BTreeMap",
-            "fn ",
             "callback",
             "service_locator",
         ] {
@@ -2343,7 +2431,9 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
                 "generated provider catalog contains banned token `{banned}`"
             );
         }
-        validate_provider_catalog_syntax(&rendered)?;
+        let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
+        validate_provider_catalog_for_manifest(&rendered, &manifest)?;
         let dlx = rendered
             .find("ProviderRole::DlxArchiveKeyProvider")
             .context("missing DLX archive key provider")?;
@@ -2415,9 +2505,19 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         );
         assert!(
             !compact_rendered.contains(
-                "implDlxHotKeyProviderConstructor{pub(crate)fnfinish(self,output:crate::providers::ListenerPdpJwksLifecycle,"
+                "implDlxHotKeyProviderConstructor{pub(crate)fnfinish(self,output:ListenerPdpJwksLifecycle,"
             ),
             "ordinary roles must not inherit ListenerPdp finish input"
+        );
+        let ordinary_role_with_listener_shape = rendered.replacen(
+            "output: bootstrap::DomainModuleResult",
+            "output: ListenerPdpJwksLifecycle",
+            1,
+        );
+        assert!(
+            validate_provider_catalog_for_manifest(&ordinary_role_with_listener_shape, &manifest)
+                .is_err(),
+            "synthetic red: ordinary role inherited the listener-PDP lifecycle shape"
         );
         let mut untyped_listener_pdp = rendered.clone();
         untyped_listener_pdp = untyped_listener_pdp.replacen(
@@ -2426,7 +2526,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             1,
         );
         assert!(
-            validate_provider_catalog_syntax(&untyped_listener_pdp).is_err(),
+            validate_provider_catalog_for_manifest(&untyped_listener_pdp, &manifest).is_err(),
             "synthetic red: untyped listener-pdp lifecycle output was accepted"
         );
         let mut dematerialized = rendered.clone();
@@ -2436,7 +2536,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             1,
         );
         assert!(
-            validate_provider_catalog_syntax(&dematerialized).is_err(),
+            validate_provider_catalog_for_manifest(&dematerialized, &manifest).is_err(),
             "synthetic red: ListenerPdp finish without materializer was accepted"
         );
         let mut aliased_materializer = rendered.clone();
@@ -2446,7 +2546,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             1,
         );
         assert!(
-            validate_provider_catalog_syntax(&aliased_materializer).is_err(),
+            validate_provider_catalog_for_manifest(&aliased_materializer, &manifest).is_err(),
             "synthetic red: ListenerPdp finish materializer alias was accepted"
         );
         for channel in ["probes", "resources", "workers"] {
@@ -2466,7 +2566,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             let mut weakened = rendered.clone();
             weakened.replace_range(operator..operator + 2, ">=");
             assert!(
-                validate_provider_catalog_syntax(&weakened).is_err(),
+                validate_provider_catalog_for_manifest(&weakened, &manifest).is_err(),
                 "synthetic red: weakened {channel} residual guard was accepted"
             );
         }
@@ -2474,7 +2574,94 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
     }
 
     #[test]
-    fn provider_finish_shape_table_is_closed_over_all_roles() {
+    fn listener_pdp_lifecycle_carrier_is_one_generated_shape_for_every_consumer() -> Result<()> {
+        let root = crate::workspace_root()?;
+        for assembly in ["runtime", "identityaudit", "settingsonly"] {
+            let source =
+                fs::read_to_string(root.join("assemblies").join(assembly).join("assembly.toml"))?;
+            let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
+            let rendered =
+                render_providers(&manifest, &format!("assemblies/{assembly}/assembly.toml"))?;
+            let compact = rendered.split_whitespace().collect::<String>();
+
+            for required in [
+                "structListenerPdpJwksEntry{probe:(primitives::ProbeName,Box<dynbootstrap::HealthProbe>),resource:Box<diport::DynManagedResource<'static>>,}",
+                "pub(crate)structListenerPdpJwksLifecycle{head:ListenerPdpJwksEntry,tail:Vec<ListenerPdpJwksEntry>,}",
+                "pub(crate)fnsingle(",
+                "pub(crate)fnmerge(mutself,other:Self)->Self",
+                "pub(crate)fninto_output(self)->bootstrap::DomainModuleResult",
+            ] {
+                assert!(
+                    compact.contains(required),
+                    "{assembly} generated carrier omitted canonical shape `{required}`"
+                );
+            }
+            for forbidden in [
+                "derive(Clone",
+                "derive(Copy",
+                "derive(Default",
+                "synthetic_for_test",
+                "crate::providers::ListenerPdpJwksLifecycle",
+            ] {
+                assert!(
+                    !rendered.contains(forbidden),
+                    "{assembly} generated carrier retained forbidden escape `{forbidden}`"
+                );
+            }
+            validate_provider_catalog_for_manifest(&rendered, &manifest)?;
+            for (name, mutated) in [
+                (
+                    "public field",
+                    rendered.replacen(
+                        "    head: ListenerPdpJwksEntry,",
+                        "    pub(crate) head: ListenerPdpJwksEntry,",
+                        1,
+                    ),
+                ),
+                (
+                    "Default derivation",
+                    rendered.replacen("#[must_use =", "#[derive(Default)]\n#[must_use =", 1),
+                ),
+                (
+                    "Clone/Copy derivation",
+                    rendered.replacen("#[must_use =", "#[derive(Clone, Copy)]\n#[must_use =", 1),
+                ),
+                (
+                    "empty Vec carrier",
+                    rendered.replacen(
+                        "    head: ListenerPdpJwksEntry,\n    tail: Vec<ListenerPdpJwksEntry>,",
+                        "    entries: Vec<ListenerPdpJwksEntry>,",
+                        1,
+                    ),
+                ),
+                (
+                    "raw module constructor",
+                    rendered.replacen(
+                        "        probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),",
+                        "        output: bootstrap::DomainModuleResult,",
+                        1,
+                    ),
+                ),
+                (
+                    "surplus worker materialization",
+                    rendered.replacen(
+                        "            workers: Vec::new(),",
+                        "            workers: output.workers,",
+                        1,
+                    ),
+                ),
+            ] {
+                assert!(
+                    validate_provider_catalog_for_manifest(&mutated, &manifest).is_err(),
+                    "synthetic red: {assembly} accepted {name} in canonical carrier"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn provider_finish_shape_is_closed_over_all_typed_roles() {
         for role in [
             ProviderRole::DeviceCertificateStore,
             ProviderRole::DeviceCommandStore,
@@ -2500,25 +2687,15 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             ProviderRole::DlxHotKeyProvider,
         ] {
             let shape = provider_finish_shape(role);
-            let target = format!("{}Constructor", provider_role_variant(role));
-            assert_eq!(
-                provider_finish_shape_for_constructor_target(&target),
-                Some(shape),
-                "constructor target lookup must share provider_finish_shape({role:?})"
-            );
             if role == ProviderRole::ListenerPdp {
                 assert_eq!(shape, LISTENER_PDP_FINISH_SHAPE);
+                assert_eq!(shape.input_type, "ListenerPdpJwksLifecycle");
                 assert_eq!(shape.materializer, Some("into_output"));
             } else {
                 assert_eq!(shape, DEFAULT_PROVIDER_FINISH_SHAPE);
                 assert_eq!(shape.materializer, None);
             }
         }
-        assert_eq!(
-            provider_finish_shape_for_constructor_target("UnknownConstructor"),
-            None,
-            "unknown constructor targets must not fall back"
-        );
     }
 
     #[test]
@@ -2569,9 +2746,9 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             "Some(assembly_schema::ProviderScope::ClusterGlobal)",
             "None",
         );
-        validate_provider_catalog_syntax(&scope_only)?;
-        validate_provider_catalog_syntax(&posture_only)?;
-        validate_provider_catalog_syntax(&all_none)?;
+        validate_provider_catalog_for_manifest(&scope_only, &manifest)?;
+        validate_provider_catalog_for_manifest(&posture_only, &manifest)?;
+        validate_provider_catalog_for_manifest(&all_none, &manifest)?;
         fs::remove_dir_all(root)?;
         Ok(())
     }
@@ -2801,29 +2978,30 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
 
         let extra_const =
             format!("{rendered}\nconst SECRET: Option<&str> = option_env!(\"RSS_PASSWORD\");\n");
-        assert!(validate_provider_catalog_syntax(&extra_const).is_err());
+        assert!(validate_provider_catalog_for_manifest(&extra_const, &manifest).is_err());
         assert!(
-            validate_provider_catalog_syntax(&rendered.replacen(
-                "\"vault\"",
-                "option_env!(\"RSS_PROVIDER\").unwrap_or(\"vault\")",
-                1
-            ))
+            validate_provider_catalog_for_manifest(
+                &rendered.replacen(
+                    "\"vault\"",
+                    "option_env!(\"RSS_PROVIDER\").unwrap_or(\"vault\")",
+                    1
+                ),
+                &manifest,
+            )
             .is_err()
         );
         assert!(
-            validate_provider_catalog_syntax(&rendered.replacen(
-                "ProviderCatalogEntry::checked",
-                "build_provider",
-                1
-            ))
+            validate_provider_catalog_for_manifest(
+                &rendered.replacen("ProviderCatalogEntry::checked", "build_provider", 1),
+                &manifest,
+            )
             .is_err()
         );
         assert!(
-            validate_provider_catalog_syntax(&rendered.replacen(
-                "None",
-                "Some(scope_from_env())",
-                1
-            ))
+            validate_provider_catalog_for_manifest(
+                &rendered.replacen("None", "Some(scope_from_env())", 1),
+                &manifest,
+            )
             .is_err()
         );
         fs::remove_dir_all(root)?;
@@ -2842,7 +3020,9 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         )?;
         assert!(generate_providers_root(&root, true).is_err());
         generate_providers_root(&root, false)?;
-        validate_provider_catalog_syntax(&fs::read_to_string(&target)?)?;
+        let source = fs::read_to_string(root.join("assemblies/runtime/assembly.toml"))?;
+        let manifest = AssemblyManifest::from_toml_str(&source)?.canonicalize_v2()?;
+        validate_provider_catalog_for_manifest(&fs::read_to_string(&target)?, &manifest)?;
         generate_providers_root(&root, true)?;
 
         fs::remove_file(&target)?;

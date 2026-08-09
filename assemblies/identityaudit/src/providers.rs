@@ -870,40 +870,12 @@ struct OidcProducts {
     probe: AccessTokenJwksReadyProbe,
 }
 
-/// Sealed, move-only JWKS lifecycle evidence with the exact probe+resource shape.
-/// Must be committed through the generated listener-pdp finish path.
-pub(crate) struct ListenerPdpJwksLifecycle {
-    jwks_probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),
-    managed_resource: Box<DynManagedResource<'static>>,
-}
-
-impl ListenerPdpJwksLifecycle {
-    pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
-        bootstrap::DomainModuleResult {
-            probes: vec![self.jwks_probe],
-            resources: vec![self.managed_resource],
-            ..Default::default()
-        }
-    }
-
-    #[cfg(test)]
-    fn for_test(
-        jwks_probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),
-        managed_resource: Box<DynManagedResource<'static>>,
-    ) -> Self {
-        Self {
-            jwks_probe,
-            managed_resource,
-        }
-    }
-}
-
 fn build_rss_listener_pdp_jwks_lifecycle(
     products: OidcProducts,
 ) -> (
     Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
     Arc<identity::AuthGrantValidationService>,
-    ListenerPdpJwksLifecycle,
+    crate::providers_gen::ListenerPdpJwksLifecycle,
 ) {
     let provider = products.provider();
     let OidcProducts {
@@ -917,16 +889,16 @@ fn build_rss_listener_pdp_jwks_lifecycle(
     (
         provider,
         grants,
-        ListenerPdpJwksLifecycle {
-            jwks_probe: (probe_name, Box::new(probe)),
+        crate::providers_gen::ListenerPdpJwksLifecycle::single(
+            (probe_name, Box::new(probe)),
             managed_resource,
-        },
+        ),
     )
 }
 
 fn commit_listener_pdp_jwks_lifecycle(
     constructor: crate::providers_gen::ListenerPdpConstructor,
-    lifecycle: ListenerPdpJwksLifecycle,
+    lifecycle: crate::providers_gen::ListenerPdpJwksLifecycle,
 ) -> anyhow::Result<crate::providers_gen::ListenerPdpBatch> {
     constructor.finish(lifecycle)
 }
@@ -1123,6 +1095,7 @@ mod tests {
     #![allow(clippy::expect_used)]
 
     use super::*;
+    use crate::providers_gen::ListenerPdpJwksLifecycle;
     use axum::{Json, Router, routing::post};
     use base64::Engine as _;
     use diport::KeyProvider as _;
@@ -1185,7 +1158,7 @@ mod tests {
     fn test_listener_pdp_jwks_lifecycle() -> (primitives::ProbeName, ListenerPdpJwksLifecycle) {
         let probe_name = primitives::ProbeName::parse("identityaudit_rss_jwks_ready")
             .expect("valid static JWKS probe name");
-        let lifecycle = ListenerPdpJwksLifecycle::for_test(
+        let lifecycle = ListenerPdpJwksLifecycle::single(
             (probe_name.clone(), Box::new(TestProbe(probe_name.clone()))),
             DynManagedResource::new_box(TestResource {
                 shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

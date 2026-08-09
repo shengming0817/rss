@@ -3,9 +3,8 @@ use super::{
     phase_result,
 };
 use crate::config::RuntimeServingConfig;
-use crate::infra::oidc::{
-    ListenerPdpJwksLifecycle, build_federated_access_provider, build_rss_access_provider,
-};
+use crate::infra::oidc::{build_federated_access_provider, build_rss_access_provider};
+use crate::providers_gen::ListenerPdpJwksLifecycle;
 use anyhow::Context as _;
 use tokio_util::sync::CancellationToken;
 
@@ -65,7 +64,7 @@ impl UncommittedListenerPdpLifecycle {
             self.committed = true;
             self.lifecycle
                 .take()
-                .map(ListenerPdpJwksLifecycle::into_module)
+                .map(ListenerPdpJwksLifecycle::into_output)
                 .unwrap_or_default()
         }
     }
@@ -113,7 +112,7 @@ impl<'a> Planned<'a> {
                     ),
                 )
                 .context("record listener rate-limiter provider output")?;
-            let listener_pdp_permit = provider_factories.listener_pdp()?;
+            let listener_pdp_constructor = provider_factories.listener_pdp()?;
 
             let config = context.config();
             let serving_config = RuntimeServingConfig::from_snapshot(config)
@@ -162,8 +161,8 @@ impl<'a> Planned<'a> {
             };
             provider_build
                 .record(crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+                    listener_pdp_constructor,
                     token_lifecycle,
-                    listener_pdp_permit,
                 ))
                 .context("record listener PDP provider output")?;
 

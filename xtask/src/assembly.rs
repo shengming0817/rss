@@ -7848,29 +7848,34 @@ fn build_service_token_provider() {
 fn build_rss_listener_pdp_jwks_lifecycle(
     provider: &RuntimeAccessProvider<RssAccessProfile>,
 ) -> ListenerPdpJwksLifecycle {
-    ListenerPdpJwksLifecycle::new(
-        provider.managed_resource(),
+    ListenerPdpJwksLifecycle::single(
         AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),
+        provider.managed_resource(),
     )
 }
 
 fn build_federated_listener_pdp_jwks_lifecycle(
     provider: &RuntimeAccessProvider<FederatedAccessProfile>,
 ) -> ListenerPdpJwksLifecycle {
-    ListenerPdpJwksLifecycle::new(
-        provider.managed_resource(),
+    ListenerPdpJwksLifecycle::single(
         AccessTokenJwksReadyProbe::federated_access(provider.jwks_readiness()).into_registration(),
+        provider.managed_resource(),
     )
 }
 
 impl ListenerPdpJwksLifecycle {
     pub(crate) fn merge(mut self, other: Self) -> Self {
-        self.module.merge(other.module);
+        self.tail.push(other.head);
+        self.tail.extend(other.tail);
         self
     }
 
-    pub(crate) fn into_module(self) -> bootstrap::DomainModuleResult {
-        self.module
+    pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
+        bootstrap::DomainModuleResult {
+            probes,
+            resources,
+            workers: Vec::new(),
+        }
     }
 }
 
@@ -7891,10 +7896,13 @@ impl ProviderOutput {
         }
     }
 
-    fn listener_pdp(lifecycle: ListenerPdpJwksLifecycle, permit: ListenerPdpPermit) -> Self {
+    fn listener_pdp(
+        constructor: ListenerPdpConstructor,
+        lifecycle: ListenerPdpJwksLifecycle,
+    ) -> Self {
         Self::new(
-            lifecycle.into_module(),
-            vec![ProviderReceipt::ListenerPdp(permit.0)],
+            lifecycle.into_output(),
+            vec![ProviderReceipt::ListenerPdp(constructor.0)],
             "listener-pdp",
             CHANNELS_PROBES_RESOURCES,
         )
@@ -7903,10 +7911,10 @@ impl ProviderOutput {
 
 mod provider_output {
 fn commit_listener_pdp_jwks_lifecycle(
-    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
-    permit: ListenerPdpPermit,
+    constructor: ListenerPdpConstructor,
+    lifecycle: ListenerPdpJwksLifecycle,
 ) -> ProviderOutput {
-    ProviderOutput::listener_pdp(lifecycle, permit)
+    ProviderOutput::listener_pdp(constructor, lifecycle)
 }
 }
 
@@ -7937,8 +7945,8 @@ fn run_startup() {
     let listener_pdp_lifecycle = rss_lifecycle.merge(federated_lifecycle);
     provider_build.record(
         crate::provider_output::commit_listener_pdp_jwks_lifecycle(
+            listener_pdp_constructor,
             listener_pdp_lifecycle,
-            listener_pdp_permit,
         ),
     );
     module.resources.push(service_token.managed_resource());

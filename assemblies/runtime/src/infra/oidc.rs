@@ -98,43 +98,6 @@ pub(crate) struct RuntimeAccessProvider<P: TokenProfileMarker> {
     resource_name: &'static str,
 }
 
-/// Sealed lifecycle evidence for the listener PDP's JWKS-backed access-token providers.
-///
-/// INVARIANT: RUNTIME-LISTENER-PDP-JWKS-LIFECYCLE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields and constructors; only profile-specific RuntimeAccessProvider impls mint exact probe+resource lifecycle evidence" }
-#[must_use = "listener PDP JWKS lifecycle must be committed to ProviderOutput or rolled back"]
-pub(crate) struct ListenerPdpJwksLifecycle {
-    module: bootstrap::DomainModuleResult,
-}
-
-impl ListenerPdpJwksLifecycle {
-    fn new(
-        resource: Box<DynManagedResource<'static>>,
-        readiness: (ProbeName, Box<dyn bootstrap::HealthProbe>),
-    ) -> Self {
-        Self {
-            module: bootstrap::DomainModuleResult {
-                probes: vec![readiness],
-                resources: vec![resource],
-                ..bootstrap::DomainModuleResult::default()
-            },
-        }
-    }
-
-    pub(crate) fn merge(mut self, other: Self) -> Self {
-        self.module.merge(other.module);
-        self
-    }
-
-    pub(crate) fn into_module(self) -> bootstrap::DomainModuleResult {
-        self.module
-    }
-
-    #[cfg(test)]
-    pub(crate) fn synthetic_for_test(module: bootstrap::DomainModuleResult) -> Self {
-        Self { module }
-    }
-}
-
 impl<P: TokenProfileMarker> RuntimeAccessProvider<P> {
     pub(crate) fn provider(&self) -> Arc<OidcProvider<P>> {
         Arc::clone(&self.provider)
@@ -154,19 +117,19 @@ impl<P: TokenProfileMarker> RuntimeAccessProvider<P> {
 
 pub(crate) fn build_rss_listener_pdp_jwks_lifecycle(
     provider: &RuntimeAccessProvider<RssAccessProfile>,
-) -> ListenerPdpJwksLifecycle {
-    ListenerPdpJwksLifecycle::new(
-        provider.managed_resource(),
+) -> crate::providers_gen::ListenerPdpJwksLifecycle {
+    crate::providers_gen::ListenerPdpJwksLifecycle::single(
         AccessTokenJwksReadyProbe::rss_access(provider.jwks_readiness()).into_registration(),
+        provider.managed_resource(),
     )
 }
 
 pub(crate) fn build_federated_listener_pdp_jwks_lifecycle(
     provider: &RuntimeAccessProvider<FederatedAccessProfile>,
-) -> ListenerPdpJwksLifecycle {
-    ListenerPdpJwksLifecycle::new(
-        provider.managed_resource(),
+) -> crate::providers_gen::ListenerPdpJwksLifecycle {
+    crate::providers_gen::ListenerPdpJwksLifecycle::single(
         AccessTokenJwksReadyProbe::federated_access(provider.jwks_readiness()).into_registration(),
+        provider.managed_resource(),
     )
 }
 
@@ -975,9 +938,18 @@ mod tests {
         )
         .expect("federated access provider");
 
+        let single = build_rss_listener_pdp_jwks_lifecycle(&rss).into_output();
+        assert_eq!(single.probes.len(), 1);
+        assert_eq!(single.resources.len(), 1);
+        assert!(single.workers.is_empty());
+        assert_eq!(
+            single.probes[0].0.as_str(),
+            RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME
+        );
+
         let lifecycle = build_rss_listener_pdp_jwks_lifecycle(&rss)
             .merge(build_federated_listener_pdp_jwks_lifecycle(&federated));
-        let module = lifecycle.into_module();
+        let module = lifecycle.into_output();
         assert_eq!(module.probes.len(), 2);
         assert_eq!(module.resources.len(), 2);
         assert!(module.workers.is_empty());

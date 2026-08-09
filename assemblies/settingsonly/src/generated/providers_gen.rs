@@ -219,6 +219,51 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
 ];
 
+struct ListenerPdpJwksEntry {
+    probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),
+    resource: Box<diport::DynManagedResource<'static>>,
+}
+
+#[must_use = "listener PDP JWKS lifecycle must be committed through its typed provider transaction"]
+pub(crate) struct ListenerPdpJwksLifecycle {
+    head: ListenerPdpJwksEntry,
+    tail: Vec<ListenerPdpJwksEntry>,
+}
+
+impl ListenerPdpJwksLifecycle {
+    pub(crate) fn single(
+        probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),
+        resource: Box<diport::DynManagedResource<'static>>,
+    ) -> Self {
+        Self {
+            head: ListenerPdpJwksEntry { probe, resource },
+            tail: Vec::new(),
+        }
+    }
+
+    #[allow(
+        dead_code,
+        reason = "single-entry assemblies share the canonical carrier API"
+    )]
+    pub(crate) fn merge(mut self, other: Self) -> Self {
+        self.tail.push(other.head);
+        self.tail.extend(other.tail);
+        self
+    }
+
+    pub(crate) fn into_output(self) -> bootstrap::DomainModuleResult {
+        let (probes, resources) = std::iter::once(self.head)
+            .chain(self.tail)
+            .map(|entry| (entry.probe, entry.resource))
+            .unzip();
+        bootstrap::DomainModuleResult {
+            probes,
+            resources,
+            workers: Vec::new(),
+        }
+    }
+}
+
 pub(crate) struct ProviderRoleBatches {
     auth_audit_sink: Option<AuthAuditSinkConstructor>,
     distributed_cas_store: Option<DistributedCasStoreConstructor>,
@@ -1113,7 +1158,7 @@ pub(crate) struct ListenerPdpReceipt {
 impl ListenerPdpConstructor {
     pub(crate) fn finish(
         self,
-        output: crate::providers::ListenerPdpJwksLifecycle,
+        output: ListenerPdpJwksLifecycle,
     ) -> anyhow::Result<ListenerPdpBatch> {
         let output = output.into_output();
         validate_lifecycle_output(self.entry, &output)?;

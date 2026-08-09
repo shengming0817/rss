@@ -24,7 +24,7 @@ use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use postgres::{PgRuntimeDeps, PgRuntimeHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::infra::oidc::ListenerPdpJwksLifecycle;
+use crate::providers_gen::ListenerPdpJwksLifecycle;
 
 const IDENTITY_SIGNER_READINESS_PERIOD: Duration = Duration::from_secs(30);
 const IDENTITY_SIGNER_READINESS_PROBE: &str = "identity_signer_ready";
@@ -308,10 +308,13 @@ impl ProviderOutput {
         )
     }
 
-    fn listener_pdp(lifecycle: ListenerPdpJwksLifecycle, permit: ListenerPdpPermit) -> Self {
+    fn listener_pdp(
+        constructor: ListenerPdpConstructor,
+        lifecycle: ListenerPdpJwksLifecycle,
+    ) -> Self {
         Self::new(
-            lifecycle.into_module(),
-            vec![ProviderReceipt::ListenerPdp(permit.0)],
+            lifecycle.into_output(),
+            vec![ProviderReceipt::ListenerPdp(constructor.0)],
             "listener-pdp",
             CHANNELS_PROBES_RESOURCES,
         )
@@ -450,10 +453,10 @@ impl ProviderOutput {
 }
 
 pub(crate) fn commit_listener_pdp_jwks_lifecycle(
-    lifecycle: crate::infra::oidc::ListenerPdpJwksLifecycle,
-    permit: ListenerPdpPermit,
+    constructor: ListenerPdpConstructor,
+    lifecycle: ListenerPdpJwksLifecycle,
 ) -> ProviderOutput {
-    ProviderOutput::listener_pdp(lifecycle, permit)
+    ProviderOutput::listener_pdp(constructor, lifecycle)
 }
 
 struct ProviderFactoryPermit {
@@ -661,7 +664,7 @@ provider_permits! {
         receipt: IdentitySigner,
         channels: CHANNELS_ALL,
     },
-    ListenerPdpPermit {
+    ListenerPdpConstructor {
         field: listener_pdp,
         factory: HttpserveOidcPdp,
         receipt: ListenerPdp,
@@ -1125,11 +1128,12 @@ pub(crate) enum ProviderBuildError {
 mod tests {
     use super::{
         BuiltDeviceRevocationProvider, CHANNELS_ALL, CHANNELS_PROBES_WORKERS, CHANNELS_RESOURCES,
-        DeviceRevocationStorePermit, DistributedLockStorePermit, ListenerPdpPermit, ProviderBuild,
-        ProviderBuildError, ProviderFactoryDispatch, ProviderFactoryPermit, ProviderOutput,
-        RuntimeObjectStorePermit, build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle,
+        DeviceRevocationStorePermit, DistributedLockStorePermit, ListenerPdpConstructor,
+        ProviderBuild, ProviderBuildError, ProviderFactoryDispatch, ProviderFactoryPermit,
+        ProviderOutput, ProviderReceipt, RuntimeObjectStorePermit, build_pg_runtime_module,
+        commit_listener_pdp_jwks_lifecycle,
     };
-    use crate::infra::oidc::ListenerPdpJwksLifecycle;
+    use crate::providers_gen::ListenerPdpJwksLifecycle;
 
     use assembly_schema::{
         LifecycleChannel as PlannedLifecycleChannel, ProviderFactorySymbol, ProviderRole,
@@ -1241,87 +1245,29 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn provider_plan_rejects_listener_pdp_without_probe_channel() -> anyhow::Result<()> {
-        let (mut missing_probe, mut missing_probe_dispatch) = provider_build_and_dispatch();
-        let missing_probe_error = missing_probe
-            .record(commit_listener_pdp_jwks_lifecycle(
-                ListenerPdpJwksLifecycle::synthetic_for_test(module_for_channels(
-                    "missing-probe-pdp",
-                    CHANNELS_RESOURCES,
-                )),
-                missing_probe_dispatch
-                    .listener_pdp()
-                    .expect("listener PDP permit"),
-            ))
-            .expect_err("listener PDP without a readiness probe must fail closed");
-        let ProviderBuildError::ProviderBatchChannelsMismatch {
-            batch,
-            expected,
-            actual,
-        } = missing_probe_error
-        else {
-            anyhow::bail!("expected provider-batch channel mismatch");
-        };
-        assert_eq!(batch, "listener-pdp");
-        assert_eq!(expected, LISTENER_PDP_CHANNELS);
-        assert_eq!(actual, CHANNELS_RESOURCES);
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
-    fn provider_plan_rejects_listener_pdp_with_surplus_worker_channel() -> anyhow::Result<()> {
-        let (mut surplus_workers, mut surplus_dispatch) = provider_build_and_dispatch();
-        let surplus_error = surplus_workers
-            .record(commit_listener_pdp_jwks_lifecycle(
-                ListenerPdpJwksLifecycle::synthetic_for_test(module_for_channels(
-                    "surplus-workers-pdp",
-                    CHANNELS_ALL,
-                )),
-                surplus_dispatch
-                    .listener_pdp()
-                    .expect("listener PDP permit"),
-            ))
-            .expect_err("listener PDP with surplus Workers must fail closed");
-        let ProviderBuildError::ProviderBatchChannelsMismatch {
-            batch,
-            expected,
-            actual,
-        } = surplus_error
-        else {
-            anyhow::bail!("expected provider-batch channel mismatch");
-        };
-        assert_eq!(batch, "listener-pdp");
-        assert_eq!(expected, LISTENER_PDP_CHANNELS);
-        assert_eq!(actual.as_slice(), CHANNELS_ALL);
-        Ok(())
-    }
-
-    #[test]
-    #[allow(clippy::expect_used)]
     fn provider_plan_rejects_duplicate_factory_receipts() -> anyhow::Result<()> {
         let (mut duplicate, mut duplicate_dispatch) = provider_build_and_dispatch();
         duplicate
             .record(commit_listener_pdp_jwks_lifecycle(
-                listener_pdp_lifecycle_for_test("first-pdp", LISTENER_PDP_CHANNELS),
                 duplicate_dispatch
                     .listener_pdp()
                     .expect("listener PDP permit"),
+                listener_pdp_lifecycle_for_test("first-pdp"),
             ))
             .expect("first listener PDP output");
         let entry = PROVIDER_CATALOG
             .iter()
             .find(|entry| entry.factory() == ProviderFactorySymbol::HttpserveOidcPdp)
             .expect("listener PDP catalog entry");
-        let forged_duplicate = ListenerPdpPermit(ProviderFactoryPermit {
+        let forged_duplicate = ListenerPdpConstructor(ProviderFactoryPermit {
             factory: entry.factory(),
             role: entry.role(),
             expected_channels: entry.evidence().outputs(),
         });
         let duplicate_error = duplicate
             .record(commit_listener_pdp_jwks_lifecycle(
-                listener_pdp_lifecycle_for_test("second-pdp", LISTENER_PDP_CHANNELS),
                 forged_duplicate,
+                listener_pdp_lifecycle_for_test("second-pdp"),
             ))
             .expect_err("release builds must reject a duplicate receipt");
         let ProviderBuildError::DuplicateFactory { factory: actual } = duplicate_error else {
@@ -1382,10 +1328,13 @@ mod tests {
             )],
             ..DomainModuleResult::default()
         };
+        let constructor = dispatch.listener_pdp().expect("PDP constructor");
         let primary = build
-            .record(commit_listener_pdp_jwks_lifecycle(
-                ListenerPdpJwksLifecycle::synthetic_for_test(invalid),
-                dispatch.listener_pdp().expect("PDP permit"),
+            .record(ProviderOutput::new(
+                invalid,
+                vec![ProviderReceipt::ListenerPdp(constructor.0)],
+                "listener-pdp",
+                super::CHANNELS_PROBES_RESOURCES,
             ))
             .expect_err("invalid PDP batch");
 
@@ -1461,14 +1410,14 @@ mod tests {
             .iter()
             .find(|entry| entry.factory() == ProviderFactorySymbol::HttpserveOidcPdp)
             .expect("listener PDP catalog entry");
-        let forged = ListenerPdpPermit(ProviderFactoryPermit {
+        let forged = ListenerPdpConstructor(ProviderFactoryPermit {
             factory: entry.factory(),
             role: entry.role(),
             expected_channels: CHANNELS_ALL,
         });
         let Err(sealed_err) = sealed.record(commit_listener_pdp_jwks_lifecycle(
-            listener_pdp_lifecycle_for_test("pdp", LISTENER_PDP_CHANNELS),
             forged,
+            listener_pdp_lifecycle_for_test("pdp"),
         )) else {
             anyhow::bail!("sealed-channel disagree must fail closed");
         };
@@ -1584,10 +1533,10 @@ mod tests {
 
     #[test]
     fn provider_factory_permits_are_non_copyable_and_non_interchangeable() {
-        static_assertions::assert_not_impl_any!(ListenerPdpPermit: Clone, Copy);
-        static_assertions::assert_not_impl_any!(ListenerPdpJwksLifecycle: Clone, Default);
+        static_assertions::assert_not_impl_any!(ListenerPdpConstructor: Clone, Copy);
+        static_assertions::assert_not_impl_any!(ListenerPdpJwksLifecycle: Clone, Copy, Default);
         static_assertions::assert_type_ne_all!(
-            ListenerPdpPermit,
+            ListenerPdpConstructor,
             DeviceRevocationStorePermit,
             DistributedLockStorePermit,
             RuntimeObjectStorePermit
@@ -1722,11 +1671,8 @@ mod tests {
         if include_listener_pdp {
             build
                 .record(commit_listener_pdp_jwks_lifecycle(
-                    listener_pdp_lifecycle_for_test(
-                        LISTENER_PDP_JWKS_PROBE_NAME,
-                        LISTENER_PDP_CHANNELS,
-                    ),
                     dispatch.listener_pdp().expect("PDP permit"),
+                    listener_pdp_lifecycle_for_test(LISTENER_PDP_JWKS_PROBE_NAME),
                 ))
                 .expect("PDP output");
         }
@@ -1830,11 +1776,11 @@ mod tests {
         );
     }
 
-    fn listener_pdp_lifecycle_for_test(
-        name: &'static str,
-        channels: &[PlannedLifecycleChannel],
-    ) -> ListenerPdpJwksLifecycle {
-        ListenerPdpJwksLifecycle::synthetic_for_test(module_for_channels(name, channels))
+    fn listener_pdp_lifecycle_for_test(name: &'static str) -> ListenerPdpJwksLifecycle {
+        let mut module = module_for_channels(name, LISTENER_PDP_CHANNELS);
+        let probe = module.probes.pop().expect("listener PDP test probe");
+        let resource = module.resources.pop().expect("listener PDP test resource");
+        ListenerPdpJwksLifecycle::single(probe, resource)
     }
 
     fn module_for_channels(
