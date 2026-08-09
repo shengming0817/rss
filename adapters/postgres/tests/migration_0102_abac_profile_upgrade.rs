@@ -185,6 +185,41 @@ async fn ambiguous_or_malformed_legacy_rows_abort_0102_atomically() -> TestResul
     Ok(())
 }
 
+async fn assert_upgrade_is_blocked(pool: &sqlx::PgPool, legacy: &serde_json::Value) -> TestResult {
+    let migration_pool = pool.clone();
+    let blocked =
+        tokio::spawn(async move { migrations_through(102).run(&migration_pool).await }).await?;
+    assert!(
+        blocked.is_err(),
+        "0102 must honor its five-second lock timeout"
+    );
+    let ledger: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations WHERE success")
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(ledger, Some(101));
+    let unchanged: serde_json::Value =
+        sqlx::query_scalar("SELECT rules FROM public.abac_policies WHERE id='lock-proof'")
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(&unchanged, legacy);
+    Ok(())
+}
+
+async fn release_lock_and_assert_upgrade(
+    pool: &sqlx::PgPool,
+    blocker: &mut sqlx::pool::PoolConnection<sqlx::Postgres>,
+) -> TestResult {
+    sqlx::query("ROLLBACK").execute(&mut **blocker).await?;
+    migrations_through(102).run(pool).await?;
+    let ledger: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations WHERE success")
+            .fetch_one(pool)
+            .await?;
+    assert_eq!(ledger, Some(102));
+    Ok(())
+}
+
 async fn assert_locking_lane_blocks_then_allows_upgrade(statement: &str) -> TestResult {
     let fixture = testkit::owned_postgres().await?;
     let pool = connect(fixture.owner_params()).await?;
@@ -197,31 +232,8 @@ async fn assert_locking_lane_blocks_then_allows_upgrade(statement: &str) -> Test
     sqlx::query("BEGIN").execute(&mut *blocker).await?;
     sqlx::query(statement).execute(&mut *blocker).await?;
 
-    let migration_pool = pool.clone();
-    let blocked =
-        tokio::spawn(async move { migrations_through(102).run(&migration_pool).await }).await?;
-    assert!(
-        blocked.is_err(),
-        "0102 must honor its five-second lock timeout"
-    );
-    let ledger: Option<i64> =
-        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations WHERE success")
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(ledger, Some(101));
-    let unchanged: serde_json::Value =
-        sqlx::query_scalar("SELECT rules FROM public.abac_policies WHERE id='lock-proof'")
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(unchanged, legacy);
-
-    sqlx::query("ROLLBACK").execute(&mut *blocker).await?;
-    migrations_through(102).run(&pool).await?;
-    let ledger: Option<i64> =
-        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations WHERE success")
-            .fetch_one(&pool)
-            .await?;
-    assert_eq!(ledger, Some(102));
+    assert_upgrade_is_blocked(&pool, &legacy).await?;
+    release_lock_and_assert_upgrade(&pool, &mut blocker).await?;
     drop(blocker);
     pool.close().await;
     drop(fixture);

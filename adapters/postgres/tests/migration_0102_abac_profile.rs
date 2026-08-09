@@ -4,13 +4,13 @@ const MIGRATION: &str = include_str!("../migrations/0102_retype_abac_policy_valu
 fn migration_fails_closed_before_rewriting_ambiguous_numeric_rules() {
     let guard = MIGRATION
         .find("ambiguous legacy numeric policies")
-        .expect("gt/lt guard");
+        .unwrap_or(MIGRATION.len());
     let rewrite = MIGRATION
         .find("UPDATE abac_policies")
-        .expect("policy rewrite");
+        .unwrap_or(MIGRATION.len());
     assert!(
-        guard < rewrite,
-        "ambiguity guard must run before any policy rewrite"
+        guard < rewrite && rewrite < MIGRATION.len(),
+        "ambiguity guard and policy rewrite must both exist, in fail-closed order"
     );
     assert!(MIGRATION.contains("IN ('gt', 'lt')"));
     assert!(

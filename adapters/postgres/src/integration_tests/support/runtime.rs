@@ -338,6 +338,7 @@ pub(in super::super) static PROJECTION_CONFORMANCE_INPUTS: &[vocab::ProjectionIn
     ),
 ];
 
+#[cfg(all(test, feature = "integration"))]
 pub(in super::super) fn projection_conformance_definition(
     fixture: ProjectionConformanceFixture,
 ) -> Result<eventexec::ProjectionTargetDefinition, eventexec::ProjectionTargetConfigError> {

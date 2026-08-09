@@ -630,6 +630,7 @@ pub(in super::super) fn make_test_env(domain: &str, contract_id: &str) -> Outbox
     )
 }
 
+#[cfg(all(test, feature = "integration"))]
 pub(in super::super) fn projection_conformance_env() -> OutboxEnvelope {
     let binding = ProjectionConformanceFixture::primary().binding();
     OutboxEnvelope::new(
@@ -648,6 +649,7 @@ pub(in super::super) fn projection_conformance_env() -> OutboxEnvelope {
     )
 }
 
+#[cfg(all(test, feature = "integration"))]
 pub(in super::super) fn projection_conformance_env_with_unbound_routing_for_negative_test()
 -> OutboxEnvelope {
     let binding = ProjectionConformanceFixture::primary().binding();
