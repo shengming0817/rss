@@ -46,44 +46,21 @@ cd lints/rss_domain_no_serialize && cargo test
 > ✅ **已接入聚合门（#1023）**：`cargo dylint --all` 现是 `cargo xtask verify` / `make verify` 的一步，并经
 > `DYLINT_RUSTFLAGS=-D warnings` 升为 **fail-closed**（默认 `Warn` 的注册 lint 违例即让 verify 非零退出）。
 > 激活 forge=azure 无 CI ⇒ verify 是治理门的唯一实际 gate（提交前 / ship·fix 收尾跑）。
-> **仍在 #1054**：覆盖面仍是 `domain` 模块命名约定（非完整域 crate 边界）——见下「强度现状」。
+> **仍在 #1054**：覆盖面仍是 `domain` 模块命名约定（非完整域 crate 边界）；细节见
+> `rss_domain_no_serialize`（[`lints/rss_domain_no_serialize/src/lib.rs`](rss_domain_no_serialize/src/lib.rs) rustdoc）。
 
-## 已落地 lint
+## 如何查事实（不在此维护 inventory）
 
-当前注册清单（与根 `Cargo.toml [workspace.metadata.dylint]` 和 `lints/Cargo.toml` 同步）：
-`rss_domain_no_serialize`、`rss_spawn_missing_scope`、`rss_crosstenant_callsite`、
-`rss_operator_authorization_callsite`、`rss_diport_impl_allowlist`、`rss_principal_facet_impl_allowlist`、
-`rss_authplan_callsite`、`rss_raw_credential_callsite`、`rss_authenticated_callsite`、
-`rss_handler_local_principal_authz`、
-`rss_runtime_env_funnel`、
-`rss_diport_error_debug_redacted`、`rss_diport_dto_debug_redacted`、`rss_pdp_impl_adapter_only`、
-`rss_projection_append_only`、`rss_partition_serial_allowlist`、`rss_diport_envelope_reserved_writer`、
-`rss_redact_debug_required`、`rss_adapter_no_business_fsm`、`rss_test_no_bare_sleep`、
-`rss_instrument_err_level`。
+本 README **不**维护已落地 lint 清单或 INVARIANT 对照表。查机器单源：
 
-| lint id | INVARIANT | 守的约束 |
-|---------|-----------|---------|
-| `rss_domain_no_serialize` | SERDE-DOMAIN-FREEZE-01 | domain 实体禁 derive serde `Serialize`/`Deserialize`（只有 contract/DTO/`generated` 可序列化到 wire）。默认 `Warn`。 |
-| `rss_spawn_missing_scope` | SPAWN-CTX-REBIND-01 | `tokio::spawn`/`spawn_blocking` 子任务体内读 `runctx::try_with`/`try_current`，却未在外层 `runctx::scope(...)` 重绑 ctx（spawn footgun 静态防误用，ADR-002）。默认 `Warn`。仅 intraprocedural；`#[cfg(test)]` 子树因 `cargo dylint --all` 默认不带 `--all-targets` 不被扫（故 `runctx` 自测的 footgun 演示不报，也无 stable 构建 `unknown_lints` 之虞）。 |
-| `rss_crosstenant_callsite` | TENANCY-CROSSTENANT-CAP-01 | vocab 跨租户 All-scope mint 三步仅 `audit::ports::CrossTenantReadScope::from_durable_append` 可调用；其 receipt 由 audit application 私有字段 Hard seal。默认 `Warn`。捕获直接 call / 函数项别名 / fn-pointer，按 caller crate + 精确 inherent impl type + method 放行；UI 以外部 caller 红、精确 method 绿、`audit` 同 crate 同名 free fn 红锁住分支。 |
-| `rss_operator_authorization_callsite` | OPERATOR-AUTHORIZATION-CALLSITE-01 | 类型感知的 operator authorization 构造目录：`OperatorDlqCapability` / `OperatorReconcileCapability` 的 `issue_for_authorized_operator()` 仍仅允许 admin/PDP 边界 crate（当前 `httpserve`）或各自 runtime `operator::{dlq,reconcile}` 精确 wrapper；`AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized` 仍只允许 `runtime::operator::dlq::dlq_operator_receipt`。L2 DR 的 `AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized` 只允许生产 `runtime::operator::dr_recovery::execute_connected_l2_dr_recovery`，`L2DrRecoveryDurableStartProof::from_store` 只允许 `postgres::bundle::PgL2DrRecoveryDeps::record_l2_dr_recovery_start_audit_subject`；crate、module、函数名及 issuer self type 均须精确匹配。规则按 `eventexec` inherent self type + method 匹配，不会误伤本地同名方法；捕获直接 call、函数项别名及同名旁路。私有字段闭合 struct literal，constructor exact-callsite gate 为 Medium。默认 `Warn`；`#[cfg(test)]` 子树默认不扫，测试 fixtures 可直接 mint。 |
-| `rss_diport_impl_allowlist` | DIPORT-IMPL-ALLOWLIST-01 | `diport` DI port trait（`Signer`/`Publisher`/`ManagedResource`… + 基 trait `*Local` + `Clock`/`SubscribeInitializer`）仅 adapter / 组合根可 impl（impl-site allowlist；funnel 下游约束——上游 `deny.toml` wrapper 守「port 只在 diport 定义」DIPORT-MACRO-CONFINE-01 为 Medium，本 lint 守下游「谁可 impl」为 Medium，#1060 闭环 ADR-003 §4.2 方案 ② 缺口）。默认 `Warn`。trait 归属按**被 impl trait 的 crate 名 == `diport`**（覆盖全部 + 未来新增 port，无名单漂移）；impl 站点二选一放行（均键 **package 身份 / 位置**，非源文件路径）——① 被编译 crate 是 `diport` 自身（含 dynosaur/trait-variant 宏生成 bridge impl，按 `LOCAL_CRATE` 身份判，**同时关掉**域 crate 用宏展开 impl 的绕过面），② 被编译 package 的 `CARGO_MANIFEST_DIR` **父目录名** ∈ `adapters`/`bins`/`assemblies`（对齐 `xtask/src/layers.rs` 顶层成员，新 adapter 自动覆盖；`xtask` 故意不入）。键 package 位置而非源文件 ⇒ 域 crate 把 impl 放进 `crates/<domain>/src/adapters/` 子目录无法绕过。`#[cfg(test)]` 子树默认不扫（test mock impl 放行）。**路径 allowlist 绿分支无法在 UI harness 模拟**（harness 控制 example 源路径），其 anti-vacuity 由真 workspace `cargo dylint --all`（12 adapter 0 诊断）承载；UI 单 example target（`rss_diport_impl_allowlist_ui` 红 + 内嵌非 port trait / inherent / item-level `#[allow]` 绿子例）。 |
-| `rss_principal_facet_impl_allowlist` | PRINCIPAL-FACET-IMPL-AUTHN-01 | `runctx::PrincipalFacet` 仅 `authn`（+ 定义 crate `runctx` 的 test facet）可 impl（impl-site caller-crate allowlist；`AppCtx` 生产**伪造门**——principal payload 是 `Arc<dyn PrincipalFacet>`，外部 crate impl 不了 facet 就造不出 `AppCtx`、无法伪造任意 tenant/principal 越权）。默认 `Warn`。跨 crate「只有 authn 能 impl」类型层不可表达（sealed-trait 跨 crate 不可行，ADR-003 §4.2 / ADR-002 §D5），dylint 为最强可用载体（Medium）。trait 归属按**被 impl trait 的 crate 名 == `runctx` 且 item 名 == `PrincipalFacet`**（runctx 还导出非-trait `RequestCtx`/`MissingCtx`，故按 crate+name 精确判）；impl 站点放行按 `LOCAL_CRATE` 名 ∈ {`runctx`, `authn`}（caller-crate allowlist，同 `rss_crosstenant_callsite` 范式）。`#[cfg(test)]` 子树默认不扫（test mock facet impl 放行）。UI 两个 example target（`rss_principal_facet_impl_allowlist_ui` 红 + 内嵌非 runctx trait / inherent / item-level `#[allow]` 绿子例 / `authn` 绿）；绿向 anti-vacuity 另由真 workspace `cargo dylint --all`（authn 真实 facet impl 0 诊断）双锁。 |
-| `rss_authplan_callsite` | AUTH-PLAN-MINT-01 | `primitives::authplan::AuthPlan` 构造入口仅组合根可调用，listener 级认证计划不得在业务 crate 内散装 mint。默认 `Warn`。 |
-| `rss_raw_credential_callsite` | RAW-CREDENTIAL-AUTHN-FUNNEL-01 | `diport::RawCredential` 私有字段与 profile-specific constructors 形成 Hard 伪造门；本 Medium lint 进一步把所有返回 `RawCredential` 的 inherent associated function callsite（含直接调用、函数项别名与 fn-pointer）限制到生产 `authn` funnel。`#[cfg(test)]` 子树不扫描；UI 以外部 caller 红与真实 `authn` funnel 绿锁住 allowlist。 |
-| `rss_authenticated_callsite` | AUTH-EVIDENCE-MINT-01 Medium + AUTHN-FUNNEL-CALLSITE-01 | Authenticated production mint：**Hard** 半段见 `authmint` token + deny.toml wrappers；本 lint 守 **Medium** exact mint allowlist + proof-consuming（`auth_bridge::{allow_evidence,mtls_evidence,federated_evidence}`）。另闸 `Principal::{audit_subject,service_caller_domain}`、AuthGrant/RSS issue、settingsonly raw JWT、settings verified maintenance capability。UI 覆盖 mint/Principal direct/nested 红例与 exact wrapper 绿例。DLQ authorized receipt 由统一 `rss_operator_authorization_callsite` 守。默认 `Warn`。 |
-| `rss_runtime_env_funnel` | RUNTIME-ENV-FUNNEL-HIR-01 | 仅对 `runtime` crate 激活：在 macro expansion 与 name resolution 后拒绝 funnel 外 `std::env::{var,var_os,vars,vars_os}`（含 alias/function-item 与 macro-generated module），只放行 `runtime::operator::{projection,audit_ledger,dlq,reconcile}` 四个精确 nested grant reader，按 expansion provenance 拒绝 `env!`/`option_env!`/`include!`，并限定唯一 process snapshot factory 只能由 `prepare_runtime_kernel` 引用。默认 `Warn`；closed catalog/cardinality 与 operator capability caller 仍由 xtask inventory 独立锁定。 |
-| `rss_handler_local_principal_authz` | HANDLER-LOCAL-PRINCIPAL-AUTHZ-01 | handler/domain 禁用 `Authenticated` getter 与非 allowlist 的 `PrincipalKind::{Admin,SuperAdmin,...}` / role-name 字面量授权分支；业务授权必须消费 route gate 插入的 `AuthorizedSubject` 并比较 typed `GrantPermission` / `RoutePermissionId`。默认 `Warn`。allowlist 仅覆盖 route gate、generated DTO enum parse/serde、authn funnel、runtime bridge、`ContractAuthorizer` 方法、PrincipalKind audit/event/wire mapper 和 audited audit target-tenant read。 |
-| `rss_diport_error_debug_redacted` | DIPORT-ERR-RAWSOURCE-BAN-01 | 受守护 crate（`diport` / `bootstrap` / `eventexec`）error struct 禁持裸 `Box<dyn std::error::Error + Send + Sync + 'static>` source 字段；改用 `diport::RedactedSource` newtype（`Debug`/`Display` 恒 `<redacted>`，不展开内层，#1144）。默认 `Warn`。上游 Hard：`RedactedSource` 类型系统保证脱敏（DIPORT-ERR-SOURCE-REDACT-01）；本 lint 下游 Medium gate：守「受守护 error struct 确实采纳该 newtype」。守护范围限 `LOCAL_CRATE ∈ {diport, bootstrap, eventexec}`（其它 crate 合法持裸 Box 不误报）。`check_field_def` 逐字段检测语法形状 `Box<dyn Error...>`（`sym::Error` diagnostic item 识别 std::error::Error）；**消费侧**用 `RedactedSource` 字段（命名 ADT、非 trait-object）天然不命中；**canonical `diport::redacted::RedactedSource` 定义自身**（内层为裸 Box）按 `DefId` 路径结构性豁免，`bootstrap` / `eventexec` 中同名假类型仍触发。UI 四个 example target（`diport` 红含 canonical 豁免绿子例 / `bootstrap` 红含同名绕过红例 / `eventexec` 红含同名绕过红例 / `not_diport` 绿）分别证受守护 crate 激活、canonical 豁免与非激活。 |
-| `rss_diport_dto_debug_redacted` | DIPORT-DTO-RAWBYTES-BAN-01 | `diport` DTO 字段禁裸字节缓冲（`Vec<u8>` / `[u8;N]` / `Box<[u8]>` / `Option` 包装），改用 `RedactedBytes` newtype。默认 `Warn`。 |
-| `rss_pdp_impl_adapter_only` | PDP-IMPL-ADAPTER-ONLY-01 | `diport::Pdp` 验签端口仅 provider adapter 可 impl，组合根/域不得内联 always-allow PDP。默认 `Warn`。 |
-| `rss_projection_append_only` | PROJECTION-APPEND-ONLY-01 | `projection_events` 表 append-only：不得对其 `DELETE` 或 `TRUNCATE`。默认 `Warn`。 |
-| `rss_partition_serial_allowlist` | PARTITION-SERIAL-IMPL-ALLOWLIST-01 | `consistency::PartitionSerialDelivery` 仅 adapter / 组合根可 impl，守 projection serial witness 的 Medium 半段。默认 `Warn`。 |
-| `rss_diport_envelope_reserved_writer` | DIPORT-ENVELOPE-WIRE-WRITER-01 | `EnvelopeMetadata::insert_wire_pair` reserved-capable wire 写面仅 adapter / 组合根可调用；业务写 metadata 走拒 reserved key 的普通入口。默认 `Warn`。 |
-| `rss_redact_debug_required` | REDACT-DEBUG-REQUIRED-01 | issue #1359 高风险敏感 DTO（`AuditEvent` / `RoleBinding` / `Session` / `RequestCtx` / `SecretMaterial` 等）禁止裸 `derive(Debug)`；改用 `#[derive(secure::Redact)]` + 逐字段 `#[redact(...)]`。默认 `Warn`。 |
-| `rss_adapter_no_business_fsm` | ADAPTER-NO-BUSINESS-FSM-01 | `adapters/*` 禁业务 FSM：path/`use` 含 `statig`，或本地 `*State`/`*Phase`/`*Lifecycle` enum 的 inherent impl 含 `next`/`transition`/`advance`/`step`（ADR-023 / #1494；上游 Medium：`deny.toml` ban `statig` = ADAPTER-THIN-FSM-01）。默认 `Warn`。激活键 `CARGO_MANIFEST_DIR` 父目录 == `adapters`（或本 lint UI package 名）。标签枚举（无过渡方法）不报；误报改名/上移，禁批量 allow。 |
-| `rss_test_no_bare_sleep` | TEST-NO-BARE-SLEEP-01 | 测试上下文禁裸 `tokio::time::sleep` / `std::thread::sleep`（含 `use` 导入）；有界等待走 `testkit::wait`（ready-signal：`await_map*` / `await_try*` / `await_notified`；固定延时：`await_delay`；禁止永不返回 `Some` 的 probe 伪装）。默认 `Warn`。上游 Hard：`testkit` 不导出公开 sleep；funnel 放行 `testkit::wait` 模块内 poll sleep。生产 backoff（非 test 上下文）不报。专用 verify 步：`dylint --lib rss_test_no_bare_sleep -- --all-features --all-targets` + `DYLINT_RUSTFLAGS=-D rss_test_no_bare_sleep`（勿用全局 `-D warnings`）。 |
-| `rss_instrument_err_level` | INSTRUMENT-ERR-LEVEL-01 | 禁止 `#[instrument(..., err)]` / `#[tracing::instrument(..., err)]` 未显式 `level` 的 `err`（裸 `err` / `err(Debug)` / `err(Display)` / `err()` 等仍默认 ERROR，会把业务 4xx 打进告警面）；须显式 `err(level = "warn"\|"error"\|…)`。默认 `Warn`。pre-expansion `check_attribute` 扫 path 末段 `instrument` 的顶层 token；`err(...)` 仅当括号内顶层含 Ident `level` 才放行；item-level `#[allow]` 逃生。**门预算（只加不减）**：本失效模式此前无 Medium/Hard 门；不可并入唯一其它 pre-expansion owner `rss_runtime_env_funnel`（MacCall/runtime env vs Attribute/`instrument` err）。详见 lint crate rustdoc §Gate budget。 |
+1. **注册** → 根 `Cargo.toml` `[workspace.metadata.dylint]`
+2. **members** → `lints/Cargo.toml` `[workspace].members`
+3. **反向索引** → `cargo xtask archrules list` / `cargo xtask archrules verify`
+4. **符号 / 红例 / 盲区** → 各 `lints/<lint>/src/lib.rs` rustdoc
+
+运行时也可 `cargo dylint list` / `cargo dylint --all` 查看当前已注册 lint。
+
+## 逃生门与新增 lint
 
 逃生门：确需豁免的 callsite（如确需序列化的非 DTO 类型、确需读裸 ctx 的 spawn），在该 item 上加
 `#[allow(<lint_id>)] // reason: ...`（与仓库 item-level carve-out 纪律一致）。

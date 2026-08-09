@@ -16,15 +16,18 @@ gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `Ex
 `ComponentTests` nextest 在该 profile 中被 typed proof 吸收。
 
 diff-adaptive `ImpactSet` 是正交的路径影响模型：它记录直接 package 影响、反向依赖闭包、稳定 `IntegrationUnitId`、
-治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行固定 9 门加七域 affected 门组成的 `meta`、
-反向闭包 check、直接 package test/clippy 与治理自测；远端 selector 则把同一影响闭包投影到固定 PR Job。
+治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行 `verify --fast` 门集（真源
+`xtask/src/verify.rs`）加 affected 域门组成的 `meta`、反向闭包 check、直接 package test/clippy 与治理自测；
+远端 selector 则把同一影响闭包投影到固定 PR Job（Job 名与闭集以 `.github/workflows/ci.yml`
+为真源；拓扑说明与运维激活状态见
+[`docs/ops/202606231530-001-ci-lane.md`](docs/ops/202606231530-001-ci-lane.md)）。
 集成影响直接投影 catalog 的 `IntegrationUnitId`，不维护第二套 generic execution-unit ID。
 
-GitHub pull request 的执行拓扑固定为 `selector`、`check`、`test-affected`、`integration-critical` 与
-result-only `gate`。selector 只计算规范选择；三个执行 Job 始终存在，并分别消费自己的选择；`test-affected`
-除 affected 组件测试外还始终生产 producer-owned LocalOnly required evidence；gate 只聚合
-这三个 Job 的最终结果，不解析额外回执。分析失败、高影响根或保守 rename 会把 PR 选择升级为
-`PrComplete`，但不会触发 `ReleaseCheck`。后者只属于 develop、nightly、release 或显式 `ci full`。
+GitHub pull request 的执行拓扑固定（selector 只计算规范选择；执行 Job 始终存在并分别消费自己的选择；
+`test-affected` 除 affected 组件测试外还始终生产 producer-owned LocalOnly required evidence；gate 只聚合
+执行 Job 的最终结果，不解析额外回执）。具体 Job 名与闭集以 `.github/workflows/ci.yml` 为真源，不在此手抄闭集。
+分析失败、高影响根或保守 rename 会把 PR 选择升级为 `PrComplete`，但不会触发 `ReleaseCheck`。后者只属于
+develop、nightly、release 或显式 `ci full`。
 cargo-nextest profile 只配置 runner 的 timeout、retry、JUnit 与 filter 行为，不等同于 `ExecutionProfile`。
 当前承载状态与迁移边界见 [`docs/ops/202606231530-001-ci-lane.md`](docs/ops/202606231530-001-ci-lane.md)。
 
@@ -34,7 +37,7 @@ make ci CI_BASE=upstream/develop         # 显式指定比较基准
 make ci CI_ARGS='--fail-fast'            # 需要首错停止时显式启用
 make ci CI_ARGS='--fresh'                # 清空当前分支断点，从头运行 affected plan
 make ci CI_ARGS='--only test --only clippy' # 仅复验 affected test/clippy（partial）
-make verify-fast VERIFY_ARGS='--fresh'   # 清空同一分支断点并重跑固定 9 门
+make verify-fast VERIFY_ARGS='--fresh'   # 清空同一分支断点并重跑 verify --fast 门集（见 xtask/src/verify.rs）
 make verify VERIFY_ARGS='--only runtime-root-guard' # 仅复验一个 typed gate（partial）
 make ci-full                             # 显式执行 release-check（workspace coverage，不重复 component nextest）
 ./hack/cargo.sh xtask ci local --base origin/develop
@@ -46,9 +49,11 @@ Make 通过 `hack/cargo.sh` 启动 xtask，是本地治理门的受控 bootstrap
 不会获得 wrapper 的 build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，因此不是等价入口。
 
 `ci local` 只读取 `<base>...HEAD` 的已提交项目差异，不扫描 untracked、本地工具或额外工作区文件。
-无差异直接成功；docs-only 和 unknown-only 只运行固定 9 门 `meta`；Rust、contract 与 generated 影响运行反向依赖 check 和直接
+无差异直接成功；docs-only 和 unknown-only 只运行 `verify --fast` 门集对应的 `meta`（真源
+`xtask/src/verify.rs`）；Rust、contract 与 generated 影响运行反向依赖 check 和直接
 影响包 test/clippy。未知路径本地忽略并留痕，但不会抹掉同一 diff 中已知包的定向测试；rename/copy 运行
-全部七域 affected `meta`，影响分析失败直接报错。本地 preflight 的 worker 进程组受 600 秒 wall-clock deadline 约束，且不运行
+affected 域 `meta`（域集由 CI/verify 投影派生，不在此维护数量），影响分析失败直接报错。本地
+preflight 的 worker 进程组受 600 秒 wall-clock deadline 约束，且不运行
 coverage、audit 或真实后端 integration；需要人工诊断无条件全量门时使用 `make ci-full`。
 
 本地 `verify`、`ci local` 与 `ci full` 默认 keep-going：聚合层继续执行后续 gate/stage，Cargo

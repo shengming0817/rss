@@ -14,8 +14,9 @@ owner-sealed port effect/privilege → runtime conformance。
 
 各级验证的覆盖面不得互相冒充：
 
-- 固定 9 门的 `verify --fast` 不拥有 LocalOnly 证明。静态闭环由 affected `make ci` 的 Consistency
-  domain 选择，或显式运行 `consistency local-only-effects`；两者都不运行 conformance、不连接 Postgres。
+- `verify --fast` 门集（真源 `xtask/src/verify.rs`）不拥有 LocalOnly 证明。静态闭环由 affected
+  `make ci` 的 Consistency domain 选择，或显式运行 `consistency local-only-effects`；两者都不运行
+  conformance、不连接 Postgres。
 - 完整 `verify` 与远端 `test-affected` 都执行 conformance；远端 required evidence 由 `test-affected` producer
   独占成败，唯一公开直接入口是 `cargo xtask ci localonly-evidence --output <path>`。它不声称运行真实 backend。
 - 真实 Postgres 只承载相邻 L1 的 adapter/journey 验收；**L0 准入本身不能借 live 环境缺失而宽限**。

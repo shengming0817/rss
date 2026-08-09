@@ -187,7 +187,7 @@ rss/
 | DB migration 命名空间 | `sqlx::migrate!` |
 | 依赖图导出 | `cargo tree` / `cargo-depgraph` |
 | mock(同模块)/ table-driven | `mockall` / `rstest` |
-| 残留真要 AST/HIR 级的少数 funnel(某 callsite) | `dylint`（自写 clippy lint）。实际注册清单以根 `Cargo.toml [workspace.metadata.dylint]` 与 `lints/Cargo.toml` 为准；人类可读清单见 `lints/README.md`，派生索引可用 `cargo xtask archrules list`。符号/红例/盲区见各 `lints/<lint>/` rustdoc；`cargo dylint --all` 已是 `cargo xtask verify` / `ci` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed。 |
+| 残留真要 AST/HIR 级的少数 funnel(某 callsite) | `dylint`（自写 clippy lint）。注册以根 `Cargo.toml [workspace.metadata.dylint]` 为准，members 以 `lints/Cargo.toml` 为准；派生反向索引用 `cargo xtask archrules list` / `verify`；符号/红例/盲区见各 `lints/<lint>/src/lib.rs` rustdoc。`lints/README.md` 只作操作指引（前置/运行/逃生门/新增步骤），不维护 inventory。`cargo dylint --all` 已是 `cargo xtask verify` / `ci` 一步并经 `DYLINT_RUSTFLAGS=-D warnings` fail-closed。 |
 | 治理脚本入口 | `cargo` + `xtask/` |
 | 错误码前缀所有权 golden | `cargo xtask` 前缀所有权治理测试（与 `error-handling.md` 一致） |
 | DI port + dynosaur 收敛到定义点白名单 | `deny.toml` wrapper：`dynosaur`/`trait-variant` 只准 **DI port 定义点 crate** 依赖——白名单 = `diport`（provider-agnostic infra port）+ 定义自身 repo/service port 的域 crate（域形 port，ADR-005 Option 2，INVARIANT DIPORT-MACRO-CONFINE-02；`layer-deps` `EXTERNAL_CONFINEMENT_WRAPPERS` 守白名单条目属 DiPort/Domain 层 + wrapper⟷源集合相等）。注：dynosaur 0.3 生成的 unsafe 经 def-site hygiene **不触发** consumer forbid（实测，ADR-003 §8），无 forbid 例外、无 unsafe carve-out——本约束是「DI port 定义点集中」架构守卫，非 unsafe 收敛；ADR-005 把原 `-01`「单一依赖点」放宽为白名单（域形 repo port 必然多点定义，前提失效，零安全代价） |
@@ -230,13 +230,15 @@ Postgres T2 / sealed receipt + runtime conformance；scanner 只守跨文件 rea
 binding、exact-set 与 anti-vacuity。细则见 [`localtx.md`](./localtx.md) 与
 [`consistency-l0.md`](./consistency-l0.md)，本文不复制闭表。
 
-这些 Medium gate 的 **GitHub Actions typed CI** carrier 由 `.github/workflows/ci.yml` 定义。普通 PR 的
-Job 闭集固定为 `selector`、`check`、`test-affected`、`integration-critical` 与 result-only `gate`；selector
-只传递规范 `SelectionPlan`，执行 Job 不重列路径策略。`test-affected` 除 affected 组件测试外始终持有并生产
-LocalOnly required evidence；其唯一公开直接入口是 `cargo xtask ci localonly-evidence --output <path>`。
-gate 只根据三个执行结果作结论，不下载或解释 evidence artifact。高影响根、影响分析
-失败和保守 rename 可升级为 `PrComplete`，但不得把 PR 扩成 `ReleaseCheck`。完整验证只属于
-develop、nightly、release 与显式 `cargo xtask ci full`。
+这些 Medium gate 的 **GitHub Actions typed CI** carrier 由 `.github/workflows/ci.yml` 定义。
+**PR job 拓扑固定**（selector 只传规范 `SelectionPlan`、执行 Job 不重列路径策略、result-only gate
+只聚合执行结果）：具体 Job 名与闭集以 `.github/workflows/ci.yml` 为真源，运维激活状态见
+[CI 运维状态](../ops/202607130824-1765-diff-adaptive-ci.md) 与
+[`202606231530-001-ci-lane.md`](../ops/202606231530-001-ci-lane.md)；本文不手抄 Job 名单。
+`test-affected` 除 affected 组件测试外始终持有并生产 LocalOnly required evidence；其唯一公开直接入口是
+`cargo xtask ci localonly-evidence --output <path>`。高影响根、影响分析失败和保守 rename 可升级为
+`PrComplete`，但不得把 PR 扩成 `ReleaseCheck`。完整验证只属于 develop、nightly、release 与显式
+`cargo xtask ci full`。
 `CI-FIXED-WORKFLOW-01` 以结构化 YAML 闭集校验、synthetic red 与 anti-vacuity 锁定固定拓扑、
 只读权限和唯一 reusable 委托，不允许 workflow 重列路径/job 策略；`CI-RESULT-GATE-01` 锁定 result-only
 聚合。固定 Job 枚举、穷举 dispatch 与唯一/完整断言由 Rust 编译期证明（Hard），YAML carrier 边界由
@@ -255,9 +257,10 @@ baseline 只做 exported-symbol/封装漂移审查，不产生 SemVer 承诺）�
 [`202606231530-001-ci-lane.md`](../ops/202606231530-001-ci-lane.md)。
 
 L0/L1 验证沿用同一 typed policy，不在规则文档维护第二份 gate inventory：affected `make ci` 按
-Consistency domain 选择声明、codegen 与静态证据，固定 9 门的 `verify --fast` 不拥有 L0/L1 证明；完整
-`verify` 增加编译和默认行为测试并仅编译 integration targets，真实 Postgres LocalTx matrix
-与 active L1 journey 由 `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`
+Consistency domain 选择声明、codegen 与静态证据；`verify --fast` 门集以 `xtask/src/verify.rs` 为真源，
+不拥有 L0/L1 证明。完整 `verify` 增加编译和默认行为测试并仅编译 integration targets，真实 Postgres
+LocalTx matrix 与 active L1 journey 由
+`cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`
 执行；selection 必须包含其稳定 integration unit ID。具体采用顺序与失败边界分别见
 [`consistency-l0.md`](./consistency-l0.md) 和 [`localtx.md`](./localtx.md)。
 
