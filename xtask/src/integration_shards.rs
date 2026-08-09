@@ -879,6 +879,8 @@ integration_shard_catalog! {
             PostgresMigration0098SettingsActiveServing => ("postgres-migration-0098-settings-active-serving", ReleaseCheck, "postgres", "migration_0098_settings_active_serving", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0098SettingsActiveServingUpgrade => ("postgres-migration-0098-settings-active-serving-upgrade", ReleaseCheck, "postgres", "migration_0098_settings_active_serving_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0099DeviceCredentialAuthority => ("postgres-migration-0099-device-credential-authority", ReleaseCheck, "postgres", "migration_0099_device_credential_authority", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0102AbacProfile => ("postgres-migration-0102-abac-profile", ReleaseCheck, "postgres", "migration_0102_abac_profile", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0102AbacProfileUpgrade => ("postgres-migration-0102-abac-profile-upgrade", ReleaseCheck, "postgres", "migration_0102_abac_profile_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
             IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
@@ -2856,6 +2858,27 @@ mod tests {
     }
 
     #[test]
+    fn migration_0102_abac_carriers_preserve_static_and_live_execution_boundaries() {
+        let static_profile = IntegrationUnitId::PostgresMigration0102AbacProfile.spec();
+        assert_eq!(static_profile.shard, IntegrationShard::PostgresDomain);
+        assert_eq!(static_profile.package, "postgres");
+        assert_eq!(static_profile.target, "migration_0102_abac_profile");
+        assert_eq!(static_profile.kind, TargetKind::Test);
+        assert_eq!(static_profile.scheduling, Scheduling::Parallel);
+        assert_eq!(static_profile.local_eligibility, LocalEligibility::Affected);
+        assert!(static_profile.resources.is_empty());
+
+        let live_upgrade = IntegrationUnitId::PostgresMigration0102AbacProfileUpgrade.spec();
+        assert_eq!(live_upgrade.shard, IntegrationShard::PostgresDomain);
+        assert_eq!(live_upgrade.package, "postgres");
+        assert_eq!(live_upgrade.target, "migration_0102_abac_profile_upgrade");
+        assert_eq!(live_upgrade.kind, TargetKind::Test);
+        assert_eq!(live_upgrade.scheduling, Scheduling::Serial);
+        assert_eq!(live_upgrade.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(live_upgrade.resources, &[Resource::Postgres]);
+    }
+
+    #[test]
     #[allow(clippy::expect_used)] // reason: registry fixture must retain security-provider closeout unit.
     fn settingsonly_vault_backend_is_unique_serial_and_feature_enabled() {
         let spec = IntegrationShard::RuntimeHttpAuth.spec();
@@ -2904,6 +2927,7 @@ mod tests {
             ("postgres", "migration_0089_saga_operator_control"),
             ("postgres", "migration_0097_projection_worker_upgrade"),
             ("postgres", "migration_0098_settings_active_serving_upgrade"),
+            ("postgres", "migration_0102_abac_profile_upgrade"),
             ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
             ("journeys", "identity_password_security_event_journey"),
