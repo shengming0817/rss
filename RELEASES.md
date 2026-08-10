@@ -21,6 +21,22 @@ Immediately before first publication, recheck the exact crate name and verify th
 owners. Names observed as available earlier are not reservations. After publication, add
 `github:shengming0817:rss-maintainers` as an owner and verify the resulting owner list.
 
+## Release Candidate closeout
+
+A listed maintainer may approve an exact source revision as a Release Candidate only after reading
+the package identity and version from Cargo metadata, validating the Release API baseline, and
+running the owning specification's same-revision package and external-consumer proof. The approval
+record identifies every approved package, version, source revision, archive digest, consumer
+revision, and intended registry owner. Packages exercised by an aggregate proof but omitted from
+that tuple are not approved.
+
+Same-revision digests, command results, and the maintainer decision belong in the issue or pull
+request review record. They must not be copied into the repository as a receipt registry or current
+status list. The reviewed version notes remain in [CHANGELOG.md](CHANGELOG.md), while Cargo metadata,
+Release API baselines, maintainer identity, and this policy remain their respective stable owners.
+RC approval does not create a tag, reserve a registry name, upload a package, or change registry
+ownership; publication retains the separate manual checks above.
+
 ## Deprecation
 
 Deprecations identify a replacement and appear in the changelog. For releases at or above 1.0, a
@@ -55,6 +71,18 @@ release 或发布批准。每次发布必须由列名维护者批准并人工执
 
 首次发布前必须重新检查精确 crate 名称并验证预期 crates.io owner；此前观察到名称可用不等于保留。发布后把
 `github:shengming0817:rss-maintainers` 加为 owner，并验证最终 owner 列表。
+
+## Release Candidate closeout
+
+列名维护者只有在从 Cargo metadata 回读 package identity/version、验证 Release API baseline，并运行所属规格的
+same-revision package 与外部 consumer proof 后，才能批准一个精确 source revision 成为 Release Candidate。批准记录
+必须逐项列出获批 package、version、source revision、archive digest、consumer revision 与预期 registry owner；
+aggregate proof 即使执行了其它 package，只要未进入该 tuple，就不构成对它们的批准。
+
+same-revision digest、命令结果与维护者裁决只进入 issue 或 PR review 记录，不得复制进仓库形成 receipt registry 或
+当前状态清单。受 review 的版本说明归 [CHANGELOG.md](CHANGELOG.md)，Cargo metadata、Release API baseline、维护者身份
+与本文分别保持各自稳定 owner。RC 批准不创建 tag、不保留 registry 名称、不上传 package，也不改变 registry owner；
+实际发布仍须单独完成上文的人工检查。
 
 ## 弃用
 

@@ -46,8 +46,9 @@ must never change an authorization outcome. RSS enforces that rule for its autho
 but the public type cannot prevent an external application from deliberately misusing a diagnostic
 identifier.
 
-Cargo publication eligibility and a passing package proof make this package a release candidate;
-they are not an RC, a registry upload, or publication approval.
+Cargo publication eligibility and a passing same-revision package proof establish candidate
+eligibility only. RC approval applies to an exact revision and archive digest under the repository's
+`RELEASES.md`; it does not publish the package. Versioned notes live in the root `CHANGELOG.md`.
 
 The async scope shape follows Tokio task-local scoping and tracing's explicit propagation model:
 [Tokio task-local source](https://github.com/tokio-rs/tokio/blob/be8ee45b3fc2d107174e586141b1cb12c93e2ddf/tokio/src/task/task_local.rs),

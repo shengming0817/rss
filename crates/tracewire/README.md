@@ -47,8 +47,8 @@ absent from its feature graph and public API; RSS keeps its multi-consumer harne
 publish-disabled `tracewiretest` workspace crate.
 
 Cargo publication eligibility and a passing same-revision package proof make this package a
-candidate. They are not an RC, a registry upload, or publication approval. Independent consumer and
-human closeout work remain separate.
+candidate only. RC approval applies to an exact revision and archive digest under the repository's
+`RELEASES.md`; it does not publish the package. Versioned notes live in the root `CHANGELOG.md`.
 
 The private bridge follows the W3C Trace Context 1.1 wire rules and the lifecycle of
 `tracing-opentelemetry::OpenTelemetrySpanExt::set_parent`:
