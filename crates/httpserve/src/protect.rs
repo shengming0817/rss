@@ -51,19 +51,17 @@ impl Default for BodyLimit {
 /// 安全响应头值集（默认：所有头开启）。
 ///
 /// 各头按 OWASP Secure Headers Project 推荐值预设；`Cache-Control` 使用 `if_not_present`（允许
-/// handler 自行覆写），其余均 `overriding`（框架统一强制）。HSTS 默认开启，可经 [`without_hsts`]
-/// 关闭（用于纯 HTTP 开发环境）。
-///
-/// [`without_hsts`]: SecurityHeaders::without_hsts
+/// handler 自行覆写），其余启用的头均 `overriding`（框架统一强制）。HSTS 内层策略恒开启；是否可在
+/// wire 上发送由持有真实 transport scheme 的 `httpd` adapter 最终裁决，plaintext 响应会被移除。
 #[derive(Clone, Debug)]
 pub struct SecurityHeaders {
     x_content_type_options: HeaderValue,
     x_frame_options: HeaderValue,
     referrer_policy: HeaderValue,
     content_security_policy: HeaderValue,
-    cross_origin_resource_policy: HeaderValue,
+    cross_origin_resource_policy: Option<HeaderValue>,
     cache_control: HeaderValue,
-    hsts: Option<HeaderValue>,
+    hsts: HeaderValue,
 }
 
 impl Default for SecurityHeaders {
@@ -75,19 +73,22 @@ impl Default for SecurityHeaders {
             content_security_policy: HeaderValue::from_static(
                 "default-src 'none'; frame-ancestors 'none'; base-uri 'none'",
             ),
-            cross_origin_resource_policy: HeaderValue::from_static("same-origin"),
+            cross_origin_resource_policy: Some(HeaderValue::from_static("same-origin")),
             cache_control: HeaderValue::from_static("no-store"),
-            hsts: Some(HeaderValue::from_static(
-                "max-age=63072000; includeSubDomains",
-            )),
+            hsts: HeaderValue::from_static("max-age=63072000; includeSubDomains"),
         }
     }
 }
 
 impl SecurityHeaders {
-    /// 关闭 HSTS（用于纯 HTTP 开发环境；生产必须保留 HSTS）。
-    pub fn without_hsts(self) -> Self {
-        Self { hsts: None, ..self }
+    /// 显式关闭框架的 CORP 策略，让 handler 自己决定是否以及如何发送该响应头。
+    ///
+    /// 默认仍为 overriding `same-origin`；只提供窄 opt-out，不开放任意值配置面。
+    pub fn without_corp(self) -> Self {
+        Self {
+            cross_origin_resource_policy: None,
+            ..self
+        }
     }
 
     /// 产出各头对应的 tower-http response header layer 列表（供 sealed_router 逐层叠加）。
@@ -113,22 +114,22 @@ impl SecurityHeaders {
             HeaderName::from_static(HDR_CONTENT_SECURITY_POLICY),
             self.content_security_policy.clone(),
         ));
-        layers.push(SetResponseHeaderLayer::overriding(
-            HeaderName::from_static(HDR_CROSS_ORIGIN_RESOURCE_POLICY),
-            self.cross_origin_resource_policy.clone(),
-        ));
+        if let Some(ref corp) = self.cross_origin_resource_policy {
+            layers.push(SetResponseHeaderLayer::overriding(
+                HeaderName::from_static(HDR_CROSS_ORIGIN_RESOURCE_POLICY),
+                corp.clone(),
+            ));
+        }
         // Cache-Control：if_not_present，允许 handler 自行覆写缓存策略。
         layers.push(SetResponseHeaderLayer::if_not_present(
             HeaderName::from_static(HDR_CACHE_CONTROL),
             self.cache_control.clone(),
         ));
-        // HSTS：仅 Some 时追加（HTTP 环境可关闭）。
-        if let Some(ref hsts_val) = self.hsts {
-            layers.push(SetResponseHeaderLayer::overriding(
-                HeaderName::from_static(HDR_STRICT_TRANSPORT_SECURITY),
-                hsts_val.clone(),
-            ));
-        }
+        // 内层 HSTS 恒存在；plaintext wire response 由持有真实 scheme 的 httpd adapter 删除。
+        layers.push(SetResponseHeaderLayer::overriding(
+            HeaderName::from_static(HDR_STRICT_TRANSPORT_SECURITY),
+            self.hsts.clone(),
+        ));
 
         layers
     }
@@ -137,7 +138,8 @@ impl SecurityHeaders {
 /// 边缘防护配置（body-limit + security-headers）。
 ///
 /// 以 [`Default`] 安全值初始化；组合根可经 [`crate::routes::AuthenticatedRoutes::with_edge_hardening`]
-/// 覆盖（如调整 `body_limit` 或关闭 HSTS）。
+/// 覆盖（如调整 `body_limit`，或显式关闭框架 CORP 策略）。HSTS 的最终 wire 裁决属于
+/// 持有真实 transport scheme 的 `httpd` adapter。
 ///
 /// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }——`EdgeHardening` 经 `sealed_router` 唯一 funnel 叠层，
 /// 保证每个 bindable router 都带 body-limit 且 outer 于 auth（结构性 Hard：不经 sealed_router 无法 bind）。
@@ -178,21 +180,31 @@ mod tests {
     }
 
     #[test]
-    fn security_headers_without_hsts_removes_hsts_layer() {
-        let headers = SecurityHeaders::default().without_hsts();
-        let layers = headers.response_layers();
-        // 关闭 HSTS 后应有 6 层
-        assert_eq!(layers.len(), 6, "without_hsts 应产出 6 层（不含 HSTS）");
+    fn security_headers_without_corp_removes_only_corp_layer() {
+        let headers = SecurityHeaders::default().without_corp();
+        assert_eq!(
+            headers.response_layers().len(),
+            6,
+            "without_corp 应只移除 CORP 层"
+        );
+        assert!(headers.cross_origin_resource_policy.is_none());
+        assert_eq!(
+            headers.hsts,
+            HeaderValue::from_static("max-age=63072000; includeSubDomains"),
+            "CORP opt-out 不得弱化 HSTS 内层策略"
+        );
     }
 
     /// SecurityHeaders 默认值断言：确保各 overriding 头的 value 正确。
     /// 通过构造 layer 后的字段是内部的，改为直接对 Default 结构做响应头集成测试（见 routes 集成测试）。
-    /// 此处只验证 layer 数量与 without_hsts 语义（非空验证）。
+    /// 此处验证 layer 非空与 HSTS 必填闭值。
     #[test]
     fn security_headers_layers_nonempty_by_default() {
         let h = SecurityHeaders::default();
         assert!(!h.response_layers().is_empty());
-        assert!(h.hsts.is_some(), "默认 HSTS 开启");
-        assert!(SecurityHeaders::default().without_hsts().hsts.is_none());
+        assert_eq!(
+            h.hsts,
+            HeaderValue::from_static("max-age=63072000; includeSubDomains")
+        );
     }
 }

@@ -896,27 +896,50 @@ where
     }
 }
 
+/// Adapter-private transport truth. The real bind path mints this closed value, so request headers
+/// and assembly callers cannot select either the observed scheme or the HSTS wire policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TransportPolicy {
+    Plaintext,
+    Tls,
+}
+
+impl TransportPolicy {
+    fn scheme(self) -> server_observation::TransportScheme {
+        match self {
+            Self::Plaintext => server_observation::TransportScheme::Http,
+            Self::Tls => server_observation::TransportScheme::Https,
+        }
+    }
+
+    fn finalize_response(self, mut response: axum::response::Response) -> axum::response::Response {
+        if self == Self::Plaintext {
+            response.headers_mut().remove("strict-transport-security");
+        }
+        response
+    }
+}
+
 /// Adapter-private bridge from the budget/auth-sealed per-request core to axum's connection
-/// make-service contract. Construction is colocated with the actual plaintext/mTLS serve branch,
-/// so request headers and assembly callers cannot select the observed scheme.
+/// make-service contract. Construction is colocated with the actual plaintext/mTLS serve branch.
 #[derive(Clone)]
 struct TransportMakeService {
     inner: httpserve::ServerService,
-    scheme: server_observation::TransportScheme,
+    policy: TransportPolicy,
 }
 
 impl TransportMakeService {
     fn plaintext(inner: httpserve::ServerService) -> Self {
         Self {
             inner,
-            scheme: server_observation::TransportScheme::Http,
+            policy: TransportPolicy::Plaintext,
         }
     }
 
     fn tls(inner: httpserve::ServerService) -> Self {
         Self {
             inner,
-            scheme: server_observation::TransportScheme::Https,
+            policy: TransportPolicy::Tls,
         }
     }
 }
@@ -936,7 +959,7 @@ where
     fn call(&mut self, target: IncomingStream<'a, L>) -> Self::Future {
         std::future::ready(Ok(TransportService {
             inner: self.inner.clone(),
-            scheme: self.scheme,
+            policy: self.policy,
             remote_addr: *target.remote_addr(),
         }))
     }
@@ -945,7 +968,7 @@ where
 #[derive(Clone)]
 struct TransportService {
     inner: httpserve::ServerService,
-    scheme: server_observation::TransportScheme,
+    policy: TransportPolicy,
     remote_addr: SocketAddr,
 }
 
@@ -971,7 +994,7 @@ impl Service<axum::extract::Request> for TransportService {
                 let observation = server_observation::RequestObservation::new(
                     request.method(),
                     request.version(),
-                    self.scheme,
+                    self.policy.scheme(),
                     listener,
                 );
                 if let Some(inbound) = inbound {
@@ -984,6 +1007,7 @@ impl Service<axum::extract::Request> for TransportService {
         TransportResponseFuture {
             inner: self.inner.call(request),
             observation,
+            policy: self.policy,
         }
     }
 }
@@ -991,6 +1015,7 @@ impl Service<axum::extract::Request> for TransportService {
 struct TransportResponseFuture<F> {
     inner: F,
     observation: Option<server_observation::RequestObservation>,
+    policy: TransportPolicy,
 }
 
 impl<F> Future for TransportResponseFuture<F>
@@ -1011,7 +1036,7 @@ where
                     Some(observation) => observation.observe_response(response),
                     None => response.into_response(),
                 };
-                Poll::Ready(Ok(response))
+                Poll::Ready(Ok(self.policy.finalize_response(response)))
             }
             Poll::Ready(Err(error)) => Poll::Ready(Err(error)),
             Poll::Pending => Poll::Pending,
@@ -1051,6 +1076,12 @@ impl BoundHttpServer {
     /// （如 `serve_until_signal`）或 `ShutdownStack::register_with_token` 闭包内调用即满足（组合根均在
     /// `#[tokio::main]` 运行时内）。
     pub fn serve(self, svc: httpserve::ServerService, token: CancellationToken) -> HttpServer {
+        tracing::warn!(
+            name = self.name,
+            transport = "plaintext",
+            hsts_policy = "strip",
+            "plaintext listener strips Strict-Transport-Security; the TLS terminator must own HSTS"
+        );
         let serve_token = token.clone();
         let listener = self.listener;
         let handle = tokio::spawn(async move {
@@ -1245,6 +1276,10 @@ mod tests {
 
         fn event(&self, event: &tracing::Event<'_>) {
             let mut fields = HashMap::new();
+            fields.insert(
+                "level".to_owned(),
+                event.metadata().level().as_str().to_owned(),
+            );
             event.record(&mut EventFieldCapture(&mut fields));
             self.events
                 .lock()
@@ -1343,7 +1378,7 @@ mod tests {
             assert!(
                 event.keys().all(|key| matches!(
                     key.as_str(),
-                    "message" | "listener" | "stage" | "reason" | "io_kind"
+                    "message" | "listener" | "stage" | "reason" | "io_kind" | "level"
                 )),
                 "unexpected observation field: {event:?}"
             );
@@ -1427,6 +1462,13 @@ mod tests {
         )
     }
 
+    fn make_hsts_svc() -> httpserve::ServerService {
+        httpserve::ServerService::from_router_for_test(
+            Router::new().route("/ok", get(|| async { "ok" })),
+            httpserve::ServerRequestBudget::for_test(),
+        )
+    }
+
     fn make_domain_transport_svc() -> httpserve::ServerService {
         httpserve::ServerService::from_router_for_test(
             Router::new()
@@ -1446,11 +1488,11 @@ mod tests {
     #[test]
     fn actual_transport_make_service_owns_closed_scheme_selection() {
         assert_eq!(
-            TransportMakeService::plaintext(make_svc()).scheme,
+            TransportMakeService::plaintext(make_svc()).policy.scheme(),
             server_observation::TransportScheme::Http
         );
         assert_eq!(
-            TransportMakeService::tls(make_mtls_svc()).scheme,
+            TransportMakeService::tls(make_mtls_svc()).policy.scheme(),
             server_observation::TransportScheme::Https
         );
     }
@@ -1629,10 +1671,16 @@ mod tests {
     // 测试断言用 expect：item-level carve-out（error-handling.md §Carve-out）。
     #[allow(clippy::expect_used)]
     async fn raw_get_response(addr: SocketAddr, path: &str) -> String {
+        raw_get_response_with_headers(addr, path, "").await
+    }
+
+    #[allow(clippy::expect_used)]
+    async fn raw_get_response_with_headers(addr: SocketAddr, path: &str, headers: &str) -> String {
         let mut stream = TcpStream::connect(addr)
             .await
             .expect("connect bound socket");
-        let req = format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        let req =
+            format!("GET {path} HTTP/1.1\r\nHost: localhost\r\n{headers}Connection: close\r\n\r\n");
         stream
             .write_all(req.as_bytes())
             .await
@@ -1862,6 +1910,95 @@ mod tests {
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
+    async fn plaintext_transport_strips_hsts_from_success_and_real_body_limit_response() {
+        let bound = HttpServer::bind(
+            "http-hsts-strip",
+            "127.0.0.1:0".parse().expect("ephemeral address"),
+        )
+        .await
+        .expect("bind");
+        let local = bound.local_addr();
+        let server = bound.serve(make_hsts_svc(), CancellationToken::new());
+
+        for (response, status, expected_body) in [
+            (raw_get_response(local, "/ok").await, "200", "ok"),
+            (
+                raw_get_response_with_headers(local, "/ok", "Content-Length: 1048577\r\n").await,
+                "413",
+                "ERR_CORE_PAYLOAD_TOO_LARGE",
+            ),
+        ] {
+            assert!(
+                response.starts_with(&format!("HTTP/1.1 {status}")),
+                "unexpected response: {response}"
+            );
+            assert!(response.contains(expected_body), "{response}");
+            assert!(
+                !response
+                    .to_ascii_lowercase()
+                    .contains("strict-transport-security:"),
+                "plaintext must strip HSTS: {response}"
+            );
+            assert!(
+                response
+                    .to_ascii_lowercase()
+                    .contains("x-content-type-options: nosniff"),
+                "transport guard must preserve other security headers: {response}"
+            );
+        }
+
+        assert!(server.shutdown().await.is_ok());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn plaintext_listener_records_one_closed_hsts_warning_at_startup() {
+        let bound = HttpServer::bind(
+            "http-hsts-warning",
+            "127.0.0.1:0".parse().expect("ephemeral address"),
+        )
+        .await
+        .expect("bind");
+        let capture = Arc::new(EventCapture::default());
+        let dispatch = tracing::Dispatch::new(Arc::clone(&capture));
+        let server = tracing::dispatcher::with_default(&dispatch, || {
+            bound.serve(make_svc(), CancellationToken::new())
+        });
+
+        {
+            let events = capture
+                .events
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let warnings = events
+                .iter()
+                .filter(|event| event.get("hsts_policy").map(String::as_str) == Some("strip"))
+                .collect::<Vec<_>>();
+            assert_eq!(warnings.len(), 1, "one policy warning per listener startup");
+            assert_eq!(
+                warnings[0].get("transport").map(String::as_str),
+                Some("plaintext")
+            );
+            assert_eq!(
+                warnings[0].get("name").map(String::as_str),
+                Some("http-hsts-warning")
+            );
+            assert_eq!(warnings[0].get("level").map(String::as_str), Some("WARN"));
+            assert!(
+                warnings[0].keys().all(|key| matches!(
+                    key.as_str(),
+                    "message" | "name" | "transport" | "hsts_policy" | "level"
+                )),
+                "warning must expose only the closed field set: {:?}",
+                warnings[0]
+            );
+        }
+
+        assert!(server.shutdown().await.is_ok());
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
     async fn plaintext_server_uses_sealed_request_budget_and_drops_handler() {
         let dropped = Arc::new(AtomicBool::new(false));
         let bound = HttpServer::bind(
@@ -1879,6 +2016,18 @@ mod tests {
         let response = raw_get_response(local, "/slow").await;
         assert!(response.starts_with("HTTP/1.1 503"), "{response}");
         assert!(response.contains("ERR_CORE_UNAVAILABLE"), "{response}");
+        assert!(
+            !response
+                .to_ascii_lowercase()
+                .contains("strict-transport-security:"),
+            "real request-budget 503 must be sanitized: {response}"
+        );
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("x-content-type-options: nosniff"),
+            "other security headers must survive: {response}"
+        );
         assert!(
             dropped.load(Ordering::Acquire),
             "plaintext timeout must drop handler future"
@@ -2700,6 +2849,55 @@ mod tests {
 
         token.cancel();
         assert!(server.shutdown().await.is_ok(), "mTLS shutdown 收敛");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn one_service_clone_gets_distinct_plaintext_and_mtls_hsts_policies() {
+        let ca = test_ca();
+        let client_id = "spiffe://example.org/ns/rss/sa/internal";
+        let mtls = test_mtls_config(&ca, client_id);
+        let client_cert = leaf_cert(&ca, None, client_id, ExtendedKeyUsagePurpose::ClientAuth);
+        let shared = make_hsts_svc();
+        let plaintext_bound = HttpServer::bind(
+            "http-plaintext-shared-hsts",
+            "127.0.0.1:0".parse().expect("ephemeral address"),
+        )
+        .await
+        .expect("bind plaintext");
+        let plaintext_local = plaintext_bound.local_addr();
+        let plaintext_server = plaintext_bound.serve(shared.clone(), CancellationToken::new());
+        let plaintext_response = raw_get_response(plaintext_local, "/ok").await;
+        assert!(
+            !plaintext_response
+                .to_ascii_lowercase()
+                .contains("strict-transport-security:"),
+            "plaintext clone must strip HSTS: {plaintext_response}"
+        );
+
+        let mtls_bound = HttpServer::bind(
+            "http-mtls-hsts",
+            "127.0.0.1:0".parse().expect("ephemeral address"),
+        )
+        .await
+        .expect("bind");
+        let mtls_local = mtls_bound.local_addr();
+        let mtls_server = mtls_bound.serve_mtls(shared, mtls, CancellationToken::new());
+
+        let response =
+            tls_get_response_with_timeout(mtls_local, "/ok", client_config(&ca, Some(client_cert)))
+                .await
+                .expect("trusted mTLS request");
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        assert!(
+            response
+                .to_ascii_lowercase()
+                .contains("strict-transport-security: max-age=63072000; includesubdomains"),
+            "mTLS must retain inner HSTS: {response}"
+        );
+
+        assert!(plaintext_server.shutdown().await.is_ok());
+        assert!(mtls_server.shutdown().await.is_ok());
     }
 
     #[tokio::test]

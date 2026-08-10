@@ -73,7 +73,14 @@ security-headers → request_id → correlation → server-request-budget → bo
   未知未来 listener fail-closed 为启用 trace。
 - **body-limit + security-headers 由唯一 bindable funnel 无条件叠默认**，每个 bind / 测试出口都带且不可遗漏
   （can't-forget funnel，Hard）。策略经 typed 结构传入，两字段均非 `Option`。
-  默认零信任头集 + 有界 body limit；组合根可覆盖，但不能取消该层。
+  默认零信任头集 + 有界 body limit；组合根可覆盖，但不能取消该层。CORP 默认以 overriding
+  `same-origin` 注入；只有显式 `SecurityHeaders::without_corp()` 会让 handler 自行持有该策略，
+  不提供任意 CORP 值的公共配置面。
+- **HSTS 的最终 owner 是持有真实 scheme 的 `httpd` transport seam**：plaintext 构造路径对所有响应
+  （包括 413/503 synthetic response）无条件删除 `Strict-Transport-Security`，并在 listener 启动时
+  记录一次闭值告警；TLS/mTLS 构造路径保留 `httpserve` 的内层默认 HSTS。不得使用
+  `X-Forwarded-Proto` 或其他请求头裁决。外部 TLS 终结部署由真实 terminator 添加 HSTS；同一个
+  `ServerService` 被 plaintext 与 mTLS listener 复用时仍分别得到正确策略。
 - **`SERVER-REQUEST-BUDGET-01`**：请求预算是必填、非零的进程快照配置，在任何 listener bind 前解析。
   唯一生产出口返回字段私有的 make-service capability，传输 adapter 只接受该 capability，
   故无法绑定无预算 raw router（Hard）。预算覆盖 body、验签、授权、handler 及其下游 future；

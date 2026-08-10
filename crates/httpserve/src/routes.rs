@@ -1564,7 +1564,8 @@ impl AuthenticatedRoutes {
     /// 覆盖边缘防护配置（body-limit + security-headers）。
     ///
     /// 组合根在 `finalize_auth` 产物上调用，覆盖默认的 [`crate::protect::EdgeHardening`] 值
-    /// （如调整 body 上限或关闭 HSTS）。`sealed_router` 将使用更新后的配置叠层。
+    /// （如调整 body 上限或显式关闭框架 CORP 策略）。`sealed_router` 将使用更新后的配置叠层；
+    /// HSTS 的最终 wire 裁决由持有真实 transport scheme 的 `httpd` adapter 完成。
     pub fn with_edge_hardening(mut self, hardening: crate::protect::EdgeHardening) -> Self {
         self.hardening = hardening;
         self
@@ -2842,6 +2843,54 @@ mod tests {
         assert!(
             headers.get("cache-control").is_some(),
             "cache-control 默认注入"
+        );
+    }
+
+    /// CORP 默认由框架 overriding；显式 opt-out 后 handler 的跨域资源策略原样保留。
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn security_headers_corp_opt_out_preserves_handler_value() {
+        let routes = || {
+            test_routes::<Health>(|rb| {
+                rb.mount_raw_for_test(
+                    admin_route("/list"),
+                    get(|| async { ([("cross-origin-resource-policy", "cross-origin")], "ok") }),
+                )
+            })
+        };
+        let plan = || {
+            primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
+                .expect("plan")
+        };
+
+        let default_router = finalize_auth(routes(), plan())
+            .expect("finalize default")
+            .into_plaintext_router_for_test();
+        let default_response = oneshot_response(default_router, "/list").await;
+        assert_eq!(
+            default_response
+                .headers()
+                .get("cross-origin-resource-policy")
+                .expect("default CORP"),
+            "same-origin",
+            "默认策略必须覆盖 handler"
+        );
+
+        let opted_out_router = finalize_auth(routes(), plan())
+            .expect("finalize opt-out")
+            .with_edge_hardening(crate::protect::EdgeHardening {
+                body_limit: crate::protect::BodyLimit::default(),
+                headers: crate::protect::SecurityHeaders::default().without_corp(),
+            })
+            .into_plaintext_router_for_test();
+        let opted_out_response = oneshot_response(opted_out_router, "/list").await;
+        assert_eq!(
+            opted_out_response
+                .headers()
+                .get("cross-origin-resource-policy")
+                .expect("handler CORP"),
+            "cross-origin",
+            "opt-out 后不得删除或覆盖 handler 值"
         );
     }
 

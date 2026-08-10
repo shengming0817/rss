@@ -3,8 +3,8 @@
 #![allow(clippy::expect_used, clippy::unwrap_used)]
 
 use super::{
-    TransportService,
-    server_observation::{self, TransportScheme},
+    TransportPolicy, TransportService,
+    server_observation::{self},
 };
 use axum::Router;
 use axum::body::{Body, Bytes};
@@ -176,7 +176,7 @@ fn server_span_settles_once_at_each_body_terminal() {
             );
             let service = TransportService {
                 inner: core,
-                scheme: TransportScheme::Http,
+                policy: TransportPolicy::Plaintext,
                 remote_addr: "127.0.0.1:1".parse().unwrap(),
             };
 
@@ -240,7 +240,10 @@ fn observed_transport(
 ) -> TransportService {
     TransportService {
         inner: service,
-        scheme,
+        policy: match scheme {
+            server_observation::TransportScheme::Http => TransportPolicy::Plaintext,
+            server_observation::TransportScheme::Https => TransportPolicy::Tls,
+        },
         remote_addr: "127.0.0.1:1".parse().expect("test remote address"),
     }
 }
