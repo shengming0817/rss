@@ -12,6 +12,7 @@
 //! INVARIANT: GENERATED-TUPLE-REDACTION-01 { level = "Hard", exec = "check", source = "codegen", facet = "constrained-scalar-redaction", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy", anti_vacuity = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy" }
 //! INVARIANT: DEFERRED-STRING-LENGTH-VALIDATION-01 { level = "Hard", exec = "check", source = "codegen", facet = "schema-marked-transport-policy-boundary", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::deferred_string_length_marker_rejects_other_validation_keywords", anti_vacuity = "codegen::tests::schema_marker_defers_transport_length_checks" }
 //! INVARIANT: GENERATED-RUSTDOC-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "codegen::tests::owned_event_and_command_seam_templates_document_public_api", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }—— owned event/command templates require rustdoc on every public item, variant, accessor and associated item.
+//! INVARIANT: PLATFORM-PUBLIC-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", golden = "crates/platform/src/contracts/generated.rs", synthetic_red = "codegen::tests::platform_public_contract_identity_is_fail_closed", anti_vacuity = "codegen::tests::platform_public_contract_identity_is_fail_closed" } —— the first public contract is an exact manifest/schema/permission projection, never a broad framework-contract selector.
 //! golden = committed 文件 diff（rust-analyzer `ensure_file_contents` 模式）；
 //! anti-vacuity：注入漂移 / 孤儿文件必失（见 `#[cfg(test)]`）。
 //!
@@ -239,6 +240,10 @@ fn plan_codegen_transaction(
         root.join("contracts/README.md"),
         Some(normalize(&render_projected_contract_rule_docs(root)?).into_bytes()),
     )?);
+    outputs.push(planned_output(
+        root.join("crates/platform/src/contracts/generated.rs"),
+        Some(render_platform_public_contracts(contracts)?.into_bytes()),
+    )?);
 
     let mut unique = BTreeSet::new();
     for output in &outputs {
@@ -254,6 +259,104 @@ fn plan_codegen_transaction(
         outputs,
         touched: Vec::new(),
     })
+}
+
+/// Project the exact framework-owned active HTTP contract set into the publishable façade.
+///
+/// v0.1 intentionally accepts one reviewed schema shape. A canonical manifest/schema change fails
+/// closed here until the façade-owned typed DTO template is deliberately updated in the same PR.
+fn render_platform_public_contracts(contracts: &[GovernedContract]) -> Result<String> {
+    let selected = contracts
+        .iter()
+        .filter(|contract| {
+            contract.owner().is_framework_owned()
+                && contract.manifest().lifecycle == Lifecycle::Active
+                && contract.manifest().kind == ContractKind::Http
+        })
+        .collect::<Vec<_>>();
+    require_single_platform_contract(selected.len())?;
+    let contract = selected[0];
+    let manifest = contract.manifest();
+    let auth = manifest
+        .endpoints
+        .as_ref()
+        .and_then(|endpoints| endpoints.http.as_ref())
+        .and_then(|http| http.auth.as_ref())
+        .context("Platform Public runtime.inventory requires HTTP auth metadata")?;
+    let schema_hash = contract.schema_hash()?;
+    validate_platform_contract_identity(
+        &manifest.id,
+        &manifest.domain,
+        &manifest.version,
+        auth.mode,
+        auth.permission.as_deref(),
+        &schema_hash,
+    )?;
+    render_platform_contract_template(
+        &manifest.id,
+        &manifest.domain,
+        &manifest.version,
+        auth.permission
+            .as_deref()
+            .context("Platform Public runtime.inventory permission is absent")?,
+        &schema_hash,
+    )
+}
+
+fn render_platform_contract_template(
+    id: &str,
+    domain: &str,
+    version: &str,
+    permission: &str,
+    schema_hash: &str,
+) -> Result<String> {
+    let major = version
+        .strip_prefix('v')
+        .context("Platform Public contract version must use v<major>")?
+        .parse::<u64>()
+        .context("Platform Public contract major version is invalid")?;
+    let rendered = include_str!("../templates/platform_contracts.rs")
+        .replace("__CONTRACT_ID__", &format!("{id:?}"))
+        .replace("__CONTRACT_DOMAIN__", domain)
+        .replace("__CONTRACT_VERSION__", version)
+        .replace("__CONTRACT_MAJOR__", &major.to_string())
+        .replace("__CONTRACT_PERMISSION__", &format!("{permission:?}"))
+        .replace("__CONTRACT_SCHEMA_DIGEST__", &format!("{schema_hash:?}"));
+    if rendered.contains("__CONTRACT_") {
+        bail!("Platform Public contract template contains an unresolved identity placeholder");
+    }
+    Ok(normalize(&rendered))
+}
+
+fn require_single_platform_contract(count: usize) -> Result<()> {
+    if count != 1 {
+        bail!(
+            "Platform Public v0.1 requires exactly one framework-owned active HTTP contract; found {count}"
+        );
+    }
+    Ok(())
+}
+
+fn validate_platform_contract_identity(
+    id: &str,
+    domain: &str,
+    version: &str,
+    auth_mode: HttpAuthMode,
+    permission: Option<&str>,
+    schema_hash: &str,
+) -> Result<()> {
+    if id == "runtime.inventory"
+        && domain == "runtime"
+        && version == "v1"
+        && auth_mode == HttpAuthMode::Permission
+        && permission == Some("runtime:inventory:read")
+        && schema_hash == "sha256:2068246486fd433631e0257d18f1e20209f9db354e67b5f554fe4e8b31e429a8"
+    {
+        return Ok(());
+    }
+    bail!(
+        "Platform Public v0.1 runtime.inventory identity/schema/permission changed; update the reviewed typed projection atomically"
+    )
 }
 
 fn planned_output(path: PathBuf, expected: Option<Vec<u8>>) -> Result<PlannedOutput> {
@@ -4629,6 +4732,95 @@ mod tests {
         "[effectProfile]\n",
         "effects = [\"auth\", \"business-write\", \"business-transaction\"]\n",
     );
+
+    #[test]
+    fn platform_public_contract_identity_is_fail_closed() {
+        const HASH: &str =
+            "sha256:2068246486fd433631e0257d18f1e20209f9db354e67b5f554fe4e8b31e429a8";
+        let validate = |id, domain, version, mode, permission, hash| {
+            validate_platform_contract_identity(id, domain, version, mode, permission, hash)
+        };
+        assert!(require_single_platform_contract(1).is_ok());
+        assert!(require_single_platform_contract(0).is_err());
+        assert!(require_single_platform_contract(2).is_err());
+        assert!(
+            validate(
+                "runtime.inventory",
+                "runtime",
+                "v1",
+                HttpAuthMode::Permission,
+                Some("runtime:inventory:read"),
+                HASH,
+            )
+            .is_ok()
+        );
+        for result in [
+            validate(
+                "runtime.other",
+                "runtime",
+                "v1",
+                HttpAuthMode::Permission,
+                Some("runtime:inventory:read"),
+                HASH,
+            ),
+            validate(
+                "runtime.inventory",
+                "other",
+                "v1",
+                HttpAuthMode::Permission,
+                Some("runtime:inventory:read"),
+                HASH,
+            ),
+            validate(
+                "runtime.inventory",
+                "runtime",
+                "v2",
+                HttpAuthMode::Permission,
+                Some("runtime:inventory:read"),
+                HASH,
+            ),
+            validate(
+                "runtime.inventory",
+                "runtime",
+                "v1",
+                HttpAuthMode::Permission,
+                Some("runtime:other"),
+                HASH,
+            ),
+            validate(
+                "runtime.inventory",
+                "runtime",
+                "v1",
+                HttpAuthMode::Permission,
+                Some("runtime:inventory:read"),
+                "sha256:changed",
+            ),
+        ] {
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn platform_public_contract_emitter_projects_validated_identity() {
+        let rendered = render_platform_contract_template(
+            "runtime.synthetic",
+            "synthetic",
+            "v7",
+            "synthetic:read",
+            "sha256:synthetic",
+        )
+        .expect("render contract identity");
+        for expected in [
+            "contracts/http/synthetic/v7/inventory",
+            "ContractId::from_static(\"runtime.synthetic\")",
+            "ContractVersion::new(7, 0)",
+            "\"sha256:synthetic\"",
+            "\"synthetic:read\"",
+        ] {
+            assert!(rendered.contains(expected), "missing projected {expected}");
+        }
+        assert!(!rendered.contains("runtime.inventory"));
+    }
 
     fn assert_generated_contains(source: &str, needle: &str, message: &str) {
         assert!(source.contains(needle), "{message}:\n{source}");

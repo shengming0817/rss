@@ -15,6 +15,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use diport::{
     FederatedAccessProfile, ProjectionOperatorTokenProfile, RssAccessProfile, ServiceTokenProfile,
     TokenProfileMarker,
@@ -108,6 +109,28 @@ impl KeySet {
             es256,
             hs256: Vec::new(),
         }
+    }
+
+    /// Render the current access-key snapshot into the concrete Platform verifier input.
+    pub(crate) fn platform_jwks_json(&self) -> Result<String, serde_json::Error> {
+        let keys = self
+            .es256
+            .iter()
+            .map(|entry| {
+                let point = entry.key.to_encoded_point(false);
+                let bytes = point.as_bytes();
+                serde_json::json!({
+                    "kty": "EC",
+                    "crv": "P-256",
+                    "alg": "ES256",
+                    "use": "sig",
+                    "kid": entry.kid,
+                    "x": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes[1..33]),
+                    "y": base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(&bytes[33..65])
+                })
+            })
+            .collect::<Vec<_>>();
+        serde_json::to_string(&serde_json::json!({ "keys": keys }))
     }
 
     pub(crate) fn service_token(hs256: Vec<KeyEntry<Vec<u8>>>) -> Self {

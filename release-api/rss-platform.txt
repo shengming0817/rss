@@ -1,0 +1,1952 @@
+== release-api profile: default ==
+pub mod rss_platform
+pub mod rss_platform::contracts
+#[non_exhaustive] pub enum rss_platform::contracts::InventoryValueErrorCode
+pub rss_platform::contracts::InventoryValueErrorCode::DomainsDuplicate
+pub rss_platform::contracts::InventoryValueErrorCode::DomainsEmpty
+pub rss_platform::contracts::InventoryValueErrorCode::Endpoint
+pub rss_platform::contracts::InventoryValueErrorCode::Fingerprint
+pub rss_platform::contracts::InventoryValueErrorCode::Identifier
+pub rss_platform::contracts::InventoryValueErrorCode::ListenersNotCanonical
+pub rss_platform::contracts::InventoryValueErrorCode::PlacementsNotCanonical
+pub rss_platform::contracts::InventoryValueErrorCode::ProvidersNotCanonical
+pub rss_platform::contracts::InventoryValueErrorCode::SourceRevision
+pub rss_platform::contracts::InventoryValueErrorCode::SpiffeIdentity
+pub rss_platform::contracts::InventoryValueErrorCode::Workflow
+pub rss_platform::contracts::InventoryValueErrorCode::WorkflowsDuplicate
+impl core::clone::Clone for rss_platform::contracts::InventoryValueErrorCode
+pub fn rss_platform::contracts::InventoryValueErrorCode::clone(&self) -> rss_platform::contracts::InventoryValueErrorCode
+impl core::cmp::Eq for rss_platform::contracts::InventoryValueErrorCode
+impl core::cmp::PartialEq for rss_platform::contracts::InventoryValueErrorCode
+pub fn rss_platform::contracts::InventoryValueErrorCode::eq(&self, &rss_platform::contracts::InventoryValueErrorCode) -> bool
+impl core::fmt::Debug for rss_platform::contracts::InventoryValueErrorCode
+pub fn rss_platform::contracts::InventoryValueErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::StructuralPartialEq for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::Freeze for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::Send for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::Sync for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::Unpin for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::UnsafeUnpin for rss_platform::contracts::InventoryValueErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::InventoryValueErrorCode
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::InventoryValueErrorCode
+pub enum rss_platform::contracts::RuntimeActivatedWorkflow
+pub rss_platform::contracts::RuntimeActivatedWorkflow::Projection(rss_platform::contracts::RuntimeActivatedProjection)
+pub rss_platform::contracts::RuntimeActivatedWorkflow::Saga(rss_platform::contracts::RuntimeActivatedSaga)
+impl core::marker::Freeze for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::marker::Send for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::marker::Sync for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::marker::Unpin for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeActivatedWorkflow
+pub enum rss_platform::contracts::RuntimeAuthScheme
+pub rss_platform::contracts::RuntimeAuthScheme::FederatedAccessToken
+pub rss_platform::contracts::RuntimeAuthScheme::MutualTls
+pub rss_platform::contracts::RuntimeAuthScheme::NoAuth
+pub rss_platform::contracts::RuntimeAuthScheme::RssAccessToken
+pub rss_platform::contracts::RuntimeAuthScheme::ServiceToken
+impl core::clone::Clone for rss_platform::contracts::RuntimeAuthScheme
+pub fn rss_platform::contracts::RuntimeAuthScheme::clone(&self) -> rss_platform::contracts::RuntimeAuthScheme
+impl core::cmp::Eq for rss_platform::contracts::RuntimeAuthScheme
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeAuthScheme
+pub fn rss_platform::contracts::RuntimeAuthScheme::eq(&self, &rss_platform::contracts::RuntimeAuthScheme) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeAuthScheme
+pub fn rss_platform::contracts::RuntimeAuthScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::Freeze for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::Send for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::Sync for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::Unpin for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeAuthScheme
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeAuthScheme
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeAuthScheme
+pub enum rss_platform::contracts::RuntimeDomain
+pub rss_platform::contracts::RuntimeDomain::Audit
+pub rss_platform::contracts::RuntimeDomain::ContractRegistry
+pub rss_platform::contracts::RuntimeDomain::Identity
+pub rss_platform::contracts::RuntimeDomain::Settings
+pub rss_platform::contracts::RuntimeDomain::SystemHealth
+impl core::clone::Clone for rss_platform::contracts::RuntimeDomain
+pub fn rss_platform::contracts::RuntimeDomain::clone(&self) -> rss_platform::contracts::RuntimeDomain
+impl core::cmp::Eq for rss_platform::contracts::RuntimeDomain
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeDomain
+pub fn rss_platform::contracts::RuntimeDomain::eq(&self, &rss_platform::contracts::RuntimeDomain) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeDomain
+pub fn rss_platform::contracts::RuntimeDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeDomain
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeDomain
+impl core::marker::Freeze for rss_platform::contracts::RuntimeDomain
+impl core::marker::Send for rss_platform::contracts::RuntimeDomain
+impl core::marker::Sync for rss_platform::contracts::RuntimeDomain
+impl core::marker::Unpin for rss_platform::contracts::RuntimeDomain
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeDomain
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeDomain
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeDomain
+pub enum rss_platform::contracts::RuntimeEndpointScheme
+pub rss_platform::contracts::RuntimeEndpointScheme::Http
+pub rss_platform::contracts::RuntimeEndpointScheme::Https
+impl core::clone::Clone for rss_platform::contracts::RuntimeEndpointScheme
+pub fn rss_platform::contracts::RuntimeEndpointScheme::clone(&self) -> rss_platform::contracts::RuntimeEndpointScheme
+impl core::cmp::Eq for rss_platform::contracts::RuntimeEndpointScheme
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeEndpointScheme
+pub fn rss_platform::contracts::RuntimeEndpointScheme::eq(&self, &rss_platform::contracts::RuntimeEndpointScheme) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeEndpointScheme
+pub fn rss_platform::contracts::RuntimeEndpointScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Freeze for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Send for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Sync for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Unpin for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeEndpointScheme
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeEndpointScheme
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeEndpointScheme
+pub enum rss_platform::contracts::RuntimeInventory
+impl rss_platform::Contract for rss_platform::contracts::RuntimeInventory
+pub type rss_platform::contracts::RuntimeInventory::Request = rss_platform::contracts::RuntimeInventoryRequest
+pub type rss_platform::contracts::RuntimeInventory::Response = rss_platform::contracts::RuntimeInventoryResponse
+pub const rss_platform::contracts::RuntimeInventory::ID: rss_platform::ContractId
+pub const rss_platform::contracts::RuntimeInventory::PERMISSION: &'static str
+pub const rss_platform::contracts::RuntimeInventory::SCHEMA_DIGEST: rss_platform::SchemaDigest
+pub const rss_platform::contracts::RuntimeInventory::VERSION: rss_platform::ContractVersion
+impl core::marker::Freeze for rss_platform::contracts::RuntimeInventory
+impl core::marker::Send for rss_platform::contracts::RuntimeInventory
+impl core::marker::Sync for rss_platform::contracts::RuntimeInventory
+impl core::marker::Unpin for rss_platform::contracts::RuntimeInventory
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeInventory
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeInventory
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeInventory
+pub enum rss_platform::contracts::RuntimeListenerKind
+pub rss_platform::contracts::RuntimeListenerKind::Admin
+pub rss_platform::contracts::RuntimeListenerKind::Health
+pub rss_platform::contracts::RuntimeListenerKind::Internal
+pub rss_platform::contracts::RuntimeListenerKind::Primary
+impl core::clone::Clone for rss_platform::contracts::RuntimeListenerKind
+pub fn rss_platform::contracts::RuntimeListenerKind::clone(&self) -> rss_platform::contracts::RuntimeListenerKind
+impl core::cmp::Eq for rss_platform::contracts::RuntimeListenerKind
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeListenerKind
+pub fn rss_platform::contracts::RuntimeListenerKind::eq(&self, &rss_platform::contracts::RuntimeListenerKind) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeListenerKind
+pub fn rss_platform::contracts::RuntimeListenerKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::Freeze for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::Send for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::Sync for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::Unpin for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeListenerKind
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeListenerKind
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeListenerKind
+pub enum rss_platform::contracts::RuntimePlacementMode
+pub rss_platform::contracts::RuntimePlacementMode::Local
+pub rss_platform::contracts::RuntimePlacementMode::Remote
+impl core::clone::Clone for rss_platform::contracts::RuntimePlacementMode
+pub fn rss_platform::contracts::RuntimePlacementMode::clone(&self) -> rss_platform::contracts::RuntimePlacementMode
+impl core::cmp::Eq for rss_platform::contracts::RuntimePlacementMode
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimePlacementMode
+pub fn rss_platform::contracts::RuntimePlacementMode::eq(&self, &rss_platform::contracts::RuntimePlacementMode) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimePlacementMode
+pub fn rss_platform::contracts::RuntimePlacementMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::Freeze for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::Send for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::Sync for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::Unpin for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimePlacementMode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimePlacementMode
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimePlacementMode
+pub enum rss_platform::contracts::RuntimePlacementReadiness
+pub rss_platform::contracts::RuntimePlacementReadiness::MutualTlsSourceUnavailable
+pub rss_platform::contracts::RuntimePlacementReadiness::Ready
+impl core::clone::Clone for rss_platform::contracts::RuntimePlacementReadiness
+pub fn rss_platform::contracts::RuntimePlacementReadiness::clone(&self) -> rss_platform::contracts::RuntimePlacementReadiness
+impl core::cmp::Eq for rss_platform::contracts::RuntimePlacementReadiness
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimePlacementReadiness
+pub fn rss_platform::contracts::RuntimePlacementReadiness::eq(&self, &rss_platform::contracts::RuntimePlacementReadiness) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimePlacementReadiness
+pub fn rss_platform::contracts::RuntimePlacementReadiness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::Freeze for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::Send for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::Sync for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::Unpin for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimePlacementReadiness
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimePlacementReadiness
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimePlacementReadiness
+pub enum rss_platform::contracts::RuntimeProjectionActivation
+pub rss_platform::contracts::RuntimeProjectionActivation::Active
+pub rss_platform::contracts::RuntimeProjectionActivation::CaptureOnly
+pub rss_platform::contracts::RuntimeProjectionActivation::Shadow
+impl core::clone::Clone for rss_platform::contracts::RuntimeProjectionActivation
+pub fn rss_platform::contracts::RuntimeProjectionActivation::clone(&self) -> rss_platform::contracts::RuntimeProjectionActivation
+impl core::cmp::Eq for rss_platform::contracts::RuntimeProjectionActivation
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeProjectionActivation
+pub fn rss_platform::contracts::RuntimeProjectionActivation::eq(&self, &rss_platform::contracts::RuntimeProjectionActivation) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeProjectionActivation
+pub fn rss_platform::contracts::RuntimeProjectionActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::Freeze for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::Send for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::Sync for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::Unpin for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeProjectionActivation
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeProjectionActivation
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeProjectionActivation
+pub enum rss_platform::contracts::RuntimeProviderState
+pub rss_platform::contracts::RuntimeProviderState::Degraded
+pub rss_platform::contracts::RuntimeProviderState::Ready
+pub rss_platform::contracts::RuntimeProviderState::Unavailable
+impl core::clone::Clone for rss_platform::contracts::RuntimeProviderState
+pub fn rss_platform::contracts::RuntimeProviderState::clone(&self) -> rss_platform::contracts::RuntimeProviderState
+impl core::cmp::Eq for rss_platform::contracts::RuntimeProviderState
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeProviderState
+pub fn rss_platform::contracts::RuntimeProviderState::eq(&self, &rss_platform::contracts::RuntimeProviderState) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeProviderState
+pub fn rss_platform::contracts::RuntimeProviderState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeProviderState
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeProviderState
+impl core::marker::Freeze for rss_platform::contracts::RuntimeProviderState
+impl core::marker::Send for rss_platform::contracts::RuntimeProviderState
+impl core::marker::Sync for rss_platform::contracts::RuntimeProviderState
+impl core::marker::Unpin for rss_platform::contracts::RuntimeProviderState
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeProviderState
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeProviderState
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeProviderState
+pub struct rss_platform::contracts::InventoryValueError(_)
+impl rss_platform::contracts::InventoryValueError
+pub const fn rss_platform::contracts::InventoryValueError::code(self) -> rss_platform::contracts::InventoryValueErrorCode
+impl core::clone::Clone for rss_platform::contracts::InventoryValueError
+pub fn rss_platform::contracts::InventoryValueError::clone(&self) -> rss_platform::contracts::InventoryValueError
+impl core::cmp::Eq for rss_platform::contracts::InventoryValueError
+impl core::cmp::PartialEq for rss_platform::contracts::InventoryValueError
+pub fn rss_platform::contracts::InventoryValueError::eq(&self, &rss_platform::contracts::InventoryValueError) -> bool
+impl core::error::Error for rss_platform::contracts::InventoryValueError
+impl core::fmt::Debug for rss_platform::contracts::InventoryValueError
+pub fn rss_platform::contracts::InventoryValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::contracts::InventoryValueError
+pub fn rss_platform::contracts::InventoryValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::InventoryValueError
+impl core::marker::StructuralPartialEq for rss_platform::contracts::InventoryValueError
+impl core::marker::Freeze for rss_platform::contracts::InventoryValueError
+impl core::marker::Send for rss_platform::contracts::InventoryValueError
+impl core::marker::Sync for rss_platform::contracts::InventoryValueError
+impl core::marker::Unpin for rss_platform::contracts::InventoryValueError
+impl core::marker::UnsafeUnpin for rss_platform::contracts::InventoryValueError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::InventoryValueError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::InventoryValueError
+pub struct rss_platform::contracts::RuntimeActivatedProjection
+impl rss_platform::contracts::RuntimeActivatedProjection
+pub const fn rss_platform::contracts::RuntimeActivatedProjection::activation(&self) -> rss_platform::contracts::RuntimeProjectionActivation
+pub fn rss_platform::contracts::RuntimeActivatedProjection::definition_version(&self) -> &str
+pub fn rss_platform::contracts::RuntimeActivatedProjection::id(&self) -> &str
+pub fn rss_platform::contracts::RuntimeActivatedProjection::new(&str, &str, rss_platform::contracts::Sha256Fingerprint, rss_platform::contracts::RuntimeProjectionActivation) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeActivatedProjection::schema_digest(&self) -> &rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Freeze for rss_platform::contracts::RuntimeActivatedProjection
+impl core::marker::Send for rss_platform::contracts::RuntimeActivatedProjection
+impl core::marker::Sync for rss_platform::contracts::RuntimeActivatedProjection
+impl core::marker::Unpin for rss_platform::contracts::RuntimeActivatedProjection
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeActivatedProjection
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeActivatedProjection
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeActivatedProjection
+pub struct rss_platform::contracts::RuntimeActivatedSaga
+impl rss_platform::contracts::RuntimeActivatedSaga
+pub fn rss_platform::contracts::RuntimeActivatedSaga::definition_version(&self) -> &str
+pub fn rss_platform::contracts::RuntimeActivatedSaga::id(&self) -> &str
+pub fn rss_platform::contracts::RuntimeActivatedSaga::new(&str, &str, rss_platform::contracts::Sha256Fingerprint) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeActivatedSaga::schema_digest(&self) -> &rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Freeze for rss_platform::contracts::RuntimeActivatedSaga
+impl core::marker::Send for rss_platform::contracts::RuntimeActivatedSaga
+impl core::marker::Sync for rss_platform::contracts::RuntimeActivatedSaga
+impl core::marker::Unpin for rss_platform::contracts::RuntimeActivatedSaga
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeActivatedSaga
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeActivatedSaga
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeActivatedSaga
+pub struct rss_platform::contracts::RuntimeBuildMetadata
+impl rss_platform::contracts::RuntimeBuildMetadata
+pub fn rss_platform::contracts::RuntimeBuildMetadata::image_digest(&self) -> &rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::RuntimeBuildMetadata::new(&str, rss_platform::contracts::Sha256Fingerprint) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeBuildMetadata::source_revision(&self) -> &str
+impl core::marker::Freeze for rss_platform::contracts::RuntimeBuildMetadata
+impl core::marker::Send for rss_platform::contracts::RuntimeBuildMetadata
+impl core::marker::Sync for rss_platform::contracts::RuntimeBuildMetadata
+impl core::marker::Unpin for rss_platform::contracts::RuntimeBuildMetadata
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeBuildMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeBuildMetadata
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeBuildMetadata
+pub struct rss_platform::contracts::RuntimeInventoryData
+impl rss_platform::contracts::RuntimeInventoryData
+pub fn rss_platform::contracts::RuntimeInventoryData::activated_workflows(&self) -> &[rss_platform::contracts::RuntimeActivatedWorkflow]
+pub fn rss_platform::contracts::RuntimeInventoryData::assembly_fingerprint(&self) -> &rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::RuntimeInventoryData::build_metadata(&self) -> core::option::Option<&rss_platform::contracts::RuntimeBuildMetadata>
+pub fn rss_platform::contracts::RuntimeInventoryData::domains(&self) -> &[rss_platform::contracts::RuntimeDomain]
+pub fn rss_platform::contracts::RuntimeInventoryData::listeners(&self) -> &[rss_platform::contracts::RuntimeListener]
+pub fn rss_platform::contracts::RuntimeInventoryData::new(rss_platform::contracts::Sha256Fingerprint, rss_platform::contracts::Sha256Fingerprint, alloc::vec::Vec<rss_platform::contracts::RuntimeDomain>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeInventoryData::placements(&self) -> &[rss_platform::contracts::RuntimePlacement]
+pub fn rss_platform::contracts::RuntimeInventoryData::provider_posture(&self) -> &[rss_platform::contracts::RuntimeProviderPosture]
+pub fn rss_platform::contracts::RuntimeInventoryData::runtime_plan_fingerprint(&self) -> &rss_platform::contracts::Sha256Fingerprint
+pub const fn rss_platform::contracts::RuntimeInventoryData::schema_version(&self) -> u16
+pub fn rss_platform::contracts::RuntimeInventoryData::with_activated_workflows(self, alloc::vec::Vec<rss_platform::contracts::RuntimeActivatedWorkflow>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeInventoryData::with_build_metadata(self, rss_platform::contracts::RuntimeBuildMetadata) -> Self
+pub fn rss_platform::contracts::RuntimeInventoryData::with_listeners(self, alloc::vec::Vec<rss_platform::contracts::RuntimeListener>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeInventoryData::with_placements(self, alloc::vec::Vec<rss_platform::contracts::RuntimePlacement>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeInventoryData::with_provider_posture(self, alloc::vec::Vec<rss_platform::contracts::RuntimeProviderPosture>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+impl core::marker::Freeze for rss_platform::contracts::RuntimeInventoryData
+impl core::marker::Send for rss_platform::contracts::RuntimeInventoryData
+impl core::marker::Sync for rss_platform::contracts::RuntimeInventoryData
+impl core::marker::Unpin for rss_platform::contracts::RuntimeInventoryData
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeInventoryData
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeInventoryData
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeInventoryData
+pub struct rss_platform::contracts::RuntimeInventoryRequest
+impl core::clone::Clone for rss_platform::contracts::RuntimeInventoryRequest
+pub fn rss_platform::contracts::RuntimeInventoryRequest::clone(&self) -> rss_platform::contracts::RuntimeInventoryRequest
+impl core::default::Default for rss_platform::contracts::RuntimeInventoryRequest
+pub fn rss_platform::contracts::RuntimeInventoryRequest::default() -> rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::Freeze for rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::Send for rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::Sync for rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::Unpin for rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeInventoryRequest
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeInventoryRequest
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeInventoryRequest
+pub struct rss_platform::contracts::RuntimeInventoryResponse
+impl rss_platform::contracts::RuntimeInventoryResponse
+pub fn rss_platform::contracts::RuntimeInventoryResponse::data(&self) -> &rss_platform::contracts::RuntimeInventoryData
+pub fn rss_platform::contracts::RuntimeInventoryResponse::into_data(self) -> rss_platform::contracts::RuntimeInventoryData
+pub fn rss_platform::contracts::RuntimeInventoryResponse::new(rss_platform::contracts::RuntimeInventoryData) -> Self
+impl core::marker::Freeze for rss_platform::contracts::RuntimeInventoryResponse
+impl core::marker::Send for rss_platform::contracts::RuntimeInventoryResponse
+impl core::marker::Sync for rss_platform::contracts::RuntimeInventoryResponse
+impl core::marker::Unpin for rss_platform::contracts::RuntimeInventoryResponse
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeInventoryResponse
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeInventoryResponse
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeInventoryResponse
+pub struct rss_platform::contracts::RuntimeListener
+impl rss_platform::contracts::RuntimeListener
+pub const fn rss_platform::contracts::RuntimeListener::auth_scheme(&self) -> rss_platform::contracts::RuntimeAuthScheme
+pub fn rss_platform::contracts::RuntimeListener::endpoint(&self) -> &rss_platform::contracts::RuntimeListenerEndpoint
+pub fn rss_platform::contracts::RuntimeListener::id(&self) -> &str
+pub const fn rss_platform::contracts::RuntimeListener::kind(&self) -> rss_platform::contracts::RuntimeListenerKind
+pub fn rss_platform::contracts::RuntimeListener::new(&str, rss_platform::contracts::RuntimeListenerKind, rss_platform::contracts::RuntimeListenerEndpoint, rss_platform::contracts::RuntimeAuthScheme) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+impl core::marker::Freeze for rss_platform::contracts::RuntimeListener
+impl core::marker::Send for rss_platform::contracts::RuntimeListener
+impl core::marker::Sync for rss_platform::contracts::RuntimeListener
+impl core::marker::Unpin for rss_platform::contracts::RuntimeListener
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeListener
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeListener
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeListener
+pub struct rss_platform::contracts::RuntimeListenerEndpoint
+impl rss_platform::contracts::RuntimeListenerEndpoint
+pub fn rss_platform::contracts::RuntimeListenerEndpoint::host(&self) -> &str
+pub fn rss_platform::contracts::RuntimeListenerEndpoint::new(rss_platform::contracts::RuntimeEndpointScheme, &str, u16) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub const fn rss_platform::contracts::RuntimeListenerEndpoint::port(&self) -> u16
+pub const fn rss_platform::contracts::RuntimeListenerEndpoint::scheme(&self) -> rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Freeze for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::marker::Send for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::marker::Sync for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::marker::Unpin for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeListenerEndpoint
+pub struct rss_platform::contracts::RuntimePlacement
+impl rss_platform::contracts::RuntimePlacement
+pub const fn rss_platform::contracts::RuntimePlacement::domain(&self) -> rss_platform::contracts::RuntimeDomain
+pub fn rss_platform::contracts::RuntimePlacement::endpoint(&self) -> core::option::Option<&rss_platform::contracts::RuntimeListenerEndpoint>
+pub const fn rss_platform::contracts::RuntimePlacement::mode(&self) -> rss_platform::contracts::RuntimePlacementMode
+pub fn rss_platform::contracts::RuntimePlacement::new(rss_platform::contracts::RuntimeDomain, &str, rss_platform::contracts::RuntimePlacementMode, rss_platform::contracts::RuntimePlacementReadiness) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub const fn rss_platform::contracts::RuntimePlacement::readiness(&self) -> rss_platform::contracts::RuntimePlacementReadiness
+pub fn rss_platform::contracts::RuntimePlacement::spiffe_identity(&self) -> core::option::Option<&str>
+pub fn rss_platform::contracts::RuntimePlacement::with_endpoint(self, rss_platform::contracts::RuntimeListenerEndpoint) -> Self
+pub fn rss_platform::contracts::RuntimePlacement::with_spiffe_identity(self, &str) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimePlacement::workload(&self) -> &str
+impl core::marker::Freeze for rss_platform::contracts::RuntimePlacement
+impl core::marker::Send for rss_platform::contracts::RuntimePlacement
+impl core::marker::Sync for rss_platform::contracts::RuntimePlacement
+impl core::marker::Unpin for rss_platform::contracts::RuntimePlacement
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimePlacement
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimePlacement
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimePlacement
+pub struct rss_platform::contracts::RuntimeProviderPosture
+impl rss_platform::contracts::RuntimeProviderPosture
+pub fn rss_platform::contracts::RuntimeProviderPosture::id(&self) -> &str
+pub fn rss_platform::contracts::RuntimeProviderPosture::new(&str, rss_platform::contracts::RuntimeProviderState) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub const fn rss_platform::contracts::RuntimeProviderPosture::state(&self) -> rss_platform::contracts::RuntimeProviderState
+impl core::marker::Freeze for rss_platform::contracts::RuntimeProviderPosture
+impl core::marker::Send for rss_platform::contracts::RuntimeProviderPosture
+impl core::marker::Sync for rss_platform::contracts::RuntimeProviderPosture
+impl core::marker::Unpin for rss_platform::contracts::RuntimeProviderPosture
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeProviderPosture
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeProviderPosture
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeProviderPosture
+pub struct rss_platform::contracts::Sha256Fingerprint(_)
+impl rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::Sha256Fingerprint::as_str(&self) -> &str
+pub fn rss_platform::contracts::Sha256Fingerprint::parse(&str) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+impl core::clone::Clone for rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::Sha256Fingerprint::clone(&self) -> rss_platform::contracts::Sha256Fingerprint
+impl core::cmp::Eq for rss_platform::contracts::Sha256Fingerprint
+impl core::cmp::PartialEq for rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::Sha256Fingerprint::eq(&self, &rss_platform::contracts::Sha256Fingerprint) -> bool
+impl core::marker::StructuralPartialEq for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Freeze for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Send for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Sync for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Unpin for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::UnsafeUnpin for rss_platform::contracts::Sha256Fingerprint
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::Sha256Fingerprint
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::Sha256Fingerprint
+#[non_exhaustive] pub enum rss_platform::ConditionCode
+pub rss_platform::ConditionCode::AcceptingDispatch
+pub rss_platform::ConditionCode::Draining
+pub rss_platform::ConditionCode::HandlersAdmitted
+pub rss_platform::ConditionCode::Stopped
+impl core::clone::Clone for rss_platform::ConditionCode
+pub fn rss_platform::ConditionCode::clone(&self) -> rss_platform::ConditionCode
+impl core::cmp::Eq for rss_platform::ConditionCode
+impl core::cmp::PartialEq for rss_platform::ConditionCode
+pub fn rss_platform::ConditionCode::eq(&self, &rss_platform::ConditionCode) -> bool
+impl core::fmt::Debug for rss_platform::ConditionCode
+pub fn rss_platform::ConditionCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::ConditionCode
+impl core::marker::StructuralPartialEq for rss_platform::ConditionCode
+impl core::marker::Freeze for rss_platform::ConditionCode
+impl core::marker::Send for rss_platform::ConditionCode
+impl core::marker::Sync for rss_platform::ConditionCode
+impl core::marker::Unpin for rss_platform::ConditionCode
+impl core::marker::UnsafeUnpin for rss_platform::ConditionCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ConditionCode
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ConditionCode
+#[non_exhaustive] pub enum rss_platform::ConditionStatus
+pub rss_platform::ConditionStatus::False
+pub rss_platform::ConditionStatus::True
+impl core::clone::Clone for rss_platform::ConditionStatus
+pub fn rss_platform::ConditionStatus::clone(&self) -> rss_platform::ConditionStatus
+impl core::cmp::Eq for rss_platform::ConditionStatus
+impl core::cmp::PartialEq for rss_platform::ConditionStatus
+pub fn rss_platform::ConditionStatus::eq(&self, &rss_platform::ConditionStatus) -> bool
+impl core::fmt::Debug for rss_platform::ConditionStatus
+pub fn rss_platform::ConditionStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::ConditionStatus
+impl core::marker::StructuralPartialEq for rss_platform::ConditionStatus
+impl core::marker::Freeze for rss_platform::ConditionStatus
+impl core::marker::Send for rss_platform::ConditionStatus
+impl core::marker::Sync for rss_platform::ConditionStatus
+impl core::marker::Unpin for rss_platform::ConditionStatus
+impl core::marker::UnsafeUnpin for rss_platform::ConditionStatus
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ConditionStatus
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ConditionStatus
+#[non_exhaustive] pub enum rss_platform::DiagnosticCode
+pub rss_platform::DiagnosticCode::DuplicateHandler
+pub rss_platform::DiagnosticCode::DuplicateModule
+pub rss_platform::DiagnosticCode::HandlerFailed
+pub rss_platform::DiagnosticCode::InvalidCredential
+pub rss_platform::DiagnosticCode::InvalidTrustedIssuer
+pub rss_platform::DiagnosticCode::MissingHandler
+pub rss_platform::DiagnosticCode::MissingTrustedIssuer
+pub rss_platform::DiagnosticCode::PermissionDenied
+pub rss_platform::DiagnosticCode::RuntimeDraining
+pub rss_platform::DiagnosticCode::RuntimeStopped
+pub rss_platform::DiagnosticCode::ShutdownComplete
+pub rss_platform::DiagnosticCode::ShutdownTimedOut
+impl core::clone::Clone for rss_platform::DiagnosticCode
+pub fn rss_platform::DiagnosticCode::clone(&self) -> rss_platform::DiagnosticCode
+impl core::cmp::Eq for rss_platform::DiagnosticCode
+impl core::cmp::PartialEq for rss_platform::DiagnosticCode
+pub fn rss_platform::DiagnosticCode::eq(&self, &rss_platform::DiagnosticCode) -> bool
+impl core::fmt::Debug for rss_platform::DiagnosticCode
+pub fn rss_platform::DiagnosticCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::DiagnosticCode
+impl core::marker::StructuralPartialEq for rss_platform::DiagnosticCode
+impl core::marker::Freeze for rss_platform::DiagnosticCode
+impl core::marker::Send for rss_platform::DiagnosticCode
+impl core::marker::Sync for rss_platform::DiagnosticCode
+impl core::marker::Unpin for rss_platform::DiagnosticCode
+impl core::marker::UnsafeUnpin for rss_platform::DiagnosticCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::DiagnosticCode
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::DiagnosticCode
+pub enum rss_platform::DiagnosticDetail<'a>
+pub rss_platform::DiagnosticDetail::Count(usize)
+pub rss_platform::DiagnosticDetail::Duration(&'a core::time::Duration)
+impl<'a> core::marker::Freeze for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::marker::Send for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::marker::Sync for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::marker::Unpin for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::marker::UnsafeUnpin for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for rss_platform::DiagnosticDetail<'a>
+#[non_exhaustive] pub enum rss_platform::IdentifierError
+pub rss_platform::IdentifierError::Empty
+pub rss_platform::IdentifierError::InvalidFormat
+pub rss_platform::IdentifierError::TooLong
+impl core::clone::Clone for rss_platform::IdentifierError
+pub fn rss_platform::IdentifierError::clone(&self) -> rss_platform::IdentifierError
+impl core::cmp::Eq for rss_platform::IdentifierError
+impl core::cmp::PartialEq for rss_platform::IdentifierError
+pub fn rss_platform::IdentifierError::eq(&self, &rss_platform::IdentifierError) -> bool
+impl core::error::Error for rss_platform::IdentifierError
+impl core::fmt::Debug for rss_platform::IdentifierError
+pub fn rss_platform::IdentifierError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::IdentifierError
+pub fn rss_platform::IdentifierError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::IdentifierError
+impl core::marker::StructuralPartialEq for rss_platform::IdentifierError
+impl core::marker::Freeze for rss_platform::IdentifierError
+impl core::marker::Send for rss_platform::IdentifierError
+impl core::marker::Sync for rss_platform::IdentifierError
+impl core::marker::Unpin for rss_platform::IdentifierError
+impl core::marker::UnsafeUnpin for rss_platform::IdentifierError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::IdentifierError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::IdentifierError
+#[non_exhaustive] pub enum rss_platform::PrincipalKind
+pub rss_platform::PrincipalKind::Admin
+pub rss_platform::PrincipalKind::Device
+pub rss_platform::PrincipalKind::SuperAdmin
+pub rss_platform::PrincipalKind::User
+impl core::clone::Clone for rss_platform::PrincipalKind
+pub fn rss_platform::PrincipalKind::clone(&self) -> rss_platform::PrincipalKind
+impl core::cmp::Eq for rss_platform::PrincipalKind
+impl core::cmp::PartialEq for rss_platform::PrincipalKind
+pub fn rss_platform::PrincipalKind::eq(&self, &rss_platform::PrincipalKind) -> bool
+impl core::fmt::Debug for rss_platform::PrincipalKind
+pub fn rss_platform::PrincipalKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::PrincipalKind
+impl core::marker::StructuralPartialEq for rss_platform::PrincipalKind
+impl core::marker::Freeze for rss_platform::PrincipalKind
+impl core::marker::Send for rss_platform::PrincipalKind
+impl core::marker::Sync for rss_platform::PrincipalKind
+impl core::marker::Unpin for rss_platform::PrincipalKind
+impl core::marker::UnsafeUnpin for rss_platform::PrincipalKind
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::PrincipalKind
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::PrincipalKind
+#[non_exhaustive] pub enum rss_platform::TenantIdError
+pub rss_platform::TenantIdError::Empty
+pub rss_platform::TenantIdError::InvalidFormat
+pub rss_platform::TenantIdError::Nil
+impl core::clone::Clone for rss_platform::TenantIdError
+pub fn rss_platform::TenantIdError::clone(&self) -> rss_platform::TenantIdError
+impl core::cmp::Eq for rss_platform::TenantIdError
+impl core::cmp::PartialEq for rss_platform::TenantIdError
+pub fn rss_platform::TenantIdError::eq(&self, &rss_platform::TenantIdError) -> bool
+impl core::error::Error for rss_platform::TenantIdError
+impl core::fmt::Debug for rss_platform::TenantIdError
+pub fn rss_platform::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::TenantIdError
+pub fn rss_platform::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::TenantIdError
+impl core::marker::StructuralPartialEq for rss_platform::TenantIdError
+impl core::marker::Freeze for rss_platform::TenantIdError
+impl core::marker::Send for rss_platform::TenantIdError
+impl core::marker::Sync for rss_platform::TenantIdError
+impl core::marker::Unpin for rss_platform::TenantIdError
+impl core::marker::UnsafeUnpin for rss_platform::TenantIdError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::TenantIdError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::TenantIdError
+pub struct rss_platform::AccessToken(_)
+impl rss_platform::AccessToken
+pub fn rss_platform::AccessToken::parse(&str) -> core::result::Result<Self, rss_platform::VerifyError>
+impl core::marker::Freeze for rss_platform::AccessToken
+impl core::marker::Send for rss_platform::AccessToken
+impl core::marker::Sync for rss_platform::AccessToken
+impl core::marker::Unpin for rss_platform::AccessToken
+impl core::marker::UnsafeUnpin for rss_platform::AccessToken
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::AccessToken
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::AccessToken
+pub struct rss_platform::Application
+impl rss_platform::Application
+pub fn rss_platform::Application::start(self) -> rss_platform::RuntimeHandle
+impl core::marker::Freeze for rss_platform::Application
+impl core::marker::Send for rss_platform::Application
+impl core::marker::Sync for rss_platform::Application
+impl core::marker::Unpin for rss_platform::Application
+impl core::marker::UnsafeUnpin for rss_platform::Application
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::Application
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::Application
+pub struct rss_platform::ApplicationBuilder
+impl rss_platform::ApplicationBuilder
+pub fn rss_platform::ApplicationBuilder::build(self) -> core::result::Result<rss_platform::Application, rss_platform::BuildError>
+pub fn rss_platform::ApplicationBuilder::module(self, rss_platform::ApplicationModule) -> Self
+pub fn rss_platform::ApplicationBuilder::new(rss_platform::ApplicationName) -> Self
+pub fn rss_platform::ApplicationBuilder::trusted_issuer(self, rss_platform::TrustedIssuer) -> Self
+impl core::marker::Freeze for rss_platform::ApplicationBuilder
+impl core::marker::Send for rss_platform::ApplicationBuilder
+impl core::marker::Sync for rss_platform::ApplicationBuilder
+impl core::marker::Unpin for rss_platform::ApplicationBuilder
+impl core::marker::UnsafeUnpin for rss_platform::ApplicationBuilder
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::ApplicationBuilder
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::ApplicationBuilder
+pub struct rss_platform::ApplicationModule
+impl rss_platform::ApplicationModule
+pub fn rss_platform::ApplicationModule::handler<C, H>(self, H) -> Self where C: rss_platform::Contract, H: rss_platform::Handler<C>
+pub fn rss_platform::ApplicationModule::name(&self) -> &rss_platform::ModuleName
+pub fn rss_platform::ApplicationModule::new(rss_platform::ModuleName) -> Self
+impl core::marker::Freeze for rss_platform::ApplicationModule
+impl core::marker::Send for rss_platform::ApplicationModule
+impl core::marker::Sync for rss_platform::ApplicationModule
+impl core::marker::Unpin for rss_platform::ApplicationModule
+impl core::marker::UnsafeUnpin for rss_platform::ApplicationModule
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::ApplicationModule
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::ApplicationModule
+pub struct rss_platform::ApplicationName(_)
+impl rss_platform::ApplicationName
+pub fn rss_platform::ApplicationName::as_str(&self) -> &str
+pub fn rss_platform::ApplicationName::parse(&str) -> core::result::Result<Self, rss_platform::IdentifierError>
+impl core::clone::Clone for rss_platform::ApplicationName
+pub fn rss_platform::ApplicationName::clone(&self) -> rss_platform::ApplicationName
+impl core::cmp::Eq for rss_platform::ApplicationName
+impl core::cmp::PartialEq for rss_platform::ApplicationName
+pub fn rss_platform::ApplicationName::eq(&self, &rss_platform::ApplicationName) -> bool
+impl core::hash::Hash for rss_platform::ApplicationName
+pub fn rss_platform::ApplicationName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_platform::ApplicationName
+impl core::marker::Freeze for rss_platform::ApplicationName
+impl core::marker::Send for rss_platform::ApplicationName
+impl core::marker::Sync for rss_platform::ApplicationName
+impl core::marker::Unpin for rss_platform::ApplicationName
+impl core::marker::UnsafeUnpin for rss_platform::ApplicationName
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ApplicationName
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ApplicationName
+pub struct rss_platform::BuildError
+impl rss_platform::BuildError
+pub fn rss_platform::BuildError::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::error::Error for rss_platform::BuildError
+impl core::fmt::Debug for rss_platform::BuildError
+pub fn rss_platform::BuildError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::BuildError
+pub fn rss_platform::BuildError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::BuildError
+impl core::marker::Send for rss_platform::BuildError
+impl core::marker::Sync for rss_platform::BuildError
+impl core::marker::Unpin for rss_platform::BuildError
+impl core::marker::UnsafeUnpin for rss_platform::BuildError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::BuildError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::BuildError
+pub struct rss_platform::Condition
+impl rss_platform::Condition
+pub const fn rss_platform::Condition::code(&self) -> rss_platform::ConditionCode
+pub const fn rss_platform::Condition::status(&self) -> rss_platform::ConditionStatus
+impl core::marker::Freeze for rss_platform::Condition
+impl core::marker::Send for rss_platform::Condition
+impl core::marker::Sync for rss_platform::Condition
+impl core::marker::Unpin for rss_platform::Condition
+impl core::marker::UnsafeUnpin for rss_platform::Condition
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::Condition
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::Condition
+pub struct rss_platform::ConditionsSnapshot
+impl rss_platform::ConditionsSnapshot
+pub fn rss_platform::ConditionsSnapshot::iter(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &rss_platform::Condition>
+impl core::marker::Freeze for rss_platform::ConditionsSnapshot
+impl core::marker::Send for rss_platform::ConditionsSnapshot
+impl core::marker::Sync for rss_platform::ConditionsSnapshot
+impl core::marker::Unpin for rss_platform::ConditionsSnapshot
+impl core::marker::UnsafeUnpin for rss_platform::ConditionsSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ConditionsSnapshot
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ConditionsSnapshot
+pub struct rss_platform::ContractId(_)
+impl rss_platform::ContractId
+pub const fn rss_platform::ContractId::as_str(self) -> &'static str
+pub const fn rss_platform::ContractId::from_static(&'static str) -> Self
+impl core::clone::Clone for rss_platform::ContractId
+pub fn rss_platform::ContractId::clone(&self) -> rss_platform::ContractId
+impl core::cmp::Eq for rss_platform::ContractId
+impl core::cmp::PartialEq for rss_platform::ContractId
+pub fn rss_platform::ContractId::eq(&self, &rss_platform::ContractId) -> bool
+impl core::hash::Hash for rss_platform::ContractId
+pub fn rss_platform::ContractId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_platform::ContractId
+impl core::marker::StructuralPartialEq for rss_platform::ContractId
+impl core::marker::Freeze for rss_platform::ContractId
+impl core::marker::Send for rss_platform::ContractId
+impl core::marker::Sync for rss_platform::ContractId
+impl core::marker::Unpin for rss_platform::ContractId
+impl core::marker::UnsafeUnpin for rss_platform::ContractId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ContractId
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ContractId
+pub struct rss_platform::ContractVersion
+impl rss_platform::ContractVersion
+pub const fn rss_platform::ContractVersion::major(self) -> u16
+pub const fn rss_platform::ContractVersion::minor(self) -> u16
+pub const fn rss_platform::ContractVersion::new(u16, u16) -> Self
+impl core::clone::Clone for rss_platform::ContractVersion
+pub fn rss_platform::ContractVersion::clone(&self) -> rss_platform::ContractVersion
+impl core::cmp::Eq for rss_platform::ContractVersion
+impl core::cmp::PartialEq for rss_platform::ContractVersion
+pub fn rss_platform::ContractVersion::eq(&self, &rss_platform::ContractVersion) -> bool
+impl core::hash::Hash for rss_platform::ContractVersion
+pub fn rss_platform::ContractVersion::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_platform::ContractVersion
+impl core::marker::StructuralPartialEq for rss_platform::ContractVersion
+impl core::marker::Freeze for rss_platform::ContractVersion
+impl core::marker::Send for rss_platform::ContractVersion
+impl core::marker::Sync for rss_platform::ContractVersion
+impl core::marker::Unpin for rss_platform::ContractVersion
+impl core::marker::UnsafeUnpin for rss_platform::ContractVersion
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ContractVersion
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ContractVersion
+pub struct rss_platform::Diagnostic
+impl rss_platform::Diagnostic
+pub const fn rss_platform::Diagnostic::code(&self) -> rss_platform::DiagnosticCode
+pub fn rss_platform::Diagnostic::detail(&self) -> core::option::Option<rss_platform::DiagnosticDetail<'_>>
+impl core::clone::Clone for rss_platform::Diagnostic
+pub fn rss_platform::Diagnostic::clone(&self) -> rss_platform::Diagnostic
+impl core::marker::Freeze for rss_platform::Diagnostic
+impl core::marker::Send for rss_platform::Diagnostic
+impl core::marker::Sync for rss_platform::Diagnostic
+impl core::marker::Unpin for rss_platform::Diagnostic
+impl core::marker::UnsafeUnpin for rss_platform::Diagnostic
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::Diagnostic
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::Diagnostic
+pub struct rss_platform::DiagnosticsSnapshot
+impl rss_platform::DiagnosticsSnapshot
+pub fn rss_platform::DiagnosticsSnapshot::iter(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &rss_platform::Diagnostic>
+impl core::marker::Freeze for rss_platform::DiagnosticsSnapshot
+impl core::marker::Send for rss_platform::DiagnosticsSnapshot
+impl core::marker::Sync for rss_platform::DiagnosticsSnapshot
+impl core::marker::Unpin for rss_platform::DiagnosticsSnapshot
+impl core::marker::UnsafeUnpin for rss_platform::DiagnosticsSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::DiagnosticsSnapshot
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::DiagnosticsSnapshot
+pub struct rss_platform::DispatchError
+impl rss_platform::DispatchError
+pub fn rss_platform::DispatchError::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::error::Error for rss_platform::DispatchError
+impl core::fmt::Debug for rss_platform::DispatchError
+pub fn rss_platform::DispatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::DispatchError
+pub fn rss_platform::DispatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::DispatchError
+impl core::marker::Send for rss_platform::DispatchError
+impl core::marker::Sync for rss_platform::DispatchError
+impl core::marker::Unpin for rss_platform::DispatchError
+impl core::marker::UnsafeUnpin for rss_platform::DispatchError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::DispatchError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::DispatchError
+pub struct rss_platform::Dispatcher
+impl rss_platform::Dispatcher
+pub fn rss_platform::Dispatcher::conditions(&self) -> rss_platform::ConditionsSnapshot
+pub fn rss_platform::Dispatcher::dispatch<C: rss_platform::Contract>(&self, &rss_platform::VerifiedAccess, rss_platform::RequestId, <C as rss_platform::Contract>::Request) -> core::result::Result<<C as rss_platform::Contract>::Response, rss_platform::DispatchError>
+pub fn rss_platform::Dispatcher::verify(&self, &rss_platform::AccessToken, std::time::SystemTime) -> core::result::Result<rss_platform::VerifiedAccess, rss_platform::VerifyError>
+impl core::clone::Clone for rss_platform::Dispatcher
+pub fn rss_platform::Dispatcher::clone(&self) -> rss_platform::Dispatcher
+impl core::marker::Freeze for rss_platform::Dispatcher
+impl core::marker::Send for rss_platform::Dispatcher
+impl core::marker::Sync for rss_platform::Dispatcher
+impl core::marker::Unpin for rss_platform::Dispatcher
+impl core::marker::UnsafeUnpin for rss_platform::Dispatcher
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::Dispatcher
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::Dispatcher
+pub struct rss_platform::HandlerError
+impl rss_platform::HandlerError
+pub const fn rss_platform::HandlerError::new() -> Self
+impl core::default::Default for rss_platform::HandlerError
+pub fn rss_platform::HandlerError::default() -> Self
+impl core::error::Error for rss_platform::HandlerError
+impl core::fmt::Debug for rss_platform::HandlerError
+pub fn rss_platform::HandlerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::HandlerError
+pub fn rss_platform::HandlerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::HandlerError
+impl core::marker::Send for rss_platform::HandlerError
+impl core::marker::Sync for rss_platform::HandlerError
+impl core::marker::Unpin for rss_platform::HandlerError
+impl core::marker::UnsafeUnpin for rss_platform::HandlerError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::HandlerError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::HandlerError
+pub struct rss_platform::ModuleName(_)
+impl rss_platform::ModuleName
+pub fn rss_platform::ModuleName::as_str(&self) -> &str
+pub fn rss_platform::ModuleName::parse(&str) -> core::result::Result<Self, rss_platform::IdentifierError>
+impl core::clone::Clone for rss_platform::ModuleName
+pub fn rss_platform::ModuleName::clone(&self) -> rss_platform::ModuleName
+impl core::cmp::Eq for rss_platform::ModuleName
+impl core::cmp::PartialEq for rss_platform::ModuleName
+pub fn rss_platform::ModuleName::eq(&self, &rss_platform::ModuleName) -> bool
+impl core::hash::Hash for rss_platform::ModuleName
+pub fn rss_platform::ModuleName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_platform::ModuleName
+impl core::marker::Freeze for rss_platform::ModuleName
+impl core::marker::Send for rss_platform::ModuleName
+impl core::marker::Sync for rss_platform::ModuleName
+impl core::marker::Unpin for rss_platform::ModuleName
+impl core::marker::UnsafeUnpin for rss_platform::ModuleName
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ModuleName
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ModuleName
+pub struct rss_platform::RequestContext<'a>
+impl rss_platform::RequestContext<'_>
+pub fn rss_platform::RequestContext<'_>::allows_permission(&self, &str) -> bool
+pub fn rss_platform::RequestContext<'_>::principal(&self) -> rss_platform::VerifiedPrincipal<'_>
+pub fn rss_platform::RequestContext<'_>::request_id(&self) -> &rss_platform::RequestId
+pub fn rss_platform::RequestContext<'_>::tenant(&self) -> core::option::Option<rss_platform::VerifiedTenant<'_>>
+impl<'a> core::marker::Freeze for rss_platform::RequestContext<'a>
+impl<'a> core::marker::Send for rss_platform::RequestContext<'a>
+impl<'a> core::marker::Sync for rss_platform::RequestContext<'a>
+impl<'a> core::marker::Unpin for rss_platform::RequestContext<'a>
+impl<'a> core::marker::UnsafeUnpin for rss_platform::RequestContext<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_platform::RequestContext<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for rss_platform::RequestContext<'a>
+pub struct rss_platform::RequestId(_)
+impl rss_platform::RequestId
+pub fn rss_platform::RequestId::as_str(&self) -> &str
+pub fn rss_platform::RequestId::parse(&str) -> core::result::Result<Self, rss_platform::IdentifierError>
+impl core::clone::Clone for rss_platform::RequestId
+pub fn rss_platform::RequestId::clone(&self) -> rss_platform::RequestId
+impl core::cmp::Eq for rss_platform::RequestId
+impl core::cmp::PartialEq for rss_platform::RequestId
+pub fn rss_platform::RequestId::eq(&self, &rss_platform::RequestId) -> bool
+impl core::hash::Hash for rss_platform::RequestId
+pub fn rss_platform::RequestId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_platform::RequestId
+impl core::marker::Freeze for rss_platform::RequestId
+impl core::marker::Send for rss_platform::RequestId
+impl core::marker::Sync for rss_platform::RequestId
+impl core::marker::Unpin for rss_platform::RequestId
+impl core::marker::UnsafeUnpin for rss_platform::RequestId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::RequestId
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::RequestId
+pub struct rss_platform::RuntimeHandle
+impl rss_platform::RuntimeHandle
+pub fn rss_platform::RuntimeHandle::conditions(&self) -> rss_platform::ConditionsSnapshot
+pub fn rss_platform::RuntimeHandle::diagnostics(&self) -> rss_platform::DiagnosticsSnapshot
+pub fn rss_platform::RuntimeHandle::dispatcher(&self) -> rss_platform::Dispatcher
+pub fn rss_platform::RuntimeHandle::shutdown(self, core::time::Duration) -> core::result::Result<rss_platform::ShutdownReport, rss_platform::ShutdownError>
+impl core::marker::Freeze for rss_platform::RuntimeHandle
+impl core::marker::Send for rss_platform::RuntimeHandle
+impl core::marker::Sync for rss_platform::RuntimeHandle
+impl core::marker::Unpin for rss_platform::RuntimeHandle
+impl core::marker::UnsafeUnpin for rss_platform::RuntimeHandle
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::RuntimeHandle
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::RuntimeHandle
+pub struct rss_platform::SchemaDigest(_)
+impl rss_platform::SchemaDigest
+pub const fn rss_platform::SchemaDigest::as_str(self) -> &'static str
+pub const fn rss_platform::SchemaDigest::from_static(&'static str) -> Self
+impl core::clone::Clone for rss_platform::SchemaDigest
+pub fn rss_platform::SchemaDigest::clone(&self) -> rss_platform::SchemaDigest
+impl core::cmp::Eq for rss_platform::SchemaDigest
+impl core::cmp::PartialEq for rss_platform::SchemaDigest
+pub fn rss_platform::SchemaDigest::eq(&self, &rss_platform::SchemaDigest) -> bool
+impl core::hash::Hash for rss_platform::SchemaDigest
+pub fn rss_platform::SchemaDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_platform::SchemaDigest
+impl core::marker::StructuralPartialEq for rss_platform::SchemaDigest
+impl core::marker::Freeze for rss_platform::SchemaDigest
+impl core::marker::Send for rss_platform::SchemaDigest
+impl core::marker::Sync for rss_platform::SchemaDigest
+impl core::marker::Unpin for rss_platform::SchemaDigest
+impl core::marker::UnsafeUnpin for rss_platform::SchemaDigest
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::SchemaDigest
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::SchemaDigest
+pub struct rss_platform::ShutdownError
+impl rss_platform::ShutdownError
+pub fn rss_platform::ShutdownError::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::error::Error for rss_platform::ShutdownError
+impl core::fmt::Debug for rss_platform::ShutdownError
+pub fn rss_platform::ShutdownError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::ShutdownError
+pub fn rss_platform::ShutdownError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::ShutdownError
+impl core::marker::Send for rss_platform::ShutdownError
+impl core::marker::Sync for rss_platform::ShutdownError
+impl core::marker::Unpin for rss_platform::ShutdownError
+impl core::marker::UnsafeUnpin for rss_platform::ShutdownError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ShutdownError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ShutdownError
+pub struct rss_platform::ShutdownReport
+impl rss_platform::ShutdownReport
+pub fn rss_platform::ShutdownReport::conditions(&self) -> &rss_platform::ConditionsSnapshot
+pub fn rss_platform::ShutdownReport::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::marker::Freeze for rss_platform::ShutdownReport
+impl core::marker::Send for rss_platform::ShutdownReport
+impl core::marker::Sync for rss_platform::ShutdownReport
+impl core::marker::Unpin for rss_platform::ShutdownReport
+impl core::marker::UnsafeUnpin for rss_platform::ShutdownReport
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ShutdownReport
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ShutdownReport
+pub struct rss_platform::TenantId(_)
+impl rss_platform::TenantId
+pub fn rss_platform::TenantId::as_str(&self) -> &str
+pub fn rss_platform::TenantId::parse(&str) -> core::result::Result<Self, rss_platform::TenantIdError>
+impl core::clone::Clone for rss_platform::TenantId
+pub fn rss_platform::TenantId::clone(&self) -> rss_platform::TenantId
+impl core::cmp::Eq for rss_platform::TenantId
+impl core::cmp::PartialEq for rss_platform::TenantId
+pub fn rss_platform::TenantId::eq(&self, &rss_platform::TenantId) -> bool
+impl core::hash::Hash for rss_platform::TenantId
+pub fn rss_platform::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_platform::TenantId
+impl core::marker::Freeze for rss_platform::TenantId
+impl core::marker::Send for rss_platform::TenantId
+impl core::marker::Sync for rss_platform::TenantId
+impl core::marker::Unpin for rss_platform::TenantId
+impl core::marker::UnsafeUnpin for rss_platform::TenantId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::TenantId
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::TenantId
+pub struct rss_platform::TrustedIssuer
+impl rss_platform::TrustedIssuer
+pub fn rss_platform::TrustedIssuer::from_jwks_json(&str, &str, &str) -> core::result::Result<Self, rss_platform::BuildError>
+pub fn rss_platform::TrustedIssuer::verify(&self, &rss_platform::AccessToken, std::time::SystemTime) -> core::result::Result<rss_platform::VerifiedAccess, rss_platform::VerifyError>
+pub fn rss_platform::TrustedIssuer::verify_with_policy(&self, &rss_platform::AccessToken, std::time::SystemTime, &rss_platform::VerificationPolicy) -> core::result::Result<rss_platform::VerifiedAccess, rss_platform::VerifyError>
+impl core::marker::Freeze for rss_platform::TrustedIssuer
+impl core::marker::Send for rss_platform::TrustedIssuer
+impl core::marker::Sync for rss_platform::TrustedIssuer
+impl core::marker::Unpin for rss_platform::TrustedIssuer
+impl core::marker::UnsafeUnpin for rss_platform::TrustedIssuer
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::TrustedIssuer
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::TrustedIssuer
+pub struct rss_platform::VerificationPolicy
+impl rss_platform::VerificationPolicy
+pub fn rss_platform::VerificationPolicy::new(&str, &str, u64) -> core::result::Result<Self, rss_platform::BuildError>
+impl core::default::Default for rss_platform::VerificationPolicy
+pub fn rss_platform::VerificationPolicy::default() -> Self
+impl core::marker::Freeze for rss_platform::VerificationPolicy
+impl core::marker::Send for rss_platform::VerificationPolicy
+impl core::marker::Sync for rss_platform::VerificationPolicy
+impl core::marker::Unpin for rss_platform::VerificationPolicy
+impl core::marker::UnsafeUnpin for rss_platform::VerificationPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerificationPolicy
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::VerificationPolicy
+pub struct rss_platform::VerifiedAccess
+impl rss_platform::VerifiedAccess
+pub fn rss_platform::VerifiedAccess::allows_permission(&self, &str) -> bool
+pub fn rss_platform::VerifiedAccess::matches_subject(&self, &str) -> bool
+pub fn rss_platform::VerifiedAccess::principal_kind(&self) -> rss_platform::PrincipalKind
+pub fn rss_platform::VerifiedAccess::tenant(&self) -> core::option::Option<&rss_platform::TenantId>
+impl core::marker::Freeze for rss_platform::VerifiedAccess
+impl core::marker::Send for rss_platform::VerifiedAccess
+impl core::marker::Sync for rss_platform::VerifiedAccess
+impl core::marker::Unpin for rss_platform::VerifiedAccess
+impl core::marker::UnsafeUnpin for rss_platform::VerifiedAccess
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerifiedAccess
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::VerifiedAccess
+pub struct rss_platform::VerifiedPrincipal<'a>
+impl rss_platform::VerifiedPrincipal<'_>
+pub fn rss_platform::VerifiedPrincipal<'_>::kind(&self) -> rss_platform::PrincipalKind
+pub fn rss_platform::VerifiedPrincipal<'_>::matches_subject(&self, &str) -> bool
+impl<'a> core::marker::Freeze for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::marker::Send for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::marker::Sync for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::marker::Unpin for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::marker::UnsafeUnpin for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for rss_platform::VerifiedPrincipal<'a>
+pub struct rss_platform::VerifiedTenant<'a>
+impl rss_platform::VerifiedTenant<'_>
+pub fn rss_platform::VerifiedTenant<'_>::id(&self) -> &rss_platform::TenantId
+impl<'a> core::marker::Freeze for rss_platform::VerifiedTenant<'a>
+impl<'a> core::marker::Send for rss_platform::VerifiedTenant<'a>
+impl<'a> core::marker::Sync for rss_platform::VerifiedTenant<'a>
+impl<'a> core::marker::Unpin for rss_platform::VerifiedTenant<'a>
+impl<'a> core::marker::UnsafeUnpin for rss_platform::VerifiedTenant<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerifiedTenant<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for rss_platform::VerifiedTenant<'a>
+pub struct rss_platform::VerifyError
+impl rss_platform::VerifyError
+pub fn rss_platform::VerifyError::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::error::Error for rss_platform::VerifyError
+impl core::fmt::Debug for rss_platform::VerifyError
+pub fn rss_platform::VerifyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::VerifyError
+pub fn rss_platform::VerifyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::VerifyError
+impl core::marker::Send for rss_platform::VerifyError
+impl core::marker::Sync for rss_platform::VerifyError
+impl core::marker::Unpin for rss_platform::VerifyError
+impl core::marker::UnsafeUnpin for rss_platform::VerifyError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerifyError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::VerifyError
+pub trait rss_platform::Contract: rss_platform::runtime::private::Sealed + core::marker::Send + core::marker::Sync + 'static
+pub type rss_platform::Contract::Request: core::marker::Send + 'static
+pub type rss_platform::Contract::Response: core::marker::Send + 'static
+pub const rss_platform::Contract::ID: rss_platform::ContractId
+pub const rss_platform::Contract::PERMISSION: &'static str
+pub const rss_platform::Contract::SCHEMA_DIGEST: rss_platform::SchemaDigest
+pub const rss_platform::Contract::VERSION: rss_platform::ContractVersion
+impl rss_platform::Contract for rss_platform::contracts::RuntimeInventory
+pub type rss_platform::contracts::RuntimeInventory::Request = rss_platform::contracts::RuntimeInventoryRequest
+pub type rss_platform::contracts::RuntimeInventory::Response = rss_platform::contracts::RuntimeInventoryResponse
+pub const rss_platform::contracts::RuntimeInventory::ID: rss_platform::ContractId
+pub const rss_platform::contracts::RuntimeInventory::PERMISSION: &'static str
+pub const rss_platform::contracts::RuntimeInventory::SCHEMA_DIGEST: rss_platform::SchemaDigest
+pub const rss_platform::contracts::RuntimeInventory::VERSION: rss_platform::ContractVersion
+pub trait rss_platform::Handler<C: rss_platform::Contract>: core::marker::Send + core::marker::Sync + 'static
+pub fn rss_platform::Handler::handle(&self, <C as rss_platform::Contract>::Request, rss_platform::RequestContext<'_>) -> core::result::Result<<C as rss_platform::Contract>::Response, rss_platform::HandlerError>
+== release-api profile: all-features ==
+pub mod rss_platform
+pub mod rss_platform::contracts
+#[non_exhaustive] pub enum rss_platform::contracts::InventoryValueErrorCode
+pub rss_platform::contracts::InventoryValueErrorCode::DomainsDuplicate
+pub rss_platform::contracts::InventoryValueErrorCode::DomainsEmpty
+pub rss_platform::contracts::InventoryValueErrorCode::Endpoint
+pub rss_platform::contracts::InventoryValueErrorCode::Fingerprint
+pub rss_platform::contracts::InventoryValueErrorCode::Identifier
+pub rss_platform::contracts::InventoryValueErrorCode::ListenersNotCanonical
+pub rss_platform::contracts::InventoryValueErrorCode::PlacementsNotCanonical
+pub rss_platform::contracts::InventoryValueErrorCode::ProvidersNotCanonical
+pub rss_platform::contracts::InventoryValueErrorCode::SourceRevision
+pub rss_platform::contracts::InventoryValueErrorCode::SpiffeIdentity
+pub rss_platform::contracts::InventoryValueErrorCode::Workflow
+pub rss_platform::contracts::InventoryValueErrorCode::WorkflowsDuplicate
+impl core::clone::Clone for rss_platform::contracts::InventoryValueErrorCode
+pub fn rss_platform::contracts::InventoryValueErrorCode::clone(&self) -> rss_platform::contracts::InventoryValueErrorCode
+impl core::cmp::Eq for rss_platform::contracts::InventoryValueErrorCode
+impl core::cmp::PartialEq for rss_platform::contracts::InventoryValueErrorCode
+pub fn rss_platform::contracts::InventoryValueErrorCode::eq(&self, &rss_platform::contracts::InventoryValueErrorCode) -> bool
+impl core::fmt::Debug for rss_platform::contracts::InventoryValueErrorCode
+pub fn rss_platform::contracts::InventoryValueErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::StructuralPartialEq for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::Freeze for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::Send for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::Sync for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::Unpin for rss_platform::contracts::InventoryValueErrorCode
+impl core::marker::UnsafeUnpin for rss_platform::contracts::InventoryValueErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::InventoryValueErrorCode
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::InventoryValueErrorCode
+pub enum rss_platform::contracts::RuntimeActivatedWorkflow
+pub rss_platform::contracts::RuntimeActivatedWorkflow::Projection(rss_platform::contracts::RuntimeActivatedProjection)
+pub rss_platform::contracts::RuntimeActivatedWorkflow::Saga(rss_platform::contracts::RuntimeActivatedSaga)
+impl core::marker::Freeze for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::marker::Send for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::marker::Sync for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::marker::Unpin for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeActivatedWorkflow
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeActivatedWorkflow
+pub enum rss_platform::contracts::RuntimeAuthScheme
+pub rss_platform::contracts::RuntimeAuthScheme::FederatedAccessToken
+pub rss_platform::contracts::RuntimeAuthScheme::MutualTls
+pub rss_platform::contracts::RuntimeAuthScheme::NoAuth
+pub rss_platform::contracts::RuntimeAuthScheme::RssAccessToken
+pub rss_platform::contracts::RuntimeAuthScheme::ServiceToken
+impl core::clone::Clone for rss_platform::contracts::RuntimeAuthScheme
+pub fn rss_platform::contracts::RuntimeAuthScheme::clone(&self) -> rss_platform::contracts::RuntimeAuthScheme
+impl core::cmp::Eq for rss_platform::contracts::RuntimeAuthScheme
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeAuthScheme
+pub fn rss_platform::contracts::RuntimeAuthScheme::eq(&self, &rss_platform::contracts::RuntimeAuthScheme) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeAuthScheme
+pub fn rss_platform::contracts::RuntimeAuthScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::Freeze for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::Send for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::Sync for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::Unpin for rss_platform::contracts::RuntimeAuthScheme
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeAuthScheme
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeAuthScheme
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeAuthScheme
+pub enum rss_platform::contracts::RuntimeDomain
+pub rss_platform::contracts::RuntimeDomain::Audit
+pub rss_platform::contracts::RuntimeDomain::ContractRegistry
+pub rss_platform::contracts::RuntimeDomain::Identity
+pub rss_platform::contracts::RuntimeDomain::Settings
+pub rss_platform::contracts::RuntimeDomain::SystemHealth
+impl core::clone::Clone for rss_platform::contracts::RuntimeDomain
+pub fn rss_platform::contracts::RuntimeDomain::clone(&self) -> rss_platform::contracts::RuntimeDomain
+impl core::cmp::Eq for rss_platform::contracts::RuntimeDomain
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeDomain
+pub fn rss_platform::contracts::RuntimeDomain::eq(&self, &rss_platform::contracts::RuntimeDomain) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeDomain
+pub fn rss_platform::contracts::RuntimeDomain::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeDomain
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeDomain
+impl core::marker::Freeze for rss_platform::contracts::RuntimeDomain
+impl core::marker::Send for rss_platform::contracts::RuntimeDomain
+impl core::marker::Sync for rss_platform::contracts::RuntimeDomain
+impl core::marker::Unpin for rss_platform::contracts::RuntimeDomain
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeDomain
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeDomain
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeDomain
+pub enum rss_platform::contracts::RuntimeEndpointScheme
+pub rss_platform::contracts::RuntimeEndpointScheme::Http
+pub rss_platform::contracts::RuntimeEndpointScheme::Https
+impl core::clone::Clone for rss_platform::contracts::RuntimeEndpointScheme
+pub fn rss_platform::contracts::RuntimeEndpointScheme::clone(&self) -> rss_platform::contracts::RuntimeEndpointScheme
+impl core::cmp::Eq for rss_platform::contracts::RuntimeEndpointScheme
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeEndpointScheme
+pub fn rss_platform::contracts::RuntimeEndpointScheme::eq(&self, &rss_platform::contracts::RuntimeEndpointScheme) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeEndpointScheme
+pub fn rss_platform::contracts::RuntimeEndpointScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Freeze for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Send for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Sync for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Unpin for rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeEndpointScheme
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeEndpointScheme
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeEndpointScheme
+pub enum rss_platform::contracts::RuntimeInventory
+impl rss_platform::Contract for rss_platform::contracts::RuntimeInventory
+pub type rss_platform::contracts::RuntimeInventory::Request = rss_platform::contracts::RuntimeInventoryRequest
+pub type rss_platform::contracts::RuntimeInventory::Response = rss_platform::contracts::RuntimeInventoryResponse
+pub const rss_platform::contracts::RuntimeInventory::ID: rss_platform::ContractId
+pub const rss_platform::contracts::RuntimeInventory::PERMISSION: &'static str
+pub const rss_platform::contracts::RuntimeInventory::SCHEMA_DIGEST: rss_platform::SchemaDigest
+pub const rss_platform::contracts::RuntimeInventory::VERSION: rss_platform::ContractVersion
+impl core::marker::Freeze for rss_platform::contracts::RuntimeInventory
+impl core::marker::Send for rss_platform::contracts::RuntimeInventory
+impl core::marker::Sync for rss_platform::contracts::RuntimeInventory
+impl core::marker::Unpin for rss_platform::contracts::RuntimeInventory
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeInventory
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeInventory
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeInventory
+pub enum rss_platform::contracts::RuntimeListenerKind
+pub rss_platform::contracts::RuntimeListenerKind::Admin
+pub rss_platform::contracts::RuntimeListenerKind::Health
+pub rss_platform::contracts::RuntimeListenerKind::Internal
+pub rss_platform::contracts::RuntimeListenerKind::Primary
+impl core::clone::Clone for rss_platform::contracts::RuntimeListenerKind
+pub fn rss_platform::contracts::RuntimeListenerKind::clone(&self) -> rss_platform::contracts::RuntimeListenerKind
+impl core::cmp::Eq for rss_platform::contracts::RuntimeListenerKind
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeListenerKind
+pub fn rss_platform::contracts::RuntimeListenerKind::eq(&self, &rss_platform::contracts::RuntimeListenerKind) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeListenerKind
+pub fn rss_platform::contracts::RuntimeListenerKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::Freeze for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::Send for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::Sync for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::Unpin for rss_platform::contracts::RuntimeListenerKind
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeListenerKind
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeListenerKind
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeListenerKind
+pub enum rss_platform::contracts::RuntimePlacementMode
+pub rss_platform::contracts::RuntimePlacementMode::Local
+pub rss_platform::contracts::RuntimePlacementMode::Remote
+impl core::clone::Clone for rss_platform::contracts::RuntimePlacementMode
+pub fn rss_platform::contracts::RuntimePlacementMode::clone(&self) -> rss_platform::contracts::RuntimePlacementMode
+impl core::cmp::Eq for rss_platform::contracts::RuntimePlacementMode
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimePlacementMode
+pub fn rss_platform::contracts::RuntimePlacementMode::eq(&self, &rss_platform::contracts::RuntimePlacementMode) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimePlacementMode
+pub fn rss_platform::contracts::RuntimePlacementMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::Freeze for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::Send for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::Sync for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::Unpin for rss_platform::contracts::RuntimePlacementMode
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimePlacementMode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimePlacementMode
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimePlacementMode
+pub enum rss_platform::contracts::RuntimePlacementReadiness
+pub rss_platform::contracts::RuntimePlacementReadiness::MutualTlsSourceUnavailable
+pub rss_platform::contracts::RuntimePlacementReadiness::Ready
+impl core::clone::Clone for rss_platform::contracts::RuntimePlacementReadiness
+pub fn rss_platform::contracts::RuntimePlacementReadiness::clone(&self) -> rss_platform::contracts::RuntimePlacementReadiness
+impl core::cmp::Eq for rss_platform::contracts::RuntimePlacementReadiness
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimePlacementReadiness
+pub fn rss_platform::contracts::RuntimePlacementReadiness::eq(&self, &rss_platform::contracts::RuntimePlacementReadiness) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimePlacementReadiness
+pub fn rss_platform::contracts::RuntimePlacementReadiness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::Freeze for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::Send for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::Sync for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::Unpin for rss_platform::contracts::RuntimePlacementReadiness
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimePlacementReadiness
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimePlacementReadiness
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimePlacementReadiness
+pub enum rss_platform::contracts::RuntimeProjectionActivation
+pub rss_platform::contracts::RuntimeProjectionActivation::Active
+pub rss_platform::contracts::RuntimeProjectionActivation::CaptureOnly
+pub rss_platform::contracts::RuntimeProjectionActivation::Shadow
+impl core::clone::Clone for rss_platform::contracts::RuntimeProjectionActivation
+pub fn rss_platform::contracts::RuntimeProjectionActivation::clone(&self) -> rss_platform::contracts::RuntimeProjectionActivation
+impl core::cmp::Eq for rss_platform::contracts::RuntimeProjectionActivation
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeProjectionActivation
+pub fn rss_platform::contracts::RuntimeProjectionActivation::eq(&self, &rss_platform::contracts::RuntimeProjectionActivation) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeProjectionActivation
+pub fn rss_platform::contracts::RuntimeProjectionActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::Freeze for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::Send for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::Sync for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::Unpin for rss_platform::contracts::RuntimeProjectionActivation
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeProjectionActivation
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeProjectionActivation
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeProjectionActivation
+pub enum rss_platform::contracts::RuntimeProviderState
+pub rss_platform::contracts::RuntimeProviderState::Degraded
+pub rss_platform::contracts::RuntimeProviderState::Ready
+pub rss_platform::contracts::RuntimeProviderState::Unavailable
+impl core::clone::Clone for rss_platform::contracts::RuntimeProviderState
+pub fn rss_platform::contracts::RuntimeProviderState::clone(&self) -> rss_platform::contracts::RuntimeProviderState
+impl core::cmp::Eq for rss_platform::contracts::RuntimeProviderState
+impl core::cmp::PartialEq for rss_platform::contracts::RuntimeProviderState
+pub fn rss_platform::contracts::RuntimeProviderState::eq(&self, &rss_platform::contracts::RuntimeProviderState) -> bool
+impl core::fmt::Debug for rss_platform::contracts::RuntimeProviderState
+pub fn rss_platform::contracts::RuntimeProviderState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::RuntimeProviderState
+impl core::marker::StructuralPartialEq for rss_platform::contracts::RuntimeProviderState
+impl core::marker::Freeze for rss_platform::contracts::RuntimeProviderState
+impl core::marker::Send for rss_platform::contracts::RuntimeProviderState
+impl core::marker::Sync for rss_platform::contracts::RuntimeProviderState
+impl core::marker::Unpin for rss_platform::contracts::RuntimeProviderState
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeProviderState
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeProviderState
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeProviderState
+pub struct rss_platform::contracts::InventoryValueError(_)
+impl rss_platform::contracts::InventoryValueError
+pub const fn rss_platform::contracts::InventoryValueError::code(self) -> rss_platform::contracts::InventoryValueErrorCode
+impl core::clone::Clone for rss_platform::contracts::InventoryValueError
+pub fn rss_platform::contracts::InventoryValueError::clone(&self) -> rss_platform::contracts::InventoryValueError
+impl core::cmp::Eq for rss_platform::contracts::InventoryValueError
+impl core::cmp::PartialEq for rss_platform::contracts::InventoryValueError
+pub fn rss_platform::contracts::InventoryValueError::eq(&self, &rss_platform::contracts::InventoryValueError) -> bool
+impl core::error::Error for rss_platform::contracts::InventoryValueError
+impl core::fmt::Debug for rss_platform::contracts::InventoryValueError
+pub fn rss_platform::contracts::InventoryValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::contracts::InventoryValueError
+pub fn rss_platform::contracts::InventoryValueError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::contracts::InventoryValueError
+impl core::marker::StructuralPartialEq for rss_platform::contracts::InventoryValueError
+impl core::marker::Freeze for rss_platform::contracts::InventoryValueError
+impl core::marker::Send for rss_platform::contracts::InventoryValueError
+impl core::marker::Sync for rss_platform::contracts::InventoryValueError
+impl core::marker::Unpin for rss_platform::contracts::InventoryValueError
+impl core::marker::UnsafeUnpin for rss_platform::contracts::InventoryValueError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::InventoryValueError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::InventoryValueError
+pub struct rss_platform::contracts::RuntimeActivatedProjection
+impl rss_platform::contracts::RuntimeActivatedProjection
+pub const fn rss_platform::contracts::RuntimeActivatedProjection::activation(&self) -> rss_platform::contracts::RuntimeProjectionActivation
+pub fn rss_platform::contracts::RuntimeActivatedProjection::definition_version(&self) -> &str
+pub fn rss_platform::contracts::RuntimeActivatedProjection::id(&self) -> &str
+pub fn rss_platform::contracts::RuntimeActivatedProjection::new(&str, &str, rss_platform::contracts::Sha256Fingerprint, rss_platform::contracts::RuntimeProjectionActivation) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeActivatedProjection::schema_digest(&self) -> &rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Freeze for rss_platform::contracts::RuntimeActivatedProjection
+impl core::marker::Send for rss_platform::contracts::RuntimeActivatedProjection
+impl core::marker::Sync for rss_platform::contracts::RuntimeActivatedProjection
+impl core::marker::Unpin for rss_platform::contracts::RuntimeActivatedProjection
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeActivatedProjection
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeActivatedProjection
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeActivatedProjection
+pub struct rss_platform::contracts::RuntimeActivatedSaga
+impl rss_platform::contracts::RuntimeActivatedSaga
+pub fn rss_platform::contracts::RuntimeActivatedSaga::definition_version(&self) -> &str
+pub fn rss_platform::contracts::RuntimeActivatedSaga::id(&self) -> &str
+pub fn rss_platform::contracts::RuntimeActivatedSaga::new(&str, &str, rss_platform::contracts::Sha256Fingerprint) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeActivatedSaga::schema_digest(&self) -> &rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Freeze for rss_platform::contracts::RuntimeActivatedSaga
+impl core::marker::Send for rss_platform::contracts::RuntimeActivatedSaga
+impl core::marker::Sync for rss_platform::contracts::RuntimeActivatedSaga
+impl core::marker::Unpin for rss_platform::contracts::RuntimeActivatedSaga
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeActivatedSaga
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeActivatedSaga
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeActivatedSaga
+pub struct rss_platform::contracts::RuntimeBuildMetadata
+impl rss_platform::contracts::RuntimeBuildMetadata
+pub fn rss_platform::contracts::RuntimeBuildMetadata::image_digest(&self) -> &rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::RuntimeBuildMetadata::new(&str, rss_platform::contracts::Sha256Fingerprint) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeBuildMetadata::source_revision(&self) -> &str
+impl core::marker::Freeze for rss_platform::contracts::RuntimeBuildMetadata
+impl core::marker::Send for rss_platform::contracts::RuntimeBuildMetadata
+impl core::marker::Sync for rss_platform::contracts::RuntimeBuildMetadata
+impl core::marker::Unpin for rss_platform::contracts::RuntimeBuildMetadata
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeBuildMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeBuildMetadata
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeBuildMetadata
+pub struct rss_platform::contracts::RuntimeInventoryData
+impl rss_platform::contracts::RuntimeInventoryData
+pub fn rss_platform::contracts::RuntimeInventoryData::activated_workflows(&self) -> &[rss_platform::contracts::RuntimeActivatedWorkflow]
+pub fn rss_platform::contracts::RuntimeInventoryData::assembly_fingerprint(&self) -> &rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::RuntimeInventoryData::build_metadata(&self) -> core::option::Option<&rss_platform::contracts::RuntimeBuildMetadata>
+pub fn rss_platform::contracts::RuntimeInventoryData::domains(&self) -> &[rss_platform::contracts::RuntimeDomain]
+pub fn rss_platform::contracts::RuntimeInventoryData::listeners(&self) -> &[rss_platform::contracts::RuntimeListener]
+pub fn rss_platform::contracts::RuntimeInventoryData::new(rss_platform::contracts::Sha256Fingerprint, rss_platform::contracts::Sha256Fingerprint, alloc::vec::Vec<rss_platform::contracts::RuntimeDomain>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeInventoryData::placements(&self) -> &[rss_platform::contracts::RuntimePlacement]
+pub fn rss_platform::contracts::RuntimeInventoryData::provider_posture(&self) -> &[rss_platform::contracts::RuntimeProviderPosture]
+pub fn rss_platform::contracts::RuntimeInventoryData::runtime_plan_fingerprint(&self) -> &rss_platform::contracts::Sha256Fingerprint
+pub const fn rss_platform::contracts::RuntimeInventoryData::schema_version(&self) -> u16
+pub fn rss_platform::contracts::RuntimeInventoryData::with_activated_workflows(self, alloc::vec::Vec<rss_platform::contracts::RuntimeActivatedWorkflow>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeInventoryData::with_build_metadata(self, rss_platform::contracts::RuntimeBuildMetadata) -> Self
+pub fn rss_platform::contracts::RuntimeInventoryData::with_listeners(self, alloc::vec::Vec<rss_platform::contracts::RuntimeListener>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeInventoryData::with_placements(self, alloc::vec::Vec<rss_platform::contracts::RuntimePlacement>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimeInventoryData::with_provider_posture(self, alloc::vec::Vec<rss_platform::contracts::RuntimeProviderPosture>) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+impl core::marker::Freeze for rss_platform::contracts::RuntimeInventoryData
+impl core::marker::Send for rss_platform::contracts::RuntimeInventoryData
+impl core::marker::Sync for rss_platform::contracts::RuntimeInventoryData
+impl core::marker::Unpin for rss_platform::contracts::RuntimeInventoryData
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeInventoryData
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeInventoryData
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeInventoryData
+pub struct rss_platform::contracts::RuntimeInventoryRequest
+impl core::clone::Clone for rss_platform::contracts::RuntimeInventoryRequest
+pub fn rss_platform::contracts::RuntimeInventoryRequest::clone(&self) -> rss_platform::contracts::RuntimeInventoryRequest
+impl core::default::Default for rss_platform::contracts::RuntimeInventoryRequest
+pub fn rss_platform::contracts::RuntimeInventoryRequest::default() -> rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::Freeze for rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::Send for rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::Sync for rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::Unpin for rss_platform::contracts::RuntimeInventoryRequest
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeInventoryRequest
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeInventoryRequest
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeInventoryRequest
+pub struct rss_platform::contracts::RuntimeInventoryResponse
+impl rss_platform::contracts::RuntimeInventoryResponse
+pub fn rss_platform::contracts::RuntimeInventoryResponse::data(&self) -> &rss_platform::contracts::RuntimeInventoryData
+pub fn rss_platform::contracts::RuntimeInventoryResponse::into_data(self) -> rss_platform::contracts::RuntimeInventoryData
+pub fn rss_platform::contracts::RuntimeInventoryResponse::new(rss_platform::contracts::RuntimeInventoryData) -> Self
+impl core::marker::Freeze for rss_platform::contracts::RuntimeInventoryResponse
+impl core::marker::Send for rss_platform::contracts::RuntimeInventoryResponse
+impl core::marker::Sync for rss_platform::contracts::RuntimeInventoryResponse
+impl core::marker::Unpin for rss_platform::contracts::RuntimeInventoryResponse
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeInventoryResponse
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeInventoryResponse
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeInventoryResponse
+pub struct rss_platform::contracts::RuntimeListener
+impl rss_platform::contracts::RuntimeListener
+pub const fn rss_platform::contracts::RuntimeListener::auth_scheme(&self) -> rss_platform::contracts::RuntimeAuthScheme
+pub fn rss_platform::contracts::RuntimeListener::endpoint(&self) -> &rss_platform::contracts::RuntimeListenerEndpoint
+pub fn rss_platform::contracts::RuntimeListener::id(&self) -> &str
+pub const fn rss_platform::contracts::RuntimeListener::kind(&self) -> rss_platform::contracts::RuntimeListenerKind
+pub fn rss_platform::contracts::RuntimeListener::new(&str, rss_platform::contracts::RuntimeListenerKind, rss_platform::contracts::RuntimeListenerEndpoint, rss_platform::contracts::RuntimeAuthScheme) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+impl core::marker::Freeze for rss_platform::contracts::RuntimeListener
+impl core::marker::Send for rss_platform::contracts::RuntimeListener
+impl core::marker::Sync for rss_platform::contracts::RuntimeListener
+impl core::marker::Unpin for rss_platform::contracts::RuntimeListener
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeListener
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeListener
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeListener
+pub struct rss_platform::contracts::RuntimeListenerEndpoint
+impl rss_platform::contracts::RuntimeListenerEndpoint
+pub fn rss_platform::contracts::RuntimeListenerEndpoint::host(&self) -> &str
+pub fn rss_platform::contracts::RuntimeListenerEndpoint::new(rss_platform::contracts::RuntimeEndpointScheme, &str, u16) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub const fn rss_platform::contracts::RuntimeListenerEndpoint::port(&self) -> u16
+pub const fn rss_platform::contracts::RuntimeListenerEndpoint::scheme(&self) -> rss_platform::contracts::RuntimeEndpointScheme
+impl core::marker::Freeze for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::marker::Send for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::marker::Sync for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::marker::Unpin for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeListenerEndpoint
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeListenerEndpoint
+pub struct rss_platform::contracts::RuntimePlacement
+impl rss_platform::contracts::RuntimePlacement
+pub const fn rss_platform::contracts::RuntimePlacement::domain(&self) -> rss_platform::contracts::RuntimeDomain
+pub fn rss_platform::contracts::RuntimePlacement::endpoint(&self) -> core::option::Option<&rss_platform::contracts::RuntimeListenerEndpoint>
+pub const fn rss_platform::contracts::RuntimePlacement::mode(&self) -> rss_platform::contracts::RuntimePlacementMode
+pub fn rss_platform::contracts::RuntimePlacement::new(rss_platform::contracts::RuntimeDomain, &str, rss_platform::contracts::RuntimePlacementMode, rss_platform::contracts::RuntimePlacementReadiness) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub const fn rss_platform::contracts::RuntimePlacement::readiness(&self) -> rss_platform::contracts::RuntimePlacementReadiness
+pub fn rss_platform::contracts::RuntimePlacement::spiffe_identity(&self) -> core::option::Option<&str>
+pub fn rss_platform::contracts::RuntimePlacement::with_endpoint(self, rss_platform::contracts::RuntimeListenerEndpoint) -> Self
+pub fn rss_platform::contracts::RuntimePlacement::with_spiffe_identity(self, &str) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub fn rss_platform::contracts::RuntimePlacement::workload(&self) -> &str
+impl core::marker::Freeze for rss_platform::contracts::RuntimePlacement
+impl core::marker::Send for rss_platform::contracts::RuntimePlacement
+impl core::marker::Sync for rss_platform::contracts::RuntimePlacement
+impl core::marker::Unpin for rss_platform::contracts::RuntimePlacement
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimePlacement
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimePlacement
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimePlacement
+pub struct rss_platform::contracts::RuntimeProviderPosture
+impl rss_platform::contracts::RuntimeProviderPosture
+pub fn rss_platform::contracts::RuntimeProviderPosture::id(&self) -> &str
+pub fn rss_platform::contracts::RuntimeProviderPosture::new(&str, rss_platform::contracts::RuntimeProviderState) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+pub const fn rss_platform::contracts::RuntimeProviderPosture::state(&self) -> rss_platform::contracts::RuntimeProviderState
+impl core::marker::Freeze for rss_platform::contracts::RuntimeProviderPosture
+impl core::marker::Send for rss_platform::contracts::RuntimeProviderPosture
+impl core::marker::Sync for rss_platform::contracts::RuntimeProviderPosture
+impl core::marker::Unpin for rss_platform::contracts::RuntimeProviderPosture
+impl core::marker::UnsafeUnpin for rss_platform::contracts::RuntimeProviderPosture
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::RuntimeProviderPosture
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::RuntimeProviderPosture
+pub struct rss_platform::contracts::Sha256Fingerprint(_)
+impl rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::Sha256Fingerprint::as_str(&self) -> &str
+pub fn rss_platform::contracts::Sha256Fingerprint::parse(&str) -> core::result::Result<Self, rss_platform::contracts::InventoryValueError>
+impl core::clone::Clone for rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::Sha256Fingerprint::clone(&self) -> rss_platform::contracts::Sha256Fingerprint
+impl core::cmp::Eq for rss_platform::contracts::Sha256Fingerprint
+impl core::cmp::PartialEq for rss_platform::contracts::Sha256Fingerprint
+pub fn rss_platform::contracts::Sha256Fingerprint::eq(&self, &rss_platform::contracts::Sha256Fingerprint) -> bool
+impl core::marker::StructuralPartialEq for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Freeze for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Send for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Sync for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::Unpin for rss_platform::contracts::Sha256Fingerprint
+impl core::marker::UnsafeUnpin for rss_platform::contracts::Sha256Fingerprint
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::contracts::Sha256Fingerprint
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::contracts::Sha256Fingerprint
+#[non_exhaustive] pub enum rss_platform::ConditionCode
+pub rss_platform::ConditionCode::AcceptingDispatch
+pub rss_platform::ConditionCode::Draining
+pub rss_platform::ConditionCode::HandlersAdmitted
+pub rss_platform::ConditionCode::Stopped
+impl core::clone::Clone for rss_platform::ConditionCode
+pub fn rss_platform::ConditionCode::clone(&self) -> rss_platform::ConditionCode
+impl core::cmp::Eq for rss_platform::ConditionCode
+impl core::cmp::PartialEq for rss_platform::ConditionCode
+pub fn rss_platform::ConditionCode::eq(&self, &rss_platform::ConditionCode) -> bool
+impl core::fmt::Debug for rss_platform::ConditionCode
+pub fn rss_platform::ConditionCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::ConditionCode
+impl core::marker::StructuralPartialEq for rss_platform::ConditionCode
+impl core::marker::Freeze for rss_platform::ConditionCode
+impl core::marker::Send for rss_platform::ConditionCode
+impl core::marker::Sync for rss_platform::ConditionCode
+impl core::marker::Unpin for rss_platform::ConditionCode
+impl core::marker::UnsafeUnpin for rss_platform::ConditionCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ConditionCode
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ConditionCode
+#[non_exhaustive] pub enum rss_platform::ConditionStatus
+pub rss_platform::ConditionStatus::False
+pub rss_platform::ConditionStatus::True
+impl core::clone::Clone for rss_platform::ConditionStatus
+pub fn rss_platform::ConditionStatus::clone(&self) -> rss_platform::ConditionStatus
+impl core::cmp::Eq for rss_platform::ConditionStatus
+impl core::cmp::PartialEq for rss_platform::ConditionStatus
+pub fn rss_platform::ConditionStatus::eq(&self, &rss_platform::ConditionStatus) -> bool
+impl core::fmt::Debug for rss_platform::ConditionStatus
+pub fn rss_platform::ConditionStatus::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::ConditionStatus
+impl core::marker::StructuralPartialEq for rss_platform::ConditionStatus
+impl core::marker::Freeze for rss_platform::ConditionStatus
+impl core::marker::Send for rss_platform::ConditionStatus
+impl core::marker::Sync for rss_platform::ConditionStatus
+impl core::marker::Unpin for rss_platform::ConditionStatus
+impl core::marker::UnsafeUnpin for rss_platform::ConditionStatus
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ConditionStatus
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ConditionStatus
+#[non_exhaustive] pub enum rss_platform::DiagnosticCode
+pub rss_platform::DiagnosticCode::DuplicateHandler
+pub rss_platform::DiagnosticCode::DuplicateModule
+pub rss_platform::DiagnosticCode::HandlerFailed
+pub rss_platform::DiagnosticCode::InvalidCredential
+pub rss_platform::DiagnosticCode::InvalidTrustedIssuer
+pub rss_platform::DiagnosticCode::MissingHandler
+pub rss_platform::DiagnosticCode::MissingTrustedIssuer
+pub rss_platform::DiagnosticCode::PermissionDenied
+pub rss_platform::DiagnosticCode::RuntimeDraining
+pub rss_platform::DiagnosticCode::RuntimeStopped
+pub rss_platform::DiagnosticCode::ShutdownComplete
+pub rss_platform::DiagnosticCode::ShutdownTimedOut
+impl core::clone::Clone for rss_platform::DiagnosticCode
+pub fn rss_platform::DiagnosticCode::clone(&self) -> rss_platform::DiagnosticCode
+impl core::cmp::Eq for rss_platform::DiagnosticCode
+impl core::cmp::PartialEq for rss_platform::DiagnosticCode
+pub fn rss_platform::DiagnosticCode::eq(&self, &rss_platform::DiagnosticCode) -> bool
+impl core::fmt::Debug for rss_platform::DiagnosticCode
+pub fn rss_platform::DiagnosticCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::DiagnosticCode
+impl core::marker::StructuralPartialEq for rss_platform::DiagnosticCode
+impl core::marker::Freeze for rss_platform::DiagnosticCode
+impl core::marker::Send for rss_platform::DiagnosticCode
+impl core::marker::Sync for rss_platform::DiagnosticCode
+impl core::marker::Unpin for rss_platform::DiagnosticCode
+impl core::marker::UnsafeUnpin for rss_platform::DiagnosticCode
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::DiagnosticCode
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::DiagnosticCode
+pub enum rss_platform::DiagnosticDetail<'a>
+pub rss_platform::DiagnosticDetail::Count(usize)
+pub rss_platform::DiagnosticDetail::Duration(&'a core::time::Duration)
+impl<'a> core::marker::Freeze for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::marker::Send for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::marker::Sync for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::marker::Unpin for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::marker::UnsafeUnpin for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_platform::DiagnosticDetail<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for rss_platform::DiagnosticDetail<'a>
+#[non_exhaustive] pub enum rss_platform::IdentifierError
+pub rss_platform::IdentifierError::Empty
+pub rss_platform::IdentifierError::InvalidFormat
+pub rss_platform::IdentifierError::TooLong
+impl core::clone::Clone for rss_platform::IdentifierError
+pub fn rss_platform::IdentifierError::clone(&self) -> rss_platform::IdentifierError
+impl core::cmp::Eq for rss_platform::IdentifierError
+impl core::cmp::PartialEq for rss_platform::IdentifierError
+pub fn rss_platform::IdentifierError::eq(&self, &rss_platform::IdentifierError) -> bool
+impl core::error::Error for rss_platform::IdentifierError
+impl core::fmt::Debug for rss_platform::IdentifierError
+pub fn rss_platform::IdentifierError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::IdentifierError
+pub fn rss_platform::IdentifierError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::IdentifierError
+impl core::marker::StructuralPartialEq for rss_platform::IdentifierError
+impl core::marker::Freeze for rss_platform::IdentifierError
+impl core::marker::Send for rss_platform::IdentifierError
+impl core::marker::Sync for rss_platform::IdentifierError
+impl core::marker::Unpin for rss_platform::IdentifierError
+impl core::marker::UnsafeUnpin for rss_platform::IdentifierError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::IdentifierError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::IdentifierError
+#[non_exhaustive] pub enum rss_platform::PrincipalKind
+pub rss_platform::PrincipalKind::Admin
+pub rss_platform::PrincipalKind::Device
+pub rss_platform::PrincipalKind::SuperAdmin
+pub rss_platform::PrincipalKind::User
+impl core::clone::Clone for rss_platform::PrincipalKind
+pub fn rss_platform::PrincipalKind::clone(&self) -> rss_platform::PrincipalKind
+impl core::cmp::Eq for rss_platform::PrincipalKind
+impl core::cmp::PartialEq for rss_platform::PrincipalKind
+pub fn rss_platform::PrincipalKind::eq(&self, &rss_platform::PrincipalKind) -> bool
+impl core::fmt::Debug for rss_platform::PrincipalKind
+pub fn rss_platform::PrincipalKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::PrincipalKind
+impl core::marker::StructuralPartialEq for rss_platform::PrincipalKind
+impl core::marker::Freeze for rss_platform::PrincipalKind
+impl core::marker::Send for rss_platform::PrincipalKind
+impl core::marker::Sync for rss_platform::PrincipalKind
+impl core::marker::Unpin for rss_platform::PrincipalKind
+impl core::marker::UnsafeUnpin for rss_platform::PrincipalKind
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::PrincipalKind
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::PrincipalKind
+#[non_exhaustive] pub enum rss_platform::TenantIdError
+pub rss_platform::TenantIdError::Empty
+pub rss_platform::TenantIdError::InvalidFormat
+pub rss_platform::TenantIdError::Nil
+impl core::clone::Clone for rss_platform::TenantIdError
+pub fn rss_platform::TenantIdError::clone(&self) -> rss_platform::TenantIdError
+impl core::cmp::Eq for rss_platform::TenantIdError
+impl core::cmp::PartialEq for rss_platform::TenantIdError
+pub fn rss_platform::TenantIdError::eq(&self, &rss_platform::TenantIdError) -> bool
+impl core::error::Error for rss_platform::TenantIdError
+impl core::fmt::Debug for rss_platform::TenantIdError
+pub fn rss_platform::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::TenantIdError
+pub fn rss_platform::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::TenantIdError
+impl core::marker::StructuralPartialEq for rss_platform::TenantIdError
+impl core::marker::Freeze for rss_platform::TenantIdError
+impl core::marker::Send for rss_platform::TenantIdError
+impl core::marker::Sync for rss_platform::TenantIdError
+impl core::marker::Unpin for rss_platform::TenantIdError
+impl core::marker::UnsafeUnpin for rss_platform::TenantIdError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::TenantIdError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::TenantIdError
+pub struct rss_platform::AccessToken(_)
+impl rss_platform::AccessToken
+pub fn rss_platform::AccessToken::parse(&str) -> core::result::Result<Self, rss_platform::VerifyError>
+impl core::marker::Freeze for rss_platform::AccessToken
+impl core::marker::Send for rss_platform::AccessToken
+impl core::marker::Sync for rss_platform::AccessToken
+impl core::marker::Unpin for rss_platform::AccessToken
+impl core::marker::UnsafeUnpin for rss_platform::AccessToken
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::AccessToken
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::AccessToken
+pub struct rss_platform::Application
+impl rss_platform::Application
+pub fn rss_platform::Application::start(self) -> rss_platform::RuntimeHandle
+impl core::marker::Freeze for rss_platform::Application
+impl core::marker::Send for rss_platform::Application
+impl core::marker::Sync for rss_platform::Application
+impl core::marker::Unpin for rss_platform::Application
+impl core::marker::UnsafeUnpin for rss_platform::Application
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::Application
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::Application
+pub struct rss_platform::ApplicationBuilder
+impl rss_platform::ApplicationBuilder
+pub fn rss_platform::ApplicationBuilder::build(self) -> core::result::Result<rss_platform::Application, rss_platform::BuildError>
+pub fn rss_platform::ApplicationBuilder::module(self, rss_platform::ApplicationModule) -> Self
+pub fn rss_platform::ApplicationBuilder::new(rss_platform::ApplicationName) -> Self
+pub fn rss_platform::ApplicationBuilder::trusted_issuer(self, rss_platform::TrustedIssuer) -> Self
+impl core::marker::Freeze for rss_platform::ApplicationBuilder
+impl core::marker::Send for rss_platform::ApplicationBuilder
+impl core::marker::Sync for rss_platform::ApplicationBuilder
+impl core::marker::Unpin for rss_platform::ApplicationBuilder
+impl core::marker::UnsafeUnpin for rss_platform::ApplicationBuilder
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::ApplicationBuilder
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::ApplicationBuilder
+pub struct rss_platform::ApplicationModule
+impl rss_platform::ApplicationModule
+pub fn rss_platform::ApplicationModule::handler<C, H>(self, H) -> Self where C: rss_platform::Contract, H: rss_platform::Handler<C>
+pub fn rss_platform::ApplicationModule::name(&self) -> &rss_platform::ModuleName
+pub fn rss_platform::ApplicationModule::new(rss_platform::ModuleName) -> Self
+impl core::marker::Freeze for rss_platform::ApplicationModule
+impl core::marker::Send for rss_platform::ApplicationModule
+impl core::marker::Sync for rss_platform::ApplicationModule
+impl core::marker::Unpin for rss_platform::ApplicationModule
+impl core::marker::UnsafeUnpin for rss_platform::ApplicationModule
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::ApplicationModule
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::ApplicationModule
+pub struct rss_platform::ApplicationName(_)
+impl rss_platform::ApplicationName
+pub fn rss_platform::ApplicationName::as_str(&self) -> &str
+pub fn rss_platform::ApplicationName::parse(&str) -> core::result::Result<Self, rss_platform::IdentifierError>
+impl core::clone::Clone for rss_platform::ApplicationName
+pub fn rss_platform::ApplicationName::clone(&self) -> rss_platform::ApplicationName
+impl core::cmp::Eq for rss_platform::ApplicationName
+impl core::cmp::PartialEq for rss_platform::ApplicationName
+pub fn rss_platform::ApplicationName::eq(&self, &rss_platform::ApplicationName) -> bool
+impl core::hash::Hash for rss_platform::ApplicationName
+pub fn rss_platform::ApplicationName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_platform::ApplicationName
+impl core::marker::Freeze for rss_platform::ApplicationName
+impl core::marker::Send for rss_platform::ApplicationName
+impl core::marker::Sync for rss_platform::ApplicationName
+impl core::marker::Unpin for rss_platform::ApplicationName
+impl core::marker::UnsafeUnpin for rss_platform::ApplicationName
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ApplicationName
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ApplicationName
+pub struct rss_platform::BuildError
+impl rss_platform::BuildError
+pub fn rss_platform::BuildError::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::error::Error for rss_platform::BuildError
+impl core::fmt::Debug for rss_platform::BuildError
+pub fn rss_platform::BuildError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::BuildError
+pub fn rss_platform::BuildError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::BuildError
+impl core::marker::Send for rss_platform::BuildError
+impl core::marker::Sync for rss_platform::BuildError
+impl core::marker::Unpin for rss_platform::BuildError
+impl core::marker::UnsafeUnpin for rss_platform::BuildError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::BuildError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::BuildError
+pub struct rss_platform::Condition
+impl rss_platform::Condition
+pub const fn rss_platform::Condition::code(&self) -> rss_platform::ConditionCode
+pub const fn rss_platform::Condition::status(&self) -> rss_platform::ConditionStatus
+impl core::marker::Freeze for rss_platform::Condition
+impl core::marker::Send for rss_platform::Condition
+impl core::marker::Sync for rss_platform::Condition
+impl core::marker::Unpin for rss_platform::Condition
+impl core::marker::UnsafeUnpin for rss_platform::Condition
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::Condition
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::Condition
+pub struct rss_platform::ConditionsSnapshot
+impl rss_platform::ConditionsSnapshot
+pub fn rss_platform::ConditionsSnapshot::iter(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &rss_platform::Condition>
+impl core::marker::Freeze for rss_platform::ConditionsSnapshot
+impl core::marker::Send for rss_platform::ConditionsSnapshot
+impl core::marker::Sync for rss_platform::ConditionsSnapshot
+impl core::marker::Unpin for rss_platform::ConditionsSnapshot
+impl core::marker::UnsafeUnpin for rss_platform::ConditionsSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ConditionsSnapshot
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ConditionsSnapshot
+pub struct rss_platform::ContractId(_)
+impl rss_platform::ContractId
+pub const fn rss_platform::ContractId::as_str(self) -> &'static str
+pub const fn rss_platform::ContractId::from_static(&'static str) -> Self
+impl core::clone::Clone for rss_platform::ContractId
+pub fn rss_platform::ContractId::clone(&self) -> rss_platform::ContractId
+impl core::cmp::Eq for rss_platform::ContractId
+impl core::cmp::PartialEq for rss_platform::ContractId
+pub fn rss_platform::ContractId::eq(&self, &rss_platform::ContractId) -> bool
+impl core::hash::Hash for rss_platform::ContractId
+pub fn rss_platform::ContractId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_platform::ContractId
+impl core::marker::StructuralPartialEq for rss_platform::ContractId
+impl core::marker::Freeze for rss_platform::ContractId
+impl core::marker::Send for rss_platform::ContractId
+impl core::marker::Sync for rss_platform::ContractId
+impl core::marker::Unpin for rss_platform::ContractId
+impl core::marker::UnsafeUnpin for rss_platform::ContractId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ContractId
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ContractId
+pub struct rss_platform::ContractVersion
+impl rss_platform::ContractVersion
+pub const fn rss_platform::ContractVersion::major(self) -> u16
+pub const fn rss_platform::ContractVersion::minor(self) -> u16
+pub const fn rss_platform::ContractVersion::new(u16, u16) -> Self
+impl core::clone::Clone for rss_platform::ContractVersion
+pub fn rss_platform::ContractVersion::clone(&self) -> rss_platform::ContractVersion
+impl core::cmp::Eq for rss_platform::ContractVersion
+impl core::cmp::PartialEq for rss_platform::ContractVersion
+pub fn rss_platform::ContractVersion::eq(&self, &rss_platform::ContractVersion) -> bool
+impl core::hash::Hash for rss_platform::ContractVersion
+pub fn rss_platform::ContractVersion::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_platform::ContractVersion
+impl core::marker::StructuralPartialEq for rss_platform::ContractVersion
+impl core::marker::Freeze for rss_platform::ContractVersion
+impl core::marker::Send for rss_platform::ContractVersion
+impl core::marker::Sync for rss_platform::ContractVersion
+impl core::marker::Unpin for rss_platform::ContractVersion
+impl core::marker::UnsafeUnpin for rss_platform::ContractVersion
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ContractVersion
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ContractVersion
+pub struct rss_platform::Diagnostic
+impl rss_platform::Diagnostic
+pub const fn rss_platform::Diagnostic::code(&self) -> rss_platform::DiagnosticCode
+pub fn rss_platform::Diagnostic::detail(&self) -> core::option::Option<rss_platform::DiagnosticDetail<'_>>
+impl core::clone::Clone for rss_platform::Diagnostic
+pub fn rss_platform::Diagnostic::clone(&self) -> rss_platform::Diagnostic
+impl core::marker::Freeze for rss_platform::Diagnostic
+impl core::marker::Send for rss_platform::Diagnostic
+impl core::marker::Sync for rss_platform::Diagnostic
+impl core::marker::Unpin for rss_platform::Diagnostic
+impl core::marker::UnsafeUnpin for rss_platform::Diagnostic
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::Diagnostic
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::Diagnostic
+pub struct rss_platform::DiagnosticsSnapshot
+impl rss_platform::DiagnosticsSnapshot
+pub fn rss_platform::DiagnosticsSnapshot::iter(&self) -> impl core::iter::traits::exact_size::ExactSizeIterator<Item = &rss_platform::Diagnostic>
+impl core::marker::Freeze for rss_platform::DiagnosticsSnapshot
+impl core::marker::Send for rss_platform::DiagnosticsSnapshot
+impl core::marker::Sync for rss_platform::DiagnosticsSnapshot
+impl core::marker::Unpin for rss_platform::DiagnosticsSnapshot
+impl core::marker::UnsafeUnpin for rss_platform::DiagnosticsSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::DiagnosticsSnapshot
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::DiagnosticsSnapshot
+pub struct rss_platform::DispatchError
+impl rss_platform::DispatchError
+pub fn rss_platform::DispatchError::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::error::Error for rss_platform::DispatchError
+impl core::fmt::Debug for rss_platform::DispatchError
+pub fn rss_platform::DispatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::DispatchError
+pub fn rss_platform::DispatchError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::DispatchError
+impl core::marker::Send for rss_platform::DispatchError
+impl core::marker::Sync for rss_platform::DispatchError
+impl core::marker::Unpin for rss_platform::DispatchError
+impl core::marker::UnsafeUnpin for rss_platform::DispatchError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::DispatchError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::DispatchError
+pub struct rss_platform::Dispatcher
+impl rss_platform::Dispatcher
+pub fn rss_platform::Dispatcher::conditions(&self) -> rss_platform::ConditionsSnapshot
+pub fn rss_platform::Dispatcher::dispatch<C: rss_platform::Contract>(&self, &rss_platform::VerifiedAccess, rss_platform::RequestId, <C as rss_platform::Contract>::Request) -> core::result::Result<<C as rss_platform::Contract>::Response, rss_platform::DispatchError>
+pub fn rss_platform::Dispatcher::verify(&self, &rss_platform::AccessToken, std::time::SystemTime) -> core::result::Result<rss_platform::VerifiedAccess, rss_platform::VerifyError>
+impl core::clone::Clone for rss_platform::Dispatcher
+pub fn rss_platform::Dispatcher::clone(&self) -> rss_platform::Dispatcher
+impl core::marker::Freeze for rss_platform::Dispatcher
+impl core::marker::Send for rss_platform::Dispatcher
+impl core::marker::Sync for rss_platform::Dispatcher
+impl core::marker::Unpin for rss_platform::Dispatcher
+impl core::marker::UnsafeUnpin for rss_platform::Dispatcher
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::Dispatcher
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::Dispatcher
+pub struct rss_platform::HandlerError
+impl rss_platform::HandlerError
+pub const fn rss_platform::HandlerError::new() -> Self
+impl core::default::Default for rss_platform::HandlerError
+pub fn rss_platform::HandlerError::default() -> Self
+impl core::error::Error for rss_platform::HandlerError
+impl core::fmt::Debug for rss_platform::HandlerError
+pub fn rss_platform::HandlerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::HandlerError
+pub fn rss_platform::HandlerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::HandlerError
+impl core::marker::Send for rss_platform::HandlerError
+impl core::marker::Sync for rss_platform::HandlerError
+impl core::marker::Unpin for rss_platform::HandlerError
+impl core::marker::UnsafeUnpin for rss_platform::HandlerError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::HandlerError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::HandlerError
+pub struct rss_platform::ModuleName(_)
+impl rss_platform::ModuleName
+pub fn rss_platform::ModuleName::as_str(&self) -> &str
+pub fn rss_platform::ModuleName::parse(&str) -> core::result::Result<Self, rss_platform::IdentifierError>
+impl core::clone::Clone for rss_platform::ModuleName
+pub fn rss_platform::ModuleName::clone(&self) -> rss_platform::ModuleName
+impl core::cmp::Eq for rss_platform::ModuleName
+impl core::cmp::PartialEq for rss_platform::ModuleName
+pub fn rss_platform::ModuleName::eq(&self, &rss_platform::ModuleName) -> bool
+impl core::hash::Hash for rss_platform::ModuleName
+pub fn rss_platform::ModuleName::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_platform::ModuleName
+impl core::marker::Freeze for rss_platform::ModuleName
+impl core::marker::Send for rss_platform::ModuleName
+impl core::marker::Sync for rss_platform::ModuleName
+impl core::marker::Unpin for rss_platform::ModuleName
+impl core::marker::UnsafeUnpin for rss_platform::ModuleName
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ModuleName
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ModuleName
+pub struct rss_platform::RequestContext<'a>
+impl rss_platform::RequestContext<'_>
+pub fn rss_platform::RequestContext<'_>::allows_permission(&self, &str) -> bool
+pub fn rss_platform::RequestContext<'_>::principal(&self) -> rss_platform::VerifiedPrincipal<'_>
+pub fn rss_platform::RequestContext<'_>::request_id(&self) -> &rss_platform::RequestId
+pub fn rss_platform::RequestContext<'_>::tenant(&self) -> core::option::Option<rss_platform::VerifiedTenant<'_>>
+impl<'a> core::marker::Freeze for rss_platform::RequestContext<'a>
+impl<'a> core::marker::Send for rss_platform::RequestContext<'a>
+impl<'a> core::marker::Sync for rss_platform::RequestContext<'a>
+impl<'a> core::marker::Unpin for rss_platform::RequestContext<'a>
+impl<'a> core::marker::UnsafeUnpin for rss_platform::RequestContext<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_platform::RequestContext<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for rss_platform::RequestContext<'a>
+pub struct rss_platform::RequestId(_)
+impl rss_platform::RequestId
+pub fn rss_platform::RequestId::as_str(&self) -> &str
+pub fn rss_platform::RequestId::parse(&str) -> core::result::Result<Self, rss_platform::IdentifierError>
+impl core::clone::Clone for rss_platform::RequestId
+pub fn rss_platform::RequestId::clone(&self) -> rss_platform::RequestId
+impl core::cmp::Eq for rss_platform::RequestId
+impl core::cmp::PartialEq for rss_platform::RequestId
+pub fn rss_platform::RequestId::eq(&self, &rss_platform::RequestId) -> bool
+impl core::hash::Hash for rss_platform::RequestId
+pub fn rss_platform::RequestId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_platform::RequestId
+impl core::marker::Freeze for rss_platform::RequestId
+impl core::marker::Send for rss_platform::RequestId
+impl core::marker::Sync for rss_platform::RequestId
+impl core::marker::Unpin for rss_platform::RequestId
+impl core::marker::UnsafeUnpin for rss_platform::RequestId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::RequestId
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::RequestId
+pub struct rss_platform::RuntimeHandle
+impl rss_platform::RuntimeHandle
+pub fn rss_platform::RuntimeHandle::conditions(&self) -> rss_platform::ConditionsSnapshot
+pub fn rss_platform::RuntimeHandle::diagnostics(&self) -> rss_platform::DiagnosticsSnapshot
+pub fn rss_platform::RuntimeHandle::dispatcher(&self) -> rss_platform::Dispatcher
+pub fn rss_platform::RuntimeHandle::shutdown(self, core::time::Duration) -> core::result::Result<rss_platform::ShutdownReport, rss_platform::ShutdownError>
+impl core::marker::Freeze for rss_platform::RuntimeHandle
+impl core::marker::Send for rss_platform::RuntimeHandle
+impl core::marker::Sync for rss_platform::RuntimeHandle
+impl core::marker::Unpin for rss_platform::RuntimeHandle
+impl core::marker::UnsafeUnpin for rss_platform::RuntimeHandle
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::RuntimeHandle
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::RuntimeHandle
+pub struct rss_platform::SchemaDigest(_)
+impl rss_platform::SchemaDigest
+pub const fn rss_platform::SchemaDigest::as_str(self) -> &'static str
+pub const fn rss_platform::SchemaDigest::from_static(&'static str) -> Self
+impl core::clone::Clone for rss_platform::SchemaDigest
+pub fn rss_platform::SchemaDigest::clone(&self) -> rss_platform::SchemaDigest
+impl core::cmp::Eq for rss_platform::SchemaDigest
+impl core::cmp::PartialEq for rss_platform::SchemaDigest
+pub fn rss_platform::SchemaDigest::eq(&self, &rss_platform::SchemaDigest) -> bool
+impl core::hash::Hash for rss_platform::SchemaDigest
+pub fn rss_platform::SchemaDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_platform::SchemaDigest
+impl core::marker::StructuralPartialEq for rss_platform::SchemaDigest
+impl core::marker::Freeze for rss_platform::SchemaDigest
+impl core::marker::Send for rss_platform::SchemaDigest
+impl core::marker::Sync for rss_platform::SchemaDigest
+impl core::marker::Unpin for rss_platform::SchemaDigest
+impl core::marker::UnsafeUnpin for rss_platform::SchemaDigest
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::SchemaDigest
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::SchemaDigest
+pub struct rss_platform::ShutdownError
+impl rss_platform::ShutdownError
+pub fn rss_platform::ShutdownError::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::error::Error for rss_platform::ShutdownError
+impl core::fmt::Debug for rss_platform::ShutdownError
+pub fn rss_platform::ShutdownError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::ShutdownError
+pub fn rss_platform::ShutdownError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::ShutdownError
+impl core::marker::Send for rss_platform::ShutdownError
+impl core::marker::Sync for rss_platform::ShutdownError
+impl core::marker::Unpin for rss_platform::ShutdownError
+impl core::marker::UnsafeUnpin for rss_platform::ShutdownError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ShutdownError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ShutdownError
+pub struct rss_platform::ShutdownReport
+impl rss_platform::ShutdownReport
+pub fn rss_platform::ShutdownReport::conditions(&self) -> &rss_platform::ConditionsSnapshot
+pub fn rss_platform::ShutdownReport::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::marker::Freeze for rss_platform::ShutdownReport
+impl core::marker::Send for rss_platform::ShutdownReport
+impl core::marker::Sync for rss_platform::ShutdownReport
+impl core::marker::Unpin for rss_platform::ShutdownReport
+impl core::marker::UnsafeUnpin for rss_platform::ShutdownReport
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ShutdownReport
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::ShutdownReport
+pub struct rss_platform::TenantId(_)
+impl rss_platform::TenantId
+pub fn rss_platform::TenantId::as_str(&self) -> &str
+pub fn rss_platform::TenantId::parse(&str) -> core::result::Result<Self, rss_platform::TenantIdError>
+impl core::clone::Clone for rss_platform::TenantId
+pub fn rss_platform::TenantId::clone(&self) -> rss_platform::TenantId
+impl core::cmp::Eq for rss_platform::TenantId
+impl core::cmp::PartialEq for rss_platform::TenantId
+pub fn rss_platform::TenantId::eq(&self, &rss_platform::TenantId) -> bool
+impl core::hash::Hash for rss_platform::TenantId
+pub fn rss_platform::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_platform::TenantId
+impl core::marker::Freeze for rss_platform::TenantId
+impl core::marker::Send for rss_platform::TenantId
+impl core::marker::Sync for rss_platform::TenantId
+impl core::marker::Unpin for rss_platform::TenantId
+impl core::marker::UnsafeUnpin for rss_platform::TenantId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::TenantId
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::TenantId
+pub struct rss_platform::TrustedIssuer
+impl rss_platform::TrustedIssuer
+pub fn rss_platform::TrustedIssuer::from_jwks_json(&str, &str, &str) -> core::result::Result<Self, rss_platform::BuildError>
+pub fn rss_platform::TrustedIssuer::verify(&self, &rss_platform::AccessToken, std::time::SystemTime) -> core::result::Result<rss_platform::VerifiedAccess, rss_platform::VerifyError>
+pub fn rss_platform::TrustedIssuer::verify_with_policy(&self, &rss_platform::AccessToken, std::time::SystemTime, &rss_platform::VerificationPolicy) -> core::result::Result<rss_platform::VerifiedAccess, rss_platform::VerifyError>
+impl core::marker::Freeze for rss_platform::TrustedIssuer
+impl core::marker::Send for rss_platform::TrustedIssuer
+impl core::marker::Sync for rss_platform::TrustedIssuer
+impl core::marker::Unpin for rss_platform::TrustedIssuer
+impl core::marker::UnsafeUnpin for rss_platform::TrustedIssuer
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::TrustedIssuer
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::TrustedIssuer
+pub struct rss_platform::VerificationPolicy
+impl rss_platform::VerificationPolicy
+pub fn rss_platform::VerificationPolicy::new(&str, &str, u64) -> core::result::Result<Self, rss_platform::BuildError>
+impl core::default::Default for rss_platform::VerificationPolicy
+pub fn rss_platform::VerificationPolicy::default() -> Self
+impl core::marker::Freeze for rss_platform::VerificationPolicy
+impl core::marker::Send for rss_platform::VerificationPolicy
+impl core::marker::Sync for rss_platform::VerificationPolicy
+impl core::marker::Unpin for rss_platform::VerificationPolicy
+impl core::marker::UnsafeUnpin for rss_platform::VerificationPolicy
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerificationPolicy
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::VerificationPolicy
+pub struct rss_platform::VerifiedAccess
+impl rss_platform::VerifiedAccess
+pub fn rss_platform::VerifiedAccess::allows_permission(&self, &str) -> bool
+pub fn rss_platform::VerifiedAccess::matches_subject(&self, &str) -> bool
+pub fn rss_platform::VerifiedAccess::principal_kind(&self) -> rss_platform::PrincipalKind
+pub fn rss_platform::VerifiedAccess::tenant(&self) -> core::option::Option<&rss_platform::TenantId>
+impl core::marker::Freeze for rss_platform::VerifiedAccess
+impl core::marker::Send for rss_platform::VerifiedAccess
+impl core::marker::Sync for rss_platform::VerifiedAccess
+impl core::marker::Unpin for rss_platform::VerifiedAccess
+impl core::marker::UnsafeUnpin for rss_platform::VerifiedAccess
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerifiedAccess
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::VerifiedAccess
+pub struct rss_platform::VerifiedPrincipal<'a>
+impl rss_platform::VerifiedPrincipal<'_>
+pub fn rss_platform::VerifiedPrincipal<'_>::kind(&self) -> rss_platform::PrincipalKind
+pub fn rss_platform::VerifiedPrincipal<'_>::matches_subject(&self, &str) -> bool
+impl<'a> core::marker::Freeze for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::marker::Send for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::marker::Sync for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::marker::Unpin for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::marker::UnsafeUnpin for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerifiedPrincipal<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for rss_platform::VerifiedPrincipal<'a>
+pub struct rss_platform::VerifiedTenant<'a>
+impl rss_platform::VerifiedTenant<'_>
+pub fn rss_platform::VerifiedTenant<'_>::id(&self) -> &rss_platform::TenantId
+impl<'a> core::marker::Freeze for rss_platform::VerifiedTenant<'a>
+impl<'a> core::marker::Send for rss_platform::VerifiedTenant<'a>
+impl<'a> core::marker::Sync for rss_platform::VerifiedTenant<'a>
+impl<'a> core::marker::Unpin for rss_platform::VerifiedTenant<'a>
+impl<'a> core::marker::UnsafeUnpin for rss_platform::VerifiedTenant<'a>
+impl<'a> core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerifiedTenant<'a>
+impl<'a> core::panic::unwind_safe::UnwindSafe for rss_platform::VerifiedTenant<'a>
+pub struct rss_platform::VerifyError
+impl rss_platform::VerifyError
+pub fn rss_platform::VerifyError::diagnostics(&self) -> &rss_platform::DiagnosticsSnapshot
+impl core::error::Error for rss_platform::VerifyError
+impl core::fmt::Debug for rss_platform::VerifyError
+pub fn rss_platform::VerifyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_platform::VerifyError
+pub fn rss_platform::VerifyError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_platform::VerifyError
+impl core::marker::Send for rss_platform::VerifyError
+impl core::marker::Sync for rss_platform::VerifyError
+impl core::marker::Unpin for rss_platform::VerifyError
+impl core::marker::UnsafeUnpin for rss_platform::VerifyError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::VerifyError
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::VerifyError
+pub trait rss_platform::Contract: rss_platform::runtime::private::Sealed + core::marker::Send + core::marker::Sync + 'static
+pub type rss_platform::Contract::Request: core::marker::Send + 'static
+pub type rss_platform::Contract::Response: core::marker::Send + 'static
+pub const rss_platform::Contract::ID: rss_platform::ContractId
+pub const rss_platform::Contract::PERMISSION: &'static str
+pub const rss_platform::Contract::SCHEMA_DIGEST: rss_platform::SchemaDigest
+pub const rss_platform::Contract::VERSION: rss_platform::ContractVersion
+impl rss_platform::Contract for rss_platform::contracts::RuntimeInventory
+pub type rss_platform::contracts::RuntimeInventory::Request = rss_platform::contracts::RuntimeInventoryRequest
+pub type rss_platform::contracts::RuntimeInventory::Response = rss_platform::contracts::RuntimeInventoryResponse
+pub const rss_platform::contracts::RuntimeInventory::ID: rss_platform::ContractId
+pub const rss_platform::contracts::RuntimeInventory::PERMISSION: &'static str
+pub const rss_platform::contracts::RuntimeInventory::SCHEMA_DIGEST: rss_platform::SchemaDigest
+pub const rss_platform::contracts::RuntimeInventory::VERSION: rss_platform::ContractVersion
+pub trait rss_platform::Handler<C: rss_platform::Contract>: core::marker::Send + core::marker::Sync + 'static
+pub fn rss_platform::Handler::handle(&self, <C as rss_platform::Contract>::Request, rss_platform::RequestContext<'_>) -> core::result::Result<<C as rss_platform::Contract>::Response, rss_platform::HandlerError>

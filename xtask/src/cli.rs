@@ -41,6 +41,8 @@ pub(crate) enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Build a real `.crate` and prove it from an independent offline local-registry consumer.
+    PackageProof,
     /// Debezium / CDC connector skeleton。
     #[command(subcommand)]
     CdcConfig(CdcConfigCommand),

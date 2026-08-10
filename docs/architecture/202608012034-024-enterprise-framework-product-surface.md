@@ -2,7 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-01
-- **Last updated**：2026-08-08
+- **Last updated**：2026-08-09
 - **Scope**：[`project-scope.md`](../rules/project-scope.md) 的项目目标与目标验收边界
 
 ## Context
@@ -11,6 +11,21 @@ RSS 已具备 contract/codegen、静态 assembly、L0–L4 primitive、多租户
 面向 Rust 企业应用的 AI 友好型企业开发框架后，需要统一公共消费面、官方技术栈闭包和分阶段完成条件。
 
 ## Decision
+
+### 2026-08-09 amendment：Platform Public v0.1 真实 owner
+
+本 amendment 取代 Spec 012 旧版的 “thin façade / exact API frozen / 不改变 runtime” 实施解释。
+`rss-platform` 0.1.0 是 provider-free、进程内 typed application kernel，原子拥有 canonical contract
+admission、静态 federated ES256 authority、typed handler dispatch 与 bounded drain/shutdown。它不是
+publish=false internals 的 wrapper，也不提供 DI container、Host/Provider SPI 或第二 composition root。
+
+`core`/`eventing` 仍是候选 official profile，但尚未激活，不进入 Platform v0.1 API；kernel conditions 只报告
+自身真实 handler/dispatch/drain/stopped 状态，不映射 provider/runtime readiness。Platform crate 位于新的最低位
+`PlatformPublic` layer，无 workspace normal/build dependency；internal layers 只能反向消费其稳定值面。
+
+framework-owned active HTTP manifests 经同一 `cargo xtask codegen` 投影 sealed public contract set；v0.1 exact set
+为 `runtime.inventory`。Release Surface、真实 `.crate` local-registry consumer 与 locked/offline T2 是同一合并门。
+旧 #2045 fixture、开放 Contract、core/eventing marker 与兼容 path 全部删除，不保留 shim/alias。
 
 ### 产品面
 

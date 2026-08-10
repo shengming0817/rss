@@ -34,10 +34,11 @@ package 使用品牌 **RSS** 与 `rss-` 前缀；首批两个 Standalone Compone
 |---|---|---|
 | `diagctx` | `rss-diag-context` | `github:shengming0817:rss-maintainers` |
 | `tracewire` | `rss-trace-context` | `github:shengming0817:rss-maintainers` |
+| `platform` | `rss-platform` | `github:shengming0817:rss-maintainers` |
 
 规范源码仓库是 [`shengming0817/rss`](https://github.com/shengming0817/rss)。2026-08-09 UTC 的 crates.io
-检查确认精确名称 `rss` 已被无关的 RSS feed 读写 crate 占用，而 `rss-diag-context` 与
-`rss-trace-context` 当时未登记。未登记只是一项带时间的冲突检查，不构成名称保留、ownership 或发布授权；首次
+检查确认精确名称 `rss` 已被无关的 RSS feed 读写 crate 占用，而 `rss-diag-context`、
+`rss-trace-context` 与 `rss-platform` 当时未登记。未登记只是一项带时间的冲突检查，不构成名称保留、ownership 或发布授权；首次
 发布前必须重新查询精确名称，并在 crate 创建后验证 registry owner 列表。`crates/diagctx` / `diagctx` 与
 `crates/tracewire` / `tracewire` 分别是仓内路径与 dependency rename key，不构成旧 package alias。Cargo closure
 PBI 直接采用上表公开 package identity，但在最终 API 与同 revision artifact proof 完成前继续保持
@@ -76,6 +77,7 @@ rss/
 ├── .config/nextest.toml  # cargo-nextest（进程隔离 / 重试）
 ├── crates/               # 全部库 crate，扁平（Rust 惯例，非分层目录）
 │   ├── vocab/            # error(thiserror) / authz / tenant / query（基础词汇）
+│   ├── platform/         # PlatformPublic：发布的 provider-free typed application kernel（零 workspace 生产依赖）
 │   ├── assembly-schema/  # assembly / contract authoring schema；依赖 vocab canonical 类型
 │   ├── ids/              # sealed newtype（私有字段 = 硬封）
 │   ├── securederive/    # proc-macro：#[derive(Redact)] 字段级脱敏（intra-base DAG 低于 secure）
@@ -127,6 +129,11 @@ rss/
 ```
 
 ## 分层(crate 图 + deny.toml 编译期强制)
+
+- **PlatformPublic** `rss-platform`：全 workspace 最低位公开层；normal/build dependency 只允许外部 crates，
+  禁止任何 workspace 出边。它拥有 sealed generated contract、静态 federated ES256 authority、进程内 typed
+  dispatch 与 bounded drain；不拥有 listener/provider/assembly/profile readiness。Basis/Engine/DI-infra/Service/
+  Domain/Adapter/Generated/Tooling/Example/Root 可反向消费它，但不得把 internal 类型注入其公开签名。
 
 - **基础** `vocab`/`assembly-schema`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`/`authmint`/`requestidmint`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；capability crate `diagctx`、`authmint`、`sagaauthmint` 与 `requestidmint` 为独立根，不依赖其它基础 crate，也不被其它基础 crate 依赖；`requestidmint` 仅由 deny.toml wrappers `httpserve`（mint）与 `generated`（consume）持有（HTTP-REQUEST-ID-AUTHORITY-01 Hard），因此业务 crate 不能伪造 typed response 的 request ID。`diagctx` 仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）；`authmint` 仅由既有 deny.toml wrappers 持有（AUTH-EVIDENCE-MINT-01 Hard）；assembly 内 exact mint + proof-consuming 另由 `rss_authenticated_callsite` Medium 守。现有 sanctioned 前向边:`assembly-schema → vocab`（contract authoring 的 canonical `StepName` / `DomainName` 类型边界）、`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与 `secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制。
 - **引擎/原语** `consistency`/`primitives`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`tracewire`(W3C Trace Context capture/remote-parent restore 单源)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `httpserve`(HTTP ingress 还原)+`eventexec`(consume 还原)+ adapter `postgres`(emit 捕获)依赖——otel 只准在此与 `adapters/otel` 收口,二者外不直接 import otel(当前只有结构性收口,无机器守)。

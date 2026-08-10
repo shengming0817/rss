@@ -43,6 +43,7 @@ mod localtx_coverage;
 mod localtx_evidence;
 mod localtx_report;
 mod outbox_same_id_guard;
+mod package_proof;
 mod pathsafe;
 mod pdpallow;
 mod pg_tenant_tx_guard;
@@ -92,6 +93,7 @@ fn main() -> Result<()> {
 fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Codegen { check } => codegen::run(check),
+        Command::PackageProof => package_proof::run_command(),
         Command::CdcConfig(CdcConfigCommand::Debezium) => cdc_config::run_debezium(),
         Command::Contract(ContractCommand::Validate) => {
             diagnostic::run_check(&contract::validate::ContractValidate)

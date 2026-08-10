@@ -184,6 +184,16 @@ impl BaselineCatalog {
         )
     }
 
+    fn derive_from_release_surface(
+        root: &Path,
+        facts: &WorkspaceFacts,
+        surface: &crate::release_surface::ReleaseSurface,
+    ) -> Result<Self> {
+        crate::workspace_facts::validate_command_funnel(root)?;
+        crate::assembly_governance::validate_source_funnel(root)?;
+        Self::from_release_surface(facts, surface)
+    }
+
     fn from_selected_packages<'a>(
         facts: &WorkspaceFacts,
         selected: impl IntoIterator<Item = &'a str>,
@@ -676,22 +686,25 @@ fn collect_release_stage<T>(
 /// Canonical ReleaseCheck proof. The Cargo graph and validated positive selection remain the typed
 /// authority; rustdoc token projection only closes residual public-signature leakage.
 /// INVARIANT: RELEASE-API-COMPAT-01 { level = "Medium", exec = "release-check", source = "rustdoc-json", synthetic_red = "tests::checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection", anti_vacuity = "tests::checked_in_rustdoc_fixture_crosses_builder_and_source_identity_projection" }.
-pub(crate) fn run_release_check(against: &str, allow_missing_tools: bool) -> Result<()> {
-    let root = crate::workspace_root()?;
-    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
-    let facts = command_facts.get()?;
-    let catalog = BaselineCatalog::derive(&root, facts)?;
+pub(crate) fn run_release_check(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    against: &str,
+    allow_missing_tools: bool,
+) -> Result<crate::release_surface::ReleaseSurface> {
+    let surface = validated_release_surface(root, facts)?;
+    let catalog = BaselineCatalog::derive_from_release_surface(root, facts, &surface)?;
 
     let mut failures = Vec::new();
     collect_release_stage(&mut failures, 0, "internal-exact-set", || {
         execute(
-            &root,
+            root,
             &catalog.plan(BaselineScope::Complete(BaselineOwner::Internal)),
             true,
         )
     });
 
-    let base_revision = match merge_base(&root, against) {
+    let base_revision = match merge_base(root, against) {
         Ok(revision) => Some(revision),
         Err(error) => {
             failures.push(ReleaseProofFailure::from_error(1, "base-revision", error));
@@ -699,7 +712,7 @@ pub(crate) fn run_release_check(against: &str, allow_missing_tools: bool) -> Res
         }
     };
     let base_packages = match &base_revision {
-        Some(revision) => match release_packages_at(&root, revision) {
+        Some(revision) => match release_packages_at(root, revision) {
             Ok(packages) => Some(packages),
             Err(error) => {
                 failures.push(ReleaseProofFailure::from_error(
@@ -722,7 +735,7 @@ pub(crate) fn run_release_check(against: &str, allow_missing_tools: bool) -> Res
         .map(|base| ReleaseSelectionDelta::derive(&current_packages, base));
 
     let captures = match execute(
-        &root,
+        root,
         &catalog.plan(BaselineScope::Complete(BaselineOwner::Release)),
         true,
     ) {
@@ -737,30 +750,22 @@ pub(crate) fn run_release_check(against: &str, allow_missing_tools: bool) -> Res
         }
     };
 
-    if !current_packages.is_empty() {
-        match (validated_release_surface(&root, facts), captures.as_ref()) {
-            (Ok(surface), Some(captures)) => {
-                match release_api_findings(facts, &surface, captures) {
-                    Ok(findings) => {
-                        failures.extend(findings.into_iter().map(|finding| ReleaseProofFailure {
-                            stage: 3,
-                            subject: finding.subject,
-                            detail: format!("rule={:?}: {}", finding.rule, finding.detail),
-                        }))
-                    }
-                    Err(error) => failures.push(ReleaseProofFailure::from_error(
-                        3,
-                        "release-type-projection",
-                        error,
-                    )),
-                }
+    if !current_packages.is_empty()
+        && let Some(captures) = captures.as_ref()
+    {
+        match release_api_findings(facts, &surface, captures) {
+            Ok(findings) => {
+                failures.extend(findings.into_iter().map(|finding| ReleaseProofFailure {
+                    stage: 3,
+                    subject: finding.subject,
+                    detail: format!("rule={:?}: {}", finding.rule, finding.detail),
+                }))
             }
-            (Err(error), _) => failures.push(ReleaseProofFailure::from_error(
+            Err(error) => failures.push(ReleaseProofFailure::from_error(
                 3,
-                "validated-release-surface",
+                "release-type-projection",
                 error,
             )),
-            (Ok(_), None) => {}
         }
     }
 
@@ -770,7 +775,7 @@ pub(crate) fn run_release_check(against: &str, allow_missing_tools: bool) -> Res
                 Ok(true) => {
                     if let Err(error) =
                         run_semver_packages(&delta.semver_packages, |package, profile| {
-                            run_semver_check(&root, package, base_revision, profile)
+                            run_semver_check(root, package, base_revision, profile)
                         })
                     {
                         failures.push(ReleaseProofFailure::from_error(4, "semver", error));
@@ -815,7 +820,7 @@ pub(crate) fn run_release_check(against: &str, allow_missing_tools: bool) -> Res
         delta.first_release_packages.len(),
         delta.removed_packages.len()
     );
-    Ok(())
+    Ok(surface)
 }
 
 fn run_semver_packages(
@@ -843,7 +848,7 @@ fn run_semver_packages(
     )
 }
 
-fn validated_release_surface(
+pub(crate) fn validated_release_surface(
     root: &Path,
     facts: &WorkspaceFacts,
 ) -> Result<crate::release_surface::ReleaseSurface> {

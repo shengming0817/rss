@@ -167,20 +167,7 @@ if observed != expected:
         );
     }
 
-    let mut public_command = external_cmd(
-        ExternalProgram::SystemShell,
-        &[
-            "hack/cargo.sh",
-            "xtask",
-            "ci",
-            "local",
-            "--base",
-            "origin/develop",
-            "--fail-fast",
-        ],
-        &[],
-        Some(root),
-    );
+    let mut public_command = crate::cmd::ci_wrapper_public_probe(root, &wrapper)?;
     let public = public_command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -203,12 +190,7 @@ if observed != expected:
     let help_probe_arg = help_probe
         .to_str()
         .context("wrapper help probe path 不是 UTF-8")?;
-    let mut help_command = external_cmd(
-        ExternalProgram::SystemShell,
-        &["hack/cargo.sh", "xtask", "ci", "local", "--help"],
-        &[],
-        Some(root),
-    );
+    let mut help_command = crate::cmd::ci_wrapper_help_probe(root, &wrapper)?;
     let help = help_command
         .env_clear()
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))

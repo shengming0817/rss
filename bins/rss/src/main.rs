@@ -234,7 +234,7 @@ async fn run_main() -> anyhow::Result<()> {
 }
 
 fn install_process_hooks() {
-    runtimeexec::install_redacted_panic_hook();
+    runtimeexec::install_redacted_panic_hook()
 }
 
 fn process_exit(_hooks: (), result: anyhow::Result<()>) -> std::process::ExitCode {

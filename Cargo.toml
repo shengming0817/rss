@@ -4,6 +4,8 @@
 [workspace]
 resolver = "2"
 members = [
+  # Platform Public：零 workspace 生产依赖的 provider-free 进程内应用内核。
+  "crates/platform",
   # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 architecture.md）
   "crates/vocab",
   "crates/ids",
@@ -89,11 +91,13 @@ members = [
 ]
 # 自写 dylint lint workspace（nightly rustc_private，自成独立 workspace）——显式排除，
 # 不参与根 stable 1.96 构建。隔离主靠 lints/Cargo.toml 的 [workspace]，此处作可见防线。
-exclude = ["lints", "xtask/tests/fixtures/platform_application_waist"]
+exclude = ["lints"]
 
 # Positive Release Surface selection. Unlisted packages and profile artifacts remain internal.
 [workspace.metadata.release-surface]
-packages = []
+packages = [
+  { package = "rss-platform", public-api-owner = "platform-public", api-stability = "experimental", profiles = [] },
+]
 profile-artifacts = []
 
 # 自写 dylint lint 注册入口；对 cargo build/test/check 惰性（仅 `cargo dylint` 读取），

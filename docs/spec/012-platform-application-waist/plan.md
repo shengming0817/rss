@@ -1,50 +1,13 @@
-# Implementation Plan: Platform Application waist 与外部消费证明
+# Implementation Plan: Platform Public 高风险单波次
 
-## 本规格 PR
+## 单波次闭包
 
-#2041 只确定 Platform application 的能力边界、禁止面、依赖 DAG 和 proof owner。不实现 façade、package、external
-repository、SemVer fixture、profile 或 runtime behavior。
+1. 建立 compile-negative、验证矩阵、typed dispatch、并发 drain 与 shutdown 红测。
+2. 新建零 workspace 生产依赖的 `rss-platform`，并登记最低位 `PlatformPublic` layer。
+3. 从 canonical framework-owned active HTTP set 生成 sealed marker 与 façade-owned DTO。
+4. 原子删除 #2045 fixture/harness/UI、core/eventing marker 与所有兼容入口。
+5. 将 package 选入 experimental Release Surface 并生成首个 release API baseline。
+6. 用真实 `.crate`、本地 registry、独立 Git/Cargo.lock 与 locked/offline T2 consumer 闭合 #2051/#2052。
+7. 仅在定向门稳定后运行一次完整 `make ci CI_BASE=origin/develop`，批量处置结果。
 
-## 后续交付 DAG
-
-```text
-#2042 -> (#2044 + #2045) -> #2047 -> #2048
-
-#2045 + #2048 -> #2049 thin façade
-
-#2050 -> #2051 shared packaging mechanics
-
-#2049 + #2051 -> #2052 final façade proof + independent T2 consumer
-```
-
-精确依赖为 `#2049 blocked-by #2045,#2048`，`#2052 blocked-by #2051,#2049`。
-
-## 阶段
-
-### Phase A — API design（#2045）
-
-- [x] 从真实应用场景定义最小能力类别，并在单一 executable contract 冻结 exact public signature。
-- [x] 对每个 internal 类型选择隐藏、只读 projection、wrapper 或受控 adapter；不直接 re-export ownership detail。
-- [x] 使用带 positive anti-vacuity 的 compile-positive/negative fixture 证明设计可用且禁止面关闭。
-- [x] 将载体诚实标为临时 T1/Medium；不实现 façade runtime behavior，不声称 package/SemVer/T2 证据。
-
-### Phase B — Thin façade（#2049）
-
-- 原子迁移并删除 #2045 executable contract，只实现其接纳 API，优先复用现有类型与逻辑。
-- 用 private verified projection、profile typestate 和 consuming handle 把临时 Medium 设计证据提升为真实 Hard 边界。
-- 由 #2048 的 release-check 和 compile fixture 覆盖直接/间接泄漏。
-- 不接真实 provider、不创建 DI container、不改变 startup/readiness/drain 行为。
-
-### Phase C — Independent consumer（#2052）
-
-- 在 #2051 已证明共享 mechanics、#2049 已完成 façade 后，从同一 revision 生成实际 façade `.crate` 并建立独立 consumer；
-  早于 #2049 的 package 结果不具 canonical 效力。
-- consumer compile-use 全部承诺能力，并用公开 typed builder 启动有界 application seam、执行一次 verified-context
-  handler request、观察 Conditions/Diagnostics，再经 `RuntimeHandle` 停止。
-- 负例拒绝 internal import、verified authority mint 与敏感 detail 泄漏，并建立 N-1→N fixture seed。
-- T2 fixture 不启动 Reference Extension、真实 provider 或 production journey，不新增 T3。
-
-## 回滚与兼容
-
-API design、façade 和 consumer 分三个可独立回滚 outcome。façade 首次建立时不保留 internal path 兼容层；产生真实
-Release API consumer 后，后续兼容与弃用由 release-selected baseline 和 consumer fixture 共同拥有。
+任一 authority、dispatch、drain、codegen、release 或 package proof 失败，整个波次不可合并。

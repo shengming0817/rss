@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use diport::{
     Clock, PdpError, TokenProfile, TokenProfileMarker, VerifiedAccessGrantFacts, VerifiedClaims,
+    VerifiedClaimsView,
 };
 use serde::Deserialize;
 
@@ -70,6 +71,63 @@ pub(crate) fn validate_and_map<P: TokenProfileMarker>(
     payload: &[u8],
 ) -> Result<VerifiedClaims, PdpError> {
     validate_claims(config, clock, payload).map(|(claims, _jti, _expires_at)| claims)
+}
+
+/// Project an already-decided Platform federated authority into the legacy internal PDP carrier.
+///
+/// Platform owns the signature and standard access-claim decision. This adapter overlay preserves
+/// provider-specific claim names, the operator's principal-kind allowlist, and the configured
+/// permission universe, then proves that its projection is identical to the Platform authority.
+pub(crate) fn map_platform_federated<P: TokenProfileMarker>(
+    config: &VerifierConfig<P>,
+    payload: &[u8],
+    access: &rss_platform::VerifiedAccess,
+) -> Result<VerifiedClaims, PdpError> {
+    let claims: Claims = serde_json::from_slice(payload).map_err(|_| PdpError::InvalidSignature)?;
+    let mapped = validate_profile_claims::<P>(config, &claims)?;
+    let identical = match mapped.view() {
+        VerifiedClaimsView::FederatedAccess {
+            subject,
+            tenant,
+            kind,
+            ..
+        } => {
+            access.matches_subject(subject)
+                && platform_kind_matches(access.principal_kind(), kind)
+                && match (access.tenant(), tenant) {
+                    (Some(platform), Some(adapter)) => platform.as_str() == adapter.to_string(),
+                    (None, None) => true,
+                    _ => false,
+                }
+        }
+        _ => false,
+    };
+    if !identical {
+        return Err(PdpError::InvalidSignature);
+    }
+    Ok(mapped)
+}
+
+fn platform_kind_matches(
+    platform: rss_platform::PrincipalKind,
+    adapter: vocab::PrincipalKind,
+) -> bool {
+    matches!(
+        (platform, adapter),
+        (
+            rss_platform::PrincipalKind::User,
+            vocab::PrincipalKind::User
+        ) | (
+            rss_platform::PrincipalKind::Device,
+            vocab::PrincipalKind::Device
+        ) | (
+            rss_platform::PrincipalKind::Admin,
+            vocab::PrincipalKind::Admin
+        ) | (
+            rss_platform::PrincipalKind::SuperAdmin,
+            vocab::PrincipalKind::SuperAdmin
+        )
+    )
 }
 
 /// Service-token claim validation additionally requires a non-empty `jti` nonce.

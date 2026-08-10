@@ -114,6 +114,43 @@ fn clean_cmd(program: &str, args: &[&str], env: &[(&str, &str)], cwd: Option<&Pa
     cmd
 }
 
+/// Construct the exact executable public local-CI wrapper transfer probe.
+///
+/// Keeping the dynamic wrapper path inside the command owner prevents a general shell-forwarding
+/// capability from appearing in governance checks while retaining one closed probe vocabulary.
+pub(crate) fn ci_wrapper_public_probe(root: &Path, wrapper: &Path) -> anyhow::Result<Command> {
+    let wrapper = wrapper
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("wrapper executable probe path is not UTF-8"))?;
+    Ok(clean_cmd(
+        "/bin/sh",
+        &[
+            wrapper,
+            "xtask",
+            "ci",
+            "local",
+            "--base",
+            "origin/develop",
+            "--fail-fast",
+        ],
+        &[],
+        Some(root),
+    ))
+}
+
+/// Construct the exact executable local-CI help-bypass probe.
+pub(crate) fn ci_wrapper_help_probe(root: &Path, wrapper: &Path) -> anyhow::Result<Command> {
+    let wrapper = wrapper
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("wrapper executable probe path is not UTF-8"))?;
+    Ok(clean_cmd(
+        "/bin/sh",
+        &[wrapper, "xtask", "ci", "local", "--help"],
+        &[],
+        Some(root),
+    ))
+}
+
 const COMPILER_CACHE_MODE_ENV: &str = "RSS_COMPILER_CACHE";
 const INTERNAL_SCCACHE_PATH_ENV: &str = "RSS_INTERNAL_SCCACHE_PATH";
 const SCCACHE_VERSION: &str = env!("RSS_TOOL_VERSION_SCCACHE");
@@ -297,8 +334,10 @@ impl ExternalProgram {
 pub(crate) enum CargoSubcommand {
     Metadata,
     Check,
-    #[cfg(test)]
     GenerateLockfile,
+    Package,
+    Run,
+    Fetch,
     Fmt,
     Build,
     Test,
@@ -338,8 +377,10 @@ impl CargoSubcommand {
         match self {
             Self::Metadata => "metadata",
             Self::Check => "check",
-            #[cfg(test)]
             Self::GenerateLockfile => "generate-lockfile",
+            Self::Package => "package",
+            Self::Run => "run",
+            Self::Fetch => "fetch",
             Self::Fmt => "fmt",
             Self::Build => "build",
             Self::Test => "test",

@@ -1,123 +1,76 @@
-# Feature Specification: Platform Application waist 与外部消费证明
+# Feature Specification: Platform Public application kernel 与外部消费证明
 
 **Created**: 2026-08-08
-**Status**: Exact API contract frozen
-**Owner issue**: #2041
-**Exact API owner**: #2045
+**Amended**: 2026-08-09
+**Status**: Implemented experimental v0.1 contract
+**Owner issues**: #2049, #2051, #2052
 
-## 背景
+## 决策修正
 
-[`ADR-024`](../../architecture/202608012034-024-enterprise-framework-product-surface.md) 已接纳 Platform Public，
-[`Spec 010`](../010-release-surface-convergence/spec.md) 已定义 Platform Application waist 是当前已接纳的两条通用
-公共 Rust 窄腰之一。
-当前缺口是让应用作者只面对稳定的 contract/handler、可信 context、module、lifecycle 与 diagnostics，而不理解
-provider、执行引擎、generated registry 或 assembly ownership。
+本 amendment 取代本规格旧版的 “thin façade / exact API frozen / 不改变 runtime” 方案。旧方案只能冻结形状，
+却没有拥有 authority、dispatch 或 lifecycle，因而不能构成 Platform Public 产品面。v0.1 直接定义
+`rss-platform` 为 provider-free、进程内 typed application kernel；旧 #2045 fixture 与 profile API 不保留
+alias、shim 或兼容入口。
 
-## 目标
+`core`、`eventing` 仍是 ADR-024 的候选 official profile，但尚未激活，不进入 v0.1 Release API。
+本 kernel 不绑定 listener、不构造 provider、不声明 provider/runtime readiness，也不提供 Host/Provider SPI。
 
-1. 定义 Platform application 作者需要的最小能力类别，并为每类 internal 类型给出隐藏或公开替代策略。
-2. 用薄 façade 复用既有类型和行为，不创建 DI container、Provider SPI 或第二 runtime composition owner。
-3. 由真实独立 repository 从最终 façade package tarball/local registry 执行有界 T2 应用 seam，建立 Release API、可信
-   context/lifecycle 消费与 SemVer baseline。
+## Canonical public contract
 
-能力边界由 #2041 拥有；#2045 已冻结精确 API 设计，#2049 拥有真实 façade 实现。
+`cargo xtask codegen` 从 `owner="_framework" + lifecycle="active" + kind="http"` 的 canonical manifests
+投影 sealed contract marker 与 façade-owned DTO。v0.1 exact set 只有 `runtime.inventory`；ID、版本、
+schema digest、permission 与 reviewed DTO template 任一漂移必须 fail-closed。
+集合 DTO 在构造边界拒绝重复值；listener/provider/placement 还必须满足 canonical stable key 顺序，
+失败只返回可匹配的闭值原因码。
 
-## #2045 精确契约单源
+公开调用链固定为：
 
-精确 Rust path、签名、泛型、可见性和闭值枚举的唯一规范源是
-[`platform_application_waist` executable contract](../../../xtask/tests/fixtures/platform_application_waist/src/lib.rs)。
-该 crate `publish = false`、不属于 workspace、依赖集合为空，只表达可编译的类型与可见性设计；本文不复制签名，避免
-Markdown 与 Rust 双真源。#2049 必须把接纳签名原子迁入真实 façade 并删除该 fixture。
+```text
+ApplicationBuilder -> Application -> RuntimeHandle
+RuntimeHandle::dispatcher -> Dispatcher::verify
+Dispatcher::dispatch<C> -> RuntimeHandle::shutdown
+```
 
-| 能力 | 冻结语义 | 明确禁止 |
-|---|---|---|
-| Contract/Handler | 开放 authoring；身份由 ID、版本和 schema digest 组成 | authoring impl 不授予 route/admission/runtime authority |
-| Verified request | 借用式 RequestContext、Principal、Tenant 只读 view | public mint、Clone、serde、raw subject/credential、plain TenantId→authority 转换 |
-| ApplicationModule | 只登记 contract/handler 意图；canonical admission 在 build 阶段 | Registry、DomainModuleResult、provider/route ownership bag |
-| Profile builder | 仅 Core/Eventing 私有 marker；build 与 start 消费前一阶段 | public Profile 扩展点、AssemblyLock/RuntimePlan constructor |
-| RuntimeHandle | 只读 snapshot；shutdown 消费 handle | Clone、JoinHandle/CancellationToken、raw runtime control |
-| Diagnostics | 登记过的 code + 强类型 public detail；三类阶段错误 | 任意 text、provider/config/credential/PII、raw error/source chain |
+- `Contract` 是 sealed trait；外部只能实现 `Handler<C>`。
+- `ApplicationModule` 登记 typed handler；build 原子拒绝重复 module/contract handler。
+- `TrustedIssuer` 只接受静态 ES256 JWKS snapshot，并固定 issuer/audience。
+- `AccessToken`、`VerifiedAccess`、`RequestContext` 与 verified views 无 public mint；token/context
+  不实现 Clone/Debug/serde。subject 仅允许 `matches_subject`。
+- `dispatch<C>` 同时要求 generated marker、已登记 handler、verified authority 和 marker-owned permission。
+- `RuntimeHandle` 不可 Clone；`Dispatcher` 可 Clone。shutdown 消费 handle，先进入 draining、拒绝新请求，
+  等待在途 handler，并受显式 `Duration` 上界约束；超时保持真实 draining，最后一个在途 handler 退出才
+  原子进入 stopped；所有遗留 dispatcher 在 stopped 后 fail-closed。
+- conditions 只描述 handlers admitted、accepting dispatch、draining、stopped 的真实 kernel 状态。
+- Build/Verify/Dispatch/Shutdown 错误与 diagnostics 只携闭值 code/typed detail，Display/Debug 固定脱敏且无 source；
+  runtime 保留最多 64 条最近闭值诊断，不保存 token/identity/provider text。
 
-开放 `Contract` 只表达作者声明。#2049 的 private admission adapter 必须将 ID、版本和 schema digest 与 canonical generated
-facts 精确 join；未知或冲突声明只能成为闭值 build diagnostic，不能形成 route 或 provider capability。
+## Verification profile
 
-## 用户场景与独立验收
+v0.1 只支持静态 federated ES256 access token：
 
-### US1 — 应用作者只依赖 Platform façade
+- protected header 必须 exact `alg=ES256`、`typ=at+jwt`、非空 exact `kid`，且不得含 `crit`；
+- 签名、issuer、audience、`iat/exp/nbf`、最大 900 秒 lifetime、`token_use=access` 全部校验；
+- federated principal 只接受 user/device/admin + canonical tenant，或无 tenant 的 superAdmin；
+- permissions 必须非空、去重、canonical，dispatch 再检查 contract-owned permission；
+- token、subject、tenant、JWKS/config 与 raw source 不得进入 error/diagnostics。
 
-应用作者可以声明 contract/handler、读取可信只读 request context、注册 ApplicationModule、按 official profile 构造
-应用，并通过 RuntimeHandle 与 Conditions/Diagnostics 观察生命周期和失败。
+动态 JWKS lifecycle、RSS/service-token profile 与 provider glue 留在 internal Official Integration；federated ES256
+签名与标准 access claims 判定复用 Platform owner，Integration 仅叠加 operator kind allowlist、可配置 claim 名与
+permission universe，并必须证明投影 identity 与 Platform authority 完全一致。
 
-独立验收：最小 workspace 外应用只依赖 façade package，即可通过 typed builder 启动、执行一次 handler request 并经
-`RuntimeHandle` 有界停止，不直接依赖 RSS workspace、internal crate 或真实 provider。
+## Release 与独立证明
 
-### US2 — 可信 context 只读且不可伪造
+`rss-platform` 0.1.0 是 experimental PlatformPublic package，normal/build dependency 只能是外部 crates。
+Release Surface 同时守 default/all-features API、SemVer、publish closure 与 forbidden-type leakage。
 
-Principal、Tenant 与 Request context 来自既有 verified execution path。façade 只提供应用所需的只读视图，不公开
-mint、provider client、raw credential 或装配 constructor。
+`cargo xtask package-proof` 必须从当前 revision 生成真实 `.crate`，建立本地 registry，在 workspace 外临时
+Git repository 生成独立 `Cargo.lock`，然后以 `--locked --offline` build/run。T2 consumer 必须注册
+`runtime.inventory` handler、用 ES256 token 走真实 verify/dispatch、读取 conditions/diagnostics 并 bounded shutdown；
+helper 必须精确验证每阶段结构化 receipt。该 proof 由 canonical ReleaseCheck 的 public-api execution owner 执行。
 
-独立验收：T2 request seam 将 verified context 交给 handler，应用可以读取可信值，但无法经公共 façade 构造 verified
-identity、tenant authority 或受控 receipt。
+## Non-goals
 
-### US3 — internal ownership 不经 façade 泄漏
-
-provider catalog、`diport`、generated registry、event execution/runtime execution ownership、`AssemblyLock`、
-`RuntimePlan` 和具体 provider client 保持 internal。
-
-独立验收：正向应用编译通过；直接或经 re-export、generic bound、error source、conversion 泄漏 internal 类型的负例失败。
-
-### US4 — 外部 consumer 固定真实升级边界
-
-独立 Platform consumer 拥有自己的 repository、lockfile 与 N-1→N fixture，只从最终 façade 的实际 package 消费完整
-最小 waist：contract/handler/module、profile-typed builder、verified context、`RuntimeHandle` 与 diagnostics。
-
-独立验收：Release API 的兼容变化由外部 consumer 和 SemVer proof 发现；Reference Extension 或仓内 example 不得替代。
-
-## 功能需求
-
-- **FR-001**：Platform waist 必须只覆盖 contract/handler authoring、可信只读 context、`ApplicationModule`、
-  profile-typed builder、`RuntimeHandle`、Conditions/Diagnostics 和公开错误。
-- **FR-002**：façade 必须优先复用窄 re-export、wrapper 或 adapter，不改变 runtime 行为，不创建反射 DI、service
-  locator 或第二 composition root。
-- **FR-003**：`diport`、provider catalog、generated registry、`eventexec`/`runtimeexec` ownership、
-  `AssemblyLock`/`RuntimePlan` constructor 与 raw provider client 必须保持 internal。
-- **FR-004**：可信 Principal/Tenant/Request context 必须保持私有构造或 sealed mint；public API 只提供最小只读消费面。
-- **FR-005**：internal 泄漏 proof 必须覆盖直接 import、re-export、generic bound、公开错误与 conversion 路径。
-- **FR-006**：公开 Conditions/Diagnostics/error 必须只暴露稳定闭值 code、经审查的 public detail 与 retryability；
-  raw provider/config/credential、tenant/principal/PII、原始错误文本和 source chain 必须保持 internal，并由 sealed
-  public/internal detail funnel、negative fixture 与 external consumer 共同证明。
-- **FR-007**：独立 consumer 必须从 façade package 的实际 `.crate`/local registry 消费，拥有独立 repository、
-  lockfile、owner 和版本升级 fixture。
-- **FR-008**：façade 的 canonical package proof 必须由 #2052 从 #2049 完成后的同一 revision 生成；#2051 只提供共享
-  packaging mechanics，不得充当最终 façade artifact verdict。
-- **FR-009**：外部 T2 consumer 必须用公开 typed builder 启动有界 application seam、执行 handler 并观察 verified
-  context/Conditions/Diagnostics，再经 `RuntimeHandle` 停止；不得启动真实 provider、Reference Extension 或 T3 journey。
-- **FR-010**：Release API/SemVer baseline 必须只覆盖 [`Spec 010`](../010-release-surface-convergence/spec.md) 的
-  正向发布集合，并复用既有 release-check。
-- **FR-011**：Reference Extension、仓内 assembly 或 example 不得充当 Platform 外部 consumer 证明。
-- **FR-012**：Markdown 只承载接口意图与 traceability；边界 enforcement 必须由 Cargo/visibility、compile fixture、
-  release API baseline 和真实 consumer 承担。
-- **FR-013**：#2045 exact contract 必须保持 `publish = false`、零依赖且不进入 workspace/release selection；其正负
-  compile proof 是临时 T1/Medium 设计载体，不得声称为真实 façade 或 package proof。
-- **FR-014**：Application build、start、shutdown 必须按所有权消费前一阶段；RuntimeHandle 不得 Clone。
-- **FR-015**：公开 stage error 仅为 Build/Start/Shutdown 三类，必须使用固定脱敏 Display/Debug、无 internal source。
-
-## 非目标
-
-- 不在 #2041 或 #2045 实现 façade runtime；#2045 的 executable contract 不是 façade crate。
-- 不接入 `core`/`eventing` 真实 provider，不激活 official profile，不改变 runtime behavior。
-- 不创建第三方 Provider SPI、通用 DI、动态模块、插件、registry 或 marketplace。
-- 不新增 T3、production journey、artifact selector、SLO、dashboard 或 delivery automation。
-- 不迁出 Identity/Settings/Audit 或其 Reference Extension assembly。
-
-## 成功标准
-
-- **SC-001**：应用作者能力类别与 internal 禁止面互斥且完整。
-- **SC-002**：可信 context 的读写/mint 边界可映射到 Hard/Medium owner。
-- **SC-003**：公开 diagnostics/error 只含稳定、经审查的信息，敏感详情和 source chain 的负例可执行。
-- **SC-004**：façade 实现和外部 consumer 分属可独立回滚的 PBI。
-- **SC-005**：规格不把仓内 consumer、Reference Extension 或 assembly smoke 计作外部 Release API proof。
-- **SC-006**：#2045、#2047、#2048、#2049、#2051、#2052 的依赖和 proof owner 完整可追踪。
-- **SC-007**：外部 proof 同时覆盖 authoring、typed startup、verified request、diagnostics 与 bounded shutdown，且不升级为 T3。
-- **SC-008**：exact API 只有一个 executable source；正例 compile-use 每项承诺能力，负例分别命中 private field、缺失
-  conversion/re-export、缺失 Clone/扩展入口和 moved-value 错误。
+- HTTP listener、wire transport、真实 provider、T3、official profile activation；
+- 通用 DI container、service locator、Provider SPI、第二 composition root；
+- internal type re-export/conversion、公开 raw subject/token/key、可伪造 authority；
+- no-op start、Unknown readiness、panic/unimplemented lifecycle。

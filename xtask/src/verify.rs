@@ -1510,7 +1510,16 @@ fn run_internal(
             crate::coverage::run(scope, opts.execution_policy)
         }
         InternalCheck::PublicApiCheck => {
-            crate::publicapi::run_release_check(&opts.contract_against, opts.allow_missing_tools)
+            let facts = command_facts
+                .get()
+                .context(command_scope_facts_context("public-api-check"))?;
+            let surface = crate::publicapi::run_release_check(
+                root,
+                facts,
+                &opts.contract_against,
+                opts.allow_missing_tools,
+            )?;
+            crate::package_proof::run(root, facts, &surface)
         }
     }
 }

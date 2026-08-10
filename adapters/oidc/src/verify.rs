@@ -144,12 +144,42 @@ pub(crate) async fn verify_credential<P: TokenProfileMarker>(
         return Err(PdpError::Untrusted);
     }
     match P::PROFILE {
-        TokenProfile::RssAccess | TokenProfile::FederatedAccess => {
-            verify_path(config, clock, raw.token(), None).await
-        }
+        TokenProfile::FederatedAccess => verify_federated_with_platform(config, clock, raw),
+        TokenProfile::RssAccess => verify_path(config, clock, raw.token(), None).await,
         TokenProfile::ServiceToken => verify_service_token_path(config, clock, raw).await,
         TokenProfile::ProjectionOperator => verify_path(config, clock, raw.token(), None).await,
     }
+}
+
+fn verify_federated_with_platform<P: TokenProfileMarker>(
+    config: &VerifierConfig<P>,
+    clock: &dyn Clock,
+    raw: &RawCredential,
+) -> Result<VerifiedClaims, PdpError> {
+    let policy = P::policy();
+    let jws = jws::parse(raw.token(), policy).map_err(classify_parse)?;
+    let snapshot = config.keys().snapshot();
+    let now = now_unix_secs(clock).ok_or(PdpError::InvalidSignature)?;
+    reject_if_kid_retired(config.retirement_schedule(), &jws.kid, now, &snapshot)?;
+    let jwks = snapshot
+        .platform_jwks_json()
+        .map_err(|_| PdpError::ProviderUnavailable)?;
+    let issuer =
+        rss_platform::TrustedIssuer::from_jwks_json(config.issuer(), config.audience(), &jwks)
+            .map_err(|_| PdpError::ProviderUnavailable)?;
+    let token =
+        rss_platform::AccessToken::parse(raw.token()).map_err(|_| PdpError::InvalidSignature)?;
+    let policy = rss_platform::VerificationPolicy::new(
+        config.kind_claim(),
+        config.tenant_claim(),
+        config.leeway_secs(),
+    )
+    .map_err(|_| PdpError::ProviderUnavailable)?;
+    let access = issuer
+        .verify_with_policy(&token, clock.now(), &policy)
+        .map_err(|_| PdpError::InvalidSignature)?;
+    record_retiring_key_verified(config.retirement_schedule(), &jws.kid, now);
+    claims::map_platform_federated(config, &jws.payload, &access)
 }
 
 async fn verify_service_token_path<P: TokenProfileMarker>(
@@ -670,6 +700,23 @@ mod tests {
     }
     #[allow(clippy::expect_used)]
     fn federated_es256_config() -> VerifierConfig<diport::FederatedAccessProfile> {
+        federated_es256_config_with_policy(&["user", "device", "admin", "superAdmin"], None, None)
+    }
+    #[allow(clippy::expect_used)]
+    fn federated_es256_config_with_policy(
+        trusted_kinds: &[&str],
+        kind_claim: Option<&str>,
+        tenant_claim: Option<&str>,
+    ) -> VerifierConfig<diport::FederatedAccessProfile> {
+        federated_es256_config_with_verification_policy(trusted_kinds, kind_claim, tenant_claim, 60)
+    }
+    #[allow(clippy::expect_used)]
+    fn federated_es256_config_with_verification_policy(
+        trusted_kinds: &[&str],
+        kind_claim: Option<&str>,
+        tenant_claim: Option<&str>,
+        leeway_secs: u64,
+    ) -> VerifierConfig<diport::FederatedAccessProfile> {
         let keys = AccessStaticKeySource::builder()
             .add_es256_sec1("test-es256", &sec1_of(&test_sk2()))
             .expect("federated es256 key")
@@ -684,9 +731,16 @@ mod tests {
             FEDERATED_AUD,
             permissions,
         )
-        .keys_static(keys);
-        for kind in ["user", "device", "admin", "superAdmin"] {
-            builder = builder.trust_kind(kind);
+        .keys_static(keys)
+        .leeway_secs(leeway_secs);
+        if let Some(name) = kind_claim {
+            builder = builder.kind_claim(name);
+        }
+        if let Some(name) = tenant_claim {
+            builder = builder.tenant_claim(name);
+        }
+        for kind in trusted_kinds {
+            builder = builder.trust_kind(*kind);
         }
         builder.build().expect("valid federated es256 config")
     }
@@ -1107,6 +1161,125 @@ mod tests {
                 assert_eq!(kind, expected_kind);
                 assert_eq!(tenant.is_some(), scoped);
             }
+        }
+    }
+
+    #[test]
+    fn federated_platform_path_preserves_kind_allowlist_and_custom_claim_policy() {
+        let body = format!(
+            r#"{{"sub":"external-user","iat":{NOW},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"user","tenant_id":"{CANON_TENANT}","permissions":["settings.config-publish"]}}"#,
+            NOW + 600
+        );
+        let token = || mint_es256(&test_sk2(), &body);
+        let empty = federated_es256_config_with_policy(&[], None, None);
+        assert!(matches!(
+            verify_credential(
+                &empty,
+                &FixedClock(NOW),
+                &RawCredential::federated_access(token()),
+            ),
+            Err(PdpError::InvalidSignature)
+        ));
+
+        let custom = federated_es256_config_with_policy(
+            &["user"],
+            Some("external_kind"),
+            Some("external_tenant"),
+        );
+        assert!(matches!(
+            verify_credential(
+                &custom,
+                &FixedClock(NOW),
+                &RawCredential::federated_access(token()),
+            ),
+            Err(PdpError::InvalidSignature)
+        ));
+
+        let custom_body = format!(
+            r#"{{"sub":"external-user","iat":{NOW},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","external_kind":"user","external_tenant":"{CANON_TENANT}","permissions":["settings.config-publish"]}}"#,
+            NOW + 600
+        );
+        let custom_token = mint_es256(&test_sk2(), &custom_body);
+        assert!(
+            verify_credential(
+                &custom,
+                &FixedClock(NOW),
+                &RawCredential::federated_access(custom_token),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn federated_platform_path_honors_configured_leeway() {
+        let config = federated_es256_config_with_verification_policy(&["user"], None, None, 60);
+        let within_expiry = format!(
+            r#"{{"sub":"external-user","iat":{},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"user","tenant_id":"{CANON_TENANT}","permissions":["settings.config-publish"]}}"#,
+            NOW - 600,
+            NOW - 60
+        );
+        assert!(
+            verify_credential(
+                &config,
+                &FixedClock(NOW),
+                &RawCredential::federated_access(mint_es256(&test_sk2(), &within_expiry)),
+            )
+            .is_ok()
+        );
+
+        let within_issued_at = format!(
+            r#"{{"sub":"external-user","iat":{},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"user","tenant_id":"{CANON_TENANT}","permissions":["settings.config-publish"]}}"#,
+            NOW + 60,
+            NOW + 600
+        );
+        assert!(
+            verify_credential(
+                &config,
+                &FixedClock(NOW),
+                &RawCredential::federated_access(mint_es256(&test_sk2(), &within_issued_at)),
+            )
+            .is_ok()
+        );
+
+        let within_not_before = format!(
+            r#"{{"sub":"external-user","iat":{NOW},"exp":{},"nbf":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"user","tenant_id":"{CANON_TENANT}","permissions":["settings.config-publish"]}}"#,
+            NOW + 600,
+            NOW + 60
+        );
+        assert!(
+            verify_credential(
+                &config,
+                &FixedClock(NOW),
+                &RawCredential::federated_access(mint_es256(&test_sk2(), &within_not_before)),
+            )
+            .is_ok()
+        );
+
+        for outside in [
+            format!(
+                r#"{{"sub":"external-user","iat":{},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"user","tenant_id":"{CANON_TENANT}","permissions":["settings.config-publish"]}}"#,
+                NOW - 600,
+                NOW - 61
+            ),
+            format!(
+                r#"{{"sub":"external-user","iat":{NOW},"exp":{},"nbf":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"user","tenant_id":"{CANON_TENANT}","permissions":["settings.config-publish"]}}"#,
+                NOW + 600,
+                NOW + 61
+            ),
+            format!(
+                r#"{{"sub":"external-user","iat":{},"exp":{},"token_use":"access","iss":"{FEDERATED_ISS}","aud":"{FEDERATED_AUD}","kind":"user","tenant_id":"{CANON_TENANT}","permissions":["settings.config-publish"]}}"#,
+                NOW + 61,
+                NOW + 600
+            ),
+        ] {
+            assert!(matches!(
+                verify_credential(
+                    &config,
+                    &FixedClock(NOW),
+                    &RawCredential::federated_access(mint_es256(&test_sk2(), &outside)),
+                ),
+                Err(PdpError::InvalidSignature)
+            ));
         }
     }
 

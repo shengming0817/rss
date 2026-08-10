@@ -4148,6 +4148,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "p256",
  "primitives",
+ "rss-platform",
  "rstest",
  "serde",
  "serde_json",
@@ -5249,6 +5250,17 @@ version = "0.1.0"
 dependencies = [
  "thiserror",
  "tokio",
+]
+
+[[package]]
+name = "rss-platform"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "p256",
+ "serde",
+ "serde_json",
+ "trybuild",
 ]
 
 [[package]]
@@ -8046,7 +8058,6 @@ dependencies = [
  "syn 2.0.118",
  "time",
  "toml 0.8.23",
- "trybuild",
  "typify",
  "vocab",
  "workspacefacts",

@@ -38,7 +38,6 @@ sha2 = { workspace = true }
 [dev-dependencies]
 assembly-schema = { path = "../crates/assembly-schema", features = ["test-support"] }
 rstest = { workspace = true }
-trybuild = { workspace = true }
 workspacefacts = { path = "../crates/workspacefacts", features = ["test-support"] }
 
 [lints]
