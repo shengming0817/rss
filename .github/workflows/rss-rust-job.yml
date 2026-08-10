@@ -52,6 +52,16 @@ jobs:
           esac >> "$GITHUB_OUTPUT"
           [ -n "$RSS_SELECTION" ]
           case "$RSS_SELECTION" in *$'\n'*|*$'\r'*) exit 64 ;; esac
+          if [ "$RSS_FIXED_JOB" = check ] && jq -e '.selection.mode == "release-check"' <<< "$RSS_SELECTION" >/dev/null; then
+            echo 'standalone-consumer=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'standalone-consumer=false' >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Initialize pinned standalone consumer
+        id: standalone-consumer
+        if: ${{ steps.policy.outputs.standalone-consumer == 'true' }}
+        run: git submodule update --init -- consumers/standalone
 
       - name: Setup RSS Rust CI
         uses: ./.github/actions/setup-rss-ci

@@ -9,6 +9,10 @@
   candidate eligibility 不构成 RC、published 或支持承诺。
 - `diagctx` 已有仓内真实 consumer，并与授权 context 分离；`tracewire` 的仓内 HTTP、outbox 与 consumer 调用方已
   迁移到候选 typed API，不保留旧 raw-string 入口。
+- 独立 Plain Rust consumer 的稳定源码链接是
+  [`shengming0817/rss-standalone-consumer`](https://github.com/shengming0817/rss-standalone-consumer)，repository
+  custody 为 `ghbvf`、maintenance 为 `github:shengming0817:rss-maintainers`；RSS 只保存 reviewed gitlink 和消费契约，
+  不复制外仓源码、lockfile、CI、动态 digest 或 receipt。
 
 本规格不复制 package inventory、代码行数或 API 符号快照。实现 PBI 必须重新从当前 Cargo metadata 与源码读取事实。
 
@@ -63,6 +67,8 @@ revision 生成 `.crate` 并在 workspace 外完成 canonical proof；真实 con
 - TraceParent 必须先验证再暴露；成功恢复和各类拒绝结果产生闭值、无原始输入的诊断 outcome，不得把裸 SDK 类型
   变成公共 wire 语义。
 - package tarball 必须是验证输入，workspace/path build 不能冒充发布证明。
+- 单包 archive fixture 只闭合 package 自身 hazard；真实 consumer 必须从 pinned 外仓 commit 同时消费本次 RSS HEAD
+  生成的两个 archive。gitlink、selected/artifact/resolved/executed exact-set 与 lock checksum 任一漂移都必须失败。
 - package digest 与 same-revision 结果只进入 closeout evidence，不形成 committed receipt database；早于最终 API 的
   mechanics 结果不得晋升为该证据。
 

@@ -151,6 +151,33 @@ pub(crate) fn ci_wrapper_help_probe(root: &Path, wrapper: &Path) -> anyhow::Resu
     ))
 }
 
+/// Construct the closed standalone candidate upgrade entry used by package proof.
+pub(crate) fn standalone_upgrade_cmd(
+    root: &Path,
+    script: &Path,
+    registry_index: &str,
+    diag_version: &str,
+    trace_version: &str,
+    msrv: &str,
+) -> anyhow::Result<Command> {
+    let program = script
+        .to_str()
+        .ok_or_else(|| anyhow::anyhow!("standalone upgrade script path is not UTF-8"))?;
+    Ok(clean_cmd(
+        program,
+        &[
+            "--registry-index",
+            registry_index,
+            "--diag-version",
+            diag_version,
+            "--trace-version",
+            trace_version,
+        ],
+        &[("RUSTUP_TOOLCHAIN", msrv)],
+        Some(root),
+    ))
+}
+
 const COMPILER_CACHE_MODE_ENV: &str = "RSS_COMPILER_CACHE";
 const INTERNAL_SCCACHE_PATH_ENV: &str = "RSS_INTERNAL_SCCACHE_PATH";
 const SCCACHE_VERSION: &str = env!("RSS_TOOL_VERSION_SCCACHE");

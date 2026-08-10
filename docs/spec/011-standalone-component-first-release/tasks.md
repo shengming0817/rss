@@ -11,7 +11,7 @@
 | RSS-NW-010 | #2051 | 共享 packaging mechanics，不授予 final artifact verdict | #2050 | release-check generate/unpack/external-build fixtures |
 | RSS-NW-011 | #2053 | diag-context candidate 与同 revision final-artifact proof | #2044, #2051 | unit/doctest + release API + actual `.crate` external proof |
 | RSS-NW-012 | #2054 | trace-context candidate 与同 revision final-artifact proof | #2044, #2051 | closed outcome + malformed/roundtrip + release API + actual `.crate` external proof |
-| RSS-NW-013 | #2055 | 独立 Plain Rust component consumer | #2053, #2054 | final-artifact-only repository build/test + forbidden dependency check |
+| RSS-NW-013 | #2055 | 独立 Plain Rust component consumer | #2053, #2054 | pinned `consumers/standalone` gitlink + same-invocation `cargo xtask package-proof` locked/offline build/test/clippy + forbidden dependency graph check |
 | RSS-NW-014 | #2056 | RC、CHANGELOG 与 rollback closeout | #2055 | canonical proof readback + human approval |
 
 ## #2041 入库任务

@@ -5702,9 +5702,26 @@ mod tests {
                 yaml_scalar(step, "if")
                     == Some("${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}")
             });
+        let standalone_consumer_is_exact = step_by_id(execute, "policy")
+            .and_then(|step| yaml_scalar(step, "run"))
+            .is_some_and(|run| {
+                run.contains(
+                    "if [ \"$RSS_FIXED_JOB\" = check ] && jq -e '.selection.mode == \"release-check\"' <<< \"$RSS_SELECTION\" >/dev/null; then",
+                )
+                    && run.contains("echo 'standalone-consumer=true' >> \"$GITHUB_OUTPUT\"")
+                    && run.contains("echo 'standalone-consumer=false' >> \"$GITHUB_OUTPUT\"")
+            })
+            && step_by_id(execute, "standalone-consumer").is_some_and(|step| {
+                yaml_scalar(step, "if")
+                    == Some("${{ steps.policy.outputs.standalone-consumer == 'true' }}")
+                    && yaml_scalar(step, "run")
+                        == Some("git submodule update --init -- consumers/standalone")
+            });
         let lifecycle = step_ids_are_ordered(
             execute,
             &[
+                "policy",
+                "standalone-consumer",
                 "integration-prepare",
                 "xtask",
                 "integration-collect",
@@ -5752,6 +5769,7 @@ mod tests {
             && scheduled_audit_is_exact(caller_root, jobs)
             && exact_gate
             && cleanup_is_always
+            && standalone_consumer_is_exact
             && lifecycle
             && banned
                 .into_iter()
@@ -5788,6 +5806,10 @@ mod tests {
             (caller.to_owned(), reusable.replacen("        id: integration-cleanup\n", "        id: integration-cleanup-removed\n", 1)),
             (caller.to_owned(), reusable.replacen("        id: integration-cleanup\n        if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}", "        id: integration-cleanup\n        if: ${{ success() && inputs.job == 'integration-critical' }}", 1)),
             (caller.to_owned(), reusable.replacen("name: integration-failure-${{ github.run_id }}-${{ github.run_attempt }}", "name: generic-success-artifact", 1)),
+            (caller.to_owned(), reusable.replacen("        id: standalone-consumer\n", "        id: standalone-consumer-removed\n", 1)),
+            (caller.to_owned(), reusable.replacen("steps.policy.outputs.standalone-consumer == 'true'", "always()", 1)),
+            (caller.to_owned(), reusable.replacen("git submodule update --init -- consumers/standalone", "git submodule update --init --recursive", 1)),
+            (caller.to_owned(), reusable.replacen(".selection.mode == \"release-check\"", "true", 1)),
         ];
         for (index, (red_caller, red_reusable)) in reds.into_iter().enumerate() {
             assert!(red_caller != caller || red_reusable != reusable);

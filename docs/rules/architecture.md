@@ -76,6 +76,8 @@ rss/
 ├── clippy.toml           # disallowed-methods/types/macros（clock/panic/import 纪律）
 ├── rust-toolchain.toml
 ├── .config/nextest.toml  # cargo-nextest（进程隔离 / 重试）
+├── consumers/
+│   └── standalone/       # 非 workspace Git submodule；固定独立 Plain Rust consumer 的 reviewed commit
 ├── crates/               # 全部库 crate，扁平（Rust 惯例，非分层目录）
 │   ├── vocab/            # error(thiserror) / authz / tenant / query（基础词汇）
 │   ├── platform/         # PlatformPublic：发布的 provider-free typed application kernel（零 workspace 生产依赖）
@@ -228,6 +230,7 @@ rss/
 | Event transport output 单一路径 | crate-private `wire_event_transport` 直接返回 owned `DomainModuleResult`，使旧 `.module/.infra_guards` 拆包不可编译（`EVENT-TRANSPORT-OUTPUT-TYPE-01`，Hard）；receipt 完整性与 partial rollback 由 `provider_output` 行为测试拥有，`RUNTIME-PROVIDER-BYPASS-01` 仅拒绝跨文件 raw/legacy provider 与 receipt 绕过（AcceptedMedium）。ADR-010 |
 | defer/follow-up 结构化完整性（根 config） | 仅机器拥有的根 `deny.toml`/`clippy.toml` 内 `DEFER(#NNNN)` 标签须 `owner=`/`blocked-by=<#NNNN｜trigger:..>`/`closes-when=` 齐全 + 禁裸 TODO/FIXME/XXX/HACK 注解（注解位）；`cargo xtask defer-gate`（接 verify/ci no-compile meta 步，synthetic red + anti-vacuity green）。INVARIANT DEFER-GATE-01；Markdown 与 `CLAUDE.md` 不作 enforcement carrier，只由周期、非阻塞 advisory grep 提示。 |
 | canonical 本地 CI executable 入口 | `cargo xtask ci-entry-guard` 只校验 Makefile 中唯一、600 秒有界的 `ci` 与精确 `ci-full` recipe；skill、template、CLAUDE 等 Markdown 不作 enforcement carrier，只由周期、非阻塞 advisory grep 提示。CI-LOCAL-ENTRY-01，synthetic red + workspace anti-vacuity。 |
+| Standalone candidate 真实跨包消费 | `consumers/standalone` 是非 workspace Git submodule，固定 [`shengming0817/rss-standalone-consumer`](https://github.com/shengming0817/rss-standalone-consumer) 的 reviewed commit；`cargo xtask package-proof` 在同一次 invocation 生成 Release Surface 全量 archive 与临时 registry，复制该 commit、生成隔离 lock，并以 locked/offline check/test/clippy 验证 exact candidate graph。缺/dirty/漂移 gitlink、其它 RSS package、path/git/workspace source、artifact/lock checksum 或执行集合不一致均 fail closed。RELEASE-STANDALONE-CONSUMER-01，synthetic red + pinned checkout anti-vacuity。 |
 | production Rustdoc 语义与 token profile trust chain | `cargo xtask source-semantic-guard` 只扫描 production `.rs` 的 Rustdoc，拒绝 outbox exactly/at-most-once、旧 LocalOnly effect 语义，并守四个 token-profile Rustdoc carrier；不读取 `.md`。SOURCE-RUSTDOC-SEMANTICS-01 / TOKEN-PROFILE-RUSTDOC-01，synthetic red + workspace anti-vacuity，verify/ci no-compile meta。 |
 
 ### 三档 · Cargo 替不了,框架自建(RSS 真差异化)
