@@ -93,6 +93,7 @@ audit-composition = { path = "../../composition/audit", features = ["test-suppor
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 identity-composition = { path = "../../composition/identity", features = ["test-support"] }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-audit", "auth-audit-sink", "test-support"] }
+p256 = { workspace = true }
 testkit = { path = "../../crates/testkit" }
 tokio = { workspace = true, features = ["macros", "rt"] }
 tower = { workspace = true, features = ["util"] }

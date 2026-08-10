@@ -75,7 +75,6 @@ fn make_auth_grant_services(
         authn::JwtIssuerConfig::rss_access(
             authn::SigningKeyRing::single(diport::KeyId::new("contract-test-key"))
                 .expect("non-empty signing key id"),
-            diport::SigningPurpose::new("auth.jwt.access"),
             "https://test.example",
             "test-audience",
             Duration::from_secs(900),

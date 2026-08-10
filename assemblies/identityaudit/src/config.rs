@@ -511,6 +511,9 @@ impl IdentityAuditConfig {
         }
         self.postgres.validate()?;
         self.vault.validate()?;
+        if self.identity.key_id != self.vault.signing_key_name {
+            return Err(ConfigError::InvalidValue("identity.keyId"));
+        }
         self.eventing.validate()
     }
 
@@ -1122,7 +1125,7 @@ maxConnections = 5
 addr = "https://vault.example.test:8200"
 caCertPemPath = "/run/rss/vault-ca.pem"
 transitMount = "transit"
-signingKeyName = "identity-access"
+signingKeyName = "identity-access-es256"
 dlxPayloadKeyName = "identityaudit-dlx-payload"
 readinessSeconds = 10
 
@@ -1313,8 +1316,8 @@ tenantAuthorityClockSkewSeconds = 60
             &format!("username = \"rss_identity_writer\"\npassword = \"{SECRET_SENTINEL}\""),
         );
         let wrong_kind = VALID_CONFIG.replace(
-            "signingKeyName = \"identity-access\"",
-            "signingKeyName = \"identity-access\"\nsignerToken = { kind = \"fileRef\", path = \"/tmp/token\" }",
+            "signingKeyName = \"identity-access-es256\"",
+            "signingKeyName = \"identity-access-es256\"\nsignerToken = { kind = \"fileRef\", path = \"/tmp/token\" }",
         );
         let generic_name = VALID_CONFIG.replace(
             "[eventing]",
@@ -1566,7 +1569,7 @@ tenantAuthorityClockSkewSeconds = 60
         assert_eq!(writer.into_writer_pool().1, 10);
         assert_eq!(reader.into_reader_pool().1, 10);
         assert_eq!(audit_admin.into_audit_admin_pool().1, 5);
-        assert_eq!(vault.into_vault_inputs().3, "identity-access");
+        assert_eq!(vault.into_vault_inputs().3, "identity-access-es256");
         let eventing = eventing.into_eventing_inputs();
         assert_eq!(eventing.audit_chain_key_id.get(), 1);
         assert_eq!(eventing.tenant_authority_ttl, Duration::from_secs(3600));

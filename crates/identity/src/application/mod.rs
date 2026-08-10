@@ -175,10 +175,6 @@ fn tenant_repo_scope(tenant: TenantId) -> TenantRepoScope {
 }
 /// 登录路由组前缀（Primary listener，业务 API）。
 pub const LOGIN_ROUTE_PREFIX: &str = "/api/v1/identity";
-/// JWT 署名用途字面量（seed-login / test 路径；≥ 3 处使用，rust-standards §工程护栏抽 const）。
-#[cfg(any(test, feature = "seed-login"))]
-pub(crate) const SEED_JWT_PURPOSE: &str = "auth.jwt.access";
-
 #[cfg(test)]
 pub(crate) fn seed_password_policy() -> secure::PasswordPolicy {
     secure::PasswordPolicy::for_test("passwordpassword", &[])
@@ -1237,7 +1233,6 @@ fn seed_issuer(
             authn::JwtIssuerConfig::rss_access(
                 authn::SigningKeyRing::single(diport::KeyId::new("seed-jwt-key"))
                     .expect("non-empty signing key id"),
-                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://seed.local",
                 "rss-seed",
                 Duration::from_secs(900),
@@ -6750,7 +6745,6 @@ mod tests {
                     authn::JwtIssuerConfig::rss_access(
                         authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                             .expect("non-empty signing key id"),
-                        diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                         "https://test.example",
                         "test-audience",
                         Duration::from_secs(900),
@@ -6863,7 +6857,6 @@ mod tests {
             authn::JwtIssuerConfig::rss_access(
                 authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                     .expect("non-empty signing key id"),
-                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
                 Duration::from_secs(900),
@@ -10377,7 +10370,6 @@ mod tests {
             authn::JwtIssuerConfig::rss_access(
                 authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                     .expect("non-empty signing key id"),
-                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
                 Duration::from_secs(900),
@@ -10626,7 +10618,6 @@ mod tests {
             authn::JwtIssuerConfig::rss_access(
                 authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                     .expect("non-empty signing key id"),
-                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
                 Duration::from_secs(900),
@@ -10738,7 +10729,6 @@ mod tests {
                 authn::JwtIssuerConfig::rss_access(
                     authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                         .expect("non-empty signing key id"),
-                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
                     Duration::from_secs(900),
@@ -10827,7 +10817,6 @@ mod tests {
                 authn::JwtIssuerConfig::rss_access(
                     authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                         .expect("non-empty signing key id"),
-                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
                     Duration::from_secs(900),
@@ -10949,7 +10938,6 @@ mod tests {
                 authn::JwtIssuerConfig::rss_access(
                     authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                         .expect("non-empty signing key id"),
-                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
                     Duration::from_secs(900),
@@ -11089,7 +11077,6 @@ mod tests {
                 authn::JwtIssuerConfig::rss_access(
                     authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                         .expect("non-empty signing key id"),
-                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
                     Duration::from_secs(900),
@@ -11253,7 +11240,6 @@ mod tests {
                 make_clock(1_700_000_000),
                 authn::JwtIssuerConfig::rss_access(
                     authn::SigningKeyRing::single(diport::KeyId::new("test-key")).expect("key id"),
-                    diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                     "https://test.example",
                     "test-audience",
                     Duration::from_secs(900),
@@ -11673,7 +11659,6 @@ mod tests {
             authn::JwtIssuerConfig::rss_access(
                 authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                     .expect("non-empty signing key id"),
-                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
                 Duration::from_secs(900),
@@ -12253,7 +12238,6 @@ mod tests {
             authn::JwtIssuerConfig::rss_access(
                 authn::SigningKeyRing::single(diport::KeyId::new("test-key"))
                     .expect("non-empty signing key id"),
-                diport::SigningPurpose::new(SEED_JWT_PURPOSE),
                 "https://test.example",
                 "test-audience",
                 Duration::from_secs(900),

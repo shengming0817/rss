@@ -49,8 +49,8 @@ use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
 use vault::{
-    SignatureMarshaling, StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps,
-    VaultSecretResolver, VaultSigner,
+    StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver,
+    VaultSigner,
 };
 use wiremock::matchers::{body_partial_json, method as match_method, path};
 use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
@@ -58,13 +58,13 @@ use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTempla
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 fn identity_signer(vault_uri: &str) -> TestResult<Arc<VaultSigner>> {
-    Ok(Arc::new(VaultSigner::new_allow_http(
+    Ok(Arc::new(VaultSigner::new_rss_access_allow_http(
         reqwest::Client::new(),
         vault_uri,
         "test-token",
         "transit",
         Duration::from_secs(5),
-        SignatureMarshaling::Jws,
+        diport::JwtSigningBinding::rss_access(diport::KeyId::new("rss-jwt-es256")),
     )?))
 }
 

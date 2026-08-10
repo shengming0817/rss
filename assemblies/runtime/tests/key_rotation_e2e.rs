@@ -173,25 +173,20 @@ fn vault_jwt_issuer(
     ring: authn::SigningKeyRing,
     clock: i64,
 ) -> authn::JwtIssuer<diport::RssAccessProfile, VaultSigner> {
-    let signer = VaultSigner::new_allow_http(
+    let config = authn::JwtIssuerConfig::rss_access(ring, ISS, AUD, Duration::from_secs(TTL_SECS));
+    let signer = VaultSigner::new_rss_access_allow_http(
         reqwest::Client::new(),
         vault_uri,
         "test-vault-token",
         "transit",
         Duration::from_secs(5),
-        vault::SignatureMarshaling::Jws,
+        config.signing_binding().clone(),
     )
     .expect("vault signer (dev http)");
     authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
         Arc::new(signer),
         Box::new(FixedClock(clock)),
-        authn::JwtIssuerConfig::rss_access(
-            ring,
-            diport::SigningPurpose::new("auth.rss-access"),
-            ISS,
-            AUD,
-            Duration::from_secs(TTL_SECS),
-        ),
+        config,
     )
     .expect("jwt issuer config")
 }

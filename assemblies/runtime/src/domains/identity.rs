@@ -97,7 +97,6 @@ impl IdentityModuleInput {
 
         let rss_access_issuer = authn::JwtIssuerConfig::rss_access(
             authn::SigningKeyRing::single(diport::KeyId::new(values.access_token_key_id))?,
-            diport::SigningPurpose::new("auth.rss-access"),
             values.access_token_issuer,
             values.access_token_audience,
             values.access_token_ttl,
@@ -349,6 +348,9 @@ pub(crate) mod tests {
     }
 
     pub(crate) async fn test_binding(input: IdentityModuleInput) -> anyhow::Result<DomainBinding> {
+        let binding = diport::JwtSigningBinding::rss_access(diport::KeyId::new(
+            test_values().access_token_key_id,
+        ));
         wire_with_profile(
             postgres::PgRuntimeHandle::for_module_test().for_domain(),
             test_blocklist(),
@@ -360,6 +362,7 @@ pub(crate) mod tests {
                     _ => None,
                 },
                 true,
+                binding,
             )?),
             input,
         )
@@ -436,7 +439,6 @@ pub(crate) mod tests {
         let issuer = authn::JwtIssuerConfig::rss_access(
             authn::SigningKeyRing::single(diport::KeyId::new("ttl-relation-test"))
                 .expect("non-empty signing key id"),
-            diport::SigningPurpose::new("auth.rss-access"),
             "https://issuer.test",
             "rss",
             Duration::from_secs(900),

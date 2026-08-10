@@ -36,7 +36,7 @@ use serde::Deserialize;
 use sqlx::PgPool;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tower::ServiceExt as _;
-use vault::{SignatureMarshaling, VaultSigner};
+use vault::VaultSigner;
 use wiremock::matchers::{body_partial_json, method as match_method};
 use wiremock::{Mock, MockServer, Request as MockRequest, Respond, ResponseTemplate};
 
@@ -638,18 +638,19 @@ async fn identity_password_security_event_journey() -> TestResult {
         "https://127.0.0.1:1".to_owned(),
         "test-token".to_owned(),
         "transit".to_owned(),
+        "rss-jwt-es256".to_owned(),
         "settings-config".to_owned(),
         format!(
             r#"{{"bindings":[{{"tenantId":"{OTHER_TENANT}","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}}]}}"#
         ),
     )?;
-    let signer = Arc::new(VaultSigner::new_allow_http(
+    let signer = Arc::new(VaultSigner::new_rss_access_allow_http(
         reqwest::Client::new(),
         vault_server.uri(),
         "test-token",
         "transit",
         Duration::from_secs(5),
-        SignatureMarshaling::Jws,
+        diport::JwtSigningBinding::rss_access(diport::KeyId::new("rss-jwt-es256")),
     )?);
     let blocklist =
         Arc::new(secure::DigestPasswordBlocklist::from_nonempty_sha256_digests([0xA5; 32], []));

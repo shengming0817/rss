@@ -48,16 +48,12 @@ pub use pilot::{
 /// Keeping these values together prevents composition roots from passing loose strings and
 /// durations through their shared infrastructure bag.
 pub struct IdentityRuntimeConfig {
-    jwt_key_id: diport::KeyId,
-    jwt_issuer: String,
-    jwt_audience: String,
-    jwt_access_ttl: Duration,
+    jwt_issuer_config: authn::JwtIssuerConfig<diport::RssAccessProfile>,
     auth_grant_ttl: Duration,
     refresh_ttl: Duration,
 }
 
 impl IdentityRuntimeConfig {
-    #[must_use]
     pub fn new(
         jwt_key_id: diport::KeyId,
         jwt_issuer: impl Into<String>,
@@ -65,33 +61,31 @@ impl IdentityRuntimeConfig {
         jwt_access_ttl: Duration,
         auth_grant_ttl: Duration,
         refresh_ttl: Duration,
-    ) -> Self {
-        Self {
-            jwt_key_id,
-            jwt_issuer: jwt_issuer.into(),
-            jwt_audience: jwt_audience.into(),
-            jwt_access_ttl,
+    ) -> Result<Self, authn::KeyRingError> {
+        Ok(Self {
+            jwt_issuer_config: authn::JwtIssuerConfig::rss_access(
+                authn::SigningKeyRing::single(jwt_key_id)?,
+                jwt_issuer,
+                jwt_audience,
+                jwt_access_ttl,
+            ),
             auth_grant_ttl,
             refresh_ttl,
-        }
+        })
     }
 
     /// Rebuild the sealed RSS access-token issuer input for one domain wiring pass.
-    pub fn jwt_issuer_config(
-        &self,
-    ) -> Result<authn::JwtIssuerConfig<diport::RssAccessProfile>, authn::KeyRingError> {
-        Ok(authn::JwtIssuerConfig::rss_access(
-            authn::SigningKeyRing::single(self.jwt_key_id.clone())?,
-            diport::SigningPurpose::new("auth.jwt.access"),
-            &self.jwt_issuer,
-            &self.jwt_audience,
-            self.jwt_access_ttl,
-        ))
+    pub fn jwt_issuer_config(&self) -> authn::JwtIssuerConfig<diport::RssAccessProfile> {
+        self.jwt_issuer_config.clone()
+    }
+
+    pub fn jwt_signing_binding(&self) -> &diport::JwtSigningBinding<diport::RssAccessProfile> {
+        self.jwt_issuer_config.signing_binding()
     }
 
     #[must_use]
     pub fn jwt_key_id(&self) -> &str {
-        self.jwt_key_id.as_str()
+        self.jwt_signing_binding().active_key().as_str()
     }
 
     #[must_use]
@@ -384,7 +378,6 @@ pub mod test_support {
             Arc::new(TestClock),
             authn::JwtIssuerConfig::rss_access(
                 authn::SigningKeyRing::single(diport::KeyId::new("identity-composition-test-key"))?,
-                diport::SigningPurpose::new("auth.jwt.access"),
                 "https://issuer.test",
                 "rss",
                 Duration::from_secs(900),
@@ -432,7 +425,6 @@ mod tests {
         deps.jwt = authn::JwtIssuerConfig::rss_access(
             authn::SigningKeyRing::single(diport::KeyId::new("identity-composition-test-key"))
                 .expect("non-empty signing key id"),
-            diport::SigningPurpose::new("auth.jwt.access"),
             "",
             "rss",
             std::time::Duration::from_secs(900),

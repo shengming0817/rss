@@ -29,7 +29,6 @@ use crate::providers_gen::ListenerPdpJwksLifecycle;
 const IDENTITY_SIGNER_READINESS_PERIOD: Duration = Duration::from_secs(30);
 const IDENTITY_SIGNER_READINESS_PROBE: &str = "identity_signer_ready";
 const IDENTITY_SIGNER_READINESS_WORKER: &str = "identity-signer-readiness";
-const IDENTITY_SIGNER_READINESS_MESSAGE: &[u8] = b"rss-runtime-identity-signer-readiness-v1";
 
 /// Consumes the postgres lifecycle owner into the runtime's sole lifecycle output type.
 pub(crate) fn build_pg_runtime_module(
@@ -55,9 +54,10 @@ pub(crate) fn identity_signer_resource(
 
 pub(crate) async fn identity_signer_module(
     signer: Arc<vault::VaultSigner>,
-    key: diport::KeyId,
+    binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
+    jwks: oidc::JwksReadinessHandle,
 ) -> anyhow::Result<DomainModuleResult> {
-    verify_identity_signer(&signer, key.clone()).await?;
+    verify_identity_signer(&signer, &binding, &jwks).await?;
     let health = Arc::new(IdentitySignerHealth::healthy());
     let probe_name = primitives::ProbeName::parse(IDENTITY_SIGNER_READINESS_PROBE)
         .context("parse identity signer readiness probe")?;
@@ -67,7 +67,8 @@ pub(crate) async fn identity_signer_module(
         DynManagedResource::new_box(IdentitySignerReadinessWorker::spawn(
             token,
             worker_signer,
-            key,
+            binding,
+            jwks,
             worker_health,
         ))
     });
@@ -86,17 +87,12 @@ pub(crate) async fn identity_signer_module(
 
 async fn verify_identity_signer(
     signer: &vault::VaultSigner,
-    key: diport::KeyId,
+    binding: &diport::JwtSigningBinding<diport::RssAccessProfile>,
+    jwks: &oidc::JwksReadinessHandle,
 ) -> anyhow::Result<()> {
-    use diport::Signer as _;
-    signer
-        .sign(diport::SignRequest {
-            key,
-            purpose: diport::SigningPurpose::new("auth.rss-access"),
-            message: diport::RedactedBytes::new(IDENTITY_SIGNER_READINESS_MESSAGE.to_vec()),
-        })
+    oidc::prove_rss_signer_matches_jwks(signer, binding, jwks)
         .await
-        .context("verify runtime identity signer capability")?;
+        .context("verify runtime identity signer and JWKS key pair")?;
     Ok(())
 }
 
@@ -152,7 +148,8 @@ impl IdentitySignerReadinessWorker {
     fn spawn(
         parent: CancellationToken,
         signer: Arc<vault::VaultSigner>,
-        key: diport::KeyId,
+        binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
+        jwks: oidc::JwksReadinessHandle,
         health: Arc<IdentitySignerHealth>,
     ) -> Self {
         let token = parent.child_token();
@@ -163,7 +160,7 @@ impl IdentitySignerReadinessWorker {
                 tokio::select! {
                     _ = worker_token.cancelled() => break,
                     _ = interval.tick() => {
-                        health.record(verify_identity_signer(&signer, key.clone()).await.is_ok());
+                        health.record(verify_identity_signer(&signer, &binding, &jwks).await.is_ok());
                     }
                 }
             }
@@ -1153,7 +1150,7 @@ mod tests {
         DeviceRevocationStorePermit, DistributedLockStorePermit, IdentitySignerReadinessWorker,
         ListenerPdpConstructor, ProviderBuild, ProviderBuildError, ProviderFactoryDispatch,
         ProviderFactoryPermit, ProviderOutput, ProviderReceipt, RuntimeObjectStorePermit,
-        build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle,
+        build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle, identity_signer_resource,
     };
     use crate::providers_gen::ListenerPdpJwksLifecycle;
 
@@ -1176,6 +1173,28 @@ mod tests {
         PlannedLifecycleChannel::Resources,
     ];
     const LISTENER_PDP_JWKS_PROBE_NAME: &str = "rss_access_token_jwks_ready";
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn identity_signer_resource_wraps_the_same_arc_once() {
+        let signer = Arc::new(
+            vault::VaultSigner::new_rss_access(
+                reqwest::Client::new(),
+                "https://vault.example:8200",
+                "test-token",
+                "transit",
+                std::time::Duration::from_secs(1),
+                diport::JwtSigningBinding::rss_access(diport::KeyId::new("rss-key")),
+            )
+            .expect("valid signer config"),
+        );
+        assert_eq!(Arc::strong_count(&signer), 1);
+        let resource = identity_signer_resource(Arc::clone(&signer));
+        assert_eq!(Arc::strong_count(&signer), 2);
+        assert_eq!(resource.name(), "vault-signer");
+        drop(resource);
+        assert_eq!(Arc::strong_count(&signer), 1);
+    }
 
     #[tokio::test]
     #[allow(clippy::expect_used, clippy::panic)]
@@ -1656,7 +1675,9 @@ mod tests {
         let (vault, _signer, _) =
             crate::infra::vault::VaultRuntimeConfig::from_snapshot(snapshot.view())
                 .expect("valid hermetic vault provider configuration")
-                .into_runtime()
+                .into_runtime(diport::JwtSigningBinding::rss_access(diport::KeyId::new(
+                    "test-signing-key",
+                )))
                 .expect("valid hermetic vault providers");
 
         let mut module = DomainModuleResult::default();

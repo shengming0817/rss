@@ -140,6 +140,11 @@ impl<'a> ProvidersBuilt<'a> {
         let result = async {
             let config = context.config();
             let projection_capture = context.runtime_plan.projection_capture();
+            let rss_jwks = runtime_rss_access
+                .as_ref()
+                .context("active identity signer requires RSS access-token JWKS")?
+                .jwks_readiness()
+                .handle();
             let PhaseAPrepared {
                 pg_setup,
                 carried,
@@ -148,6 +153,7 @@ impl<'a> ProvidersBuilt<'a> {
                 config,
                 Arc::clone(context.password_blocklist()),
                 serving_config,
+                rss_jwks,
                 &mut provider_build,
                 &mut provider_factories,
             )
@@ -411,6 +417,7 @@ impl<'a> ProvidersBuilt<'a> {
         config: crate::config::SnapshotConfig<'_>,
         password_blocklist: Arc<secure::DigestPasswordBlocklist>,
         serving_config: RuntimeServingConfigParts,
+        rss_jwks: oidc::JwksReadinessHandle,
         provider_build: &mut crate::provider_output::ProviderBuild,
         provider_factories: &mut crate::provider_output::ProviderFactoryDispatch,
     ) -> anyhow::Result<PhaseAPrepared> {
@@ -456,8 +463,14 @@ impl<'a> ProvidersBuilt<'a> {
         let identity_signer_permit = provider_factories.identity_signer()?;
         let settings_key_provider_permit = provider_factories.settings_key_provider()?;
         let settings_secret_resolver_permit = provider_factories.settings_secret_resolver()?;
-        let (vault, identity_signer, settings_config_value_key_name) =
-            vault_config.into_runtime().context("setup vault deps")?;
+        let identity_signing_binding = token_profiles
+            .rss_access()
+            .context("active identity signer requires RSS access token profile")?
+            .signing_binding()
+            .clone();
+        let (vault, identity_signer, settings_config_value_key_name) = vault_config
+            .into_runtime(identity_signing_binding.clone())
+            .context("setup vault deps")?;
         let settings_readiness = settings_composition::SettingsProviderReadiness::new(
             &vault.for_domain::<vault::caps::Settings>(),
             settings_config_value_key_name.clone(),
@@ -482,15 +495,10 @@ impl<'a> ProvidersBuilt<'a> {
         key_module.resources.push(key_resource);
         let mut resolver_module = resolver_output.into_output();
         resolver_module.resources.push(resolver_resource);
-        let identity_signer_key = token_profiles
-            .rss_access()
-            .context("active identity signer requires RSS access token profile")?
-            .signing_key_ring()
-            .active()
-            .clone();
         let identity_signer_module = crate::provider_output::identity_signer_module(
             Arc::clone(&identity_signer),
-            identity_signer_key,
+            identity_signing_binding,
+            rss_jwks,
         )
         .await?;
         provider_build

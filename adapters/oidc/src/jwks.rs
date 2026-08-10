@@ -27,7 +27,8 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use diport::{FederatedAccessProfile, RssAccessProfile, ShutdownError, TokenProfileMarker};
-use p256::ecdsa::VerifyingKey;
+use p256::ecdsa::signature::Verifier as _;
+use p256::ecdsa::{Signature, VerifyingKey};
 use serde::Deserialize;
 use serde::de::{self, Deserializer};
 use tokio::runtime::Handle;
@@ -41,6 +42,21 @@ use crate::verify::LOG_TARGET;
 /// JWKS 文档体积上界（字节）。JWKS 是小文档（数把 key 的 `x`/`y`/`k` base64url），256 KiB 远超正常上限；
 /// 超此值视为误挂载（如把大 CA bundle 错挂到 key 路径）→ 拒读，防同步读阻塞 tokio worker（DoS 边界前移）。
 const MAX_JWKS_BYTES: u64 = 256 * 1024;
+const RSS_SIGNING_KEY_PROOF_MESSAGE: &[u8] = b"rss.jwt-signing-key-proof.v1";
+
+/// Closed failure returned when the profile-bound RSS signer cannot prove possession of the
+/// private key corresponding to the current exact-`kid` JWKS public key.
+#[derive(Debug, thiserror::Error)]
+#[error("RSS signer does not match the current active JWKS key")]
+pub struct RssSigningKeyProofError {
+    _private: (),
+}
+
+impl RssSigningKeyProofError {
+    const fn new() -> Self {
+        Self { _private: () }
+    }
+}
 
 /// JWKS 文件源构造期 / 刷新错误（fail-fast）。`#[non_exhaustive]`：新增校验项不破坏 match。
 #[derive(Debug, thiserror::Error)]
@@ -108,6 +124,40 @@ impl JwksReadinessHandle {
     /// Whether the current JWKS snapshot contains an exact `kid` match.
     pub fn has_kid(&self, kid: &str) -> bool {
         self.snapshot.snapshot().has_kid(kid)
+    }
+}
+
+/// Prove that an RSS profile-bound signer and the current JWKS snapshot contain the same key pair.
+///
+/// The challenge is fixed here so callers cannot accidentally sign one message and verify another.
+/// The binding fixes ES256, canonical purpose, and exact active `kid`; the signature is accepted
+/// only by the matching P-256 key in the current ready snapshot. Signer errors, stale JWKS, missing
+/// keys, malformed raw JWS signatures, and material mismatches collapse to one secret-safe error.
+pub async fn prove_rss_signer_matches_jwks<S: diport::Signer + ?Sized>(
+    signer: &S,
+    binding: &diport::JwtSigningBinding<RssAccessProfile>,
+    jwks: &JwksReadinessHandle,
+) -> Result<(), RssSigningKeyProofError> {
+    if !jwks.is_ready() {
+        return Err(RssSigningKeyProofError::new());
+    }
+    let raw = signer
+        .sign(binding.sign_request(RSS_SIGNING_KEY_PROOF_MESSAGE.to_vec()))
+        .await
+        .map_err(|_| RssSigningKeyProofError::new())?;
+    let signature =
+        Signature::from_slice(raw.as_bytes()).map_err(|_| RssSigningKeyProofError::new())?;
+    let snapshot = jwks.snapshot.snapshot();
+    if snapshot
+        .es256_candidates(binding.active_key().as_str())
+        .any(|key| {
+            key.verify(RSS_SIGNING_KEY_PROOF_MESSAGE, &signature)
+                .is_ok()
+        })
+    {
+        Ok(())
+    } else {
+        Err(RssSigningKeyProofError::new())
     }
 }
 
@@ -853,6 +903,80 @@ mod tests {
 
     fn jwks_doc(keys: &[String]) -> String {
         format!(r#"{{"keys":[{}]}}"#, keys.join(","))
+    }
+
+    struct TestSigner(SigningKey);
+
+    impl diport::Signer for TestSigner {
+        async fn sign(
+            &self,
+            request: diport::SignRequest,
+        ) -> Result<diport::Signature, diport::SignerError> {
+            let signature: Signature = self.0.sign(request.message.as_bytes());
+            Ok(diport::Signature::new(signature.to_bytes().to_vec()))
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::SignerError> {
+            Ok(())
+        }
+    }
+
+    fn readiness_for(kid: &str, signing: &SigningKey) -> JwksReadinessHandle {
+        JwksReadinessHandle {
+            ready: Arc::new(AtomicBool::new(true)),
+            source_id: Arc::from("test-rss-signing-proof"),
+            snapshot: Arc::new(JwksSnapshotStore::new(KeySet::access(vec![KeyEntry {
+                kid: kid.to_owned(),
+                key: *signing.verifying_key(),
+            }]))),
+        }
+    }
+
+    #[tokio::test]
+    async fn rss_signing_proof_accepts_matching_exact_kid_material() {
+        let signing = sk(&SK1_BYTES);
+        let binding = diport::JwtSigningBinding::rss_access(diport::KeyId::new("rss-active"));
+        assert!(
+            super::prove_rss_signer_matches_jwks(
+                &TestSigner(signing.clone()),
+                &binding,
+                &readiness_for("rss-active", &signing),
+            )
+            .await
+            .is_ok()
+        );
+    }
+
+    #[tokio::test]
+    async fn rss_signing_proof_rejects_material_kid_and_readiness_drift() {
+        let signer_key = sk(&SK1_BYTES);
+        let jwks_key = sk(&SK2_BYTES);
+        let binding = diport::JwtSigningBinding::rss_access(diport::KeyId::new("rss-active"));
+        assert!(
+            super::prove_rss_signer_matches_jwks(
+                &TestSigner(signer_key.clone()),
+                &binding,
+                &readiness_for("rss-active", &jwks_key),
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            super::prove_rss_signer_matches_jwks(
+                &TestSigner(signer_key.clone()),
+                &binding,
+                &readiness_for("different-kid", &signer_key),
+            )
+            .await
+            .is_err()
+        );
+        let stale = readiness_for("rss-active", &signer_key);
+        stale.ready.store(false, Ordering::Release);
+        assert!(
+            super::prove_rss_signer_matches_jwks(&TestSigner(signer_key), &binding, &stale)
+                .await
+                .is_err()
+        );
     }
 
     fn payload(exp: i64) -> String {

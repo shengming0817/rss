@@ -29,8 +29,8 @@ use runtime::test_support::{
 };
 use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 use vault::{
-    SignatureMarshaling, StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps,
-    VaultSecretResolver, VaultSigner,
+    StoreBinding, TenantStoreAllowlist, VaultKeyProvider, VaultRuntimeDeps, VaultSecretResolver,
+    VaultSigner,
 };
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -229,13 +229,13 @@ async fn wire_settings_integrates_pg_and_vault_bundle_single_source_resolver() -
         redis,
         s3,
         vault,
-        Arc::new(VaultSigner::new_allow_http(
+        Arc::new(VaultSigner::new_rss_access_allow_http(
             reqwest::Client::new(),
             vault_server.uri(),
             "s.testtoken",
             "transit",
             Duration::from_secs(5),
-            SignatureMarshaling::Jws,
+            diport::JwtSigningBinding::rss_access(diport::KeyId::new("rss-jwt-es256")),
         )?),
         diport::KeyName::try_new("settings-config")?,
         noop_domain_transport(),

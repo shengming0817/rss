@@ -818,8 +818,8 @@ impl AccessVerifierConfigCore {
 pub(crate) struct RssAccessTokenConfig {
     verifier: AccessVerifierConfigCore,
     signing_key_ring: authn::SigningKeyRing,
+    issuer_config: authn::JwtIssuerConfig<diport::RssAccessProfile>,
     rotation_mode: authn::RotationMode,
-    ttl: Duration,
 }
 
 impl RssAccessTokenConfig {
@@ -841,11 +841,17 @@ impl RssAccessTokenConfig {
                 .as_secs(),
         )?;
         let (signing_key_ring, rotation_mode) = parse_rss_signing_rotation(config, ttl)?;
+        let issuer_config = authn::JwtIssuerConfig::rss_access(
+            signing_key_ring.clone(),
+            &verifier.issuer,
+            &verifier.audience,
+            ttl,
+        );
         Ok(Self {
             verifier,
             signing_key_ring,
+            issuer_config,
             rotation_mode,
-            ttl,
         })
     }
 
@@ -888,18 +894,16 @@ impl RssAccessTokenConfig {
     }
 
     #[cfg(test)]
-    pub(crate) const fn ttl(&self) -> Duration {
-        self.ttl
+    pub(crate) fn ttl(&self) -> Duration {
+        self.issuer_config.lifetime()
     }
 
     fn issuer_config(&self) -> authn::JwtIssuerConfig<diport::RssAccessProfile> {
-        authn::JwtIssuerConfig::rss_access(
-            self.signing_key_ring.clone(),
-            diport::SigningPurpose::new("auth.rss-access"),
-            self.issuer(),
-            self.audience(),
-            self.ttl,
-        )
+        self.issuer_config.clone()
+    }
+
+    pub(crate) fn signing_binding(&self) -> &diport::JwtSigningBinding<diport::RssAccessProfile> {
+        self.issuer_config.signing_binding()
     }
 }
 

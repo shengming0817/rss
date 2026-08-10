@@ -275,7 +275,6 @@ fn production_access_jwt() -> String {
         authn::JwtIssuerConfig::rss_access(
             authn::SigningKeyRing::single(diport::KeyId::new(RSS_KID))
                 .expect("non-empty signing key id"),
-            diport::SigningPurpose::new("auth.rss-access"),
             ISS,
             AUD,
             Duration::from_secs(900),
@@ -318,7 +317,6 @@ fn production_service_token(secret: &[u8]) -> String {
         authn::JwtIssuerConfig::service_token(
             authn::SigningKeyRing::single(diport::KeyId::new(HS_KID))
                 .expect("non-empty signing key id"),
-            diport::SigningPurpose::new("auth.service-token"),
             ISS,
             AUD,
             Duration::from_secs(300),

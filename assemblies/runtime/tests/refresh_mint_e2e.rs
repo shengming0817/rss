@@ -265,13 +265,13 @@ impl Respond for TransitSignResponder {
 /// 经 `new_allow_http`（mock 是 http）+ 注入 mock URI 构造 RSS access issuer（ES256，FixedClock）。
 #[allow(clippy::expect_used)]
 fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<diport::RssAccessProfile, VaultSigner> {
-    let signer = VaultSigner::new_allow_http(
+    let signer = VaultSigner::new_rss_access_allow_http(
         reqwest::Client::new(),
         vault_uri,
         "test-vault-token",
         "transit",
         Duration::from_secs(5),
-        vault::SignatureMarshaling::Jws,
+        diport::JwtSigningBinding::rss_access(diport::KeyId::new(KEY_ID)),
     )
     .expect("vault signer (dev http)");
     authn::JwtIssuer::<diport::RssAccessProfile, _>::new(
@@ -280,7 +280,6 @@ fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<diport::RssAccessProfil
         authn::JwtIssuerConfig::rss_access(
             authn::SigningKeyRing::single(diport::KeyId::new(KEY_ID))
                 .expect("non-empty signing key id"),
-            diport::SigningPurpose::new("auth.rss-access"),
             ISS,
             AUD,
             Duration::from_secs(TTL_SECS),

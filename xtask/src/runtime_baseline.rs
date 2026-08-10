@@ -750,7 +750,8 @@ impl<'ast> Visit<'ast> for ResidualVisitor<'_> {
             let joined = self.resolve_path(&path);
             let last = joined.rsplit("::").next().unwrap_or("");
             purpose_bound_secret_sink = [
-                "VaultSigner::new",
+                "VaultSigner::new_rss_access",
+                "VaultSigner::new_rss_access_allow_http",
                 "VaultSecretResolver::new",
                 "VaultKeyProvider::new",
                 "aws_sdk_s3::config::Credentials::new",

@@ -1,0 +1,48 @@
+error[E0277]: the trait bound `String: From<SigningPurpose>` is not satisfied
+ --> tests/ui/jwt_issuer_raw_purpose_removed_fail.rs:9:9
+  |
+7 |     let _ = JwtIssuerConfig::rss_access(
+  |             --------------------------- required by a bound introduced by this call
+8 |         SigningKeyRing::single(KeyId::new("rss-kid")).unwrap(),
+9 |         SigningPurpose::new("operator-controlled-purpose"),
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the trait `From<SigningPurpose>` is not implemented for `String`
+  |
+  = help: `String` implements trait `From<T>`:
+            From<&String>
+            From<&mut str>
+            From<&str>
+            From<Box<str>>
+            From<Cow<'_, str>>
+            From<char>
+            From<url::Url>
+            From<uuid::Uuid>
+  = note: required for `SigningPurpose` to implement `Into<String>`
+note: required by a bound in `JwtIssuerConfig::<RssAccessProfile>::rss_access`
+ --> src/mint.rs
+  |
+  |     pub fn rss_access(
+  |            ---------- required by a bound in this associated function
+  |         key_ring: SigningKeyRing,
+  |         issuer: impl Into<String>,
+  |                      ^^^^^^^^^^^^ required by this bound in `JwtIssuerConfig::<RssAccessProfile>::rss_access`
+
+error[E0061]: this function takes 4 arguments but 5 arguments were supplied
+  --> tests/ui/jwt_issuer_raw_purpose_removed_fail.rs:7:13
+   |
+ 7 |     let _ = JwtIssuerConfig::rss_access(
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+11 |         "rss-api",
+   |         --------- unexpected argument #4 of type `&'static str`
+   |
+note: associated function defined here
+  --> src/mint.rs
+   |
+   |     pub fn rss_access(
+   |            ^^^^^^^^^^
+help: remove the extra argument
+   |
+10 -         "https://rss.example",
+11 -         "rss-api",
+10 +         "https://rss.example",
+   |

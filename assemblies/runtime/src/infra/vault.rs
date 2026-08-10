@@ -157,6 +157,7 @@ impl VaultRuntimeConfig {
     /// allocation moves into the key provider's zeroizing owner.
     pub(crate) fn into_runtime(
         self,
+        signing_binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
     ) -> Result<(VaultRuntimeDeps, std::sync::Arc<VaultSigner>, KeyName), VaultRuntimeConfigError>
     {
         let Self { provider, stores } = self;
@@ -167,13 +168,13 @@ impl VaultRuntimeConfig {
             transit_mount,
             settings_key_name,
         } = provider;
-        let signer = VaultSigner::new(
+        let signer = VaultSigner::new_rss_access(
             client.clone(),
             addr.clone(),
             token.copy_secret_allocation(),
             transit_mount.clone(),
             DEFAULT_VAULT_TIMEOUT,
-            vault::SignatureMarshaling::Jws,
+            signing_binding,
         )
         .map_err(|e| {
             VaultRuntimeConfigError::VaultClient(anyhow::anyhow!("vault signer config error: {e}"))
@@ -323,6 +324,7 @@ pub(crate) fn build_vault_runtime_from_values(
     addr: String,
     token: String,
     transit_mount: String,
+    signing_key_id: String,
     settings_key_name: String,
     tenant_store_allowlist_json: String,
 ) -> anyhow::Result<(VaultRuntimeDeps, std::sync::Arc<VaultSigner>, KeyName)> {
@@ -334,7 +336,11 @@ pub(crate) fn build_vault_runtime_from_values(
         settings_key_name: Some(settings_key_name.as_str()),
         tenant_store_allowlist_json: Some(tenant_store_allowlist_json.as_str()),
     })?;
-    Ok(config.into_runtime()?)
+    Ok(
+        config.into_runtime(diport::JwtSigningBinding::rss_access(diport::KeyId::new(
+            signing_key_id,
+        )))?,
+    )
 }
 
 /// 构造 vault HTTP client（rustls + ring + webpki-roots，#1252）：reqwest `rustls-tls-webpki-roots` feature
@@ -385,12 +391,10 @@ pub(crate) const VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV: &str =
 pub(crate) const SETTINGS_CONFIG_VALUE_KEY_NAME_ENV: &str = "RSS_SETTINGS_CONFIG_VALUE_KEY_NAME";
 /// Optional PEM CA cert path for private/dev Vault HTTPS endpoints.
 pub(crate) const VAULT_CA_CERT_PEM_PATH_ENV: &str = "RSS_VAULT_CA_CERT_PEM_PATH";
-const RSS_ACCESS_TOKEN_KEY_ID_ENV: &str = crate::config::RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV;
-
 /// 从注入的配置读取器构造 vault `VaultSigner`（Transit ES256 签 access JWT）。
 ///
-/// - `allow_http=false`（生产）：`VaultSigner::new`（HTTPS-only，fail-fast 拒非 https URL）+ rustls client。
-/// - `allow_http=true`（集成测试 hermetic mock）：`VaultSigner::new_allow_http`（接受 http wiremock 地址）+
+/// - `allow_http=false`（生产）：`VaultSigner::new_rss_access`（HTTPS-only，fail-fast 拒非 https URL）+ rustls client。
+/// - `allow_http=true`（集成测试 hermetic mock）：`VaultSigner::new_rss_access_allow_http`（接受 http wiremock 地址）+
 ///   同 rustls client（兼处理 http 连接，保持 client 构造一致）。
 ///
 /// 两路均用 `Jws` marshaling：JWT/JWS 需 raw `r‖s`（vault 默认 asn1=DER 会让 oidc 验签失败，OIDC-ALG-KEYPATH-01）。
@@ -398,6 +402,7 @@ const RSS_ACCESS_TOKEN_KEY_ID_ENV: &str = crate::config::RSS_ACCESS_TOKEN_SIGNIN
 pub(crate) fn build_vault_signer_with(
     get: impl Fn(&str) -> Option<String>,
     allow_http: bool,
+    binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
 ) -> anyhow::Result<VaultSigner> {
     let addr = get(VAULT_ADDR_ENV)
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_ADDR_ENV}"))?;
@@ -407,23 +412,16 @@ pub(crate) fn build_vault_signer_with(
         .ok_or_else(|| anyhow::anyhow!("missing required env var: {VAULT_TRANSIT_MOUNT_ENV}"))?;
     let client = build_vault_tls_client_from(&get)?;
     if allow_http {
-        VaultSigner::new_allow_http(
+        VaultSigner::new_rss_access_allow_http(
             client,
             addr,
             token,
             mount,
             DEFAULT_VAULT_TIMEOUT,
-            vault::SignatureMarshaling::Jws,
+            binding,
         )
     } else {
-        VaultSigner::new(
-            client,
-            addr,
-            token,
-            mount,
-            DEFAULT_VAULT_TIMEOUT,
-            vault::SignatureMarshaling::Jws,
-        )
+        VaultSigner::new_rss_access(client, addr, token, mount, DEFAULT_VAULT_TIMEOUT, binding)
     }
     .map_err(|e| anyhow::anyhow!("vault signer config error: {e}"))
 }
@@ -561,7 +559,10 @@ fn vault_transit_key_metadata_url(
     let mut url = reqwest::Url::parse(addr.trim()).context("parse Vault base URL")?;
     anyhow::ensure!(url.scheme() == "https", "Vault base URL must use https");
     let mount_segments = vault_path_segments(mount, VAULT_TRANSIT_MOUNT_ENV)?;
-    let key_segments = vault_path_segments(key_id, RSS_ACCESS_TOKEN_KEY_ID_ENV)?;
+    let key_segments = vault_path_segments(
+        key_id,
+        crate::config::RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV,
+    )?;
     {
         let mut segments = url
             .path_segments_mut()
@@ -722,6 +723,10 @@ mod tests {
     }
 
     use super::*;
+
+    fn test_rss_signing_binding() -> diport::JwtSigningBinding<diport::RssAccessProfile> {
+        diport::JwtSigningBinding::rss_access(diport::KeyId::new("test-rss-access"))
+    }
 
     static TEMP_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -907,7 +912,11 @@ mod tests {
         let config =
             VaultRuntimeConfig::from_snapshot(snapshot.view()).expect("valid snapshot config");
         assert_eq!(format!("{config:?}"), "VaultRuntimeConfig(<redacted>)");
-        let (runtime, signer, key_name) = config.into_runtime().expect("valid runtime adapters");
+        let (runtime, signer, key_name) = config
+            .into_runtime(diport::JwtSigningBinding::rss_access(diport::KeyId::new(
+                "snapshot-rss-key",
+            )))
+            .expect("valid runtime adapters");
         assert_eq!(runtime.runtime_resources().len(), 2);
         assert_eq!(diport::ManagedResource::name(signer.as_ref()), "vault");
         assert_eq!(key_name.as_str(), "settings-snapshot-key");
@@ -923,6 +932,7 @@ mod tests {
             "https://vault.explicit.test:8200".to_owned(),
             "vault-explicit-token".to_owned(),
             "transit".to_owned(),
+            "explicit-rss-key".to_owned(),
             "settings-explicit-key".to_owned(),
             valid_vault_value(VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV)
                 .expect("valid allowlist fixture"),
@@ -1022,7 +1032,9 @@ mod tests {
             );
 
             let serving_config = VaultRuntimeConfig::from_snapshot(snapshot.view())?;
-            let Err(error) = serving_config.into_runtime() else {
+            let Err(error) = serving_config.into_runtime(diport::JwtSigningBinding::rss_access(
+                diport::KeyId::new("invalid-config-test"),
+            )) else {
                 anyhow::bail!("invalid serving provider configuration must fail");
             };
             assert!(
@@ -1103,7 +1115,9 @@ mod tests {
             _ => valid_vault_value(name),
         });
         let config = VaultRuntimeConfig::from_snapshot(snapshot.view())?;
-        let Err(error) = config.into_runtime() else {
+        let Err(error) = config.into_runtime(diport::JwtSigningBinding::rss_access(
+            diport::KeyId::new("redaction-test"),
+        )) else {
             anyhow::bail!("invalid adapter endpoint must fail");
         };
         assert!(matches!(error, VaultRuntimeConfigError::VaultClient(_)));
@@ -1130,14 +1144,14 @@ mod tests {
             }
         };
         assert!(
-            matches!(&build_vault_signer_with(get, false), Err(e) if format!("{e:#}").contains(VAULT_ADDR_ENV)),
+            matches!(&build_vault_signer_with(get, false, test_rss_signing_binding()), Err(e) if format!("{e:#}").contains(VAULT_ADDR_ENV)),
             "缺 vault addr 须 fail-fast 且错误含变量名"
         );
     }
 
     #[test]
     fn build_vault_signer_missing_token_fails_fast() {
-        // 提供 https addr（VaultSigner::new 校验 scheme）+ mount；缺 token → fail-fast。
+        // 提供 https addr（VaultSigner::new_rss_access 校验 scheme）+ mount；缺 token → fail-fast。
         let get = |k: &str| {
             if k == VAULT_ADDR_ENV {
                 Some("https://vault.test:8200".to_string())
@@ -1148,7 +1162,7 @@ mod tests {
             }
         };
         assert!(
-            matches!(&build_vault_signer_with(get, false), Err(e) if format!("{e:#}").contains(VAULT_TOKEN_ENV)),
+            matches!(&build_vault_signer_with(get, false, test_rss_signing_binding()), Err(e) if format!("{e:#}").contains(VAULT_TOKEN_ENV)),
             "缺 vault token 须 fail-fast 且错误含变量名"
         );
     }
@@ -1166,7 +1180,7 @@ mod tests {
             }
         };
         assert!(
-            matches!(&build_vault_signer_with(get, false), Err(e) if format!("{e:#}").contains(VAULT_TRANSIT_MOUNT_ENV)),
+            matches!(&build_vault_signer_with(get, false, test_rss_signing_binding()), Err(e) if format!("{e:#}").contains(VAULT_TRANSIT_MOUNT_ENV)),
             "缺 vault transit mount 须 fail-fast 且错误含变量名"
         );
     }

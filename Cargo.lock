@@ -3306,6 +3306,7 @@ dependencies = [
  "ids",
  "jsonschema",
  "oidc",
+ "p256",
  "postgres",
  "primitives",
  "prometheus-adapter",

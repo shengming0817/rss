@@ -811,6 +811,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         "https://vault.example:8200".to_string(),
         "s.testtoken".to_string(),
         "transit".to_string(),
+        "rss-jwt-es256".to_string(),
         "settings-config".to_string(),
         r#"{"bindings":[{"tenantId":"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa","storeId":"vault","mount":"secret","kvPathPrefix":"tenants/a"}]}"#.to_string(),
     )?;

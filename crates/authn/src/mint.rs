@@ -9,7 +9,6 @@
 //! §3.11–§3.12 (explicit typing and mutually exclusive validation rules), RFC 9068 §2.1
 //! (`at+jwt` access-token type).
 
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -27,25 +26,28 @@ const B64_URL: base64::engine::GeneralPurpose = base64::engine::general_purpose:
 /// constructor for `JwtIssuerConfig<FederatedAccessProfile>`. Mint always uses
 /// [`SigningKeyRing::active`] — next/retiring keys are never selected for signing
 /// (INVARIANT: AUTHN-SIGNING-KEYRING-01 { level = "Hard", exec = "native-compile", source = "code", native = "typed single active field; no next/retiring sign API" }).
+#[derive(Clone)]
 pub struct JwtIssuerConfig<P: diport::TokenProfileMarker> {
-    key_ring: SigningKeyRing,
-    purpose: diport::SigningPurpose,
+    binding: diport::JwtSigningBinding<P>,
     issuer: String,
     audience: String,
     ttl: Duration,
-    _profile: PhantomData<fn() -> P>,
 }
 
 impl JwtIssuerConfig<RssAccessProfile> {
     /// Configure an RSS access-token issuer. Validation occurs in [`JwtIssuer::new`].
     pub fn rss_access(
         key_ring: SigningKeyRing,
-        purpose: diport::SigningPurpose,
         issuer: impl Into<String>,
         audience: impl Into<String>,
         ttl: Duration,
     ) -> Self {
-        Self::from_parts(key_ring, purpose, issuer.into(), audience.into(), ttl)
+        Self::from_parts(
+            diport::JwtSigningBinding::rss_access(key_ring.active().clone()),
+            issuer.into(),
+            audience.into(),
+            ttl,
+        )
     }
 }
 
@@ -53,31 +55,42 @@ impl JwtIssuerConfig<ServiceTokenProfile> {
     /// Configure an RSS service-token issuer. Validation occurs in [`JwtIssuer::new`].
     pub fn service_token(
         key_ring: SigningKeyRing,
-        purpose: diport::SigningPurpose,
         issuer: impl Into<String>,
         audience: impl Into<String>,
         ttl: Duration,
     ) -> Self {
-        Self::from_parts(key_ring, purpose, issuer.into(), audience.into(), ttl)
+        Self::from_parts(
+            diport::JwtSigningBinding::service_token(key_ring.active().clone()),
+            issuer.into(),
+            audience.into(),
+            ttl,
+        )
     }
 }
 
 impl<P: diport::TokenProfileMarker> JwtIssuerConfig<P> {
     fn from_parts(
-        key_ring: SigningKeyRing,
-        purpose: diport::SigningPurpose,
+        binding: diport::JwtSigningBinding<P>,
         issuer: String,
         audience: String,
         ttl: Duration,
     ) -> Self {
         Self {
-            key_ring,
-            purpose,
+            binding,
             issuer,
             audience,
             ttl,
-            _profile: PhantomData,
         }
+    }
+
+    /// Borrow the canonical profile/key/purpose binding shared with the signer provider.
+    pub fn signing_binding(&self) -> &diport::JwtSigningBinding<P> {
+        &self.binding
+    }
+
+    /// Configured lifetime, already bounded by the selected profile at issuer construction.
+    pub fn lifetime(&self) -> Duration {
+        self.ttl
     }
 }
 
@@ -141,7 +154,6 @@ struct JoseHeader<'a> {
 }
 
 /// RSS access claims are always bound to one durable User authentication grant.
-#[derive(serde::Serialize)]
 struct AccessClaims<'a> {
     sub: String,
     tenant_id: String,
@@ -157,8 +169,31 @@ struct AccessClaims<'a> {
     aud: &'a str,
 }
 
+impl serde::Serialize for AccessClaims<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+        let policy = RssAccessProfile::policy();
+        let mut map = serializer.serialize_map(Some(12))?;
+        map.serialize_entry("sub", &self.sub)?;
+        map.serialize_entry(policy.tenant_claim_name(), &self.tenant_id)?;
+        map.serialize_entry(policy.kind_claim_name(), &self.kind)?;
+        map.serialize_entry("sid", &self.sid)?;
+        map.serialize_entry("jti", &self.jti)?;
+        map.serialize_entry("auth_time", &self.auth_time)?;
+        map.serialize_entry("authn_epoch", &self.authn_epoch)?;
+        map.serialize_entry("token_use", &self.token_use)?;
+        map.serialize_entry("iat", &self.iat)?;
+        map.serialize_entry("exp", &self.exp)?;
+        map.serialize_entry("iss", &self.iss)?;
+        map.serialize_entry("aud", &self.aud)?;
+        map.end()
+    }
+}
+
 /// Service claims carry the signed canonical tenant authority for the request challenger.
-#[derive(serde::Serialize)]
 struct ServiceClaims<'a> {
     sub: &'a str,
     tenant_id: String,
@@ -169,6 +204,27 @@ struct ServiceClaims<'a> {
     exp: i64,
     iss: &'a str,
     aud: &'a str,
+}
+
+impl serde::Serialize for ServiceClaims<'_> {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap as _;
+        let policy = ServiceTokenProfile::policy();
+        let mut map = serializer.serialize_map(Some(9))?;
+        map.serialize_entry("sub", &self.sub)?;
+        map.serialize_entry(policy.tenant_claim_name(), &self.tenant_id)?;
+        map.serialize_entry("jti", &self.jti)?;
+        map.serialize_entry(policy.kind_claim_name(), &self.kind)?;
+        map.serialize_entry("token_use", &self.token_use)?;
+        map.serialize_entry("iat", &self.iat)?;
+        map.serialize_entry("exp", &self.exp)?;
+        map.serialize_entry("iss", &self.iss)?;
+        map.serialize_entry("aud", &self.aud)?;
+        map.end()
+    }
 }
 
 /// A JWT issuer whose public capabilities are fixed by the sealed profile marker.
@@ -276,8 +332,8 @@ where
         // `SigningKeyRing` constructors already reject empty active; re-check as defense in depth.
         if config.issuer.is_empty()
             || config.audience.is_empty()
-            || config.key_ring.active().as_str().is_empty()
-            || config.purpose.as_str().is_empty()
+            || config.binding.active_key().as_str().is_empty()
+            || config.binding.purpose().as_str().is_empty()
             || config.ttl.is_zero()
             || config.ttl > policy.maximum_lifetime()
         {
@@ -310,11 +366,10 @@ where
         expires_at: i64,
     ) -> Result<MintedJwt, JwtIssueError> {
         let policy = P::policy();
-        // Mint only with Active — next/retiring are not selectable (AUTHN-SIGNING-KEYRING-01).
-        let active = self.config.key_ring.active();
+        let binding = &self.config.binding;
         let header = JoseHeader {
-            alg: policy.algorithm().jose_name(),
-            kid: active.as_str(),
+            alg: binding.algorithm().jose_name(),
+            kid: binding.active_key().as_str(),
             typ: policy.jose_typ(),
         };
         let header_b64 =
@@ -324,11 +379,7 @@ where
         let signing_input = format!("{header_b64}.{payload_b64}");
         let signature = self
             .signer
-            .sign(diport::SignRequest {
-                key: active.clone(),
-                purpose: self.config.purpose.clone(),
-                message: signing_input.as_bytes().to_vec().into(),
-            })
+            .sign(binding.sign_request(signing_input.as_bytes().to_vec()))
             .await
             .map_err(JwtIssueError::Sign)?;
         let signature_b64 = B64_URL.encode(signature.as_bytes());
@@ -343,7 +394,7 @@ where
 mod tests {
     use super::*;
     use crate::{AuthGrant, AuthnEpoch, GrantSecurityEventKind};
-    use diport::{KeyId, SignRequest, Signature, Signer, SignerError, SigningPurpose};
+    use diport::{KeyId, SignRequest, Signature, Signer, SignerError};
     use ids::UserId;
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
@@ -438,7 +489,6 @@ mod tests {
     fn rss_config(ttl: Duration) -> JwtIssuerConfig<RssAccessProfile> {
         JwtIssuerConfig::rss_access(
             SigningKeyRing::single(KeyId::new("rss-kid")).expect("non-empty kid"),
-            SigningPurpose::new("auth.rss-access"),
             "https://rss.example",
             "rss-api",
             ttl,
@@ -449,7 +499,6 @@ mod tests {
     fn service_config(ttl: Duration) -> JwtIssuerConfig<ServiceTokenProfile> {
         JwtIssuerConfig::service_token(
             SigningKeyRing::single(KeyId::new("service-kid")).expect("non-empty kid"),
-            SigningPurpose::new("auth.service-token"),
             "https://service.rss.example",
             "rss-internal",
             ttl,
@@ -497,7 +546,8 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rss_access_emits_exact_profile_markers_and_tenant() {
         let grant = grant(now_time() + Duration::from_secs(3_600));
-        let jwt = rss_issuer(RecordingSigner::ok(), now_time(), Duration::from_secs(900))
+        let signer = RecordingSigner::ok();
+        let jwt = rss_issuer(signer.clone(), now_time(), Duration::from_secs(900))
             .issue_access(grant.access_issue_input().expect("active grant"))
             .await
             .expect("issue access");
@@ -529,6 +579,9 @@ mod tests {
         assert_eq!(claims["exp"].as_u64(), Some(NOW_SECS + 900));
         assert_eq!(jwt.expires_at(), (NOW_SECS + 900) as i64);
         assert_eq!(parts[2], B64_URL.encode(SIG_BYTES));
+        let captured = signer.captured().expect("signer called");
+        assert_eq!(captured.key.as_str(), "rss-kid");
+        assert_eq!(captured.purpose.as_str(), "auth.rss-access");
     }
 
     #[tokio::test]
@@ -589,6 +642,7 @@ mod tests {
             "service-token signer message must be exact header.payload with no private MAC suffix"
         );
         assert_eq!(captured.key.as_str(), "service-kid");
+        assert_eq!(captured.purpose.as_str(), "auth.service-token");
     }
 
     #[test]
@@ -637,21 +691,12 @@ mod tests {
         let rss_cases = [
             JwtIssuerConfig::rss_access(
                 SigningKeyRing::single(KeyId::new("kid")).expect("non-empty kid"),
-                SigningPurpose::new(""),
-                "iss",
-                "aud",
-                Duration::from_secs(1),
-            ),
-            JwtIssuerConfig::rss_access(
-                SigningKeyRing::single(KeyId::new("kid")).expect("non-empty kid"),
-                SigningPurpose::new("purpose"),
                 "",
                 "aud",
                 Duration::from_secs(1),
             ),
             JwtIssuerConfig::rss_access(
                 SigningKeyRing::single(KeyId::new("kid")).expect("non-empty kid"),
-                SigningPurpose::new("purpose"),
                 "iss",
                 "",
                 Duration::from_secs(1),
@@ -684,7 +729,6 @@ mod tests {
             Box::new(TestClock(now_time())),
             JwtIssuerConfig::rss_access(
                 ring,
-                SigningPurpose::new("auth.rss-access"),
                 "https://rss.example",
                 "rss-api",
                 Duration::from_secs(60),

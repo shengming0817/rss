@@ -10,6 +10,7 @@ use dynosaur::dynosaur;
 use ids::UserId;
 use sha2::{Digest as _, Sha256};
 use std::future::Future;
+use std::marker::PhantomData;
 use std::time::Duration;
 use vocab::{PrincipalKind, ServiceCallerDomain, tenant::TenantId};
 
@@ -386,6 +387,8 @@ pub struct TokenPolicy {
     jose_typ: &'static str,
     token_use: &'static str,
     algorithm: TokenAlgorithm,
+    tenant_claim_name: &'static str,
+    kind_claim_name: &'static str,
     maximum_lifetime: Duration,
     maximum_token_length: usize,
     maximum_header_length: usize,
@@ -407,6 +410,16 @@ impl TokenPolicy {
     /// Only accepted JOSE algorithm.
     pub const fn algorithm(self) -> TokenAlgorithm {
         self.algorithm
+    }
+
+    /// Exact, case-sensitive signed tenant claim name.
+    pub const fn tenant_claim_name(self) -> &'static str {
+        self.tenant_claim_name
+    }
+
+    /// Exact, case-sensitive signed principal-kind claim name.
+    pub const fn kind_claim_name(self) -> &'static str {
+        self.kind_claim_name
     }
 
     /// Maximum allowed `exp - iat` duration.
@@ -439,11 +452,15 @@ const MAXIMUM_TOKEN_LENGTH: usize = 16 * 1024;
 const MAXIMUM_HEADER_LENGTH: usize = 4 * 1024;
 const MAXIMUM_PAYLOAD_LENGTH: usize = 12 * 1024;
 const MAXIMUM_SIGNATURE_LENGTH: usize = 1024;
+const TENANT_CLAIM_NAME: &str = "tenant_id";
+const KIND_CLAIM_NAME: &str = "kind";
 
 const RSS_ACCESS_POLICY: TokenPolicy = TokenPolicy {
     jose_typ: "at+jwt",
     token_use: "access",
     algorithm: TokenAlgorithm::Es256,
+    tenant_claim_name: TENANT_CLAIM_NAME,
+    kind_claim_name: KIND_CLAIM_NAME,
     maximum_lifetime: Duration::from_secs(900),
     maximum_token_length: MAXIMUM_TOKEN_LENGTH,
     maximum_header_length: MAXIMUM_HEADER_LENGTH,
@@ -455,6 +472,8 @@ const FEDERATED_ACCESS_POLICY: TokenPolicy = TokenPolicy {
     jose_typ: "at+jwt",
     token_use: "access",
     algorithm: TokenAlgorithm::Es256,
+    tenant_claim_name: TENANT_CLAIM_NAME,
+    kind_claim_name: KIND_CLAIM_NAME,
     maximum_lifetime: Duration::from_secs(900),
     maximum_token_length: MAXIMUM_TOKEN_LENGTH,
     maximum_header_length: MAXIMUM_HEADER_LENGTH,
@@ -466,6 +485,8 @@ const SERVICE_TOKEN_POLICY: TokenPolicy = TokenPolicy {
     jose_typ: "rss-service+jwt",
     token_use: "service",
     algorithm: TokenAlgorithm::Hs256,
+    tenant_claim_name: TENANT_CLAIM_NAME,
+    kind_claim_name: KIND_CLAIM_NAME,
     maximum_lifetime: Duration::from_secs(300),
     maximum_token_length: MAXIMUM_TOKEN_LENGTH,
     maximum_header_length: MAXIMUM_HEADER_LENGTH,
@@ -477,6 +498,8 @@ const PROJECTION_OPERATOR_TOKEN_POLICY: TokenPolicy = TokenPolicy {
     jose_typ: "rss-projection-operator+jwt",
     token_use: "projection-operator",
     algorithm: TokenAlgorithm::Es256,
+    tenant_claim_name: TENANT_CLAIM_NAME,
+    kind_claim_name: KIND_CLAIM_NAME,
     maximum_lifetime: Duration::from_secs(300),
     maximum_token_length: MAXIMUM_TOKEN_LENGTH,
     maximum_header_length: MAXIMUM_HEADER_LENGTH,
@@ -549,6 +572,70 @@ impl TokenProfileMarker for ServiceTokenProfile {
 
 impl TokenProfileMarker for ProjectionOperatorTokenProfile {
     const PROFILE: TokenProfile = TokenProfile::ProjectionOperator;
+}
+
+/// Profile-typed binding of one locally minted JWT to its algorithm, purpose, and active key.
+///
+/// Fields are private and constructors exist only for mintable RSS profiles. Callers cannot
+/// invent a JWT purpose or detach a signing request from the profile policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JwtSigningBinding<P: TokenProfileMarker> {
+    active_key: crate::KeyId,
+    purpose: crate::SigningPurpose,
+    _profile: PhantomData<fn() -> P>,
+}
+
+impl JwtSigningBinding<RssAccessProfile> {
+    /// Bind RSS access minting to the canonical purpose and active signing key.
+    pub fn rss_access(active_key: crate::KeyId) -> Self {
+        Self::from_parts(active_key, "auth.rss-access")
+    }
+}
+
+impl JwtSigningBinding<ServiceTokenProfile> {
+    /// Bind service-token minting to the canonical purpose and active signing key.
+    pub fn service_token(active_key: crate::KeyId) -> Self {
+        Self::from_parts(active_key, "auth.service-token")
+    }
+}
+
+impl<P: TokenProfileMarker> JwtSigningBinding<P> {
+    fn from_parts(active_key: crate::KeyId, purpose: &'static str) -> Self {
+        Self {
+            active_key,
+            purpose: crate::SigningPurpose::new(purpose),
+            _profile: PhantomData,
+        }
+    }
+
+    /// Algorithm fixed by the sealed token profile.
+    pub fn algorithm(&self) -> TokenAlgorithm {
+        P::policy().algorithm()
+    }
+
+    /// Active key selected for minting; next and retiring keys are never exposed here.
+    pub fn active_key(&self) -> &crate::KeyId {
+        &self.active_key
+    }
+
+    /// Canonical, profile-owned signing purpose.
+    pub fn purpose(&self) -> &crate::SigningPurpose {
+        &self.purpose
+    }
+
+    /// Build the only JWT signing request shape admitted by this binding.
+    pub fn sign_request(&self, message: impl Into<crate::RedactedBytes>) -> crate::SignRequest {
+        crate::SignRequest {
+            key: self.active_key.clone(),
+            purpose: self.purpose.clone(),
+            message: message.into(),
+        }
+    }
+
+    /// Check that an untrusted generic signer request remains inside this JWT capability.
+    pub fn accepts(&self, request: &crate::SignRequest) -> bool {
+        request.key == self.active_key && request.purpose == self.purpose
+    }
 }
 
 /// service-token 对 exact-one `X-Tenant-ID` 的 typed challenger（闭合类型）。

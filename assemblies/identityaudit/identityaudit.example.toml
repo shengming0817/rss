@@ -53,7 +53,7 @@ maxConnections = 5
 addr = "https://vault.example.com:8200"
 caCertPemPath = "/run/rss/vault-ca.pem"
 transitMount = "transit"
-signingKeyName = "identity-access"
+signingKeyName = "identity-access-es256"
 dlxPayloadKeyName = "identityaudit-dlx-payload"
 readinessSeconds = 10
 

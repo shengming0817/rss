@@ -46,7 +46,7 @@ pub use config::{
 #[cfg(feature = "backend")]
 pub use jwks::{
     AccessJwksKeyIsolation, AccessJwksKeyIsolationGeneration, IsolatedJwksKeySource, JwksError,
-    JwksKeySource, JwksReadinessHandle,
+    JwksKeySource, JwksReadinessHandle, RssSigningKeyProofError, prove_rss_signer_matches_jwks,
 };
 
 use std::marker::PhantomData;

@@ -126,6 +126,8 @@ pub(crate) async fn build(
         ),
         Vec::new(),
     )?);
+    let identity = build_identity(identity)?;
+    let identity_signing_binding = identity.runtime_config.jwt_signing_binding().clone();
 
     let auth_audit_sink_constructor = roles.auth_audit_sink()?;
     let distributed_cas_constructor = roles.distributed_cas_store()?;
@@ -212,7 +214,16 @@ pub(crate) async fn build(
         .finish(lock_output)?
         .transfer(transaction.provider_output_mut());
 
-    let vault = build_vault(vault, vault_signer_token, vault_dlx_token).await?;
+    let oidc = build_rss_access_provider(oidc, &pg)?;
+    let rss_jwks = oidc.jwks_readiness();
+    let vault = build_vault(
+        vault,
+        vault_signer_token,
+        vault_dlx_token,
+        identity_signing_binding,
+        rss_jwks,
+    )
+    .await?;
     let signer = Arc::clone(&vault.signer);
     let signer_output = bootstrap::DomainModuleResult {
         probes: Vec::from([vault.signer_readiness_probe]),
@@ -241,7 +252,6 @@ pub(crate) async fn build(
             .context("build identityaudit DLX key name")?,
     );
 
-    let oidc = build_rss_access_provider(oidc, &pg)?;
     let (rss_provider, grants, listener_pdp_lifecycle) =
         self::build_rss_listener_pdp_jwks_lifecycle(oidc);
     let listener_pdp =
@@ -270,11 +280,6 @@ pub(crate) async fn build(
     });
     let metrics_port: Arc<dyn diport::MetricsExporter> = metrics;
 
-    let identity = build_identity(identity)?;
-    anyhow::ensure!(
-        identity.runtime_config.jwt_key_id() == vault.signing_key_name,
-        "identityaudit identity.keyId must equal vault.signingKeyName"
-    );
     let tenant_authority = build_tenant_authority(
         tenant_authority_key,
         eventing.tenant_authority_ttl,
@@ -540,7 +545,6 @@ async fn verify_audit_chain_key(
 struct VaultProducts {
     signer: Arc<vault::VaultSigner>,
     dlx_key_provider: Arc<vault::VaultKeyProvider>,
-    signing_key_name: String,
     dlx_key_name: String,
     signer_readiness_worker: bootstrap::WorkerSpec,
     signer_readiness_probe: (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>),
@@ -552,8 +556,10 @@ async fn build_vault(
     config: config::VaultConfig,
     signer_token: zeroize::Zeroizing<String>,
     dlx_token: zeroize::Zeroizing<String>,
+    signing_binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
+    jwks: oidc::JwksReadinessHandle,
 ) -> anyhow::Result<VaultProducts> {
-    let (addr, ca_path, mount, signing_key_name, dlx_key_name, timeout) =
+    let (addr, ca_path, mount, _signing_key_name, dlx_key_name, timeout) =
         config.into_vault_inputs();
     let allow_loopback_http = url::Url::parse(&addr)
         .context("parse captured identityaudit Vault address")?
@@ -568,22 +574,22 @@ async fn build_vault(
         .build()
         .context("build identityaudit Vault client")?;
     let signer = if allow_loopback_http {
-        vault::VaultSigner::new_allow_http(
+        vault::VaultSigner::new_rss_access_allow_http(
             client.clone(),
             addr.clone(),
             signer_token.to_string(),
             mount.clone(),
             timeout,
-            vault::SignatureMarshaling::Jws,
+            signing_binding.clone(),
         )
     } else {
-        vault::VaultSigner::new(
+        vault::VaultSigner::new_rss_access(
             client.clone(),
             addr.clone(),
             signer_token.to_string(),
             mount.clone(),
             timeout,
-            vault::SignatureMarshaling::Jws,
+            signing_binding.clone(),
         )
     }
     .context("build identityaudit Vault signer")?;
@@ -602,7 +608,7 @@ async fn build_vault(
         }
         .context("build identityaudit Vault DLX key provider")?,
     );
-    verify_vault_signer(&signer, &signing_key_name).await?;
+    verify_vault_signer(&signer, &signing_binding, &jwks).await?;
     verify_vault_key_provider(&dlx_key_provider, &dlx_key_name).await?;
 
     let readiness = Arc::new(VaultReadiness::healthy());
@@ -626,7 +632,7 @@ async fn build_vault(
     );
     let worker_signer = Arc::clone(&signer);
     let worker_key_provider = Arc::clone(&dlx_key_provider);
-    let worker_signing_key = signing_key_name.clone();
+    let worker_signing_binding = signing_binding;
     let worker_dlx_key = dlx_key_name.clone();
     let signer_readiness = Arc::clone(&readiness);
     let signer_readiness_worker = bootstrap::WorkerSpec::phase_one(move |token| {
@@ -634,7 +640,8 @@ async fn build_vault(
             token,
             timeout,
             worker_signer,
-            worker_signing_key,
+            worker_signing_binding,
+            jwks,
             signer_readiness,
         ))
     });
@@ -650,7 +657,6 @@ async fn build_vault(
     Ok(VaultProducts {
         signer,
         dlx_key_provider,
-        signing_key_name,
         dlx_key_name,
         signer_readiness_worker,
         signer_readiness_probe,
@@ -659,16 +665,14 @@ async fn build_vault(
     })
 }
 
-async fn verify_vault_signer(signer: &vault::VaultSigner, key_name: &str) -> anyhow::Result<()> {
-    use diport::Signer as _;
-    signer
-        .sign(diport::SignRequest {
-            key: diport::KeyId::new(key_name),
-            purpose: diport::SigningPurpose::new("auth.jwt.access"),
-            message: diport::RedactedBytes::new(b"identityaudit-readiness".to_vec()),
-        })
+async fn verify_vault_signer(
+    signer: &vault::VaultSigner,
+    binding: &diport::JwtSigningBinding<diport::RssAccessProfile>,
+    jwks: &oidc::JwksReadinessHandle,
+) -> anyhow::Result<()> {
+    oidc::prove_rss_signer_matches_jwks(signer, binding, jwks)
         .await
-        .context("verify identityaudit Vault signer readiness")?;
+        .context("verify identityaudit Vault signer and JWKS key pair")?;
     Ok(())
 }
 
@@ -825,7 +829,8 @@ impl VaultReadinessWorker {
         token: tokio_util::sync::CancellationToken,
         period: Duration,
         signer: Arc<vault::VaultSigner>,
-        signing_key: String,
+        signing_binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
+        jwks: oidc::JwksReadinessHandle,
         readiness: Arc<VaultReadiness>,
     ) -> Self {
         let run_token = token.clone();
@@ -838,7 +843,7 @@ impl VaultReadinessWorker {
                     _ = interval.tick() => {
                         let signer_ready = tokio::select! {
                             () = run_token.cancelled() => break,
-                            result = verify_vault_signer(&signer, &signing_key) => result.is_ok(),
+                            result = verify_vault_signer(&signer, &signing_binding, &jwks) => result.is_ok(),
                         };
                         readiness.signer.store(
                             signer_ready,
@@ -926,6 +931,7 @@ struct OidcProducts {
     grants: Arc<identity::AuthGrantValidationService>,
     probe_name: primitives::ProbeName,
     probe: AccessTokenJwksReadyProbe,
+    jwks: oidc::JwksReadinessHandle,
 }
 
 fn build_rss_listener_pdp_jwks_lifecycle(
@@ -941,6 +947,7 @@ fn build_rss_listener_pdp_jwks_lifecycle(
         grants,
         probe_name,
         probe,
+        jwks: _,
     } = products;
     let managed_resource =
         SharedManagedResource::boxed(Arc::clone(&provider), "identityaudit-rss-access-verifier");
@@ -965,13 +972,17 @@ impl OidcProducts {
     fn provider(&self) -> Arc<oidc::OidcProvider<diport::RssAccessProfile>> {
         Arc::clone(&self.provider)
     }
+
+    fn jwks_readiness(&self) -> oidc::JwksReadinessHandle {
+        self.jwks.clone()
+    }
 }
 
 fn build_rss_access_provider(
     config: config::OidcConfig,
     pg: &postgres::PgRuntimeHandle,
 ) -> anyhow::Result<OidcProducts> {
-    let (provider, probe_name, probe) = build_rss_access_verifier(config)?;
+    let (provider, probe_name, probe, jwks) = build_rss_access_verifier(config)?;
     let clock: Arc<dyn diport::Clock> = Arc::new(crate::SystemClock);
     let grants = identity_composition::access_grant_validation_service(
         &pg.for_domain::<postgres::caps::Identity>(),
@@ -982,6 +993,7 @@ fn build_rss_access_provider(
         grants,
         probe,
         probe_name,
+        jwks,
     })
 }
 
@@ -991,6 +1003,7 @@ fn build_rss_access_verifier(
     Arc<oidc::OidcProvider<diport::RssAccessProfile>>,
     primitives::ProbeName,
     AccessTokenJwksReadyProbe,
+    oidc::JwksReadinessHandle,
 )> {
     let (issuer, audience, path, refresh) = config.into_oidc_inputs();
     let source = oidc::JwksKeySource::load_and_watch(
@@ -1010,15 +1023,15 @@ fn build_rss_access_verifier(
     ));
     let probe_name = primitives::ProbeName::parse("identityaudit_rss_jwks_ready")
         .context("build identityaudit JWKS probe name")?;
-    let probe = AccessTokenJwksReadyProbe::rss_access(probe_name.clone(), readiness);
-    Ok((provider, probe_name, probe))
+    let probe = AccessTokenJwksReadyProbe::rss_access(probe_name.clone(), readiness.clone());
+    Ok((provider, probe_name, probe, readiness))
 }
 
 #[cfg(test)]
 pub(crate) fn rss_access_provider_for_test(
     config: config::OidcConfig,
 ) -> anyhow::Result<Arc<oidc::OidcProvider<diport::RssAccessProfile>>> {
-    let (provider, _, _) = build_rss_access_verifier(config)?;
+    let (provider, _, _, _) = build_rss_access_verifier(config)?;
     Ok(provider)
 }
 
@@ -1037,7 +1050,7 @@ fn build_identity(config: config::IdentityConfig) -> anyhow::Result<IdentityInpu
             access_ttl,
             auth_grant_ttl,
             refresh_ttl,
-        ),
+        )?,
         blocklist,
     })
 }
@@ -1157,6 +1170,8 @@ mod tests {
     use axum::{Json, Router, routing::post};
     use base64::Engine as _;
     use diport::KeyProvider as _;
+    use p256::ecdsa::signature::Signer as _;
+    use p256::ecdsa::{Signature as P256Signature, SigningKey};
 
     #[tokio::test]
     #[allow(clippy::expect_used, clippy::panic)]
@@ -1271,15 +1286,78 @@ mod tests {
         (probe_name, lifecycle)
     }
 
-    async fn vault_sign_response() -> Json<serde_json::Value> {
+    async fn vault_sign_response(Json(body): Json<serde_json::Value>) -> Json<serde_json::Value> {
+        let message = body
+            .get("input")
+            .and_then(serde_json::Value::as_str)
+            .map(|input| {
+                base64::engine::general_purpose::STANDARD
+                    .decode(input)
+                    .expect("Vault test request input must be valid base64")
+            })
+            .expect("Vault test request must contain input");
+        let signing =
+            SigningKey::from_slice(&[0x42_u8; 32]).expect("fixed P-256 test scalar must be valid");
+        let signature: P256Signature = signing.sign(&message);
         Json(serde_json::json!({
             "data": {
                 "signature": format!(
                     "vault:v1:{}",
-                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([7_u8; 64])
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signature.to_bytes())
                 )
             }
         }))
+    }
+
+    static TEST_JWKS_SEQUENCE: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    struct TestJwksFile(std::path::PathBuf);
+
+    impl TestJwksFile {
+        fn new(kid: &str) -> anyhow::Result<Self> {
+            let signing = SigningKey::from_slice(&[0x42_u8; 32])
+                .map_err(|_| anyhow::anyhow!("fixed P-256 test scalar is invalid"))?;
+            let point = signing.verifying_key().to_encoded_point(false);
+            let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                point
+                    .x()
+                    .ok_or_else(|| anyhow::anyhow!("missing test P-256 x"))?,
+            );
+            let y = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                point
+                    .y()
+                    .ok_or_else(|| anyhow::anyhow!("missing test P-256 y"))?,
+            );
+            let path = std::env::temp_dir().join(format!(
+                "rss-identityaudit-jwks-{}-{}.json",
+                std::process::id(),
+                TEST_JWKS_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+            ));
+            std::fs::write(
+                &path,
+                format!(
+                    r#"{{"keys":[{{"kty":"EC","crv":"P-256","kid":"{kid}","alg":"ES256","x":"{x}","y":"{y}"}}]}}"#
+                ),
+            )?;
+            Ok(Self(path))
+        }
+
+        fn source(&self) -> anyhow::Result<oidc::JwksKeySource> {
+            oidc::JwksKeySource::load_and_watch(
+                "identityaudit-vault-proof-test",
+                &self.0,
+                Duration::from_secs(3_600),
+                tokio_util::sync::CancellationToken::new(),
+            )
+            .map_err(anyhow::Error::new)
+        }
+    }
+
+    impl Drop for TestJwksFile {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
     }
 
     async fn vault_encrypt_response(
@@ -1585,6 +1663,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn identity_vault_key_mismatch_is_rejected_during_config_parse_before_external_io() {
+        let document = include_str!("../identityaudit.example.toml")
+            .replace("keyId = \"identity-access-es256\"", "keyId = \"wrong-key\"");
+        let Err(error) = crate::config::parse_for_test(&document) else {
+            panic!("mismatched identity and Vault key IDs must be rejected");
+        };
+        assert_eq!(
+            error,
+            crate::config::ConfigError::InvalidValue("identity.keyId")
+        );
+    }
+
     #[tokio::test]
     async fn vault_builder_preflights_both_capabilities_and_worker_drains() -> anyhow::Result<()> {
         let (address, server) = local_vault().await?;
@@ -1596,13 +1687,16 @@ mod tests {
             .replace("/run/rss/vault-ca.pem", system_ca()?);
         let config = crate::config::parse_for_test(&document)?;
         let (_, _, _, _, vault_config, _) = config.into_sections();
+        let jwks_file = TestJwksFile::new("identity-access-es256")?;
+        let jwks_source = jwks_file.source()?;
         let products = build_vault(
             vault_config,
             zeroize::Zeroizing::new("signer-token".to_owned()),
             zeroize::Zeroizing::new("dlx-token".to_owned()),
+            diport::JwtSigningBinding::rss_access(diport::KeyId::new("identity-access-es256")),
+            jwks_source.readiness_handle(),
         )
         .await?;
-        assert_eq!(products.signing_key_name, "identity-access");
         assert_eq!(products.dlx_key_name, "identityaudit-dlx-payload");
         assert_eq!(
             products.signer_readiness_probe.1.check().status(),
@@ -1688,6 +1782,14 @@ mod tests {
         let built = build_identity(identity)?;
         assert_eq!(built.runtime_config.jwt_key_id(), "identity-access-es256");
         assert_eq!(
+            built
+                .runtime_config
+                .jwt_signing_binding()
+                .purpose()
+                .as_str(),
+            "auth.rss-access"
+        );
+        assert_eq!(
             built.runtime_config.auth_grant_ttl(),
             Duration::from_secs(2_592_000)
         );
@@ -1744,7 +1846,7 @@ mod tests {
         );
         let config = crate::config::parse_for_test(&document)?;
         let (_, _, oidc, _, _, _) = config.into_sections();
-        let (provider, name, probe) = build_rss_access_verifier(oidc)?;
+        let (provider, name, probe, _) = build_rss_access_verifier(oidc)?;
         assert_eq!(name.as_str(), "identityaudit_rss_jwks_ready");
         assert_eq!(
             bootstrap::HealthProbe::check(&probe).status(),
@@ -1788,7 +1890,7 @@ mod tests {
         );
         let config = crate::config::parse_for_test(&document)?;
         let (_, _, oidc, _, _, _) = config.into_sections();
-        let (provider, probe_name, probe) = build_rss_access_verifier(oidc)?;
+        let (provider, probe_name, probe, jwks) = build_rss_access_verifier(oidc)?;
         let products = OidcProducts {
             provider,
             grants: Arc::new(identity::AuthGrantValidationService::new(
@@ -1797,6 +1899,7 @@ mod tests {
             )),
             probe_name: probe_name.clone(),
             probe,
+            jwks,
         };
         let (provider, _grants, lifecycle) = build_rss_listener_pdp_jwks_lifecycle(products);
         let output = lifecycle.into_output();

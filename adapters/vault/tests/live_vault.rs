@@ -44,7 +44,7 @@ use tracing::span::Attributes;
 use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context as LayerContext, Layer};
 use tracing_subscriber::prelude::*;
-use vault::{SignatureMarshaling, VaultKeyProvider, VaultSigner};
+use vault::{VaultKeyProvider, VaultSigner};
 use vocab::tenant::TenantId;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -90,13 +90,13 @@ fn key_provider(
 
 #[allow(clippy::expect_used)]
 fn signer(inputs: &live_vault_support::LiveVaultInputs, client: reqwest::Client) -> VaultSigner {
-    VaultSigner::new_allow_http(
+    VaultSigner::new_rss_access_allow_http(
         client,
         inputs.addr.clone(),
         inputs.token.clone(),
         inputs.mount.clone(),
         REQUEST_TIMEOUT,
-        SignatureMarshaling::Jws,
+        diport::JwtSigningBinding::rss_access(diport::KeyId::new(inputs.signing_key.clone())),
     )
     .expect("valid config")
 }

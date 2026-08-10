@@ -105,7 +105,7 @@ mod domains {
                 deps.pg.for_domain(),
                 Arc::clone(&deps.signer),
                 Arc::new(SystemClock),
-                deps.identity_config.jwt_issuer_config()?,
+                deps.identity_config.jwt_issuer_config(),
                 deps.identity_config.auth_grant_ttl(),
                 deps.identity_config.refresh_ttl(),
                 Arc::clone(&deps.blocklist),

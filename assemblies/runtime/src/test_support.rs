@@ -343,6 +343,7 @@ pub fn build_vault_runtime_from_values(
     addr: String,
     token: String,
     transit_mount: String,
+    signing_key_id: String,
     settings_key_name: String,
     tenant_store_allowlist_json: String,
 ) -> anyhow::Result<(
@@ -354,6 +355,7 @@ pub fn build_vault_runtime_from_values(
         addr,
         token,
         transit_mount,
+        signing_key_id,
         settings_key_name,
         tenant_store_allowlist_json,
     )

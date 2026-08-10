@@ -35,11 +35,6 @@ const MAX_SERVICE_TOKEN_REPLAY_TIMEOUT: Duration = Duration::from_secs(60);
 /// 短密钥削弱 MAC 强度，故构造期 fail-fast 拒（空密钥是其子集）。`pub(crate)`：JWKS `oct` key 解析（[`crate::jwks`]）
 /// 复用同一最小强度约束（单源）。
 pub(crate) const MIN_HS256_SECRET_BYTES: usize = 32;
-/// 默认 tenant claim 名（从 JWT extra 取 `tenant_id` 字段，可经 builder 覆盖）。
-const DEFAULT_TENANT_CLAIM: &str = "tenant_id";
-/// 默认 kind claim 名（从 JWT extra 取 `kind` 字段，可经 builder 覆盖）。
-const DEFAULT_KIND_CLAIM: &str = "kind";
-
 /// 构造期配置错误（fail-fast）。`#[non_exhaustive]`：新增校验项不破坏 match。
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -463,8 +458,8 @@ impl<P: TokenProfileMarker> VerifierConfigBuilder<P> {
         Self {
             issuer: issuer.into(),
             audience: audience.into(),
-            tenant_claim: DEFAULT_TENANT_CLAIM.to_string(),
-            kind_claim: DEFAULT_KIND_CLAIM.to_string(),
+            tenant_claim: P::policy().tenant_claim_name().to_string(),
+            kind_claim: P::policy().kind_claim_name().to_string(),
             kind_allowlist: HashSet::new(),
             federated_permission_allowlist: HashSet::new(),
             leeway_secs: DEFAULT_LEEWAY_SECS,
@@ -667,16 +662,6 @@ macro_rules! impl_access_builder {
             }
 
             #[must_use]
-            pub fn tenant_claim(self, name: impl Into<String>) -> Self {
-                self.with_tenant_claim(name)
-            }
-
-            #[must_use]
-            pub fn kind_claim(self, name: impl Into<String>) -> Self {
-                self.with_kind_claim(name)
-            }
-
-            #[must_use]
             pub fn leeway_secs(self, secs: u64) -> Self {
                 self.with_leeway_secs(secs)
             }
@@ -706,6 +691,18 @@ impl VerifierConfigBuilder<FederatedAccessProfile> {
     #[must_use]
     pub fn trust_kind(self, kind: impl Into<String>) -> Self {
         self.with_trusted_kind(kind)
+    }
+
+    /// Map the independently trusted IdP's tenant extension claim.
+    #[must_use]
+    pub fn tenant_claim(self, name: impl Into<String>) -> Self {
+        self.with_tenant_claim(name)
+    }
+
+    /// Map the independently trusted IdP's principal-kind extension claim.
+    #[must_use]
+    pub fn kind_claim(self, name: impl Into<String>) -> Self {
+        self.with_kind_claim(name)
     }
 }
 
@@ -782,6 +779,14 @@ mod tests {
             .build()
     }
 
+    #[allow(clippy::expect_used)]
+    fn federated_permissions() -> FederatedPermissionUniverse {
+        FederatedPermissionUniverse::try_new([vocab::GrantPermission::route(
+            vocab::RoutePermissionId::SettingsConfigPublish,
+        )])
+        .expect("non-empty unique permission universe")
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn empty_issuer_returns_error() {
@@ -821,20 +826,28 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn empty_tenant_claim_name_returns_error() {
-        let result = VerifierConfigBuilder::<diport::RssAccessProfile>::new("https://iss", "aud")
-            .keys_static(es256_key_source())
-            .tenant_claim("")
-            .build();
+        let result = VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+            "https://iss",
+            "aud",
+            federated_permissions(),
+        )
+        .keys_static(es256_key_source())
+        .tenant_claim("")
+        .build();
         assert!(matches!(result, Err(ConfigError::EmptyClaimName)));
     }
 
     #[test]
     #[allow(clippy::expect_used)]
     fn empty_kind_claim_name_returns_error() {
-        let result = VerifierConfigBuilder::<diport::RssAccessProfile>::new("https://iss", "aud")
-            .keys_static(es256_key_source())
-            .kind_claim("")
-            .build();
+        let result = VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+            "https://iss",
+            "aud",
+            federated_permissions(),
+        )
+        .keys_static(es256_key_source())
+        .kind_claim("")
+        .build();
         assert!(matches!(result, Err(ConfigError::EmptyClaimName)));
     }
 
@@ -985,10 +998,14 @@ mod tests {
 
     #[test]
     fn whitespace_claim_name_returns_error() {
-        let result = VerifierConfigBuilder::<diport::RssAccessProfile>::new("https://iss", "aud")
-            .keys_static(es256_key_source())
-            .tenant_claim("   ")
-            .build();
+        let result = VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+            "https://iss",
+            "aud",
+            federated_permissions(),
+        )
+        .keys_static(es256_key_source())
+        .tenant_claim("   ")
+        .build();
         assert!(matches!(result, Err(ConfigError::EmptyClaimName)));
     }
 

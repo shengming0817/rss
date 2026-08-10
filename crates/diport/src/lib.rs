@@ -195,7 +195,7 @@ pub use outbox_emitter::{
     OutboxActor, OutboxEmitError, OutboxEmitErrorKind, OutboxEmitter, OutboxEnvelopeParts,
 };
 pub use pdp::{
-    DynPdp, DynServiceTokenReplayStore, FederatedAccessProfile, Pdp, PdpError,
+    DynPdp, DynServiceTokenReplayStore, FederatedAccessProfile, JwtSigningBinding, Pdp, PdpError,
     ProjectionOperatorTokenProfile, RawCredential, RssAccessProfile, SERVICE_TOKEN_TENANT_HEADER,
     ServiceTokenProfile, ServiceTokenReplayDeadline, ServiceTokenReplayDeadlineError,
     ServiceTokenReplayDisposition, ServiceTokenReplayKey, ServiceTokenReplayKeyError,

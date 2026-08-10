@@ -37,6 +37,7 @@ fn build_runtime(endpoint: String, allowlist: String) -> TestResult<vault::Vault
         endpoint,
         "journey-vault-token".to_owned(),
         "transit".to_owned(),
+        "rss-jwt-es256".to_owned(),
         "settings-config".to_owned(),
         allowlist,
     )?;

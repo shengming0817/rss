@@ -1073,7 +1073,6 @@ fn test_identity_domain_with_audit_role(
             authn::JwtIssuerConfig::rss_access(
                 authn::SigningKeyRing::single(diport::KeyId::new("runtime-test-key"))
                     .expect("non-empty signing key id"),
-                diport::SigningPurpose::new("runtime-test"),
                 "https://issuer.test",
                 "rss-test",
                 Duration::from_secs(900),

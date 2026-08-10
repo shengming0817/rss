@@ -5,9 +5,9 @@
 //! `SecretResolver` 由 **settings 域消费**（`SecretService`），故经 per-domain [`VaultDomainDeps<D>`]
 //! + sealed [`caps`] 隔离派发（与 pg `PgDomainDeps<caps::Settings>` 同范式）。
 //!
-//! `VaultSigner`（`diport::Signer`，provider-agnostic infra）当前**无 live 消费**（deviceloop 证书签发
-//! 待落地）——故本 PR **不**在 bundle 装 signer / 不造空 `VaultInfraDeps` 壳（避免预设未来需求 / 死代码）；
-//! signer 随其消费方落地时加入 `VaultInfraDeps`（#1498 follow-up 范式同此 bundle）。
+//! `VaultSigner` 是 RSS access JWT 的 profile-bound capability，由 runtime/identityaudit 各自的 identity
+//! signer provider output 持有唯一 lifecycle guard；它不属于 Settings capability bundle，避免一个资源
+//! 被两个装配出口重复注册。
 //!
 //! ## 构造模型（vault TLS-agnostic 注入）
 //!
