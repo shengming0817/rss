@@ -26,6 +26,7 @@ test-support = [
     "settings-composition/test-support",
     "httpserve/test-util",
     "runtimeexec/test-support",
+    "dep:ratelimit",
 ]
 
 [dependencies]
@@ -52,7 +53,6 @@ prometheus_adapter = { package = "prometheus-adapter", path = "../../adapters/pr
     "backend",
 ] }
 primitives = { path = "../../crates/primitives" }
-ratelimit = { path = "../../adapters/ratelimit" }
 redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 runtimeexec = { path = "../../crates/runtimeexec" }
@@ -67,6 +67,7 @@ s3 = { path = "../../adapters/s3", features = ["backend"] }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { workspace = true }
 toml = { workspace = true }
+ratelimit = { path = "../../adapters/ratelimit", optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 vault = { path = "../../adapters/vault", features = ["backend"] }
@@ -74,6 +75,7 @@ vocab = { path = "../../crates/vocab" }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+ratelimit = { path = "../../adapters/ratelimit" }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 vault = { path = "../../adapters/vault", features = ["backend", "test-support"] }
 base64 = { workspace = true }

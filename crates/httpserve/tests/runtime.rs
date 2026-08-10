@@ -196,7 +196,7 @@ async fn mount_non_primary_route_is_reachable_after_finalize() {
         )
     });
     let plan = AuthPlan::none(ListenerKind::Health).unwrap();
-    let router = finalize_auth(routes, plan)
+    let router = httpserve::finalize_health(routes, plan)
         .unwrap()
         .into_plaintext_router_for_test();
 
@@ -942,7 +942,7 @@ async fn undeclared_redirect_status_fails_closed() {
 async fn healthz_is_200() {
     let routes =
         httpserve::health::routes(|| primitives::HealthReport::aggregate(vec![]), String::new);
-    let router = finalize_auth(routes, AuthPlan::none(ListenerKind::Health).unwrap())
+    let router = httpserve::finalize_health(routes, AuthPlan::none(ListenerKind::Health).unwrap())
         .unwrap()
         .into_plaintext_router_for_test();
     let resp = router
@@ -966,7 +966,7 @@ fn health_authenticated_plan_is_rejected_before_serving() {
         let plan = AuthPlan::new(ListenerKind::Health, scheme).unwrap();
 
         assert!(matches!(
-            finalize_auth(routes, plan),
+            httpserve::finalize_health(routes, plan),
             Err(RouteGroupError::UnsupportedAuthPlan {
                 listener: ListenerKind::Health,
                 scheme: actual,
@@ -988,7 +988,7 @@ async fn readyz_reflects_aggregated_health() {
             "ok",
         )])
     };
-    let router = finalize_auth(
+    let router = httpserve::finalize_health(
         httpserve::health::routes(healthy, String::new),
         AuthPlan::none(ListenerKind::Health).unwrap(),
     )
@@ -1008,7 +1008,7 @@ async fn readyz_reflects_aggregated_health() {
             "down",
         )])
     };
-    let router = finalize_auth(
+    let router = httpserve::finalize_health(
         httpserve::health::routes(unhealthy, String::new),
         AuthPlan::none(ListenerKind::Health).unwrap(),
     )
@@ -1022,7 +1022,7 @@ async fn readyz_reflects_aggregated_health() {
 
     // 空 checks（fail-closed→Unhealthy）→ 503。
     let empty = || HealthReport::aggregate(vec![]);
-    let router = finalize_auth(
+    let router = httpserve::finalize_health(
         httpserve::health::routes(empty, String::new),
         AuthPlan::none(ListenerKind::Health).unwrap(),
     )
@@ -1066,7 +1066,7 @@ async fn server_budget_times_out_whole_request_with_shared_envelope_and_drops_ha
         )
     });
     let budget = httpserve::ServerRequestBudget::from_millis(NonZeroU64::new(20).unwrap());
-    let router = finalize_auth(routes, AuthPlan::none(ListenerKind::Health).unwrap())
+    let router = httpserve::finalize_health(routes, AuthPlan::none(ListenerKind::Health).unwrap())
         .unwrap()
         .into_plaintext_router_for_test_with_budget(budget);
 

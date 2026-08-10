@@ -912,14 +912,14 @@ mod tests {
             render_json(&build_fixture_model_without_cargo(&root, "runtime")?)?
         );
         assert!(json.contains("\"inAssembly\": false"));
-        assert!(mermaid.contains("[provider active ephemeral-memory]"));
+        assert!(mermaid.contains("[provider active persistent]"));
         assert!(mermaid.contains("[component external] outside"));
         assert!(mermaid.contains("Source: contracts/event/identity/v1/created/contract.toml"));
         assert!(!json.contains(root.to_string_lossy().as_ref()));
         let provider = model
             .nodes
             .iter()
-            .find(|node| node.label.contains("GovernorLimiter"))
+            .find(|node| node.label.contains("RedisRateLimiter"))
             .context("fixture provider missing")?;
         let consumer = model
             .nodes
@@ -1355,11 +1355,14 @@ domains = ["{domain}"]
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
-providerCrate = "ratelimit"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "{consumer}"
 lifecycle = "active"
-durability = "ephemeral-memory"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-open"
 purpose = "test"
 outputs = []
 

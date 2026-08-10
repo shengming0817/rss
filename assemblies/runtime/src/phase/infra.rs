@@ -38,6 +38,8 @@ pub(super) struct RuntimeWiringInputs {
 }
 
 struct BuiltInfra {
+    rate_limiter: Arc<redis::RedisRateLimiter>,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
     deps: SharedRuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
     wiring_inputs: RuntimeWiringInputs,
@@ -95,6 +97,8 @@ struct PhaseACarried {
     domain_modules: crate::domains::DomainModuleInputs,
     audit_consumer_key: primitives::MacKey,
     auth_grant_sweep_interval: Duration,
+    rate_limiter: Arc<redis::RedisRateLimiter>,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
     vault: vault::VaultRuntimeDeps,
     identity_signer: Arc<vault::VaultSigner>,
     settings_config_value_key_name: diport::KeyName,
@@ -128,7 +132,6 @@ impl<'a> ProvidersBuilt<'a> {
             mut provider_factories,
             listener_execution_plan,
             placement_execution_plan,
-            rate_limiter,
             serving_config,
             runtime_rss_access,
             runtime_federated_access,
@@ -182,6 +185,8 @@ impl<'a> ProvidersBuilt<'a> {
                 domain_modules,
                 audit_consumer_key,
                 auth_grant_sweep_interval,
+                rate_limiter,
+                trusted_proxy_config,
                 vault,
                 identity_signer,
                 settings_config_value_key_name,
@@ -357,6 +362,8 @@ impl<'a> ProvidersBuilt<'a> {
                 };
 
             Ok(BuiltInfra {
+                rate_limiter,
+                trusted_proxy_config,
                 deps,
                 s3_canary_config,
                 wiring_inputs,
@@ -376,7 +383,8 @@ impl<'a> ProvidersBuilt<'a> {
                 provider_factories,
                 listener_execution_plan,
                 placement_execution_plan,
-                rate_limiter,
+                rate_limiter: built.rate_limiter,
+                trusted_proxy_config: built.trusted_proxy_config,
                 deps: built.deps,
                 s3_canary_config: built.s3_canary_config,
                 wiring_inputs: built.wiring_inputs,
@@ -415,6 +423,8 @@ impl<'a> ProvidersBuilt<'a> {
             domain_modules,
             audit_consumer_key,
             auth_grant_sweep_interval,
+            trusted_proxy_config,
+            rate_limit_quota,
         } = serving_config;
         let pg_config = PgRuntimeConfig::from_snapshot(config)
             .context("build snapshot-backed postgres config")?;
@@ -498,6 +508,21 @@ impl<'a> ProvidersBuilt<'a> {
         let (redis, redis_readiness_period) = build_redis_runtime_deps(redis_config)
             .await
             .context("setup redis deps")?;
+        let listener_rate_limiter_permit = provider_factories.listener_rate_limiter()?;
+        let rate_limiter_capability = redis
+            .infra()
+            .rate_limiter_capability(crate::providers_gen::ASSEMBLY_NAMESPACE, rate_limit_quota)
+            .await
+            .context("verify Redis listener rate-limiter capability")?;
+        let (listener_rate_limiter_output, rate_limiter) =
+            crate::provider_output::ProviderOutput::listener_rate_limiter(
+                listener_rate_limiter_permit,
+                rate_limiter_capability,
+            );
+        let rate_limiter = Arc::new(rate_limiter);
+        provider_build
+            .record(listener_rate_limiter_output)
+            .context("record listener rate-limiter provider output")?;
         let redis_ready = Arc::new(std::sync::atomic::AtomicBool::new(true));
         let redis_probe_name = primitives::ProbeName::parse(REDIS_READY_PROBE_NAME)
             .context("parse redis_ready probe name")?;
@@ -583,6 +608,8 @@ impl<'a> ProvidersBuilt<'a> {
                 domain_modules,
                 audit_consumer_key,
                 auth_grant_sweep_interval,
+                rate_limiter,
+                trusted_proxy_config,
                 vault,
                 identity_signer,
                 settings_config_value_key_name,

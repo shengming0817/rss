@@ -82,6 +82,11 @@ fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留�
   the OpenTelemetry UpDownCounter and carries only the identical begin-time method, scheme, and
   listener label set on increment and decrement. Histogram count is the request count; no duplicate
   request counter is emitted.
+- `http.server.rate_limit.decisions` is the middleware-owned decision counter. Its only label is the
+  closed `outcome=allowed|limited|provider_error|unknown_allowed`; it never carries client IP,
+  request ID, tenant, route, or Redis key. HTTP 429 volume remains visible through HTTP RED, so the
+  middleware does not emit one log per rejected request. Provider errors log only once per
+  consecutive failure episode and a successful provider decision resets the episode.
 - HTTP outcomes are closed to `completed|body_error|cancelled|timeout|panic`; status class is closed
   to `informational|success|redirection|client_error|server_error|other|none`; error type is a 5xx
   decimal status or `response_body_error|cancelled|timeout|panic`. Body error and cancellation take

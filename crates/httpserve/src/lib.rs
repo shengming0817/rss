@@ -14,6 +14,7 @@ pub mod error;
 pub mod health;
 mod middleware;
 pub mod protect;
+mod real_ip;
 pub mod routes;
 mod server_observation;
 
@@ -29,17 +30,19 @@ pub use auth::{
 pub use auth::{NonRssTestScheme, RssAccessRejectMatrixKind};
 pub use budget::ServerRequestBudget;
 pub use middleware::VerifiedRequestId;
-pub use middleware::rate_limit;
+pub use middleware::{rate_limit, with_client_rate_limit};
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};
+pub use real_ip::{RealIpLayer, ResolvedClientIp, TrustedProxyConfig, TrustedProxyConfigError};
 pub use routes::{
     Admin, AuthenticatedRoutes, ClassifiedRouteState, ContractMarker,
     DeclaredProducerContractHandler, GeneratedEndpoint, GeneratedPrimaryEndpoint, Health, Internal,
     Listener, ListenerRouter, LocalOnlyAllowedEffect, NonPrimaryListener, Primary,
     ProducerAssuranceReceipt, ProducerAuthorization, ProducerMarker, ServerService,
     UnfinalizedRoutes, finalize_auth, finalize_auth_with_audit,
-    finalize_auth_with_audit_and_authorizer, finalize_primary_auth,
+    finalize_auth_with_audit_and_authorizer, finalize_health, finalize_primary_auth,
     finalize_primary_auth_with_audit,
 };
+pub use routes::{HealthRoutes, RateLimitedRoutes};
 #[cfg(any(test, feature = "test-util"))]
 pub use routes::{
     LocalOnlyMountedRouteProof, LocalOnlyRouteNotMounted, StatelessLocalOnlyMountedRouteProof,
@@ -53,7 +56,7 @@ pub use server_observation::{
 };
 
 /// 读框架注入的 request id（`request_id` 中间件在唯一 bindable 出口
-/// [`AuthenticatedRoutes::into_server_service`] 封为**最外层 request-context middleware**（仅机械
+/// bind capability 的 `into_server_service` 封为**最外层 request-context middleware**（仅机械
 /// security response-header layers 在其外），ROUTE-REQUESTID-OUTERMOST-01）。
 ///
 /// 供组合根叠在 `finalize_auth` 产物**外层**（但 request_id 内层）的中间件——如 #1109 验签桥——读

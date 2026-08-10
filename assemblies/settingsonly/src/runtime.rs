@@ -55,6 +55,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             compiled_plan.projection_capture(),
             config,
             secrets,
+            frontend.rate_limit_quota,
             transaction,
         )
         .await?;
@@ -124,19 +125,20 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
                 providers.readiness_startup_timeout,
                 ReadyAction::Log,
             )
-            .with_frontend(frontend),
+            .with_frontend(frontend)?,
             transaction,
         )
         .await
     }
 }
 
-pub(crate) struct AssemblyStartupInputs {
+pub(crate) struct AssemblyStartupInputs<S> {
     bindings: Vec<bootstrap::DomainBinding>,
     provider_activation: ProviderActivation,
     verifier: crate::auth_bridge::FederatedVerifier,
     audit_sink: httpserve::AuditSinkHandle,
-    limiter: Arc<ratelimit::GovernorLimiter>,
+    limiter: Arc<S>,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
     metrics: Arc<dyn diport::MetricsExporter>,
     primary: std::net::SocketAddr,
     admin: std::net::SocketAddr,
@@ -164,7 +166,7 @@ enum ProviderActivation {
     Fixture(runtimeexec::inventory::RuntimeInventorySeed),
 }
 
-impl AssemblyStartupInputs {
+impl AssemblyStartupInputs<redis::RedisRateLimiter> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn production(
         bindings: Vec<bootstrap::DomainBinding>,
@@ -174,7 +176,7 @@ impl AssemblyStartupInputs {
         build_metadata: Option<runtimeexec::inventory::BuildMetadata>,
         verifier: crate::auth_bridge::FederatedVerifier,
         audit_sink: httpserve::AuditSinkHandle,
-        limiter: Arc<ratelimit::GovernorLimiter>,
+        limiter: Arc<redis::RedisRateLimiter>,
         metrics: Arc<dyn diport::MetricsExporter>,
         primary: std::net::SocketAddr,
         admin: std::net::SocketAddr,
@@ -194,6 +196,7 @@ impl AssemblyStartupInputs {
             verifier,
             audit_sink,
             limiter,
+            trusted_proxy_config: httpserve::TrustedProxyConfig::disabled(),
             metrics,
             primary,
             admin,
@@ -206,8 +209,10 @@ impl AssemblyStartupInputs {
             activation_gate: None,
         }
     }
+}
 
-    #[cfg(feature = "test-support")]
+#[cfg(feature = "test-support")]
+impl AssemblyStartupInputs<ratelimit::GovernorLimiter> {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn fixture(
         bindings: Vec<bootstrap::DomainBinding>,
@@ -228,6 +233,7 @@ impl AssemblyStartupInputs {
             verifier,
             audit_sink,
             limiter,
+            trusted_proxy_config: httpserve::TrustedProxyConfig::disabled(),
             metrics,
             primary,
             admin,
@@ -239,10 +245,16 @@ impl AssemblyStartupInputs {
             activation_gate: None,
         }
     }
+}
 
-    fn with_frontend(mut self, frontend: crate::config::ServingFrontendConfig) -> Self {
+impl<S> AssemblyStartupInputs<S> {
+    fn with_frontend(
+        mut self,
+        frontend: crate::config::ServingFrontendConfig,
+    ) -> anyhow::Result<Self> {
+        self.trusted_proxy_config = frontend.trusted_proxy_config.clone();
         self.frontend = Some(frontend);
-        self
+        Ok(self)
     }
 
     #[cfg(feature = "test-support")]
@@ -252,8 +264,8 @@ impl AssemblyStartupInputs {
     }
 }
 
-pub(crate) async fn prepare_assembly(
-    mut inputs: AssemblyStartupInputs,
+pub(crate) async fn prepare_assembly<S>(
+    mut inputs: AssemblyStartupInputs<S>,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
 ) -> anyhow::Result<
     runtimeexec::PreparedLaunch<
@@ -261,7 +273,10 @@ pub(crate) async fn prepare_assembly(
         listeners::FinalizedProbeReceipt,
         ReadyHook,
     >,
-> {
+>
+where
+    S: diport::RateLimiter + Send + Sync + 'static,
+{
     let (mut registry, domain_output) = match bootstrap::compose_bindings(&mut inputs.bindings) {
         Ok(composed) => composed,
         Err(error) => {
@@ -299,6 +314,7 @@ pub(crate) async fn prepare_assembly(
         &mut registry,
         inputs.verifier,
         inputs.limiter,
+        inputs.trusted_proxy_config,
         inputs.metrics,
         inputs.audit_sink,
         reporter,

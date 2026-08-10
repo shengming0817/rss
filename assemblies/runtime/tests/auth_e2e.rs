@@ -1114,11 +1114,11 @@ impl diport::RateLimiter for AlwaysLimitedRateLimiter {
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 async fn rate_limit_blocks_before_jwt_auth_tripwire() {
     let limiter = Arc::new(AlwaysLimitedRateLimiter);
-    // 在 verify-bridge 后叠 rate-limit（对应 assemble_authed_routers 中的叠加顺序）。
-    let authed = jwt_router(true).layer(axum::middleware::from_fn_with_state(
+    let rate_limited = httpserve::with_client_rate_limit(
+        jwt_router(true),
         Arc::clone(&limiter),
-        httpserve::rate_limit::<AlwaysLimitedRateLimiter>,
-    ));
+        httpserve::TrustedProxyConfig::disabled(),
+    );
 
     let req = axum::http::Request::builder()
         .method(Method::GET)
@@ -1127,7 +1127,7 @@ async fn rate_limit_blocks_before_jwt_auth_tripwire() {
         .body(Body::empty())
         .unwrap();
 
-    let resp = authed
+    let resp = rate_limited
         .into_plaintext_router_for_test()
         .oneshot(req)
         .await

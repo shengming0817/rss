@@ -92,13 +92,24 @@ security-headers → request_id → correlation → server-request-budget → bo
   无声明或 chunked 的请求由 read-time 字节硬顶保证内存有界，未认证请求的 body 从不被读取。
   **不得**为了统一成 before-auth 413 而在 auth 前主动 buffer 未认证请求——那会回归 unauth DoS 姿态。
   保证由唯一 bindable 出口的结构 + 行为 tripwire 测试共同承担。
-- **`RATELIMIT-BEFORE-AUTH-01`**：限流是 opt-in 注入式，服务层不得提供默认 provider。
-  组合根必须叠在验签桥之后（⇒ outer 于桥 = before-auth），使用泛型静态分发而非 dyn state。
-  key 是 peer IP。超限返回 429 + `Retry-After` 整数秒。限流器**故障 fail-open**（不拒服务，记 error 日志）。
-  provider 经 assembly manifest 声明并由 `cargo xtask assembly validate` 校验。
-
-  已知边界：peer IP 在反向代理后退化为代理 IP（全局桶）。真正的 per-client 限流需要可信
-  `X-Forwarded-For` 解析，在该能力落地前不得把当前实现描述为 per-client。
+- **`RATELIMIT-BEFORE-AUTH-01`**：production 限流由组合根必填注入，服务层不得提供默认 provider。
+  三套组合根只能消费 `with_client_rate_limit` 漏斗，使用泛型静态分发而非 dyn state。
+  固定层序为 body-limit → RealIP → rate-limit → auth。RealIP 只在 immediate peer 属可信 CIDR
+  时从右向左剥离 XFF；任何重复、非法、超限或无不可信边界的输入均回退 socket peer，XFF
+  存在时禁止再读 X-Real-IP。Redis key 固定为
+  `_runtime:listener-rate-limit:v1:<assembly>:<sha256(opaque-key)>`，
+  跨副本共享配额且不保存原始 IP。超限返回 429 + `Retry-After` 整数秒；provider 故障
+  **fail-open**。manifest/catalog/lock/runtime-plan 共同固定 persistent + cluster-global + fail-open。
+  - `RSS_DEPLOYMENT_TRUSTED_PROXY_CIDRS` 是可选 JSON CIDR 数组，例如
+    `["10.0.0.0/8","2001:db8:ffff::/48"]`；缺失或 `[]` 表示 Disabled，格式/CIDR 非法则启动失败。
+    仅可列入会清除或覆盖外来 XFF/X-Real-IP 的真实直连代理；不得用全网 CIDR 作为便捷配置。
+  - `RSS_RATE_LIMIT_PER_SECOND` / `RSS_RATE_LIMIT_BURST` 各自允许 `1..=1_000_000`，缺省
+    10/20；零、非数字、非 Unicode 或超界值会记录不含原值的 warning，并仅让该项回默认。
+  - Redis check（含 pool checkout 与 Lua）有独立 100ms 上限；超时与 provider error 均进入
+    同一脱敏 fail-open 路径，不能耗尽全请求 budget 形成 503。
+  - 启动时必须用隔离、无客户端数据、有限 TTL 的 key 执行真实 GCRA Lua，验证
+    EVAL/SCRIPT 与 TIME/GET/SET ACL；成功后才铸造 move-only capability 并消费 provider receipt。
+    PING 成功但脚本能力不足必须启动失败，运行期故障仍 fail-open。
 
 ## Option 范式
 

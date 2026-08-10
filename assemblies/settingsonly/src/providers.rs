@@ -17,7 +17,7 @@ pub(crate) struct ProviderBundle {
     pub(crate) verifier: crate::auth_bridge::FederatedVerifier,
     pub(crate) audit_sink: httpserve::AuditSinkHandle,
     pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
-    pub(crate) limiter: Arc<ratelimit::GovernorLimiter>,
+    pub(crate) limiter: Arc<redis::RedisRateLimiter>,
     pub(crate) settings_readiness: settings_composition::SettingsReadinessDeps,
     pub(crate) eventing: crate::eventing::EventingInputs,
     pub(crate) role_closer: ProviderRoleCloser,
@@ -26,6 +26,8 @@ pub(crate) struct ProviderBundle {
 
 /// Closed production infrastructure; every field is a mandatory move-only capability or receipt.
 struct SettingsOnlyProductionInfra {
+    rate_limiter: Arc<redis::RedisRateLimiter>,
+    listener_rate_limiter: crate::providers_gen::ListenerRateLimiterReceipt,
     eventing: crate::eventing::EventingInputs,
     distributed_lock_store: crate::providers_gen::DistributedLockStoreReceipt,
     dlx_archive_key_provider: crate::providers_gen::DlxArchiveKeyProviderReceipt,
@@ -121,6 +123,7 @@ pub(crate) async fn build(
     projection_capture: eventexec::ProjectionCaptureView<'_>,
     config: config::SettingsOnlyConfig,
     secrets: config::ResolvedSecrets,
+    rate_limit_quota: diport::RateLimitQuota,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
 ) -> anyhow::Result<CompletedProviderBuild> {
     let config::SettingsOnlyConfigSections {
@@ -222,11 +225,6 @@ pub(crate) async fn build(
         ..Default::default()
     });
     let metrics_port: Arc<dyn diport::MetricsExporter> = metrics;
-    let limiter = crate::listeners::rate_limiter();
-    let listener_rate_limiter = listener_rate_limiter
-        .finish(bootstrap::DomainModuleResult::default())?
-        .transfer(transaction.provider_output_mut());
-
     let production = build_production_infra(
         production_infra,
         secrets,
@@ -240,6 +238,8 @@ pub(crate) async fn build(
         dlx_archive_key_constructor,
         dlx_archive_store_constructor,
         dlx_lifecycle_constructor,
+        listener_rate_limiter,
+        rate_limit_quota,
         transaction,
     )
     .await?;
@@ -252,7 +252,7 @@ pub(crate) async fn build(
             verifier,
             audit_sink,
             metrics: metrics_port,
-            limiter,
+            limiter: production.rate_limiter,
             settings_readiness,
             eventing: production.eventing,
             role_closer: ProviderRoleCloser {
@@ -264,7 +264,7 @@ pub(crate) async fn build(
                 dlx_hot_key_provider: production.dlx_hot_key_provider,
                 dlx_lifecycle_repository: production.dlx_lifecycle_repository,
                 listener_pdp,
-                listener_rate_limiter,
+                listener_rate_limiter: production.listener_rate_limiter,
                 settings_key_provider,
                 settings_secret_resolver,
                 distributed_cas_constructor,
@@ -298,6 +298,8 @@ async fn build_production_infra(
     dlx_archive_key_constructor: crate::providers_gen::DlxArchiveKeyProviderConstructor,
     dlx_archive_store_constructor: crate::providers_gen::DlxArchiveStoreConstructor,
     dlx_lifecycle_constructor: crate::providers_gen::DlxLifecycleRepositoryConstructor,
+    listener_rate_limiter_constructor: crate::providers_gen::ListenerRateLimiterConstructor,
+    rate_limit_quota: diport::RateLimitQuota,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
 ) -> anyhow::Result<SettingsOnlyProductionInfra> {
     let config::ProductionInfraConfig {
@@ -324,6 +326,15 @@ async fn build_production_infra(
     )
     .await
     .context("settingsonly Redis startup verification timed out")??;
+    let rate_limiter_capability = redis
+        .infra()
+        .rate_limiter_capability(crate::providers_gen::ASSEMBLY_NAMESPACE, rate_limit_quota)
+        .await
+        .context("verify settingsonly Redis rate-limiter capability")?;
+    let (listener_rate_limiter, rate_limiter) = listener_rate_limiter_constructor
+        .finish(rate_limiter_capability)?
+        .transfer(transaction.provider_output_mut());
+    let rate_limiter = Arc::new(rate_limiter);
     let redis_ready = Arc::new(AtomicBool::new(true));
     let redis_probe_name = primitives::ProbeName::parse(crate::readiness::REDIS)
         .context("build settingsonly Redis readiness probe name")?;
@@ -514,6 +525,8 @@ async fn build_production_infra(
         .transfer(transaction.provider_output_mut());
 
     Ok(SettingsOnlyProductionInfra {
+        rate_limiter,
+        listener_rate_limiter,
         eventing: crate::eventing::EventingInputs::new(
             pg.clone(),
             redis,
@@ -1453,7 +1466,11 @@ mod tests {
         );
         let listener_pdp = commit_listener_pdp_jwks_lifecycle(listener_pdp, listener_pdp_output)
             .expect("listener-pdp JWKS probe and resource batch");
-        let listener_rate_limiter = batch!(listener_rate_limiter, "listener-rate-limiter");
+        let listener_rate_limiter = roles
+            .listener_rate_limiter()
+            .expect("listener-rate-limiter constructor")
+            .finish_for_test(role_output("listener-rate-limiter"))
+            .expect("listener-rate-limiter batch");
         let settings_key_provider = batch!(settings_key_provider, "settings-key-provider");
         let settings_secret_resolver = batch!(settings_secret_resolver, "settings-secret-resolver");
 

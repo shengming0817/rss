@@ -1316,6 +1316,7 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
         audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
         audit_clock: Arc::new(SystemClock),
         rate_limiter: routes::build_runtime_rate_limiter(),
+        trusted_proxy_config: httpserve::TrustedProxyConfig::disabled(),
         metrics,
         framework_routes,
     })?;

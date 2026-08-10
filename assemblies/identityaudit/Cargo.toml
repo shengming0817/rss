@@ -24,6 +24,7 @@ test-support = [
     "httpserve/test-util",
     "runtimeexec/test-support",
     "dep:ids",
+    "dep:ratelimit",
 ]
 
 [[bin]]
@@ -67,13 +68,13 @@ oidc = { path = "../../adapters/oidc", features = ["backend"] }
 postgres = { path = "../../adapters/postgres", features = ["domain-identity", "domain-audit", "auth-audit-sink"] }
 prometheus_adapter = { package = "prometheus-adapter", path = "../../adapters/prometheus", features = ["backend"] }
 primitives = { path = "../../crates/primitives" }
-ratelimit = { path = "../../adapters/ratelimit" }
 redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots"] }
 runtimeexec = { path = "../../crates/runtimeexec" }
 runctx = { path = "../../crates/runctx" }
 secure = { path = "../../crates/secure" }
 schemars = { workspace = true }
+ratelimit = { path = "../../adapters/ratelimit", optional = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -87,6 +88,7 @@ vocab = { path = "../../crates/vocab" }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+ratelimit = { path = "../../adapters/ratelimit" }
 audit-composition = { path = "../../composition/audit", features = ["test-support"] }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 identity-composition = { path = "../../composition/identity", features = ["test-support"] }

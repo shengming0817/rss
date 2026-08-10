@@ -1,22 +1,63 @@
-//! `RateLimiter` —— 限流 provider DI port（可替换：in-mem governor / 未来 redis-distributed）。
+//! `RateLimiter` —— 限流 provider DI port（production Redis / test-only in-memory governor）。
 //!
 //! 对标 GoCell `middleware.RateLimiter`（Go `x/time/rate` token bucket）。provider 各自管理单调时钟
 //! （in-mem governor 用 QuantaClock，redis 用服务端 TTL）——**不**经 [`crate::Clock`]（wall-clock，错的
 //! 时间基）。
 //!
-//! async 而非 sync：未来 redis-distributed provider 走网络 I/O 须 async；provider 互换要求统一最宽签名
+//! async 而非 sync：production Redis provider 走网络 I/O；provider 互换要求统一最宽签名
 //! （与 [`crate::Signer`] / [`crate::Publisher`] 同，区别于纯计算的 sync [`crate::Clock`]）。in-mem governor
 //! provider 内部同步即返，经 `async fn` 包裹零额外开销。
 //!
 //! 对标：**port 形状**照 [`crate::signer`]（ADR-003 dynosaur Send-变体范式，本 crate 的 async DI port 单一对标）；
 //! **限流算法**无单一 Rust 工业对标 trait——概念源自 GCRA（Generic Cell Rate Algorithm）/ Go `x/time/rate`
-//! token bucket，provider 落地见 `adapters/ratelimit`（governor `ref:` 在该 crate）。
+//! token bucket。production provider 落地见 `adapters/redis`，`adapters/ratelimit` 只保留测试实现。
 
 use std::time::Duration;
 
 use dynosaur::dynosaur;
 
 use crate::redacted::RedactedSource;
+
+/// Largest accepted rate and burst. The bound keeps provider arithmetic precise and prevents an
+/// explicit configuration typo from turning the guard into an effectively unlimited limiter.
+pub const MAX_RATE_LIMIT_QUOTA: u32 = 1_000_000;
+
+/// Provider-neutral validated rate-limit quota.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RateLimitQuota {
+    per_second: u32,
+    burst: u32,
+}
+
+/// Invalid rate-limit quota. The message is deliberately value-free so configuration values are
+/// never retained by an error chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error("rate-limit quota must be within the closed safe range")]
+pub struct RateLimitQuotaError;
+
+impl RateLimitQuota {
+    /// Validate a per-key refill rate and burst capacity in `1..=1_000_000`.
+    pub const fn try_new(per_second: u32, burst: u32) -> Result<Self, RateLimitQuotaError> {
+        if per_second == 0
+            || burst == 0
+            || per_second > MAX_RATE_LIMIT_QUOTA
+            || burst > MAX_RATE_LIMIT_QUOTA
+        {
+            return Err(RateLimitQuotaError);
+        }
+        Ok(Self { per_second, burst })
+    }
+
+    #[must_use]
+    pub const fn per_second(self) -> u32 {
+        self.per_second
+    }
+
+    #[must_use]
+    pub const fn burst(self) -> u32 {
+        self.burst
+    }
+}
 
 /// 限流判定失败（provider 后端不可用等；**非** over-limit——over-limit 是 `Ok(RateLimitDecision::Limited)`）。
 ///

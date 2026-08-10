@@ -9,9 +9,9 @@
 //!   [`GeneratedEndpoint`] 或 [`GeneratedPrimaryEndpoint`]，Health 只走固定 builder ⇒ 跨 listener 泄漏
 //!   不可表达（typed function choice，Hard）。
 //! - **#1113 auth-finalize-before-bind funnel（Hard）**：finalizer 函数是 [`AuthenticatedRoutes`] 的
-//!   **唯一**生产者（构造 `pub(crate)`），[`AuthenticatedRoutes::into_server_service`] 是**唯一**
-//!   transport core 出口；[`UnfinalizedRoutes`] 无 public service 出口 ⇒ 未跑 auth 装配的 router 无法进入
-//!   transport adapter。
+//!   **唯一**生产者（构造 `pub(crate)`），但该中间状态没有 public transport 出口。业务 listener 必须
+//!   再取得 [`RateLimitedRoutes`] receipt；Health 必须由 [`finalize_health`] 取得 [`HealthRoutes`]。
+//!   [`UnfinalizedRoutes`] 与裸 [`AuthenticatedRoutes`] 都无法进入 transport adapter。
 //!
 //! 与兄弟 crate `bootstrap` 的协同：`bootstrap::Registry::finalize_routes` 经受控 `bootstrap → httpserve`
 //! 编译期路由类型边（ADR-009）构造 [`UnfinalizedRoutes`]，再由组合根按 listener 选择
@@ -1366,11 +1366,11 @@ fn permission_authz(
 /// per-listener **累加器**。
 ///
 /// INVARIANT: ROUTE-AUTH-FUNNEL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 无 public bindable 出口（无 `into_server_service`）；唯一前进路径是
-/// [`finalize_auth`]（同 crate 读私有字段）换 [`AuthenticatedRoutes`] ⇒ 未跑 auth 装配的 router 无法 bind。
+/// auth finalizer（同 crate 读私有字段）换受控状态；未跑 auth 装配的 router 无法 bind。
 /// 经 [`empty`](Self::empty) + [`nest_group`](Self::nest_group) 累加（裸 `axum::Router` 不出 httpserve），
 /// 并原子保留 generated route marker 与 stateless/stateful identity；raw test mount 不具 generated identity。
 /// 由 `bootstrap::finalize_routes` 经受控 `bootstrap → httpserve` 边驱动（ADR-009）。
-#[must_use = "UnfinalizedRoutes 须经 finalize_auth 换 AuthenticatedRoutes 才能 bind"]
+#[must_use = "UnfinalizedRoutes must pass the listener-specific auth finalizer"]
 pub struct UnfinalizedRoutes {
     router: axum::Router,
     mounted: MountedRoutes,
@@ -1439,7 +1439,9 @@ impl UnfinalizedRoutes {
 
 /// Opaque, budget-sealed per-request HTTP transport core.
 ///
-/// Only [`AuthenticatedRoutes::into_server_service`] constructs this production capability. It
+/// Only [`RateLimitedRoutes::into_server_service`] and [`HealthRoutes::into_server_service`]
+/// construct this production capability. They are disjoint closed states: business listeners must
+/// carry the edge rate-limit receipt, while Health can only be minted by [`finalize_health`]. It
 /// implements only the per-request core. It emits no transport evidence: the `httpd` adapter owns
 /// the sole official SERVER span/RED seam and selects scheme inside the actual bind branch.
 #[derive(Clone)]
@@ -1534,21 +1536,111 @@ where
     }
 }
 
-/// auth-finalize 后的 per-listener Router（#1113 funnel 出态，可进入 transport adapter）。
+/// auth-finalize 后、尚未取得 bind capability 的 per-listener Router。
 ///
 /// INVARIANT: ROUTE-AUTH-FUNNEL-02 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" }—— 唯一生产者 = finalizer 函数（构造 `pub(crate)`，外部 crate 无法
-/// mint）；[`into_server_service`](Self::into_server_service) 是唯一 transport core 出口。验签桥（#1109）经
-/// [`layer`](Self::layer) 叠在外层、保持封印（产物仍是 `AuthenticatedRoutes`，只能加层不能替换）。
+/// mint）。验签桥（#1109）经 [`layer`](Self::layer) 叠在外层、保持封印；生产没有本类型的 bind
+/// 出口，必须继续变换为 [`RateLimitedRoutes`]。Health 则由 [`finalize_health`] 直接产出独立
+/// [`HealthRoutes`]，不能经过本类型伪造。
 ///
 /// INVARIANT: BODYLIMIT-BEFORE-AUTH-01 { level = "Medium", exec = "manual/opt-in", source = "code" }—— body-limit **层**（CL 闸 + Limited wrap）叠在
 /// [`sealed_router`](Self::sealed_router) 唯一 funnel ⇒ 每个 bindable router 必带且必 outer 于 auth：
 /// CL-declared 超限 → before-auth clean 413；无声明/chunked → Limited read-time 字节硬顶（内存有界，
 /// 未认证请求经 enforce 401 时 body 从不被读，无 pre-auth buffer）。详见 middleware.rs body_limit 注释。
-#[must_use = "AuthenticatedRoutes 须经 into_server_service 交给 transport adapter"]
+#[must_use = "AuthenticatedRoutes must become RateLimitedRoutes before production bind"]
 pub struct AuthenticatedRoutes {
     router: axum::Router,
     hardening: crate::protect::EdgeHardening,
     observation_policy: crate::ServerObservationPolicy,
+}
+
+/// Bindable non-health routes that carry the mandatory RealIP → rate-limit edge funnel.
+///
+/// The private field and crate-private constructor make [`crate::with_client_rate_limit`] the only
+/// minting path. Production business listeners can require this type instead of relying on source
+/// inspection or a convention at the bind site.
+#[must_use = "RateLimitedRoutes must be consumed by the transport adapter"]
+pub struct RateLimitedRoutes(AuthenticatedRoutes);
+
+/// Bindable Health routes. Only [`finalize_health`] can mint this state, after verifying the
+/// listener and `NoAuth` plan. It deliberately has no conversion to [`RateLimitedRoutes`].
+#[must_use = "HealthRoutes must be consumed by the transport adapter"]
+pub struct HealthRoutes(AuthenticatedRoutes);
+
+impl RateLimitedRoutes {
+    pub(crate) const fn new(routes: AuthenticatedRoutes) -> Self {
+        Self(routes)
+    }
+
+    pub fn into_server_service(self, budget: crate::ServerRequestBudget) -> ServerService {
+        self.0.into_server_service(budget)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn into_plaintext_router_for_test(self) -> axum::Router {
+        self.0.into_plaintext_router_for_test()
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn into_plaintext_router_for_test_with_budget(
+        self,
+        budget: crate::ServerRequestBudget,
+    ) -> axum::Router {
+        self.0.into_plaintext_router_for_test_with_budget(budget)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn into_authenticated_for_test(self) -> AuthenticatedRoutes {
+        self.0
+    }
+}
+
+impl HealthRoutes {
+    const fn new(routes: AuthenticatedRoutes) -> Self {
+        Self(routes)
+    }
+
+    pub fn into_server_service(self, budget: crate::ServerRequestBudget) -> ServerService {
+        self.0.into_server_service(budget)
+    }
+
+    /// Override edge-hardening values without losing the closed Health bind capability.
+    pub fn with_edge_hardening(self, hardening: crate::protect::EdgeHardening) -> Self {
+        Self(self.0.with_edge_hardening(hardening))
+    }
+
+    /// Add a Health-local test layer while preserving the closed Health bind capability.
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn layer<L>(self, layer: L) -> Self
+    where
+        L: tower::Layer<axum::routing::Route> + Clone + Send + Sync + 'static,
+        L::Service: tower::Service<axum::extract::Request> + Clone + Send + Sync + 'static,
+        <L::Service as tower::Service<axum::extract::Request>>::Response:
+            axum::response::IntoResponse + 'static,
+        <L::Service as tower::Service<axum::extract::Request>>::Error:
+            Into<core::convert::Infallible> + 'static,
+        <L::Service as tower::Service<axum::extract::Request>>::Future: Send + 'static,
+    {
+        Self(self.0.layer(layer))
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn into_plaintext_router_for_test(self) -> axum::Router {
+        self.0.into_plaintext_router_for_test()
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn into_plaintext_router_for_test_with_budget(
+        self,
+        budget: crate::ServerRequestBudget,
+    ) -> axum::Router {
+        self.0.into_plaintext_router_for_test_with_budget(budget)
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    pub fn into_authenticated_for_test(self) -> AuthenticatedRoutes {
+        self.0
+    }
 }
 
 impl AuthenticatedRoutes {
@@ -1630,7 +1722,7 @@ impl AuthenticatedRoutes {
     /// **唯一** transport core 出口：封防护层后产出不可独立 bind 的 per-request service。
     /// `httpd` 在真实 plaintext/mTLS serve 分支中构造私有 make-service，并同时持有可信 scheme 与
     /// `ConnectInfo<SocketAddr>`；本 crate 不发射 transport evidence。
-    pub fn into_server_service(self, budget: crate::ServerRequestBudget) -> ServerService {
+    fn into_server_service(self, budget: crate::ServerRequestBudget) -> ServerService {
         let observation_policy = self.observation_policy;
         ServerService {
             router: self.sealed_router(budget),
@@ -1732,10 +1824,31 @@ pub fn finalize_auth(
     routes: UnfinalizedRoutes,
     plan: AuthPlan,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
-    if plan.listener() == primitives::ListenerKind::Primary {
+    if matches!(
+        plan.listener(),
+        primitives::ListenerKind::Primary | primitives::ListenerKind::Health
+    ) {
         return Err(listener_mismatch(&routes, plan.listener()));
     }
     finalize_auth_inner(routes, plan, None, None)
+}
+
+/// Finalize the only listener class that is intentionally exempt from client rate limiting.
+/// The distinct return type is the sole Health production bind capability.
+pub fn finalize_health(
+    routes: UnfinalizedRoutes,
+    plan: AuthPlan,
+) -> Result<HealthRoutes, RouteGroupError> {
+    if plan.listener() != primitives::ListenerKind::Health {
+        return Err(listener_mismatch(&routes, plan.listener()));
+    }
+    if plan.scheme() != primitives::AuthScheme::NoAuth {
+        return Err(RouteGroupError::UnsupportedAuthPlan {
+            listener: plan.listener(),
+            scheme: plan.scheme(),
+        });
+    }
+    finalize_auth_inner(routes, plan, None, None).map(HealthRoutes::new)
 }
 
 /// #1113 funnel transform with auth decision audit sink.
@@ -1748,7 +1861,10 @@ pub fn finalize_auth_with_audit(
     audit_sink: AuditSinkHandle,
     clock: Arc<dyn diport::Clock>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
-    if plan.listener() == primitives::ListenerKind::Primary {
+    if matches!(
+        plan.listener(),
+        primitives::ListenerKind::Primary | primitives::ListenerKind::Health
+    ) {
         return Err(listener_mismatch(&routes, plan.listener()));
     }
     finalize_auth_inner(routes, plan, Some(AuthAudit::new(audit_sink, clock)), None)
@@ -1761,7 +1877,10 @@ pub fn finalize_auth_with_audit_and_authorizer(
     clock: Arc<dyn diport::Clock>,
     authorizer: Arc<dyn RouteAuthorizer>,
 ) -> Result<AuthenticatedRoutes, RouteGroupError> {
-    if plan.listener() == primitives::ListenerKind::Primary {
+    if matches!(
+        plan.listener(),
+        primitives::ListenerKind::Primary | primitives::ListenerKind::Health
+    ) {
         return Err(listener_mismatch(&routes, plan.listener()));
     }
     finalize_auth_inner(
@@ -2552,7 +2671,7 @@ mod tests {
             .expect("Health plan");
 
         assert!(matches!(
-            finalize_auth(routes, plan),
+            finalize_health(routes, plan),
             Err(RouteGroupError::ListenerMismatch {
                 registered: Some(ListenerKind::Health),
                 conflicting: Some(ListenerKind::Admin),
@@ -2675,7 +2794,8 @@ mod tests {
                     next.run(req).await
                 },
             ));
-        // 仍是 AuthenticatedRoutes（类型已断言），且 transport core 出口可构造。
+        // 仍是 AuthenticatedRoutes（类型已断言）；test-only router inspection does not mint a
+        // production transport capability.
         {
             let r = authed.into_plaintext_router_for_test();
             assert_eq!(
@@ -2686,18 +2806,17 @@ mod tests {
         }
     }
 
-    /// `into_server_service` 是 transport core 出口（仅 `AuthenticatedRoutes` 有，assemblies/runtime
-    /// launch 交给 httpd bind 点消费）——可构造即证存在。
+    /// `HealthRoutes::into_server_service` 是唯一免限流 transport core 出口。
     #[tokio::test]
     #[allow(clippy::expect_used)]
-    async fn authenticated_routes_into_server_service_available() {
+    async fn health_routes_into_server_service_available() {
         let routes = test_routes::<Health>(|rb| {
             rb.mount_raw_for_test(admin_route("/list"), get(|| async {}))
         });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
-        let authed = finalize_auth(routes, plan).expect("finalize_auth");
-        let _server_service = authed.into_server_service(crate::ServerRequestBudget::for_test());
+        let health = finalize_health(routes, plan).expect("finalize_health");
+        let _server_service = health.into_server_service(crate::ServerRequestBudget::for_test());
     }
 
     /// 取回完整 Response（不仅 status）做 header 断言（request_id 封口验证）。
@@ -2721,8 +2840,8 @@ mod tests {
         });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
-        let router = finalize_auth(routes, plan)
-            .expect("finalize_auth")
+        let router = finalize_health(routes, plan)
+            .expect("finalize_health")
             .into_plaintext_router_for_test();
         let resp = oneshot_response(router, "/list").await;
         assert_eq!(resp.status(), StatusCode::OK, "NoAuth matched → 200");
@@ -2746,23 +2865,22 @@ mod tests {
             .expect("plan");
         // 探针层模拟验签桥（经 AuthenticatedRoutes::layer 叠在 finalize_auth 外、request_id 内）：
         // 读 RequestId extension，在场则回写 marker header。
-        let probed =
-            finalize_auth(routes, plan)
-                .expect("finalize_auth")
-                .layer(axum::middleware::from_fn(
-                    |req: axum::extract::Request, next: axum::middleware::Next| async move {
-                        let saw = req
-                            .extensions()
-                            .get::<crate::middleware::VerifiedRequestId>()
-                            .is_some();
-                        let mut resp = next.run(req).await;
-                        if saw {
-                            resp.headers_mut()
-                                .insert("x-saw-rid", axum::http::HeaderValue::from_static("1"));
-                        }
-                        resp
-                    },
-                ));
+        let probed = finalize_health(routes, plan)
+            .expect("finalize_health")
+            .layer(axum::middleware::from_fn(
+                |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let saw = req
+                        .extensions()
+                        .get::<crate::middleware::VerifiedRequestId>()
+                        .is_some();
+                    let mut resp = next.run(req).await;
+                    if saw {
+                        resp.headers_mut()
+                            .insert("x-saw-rid", axum::http::HeaderValue::from_static("1"));
+                    }
+                    resp
+                },
+            ));
         let resp = oneshot_response(probed.into_plaintext_router_for_test(), "/list").await;
         assert_eq!(
             resp.headers().get("x-saw-rid").map(|v| v.as_bytes()),
@@ -2799,8 +2917,8 @@ mod tests {
         });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
-        let router = finalize_auth(routes, plan)
-            .expect("finalize_auth")
+        let router = finalize_health(routes, plan)
+            .expect("finalize_health")
             .into_plaintext_router_for_test();
 
         let resp = oneshot_response(router, "/list").await;
@@ -2863,7 +2981,7 @@ mod tests {
                 .expect("plan")
         };
 
-        let default_router = finalize_auth(routes(), plan())
+        let default_router = finalize_health(routes(), plan())
             .expect("finalize default")
             .into_plaintext_router_for_test();
         let default_response = oneshot_response(default_router, "/list").await;
@@ -2876,7 +2994,7 @@ mod tests {
             "默认策略必须覆盖 handler"
         );
 
-        let opted_out_router = finalize_auth(routes(), plan())
+        let opted_out_router = finalize_health(routes(), plan())
             .expect("finalize opt-out")
             .with_edge_hardening(crate::protect::EdgeHardening {
                 body_limit: crate::protect::BodyLimit::default(),
@@ -2905,8 +3023,8 @@ mod tests {
         });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
-        let router = finalize_auth(routes, plan)
-            .expect("finalize_auth")
+        let router = finalize_health(routes, plan)
+            .expect("finalize_health")
             .with_edge_hardening(crate::protect::EdgeHardening {
                 body_limit: crate::protect::BodyLimit::new(
                     std::num::NonZeroUsize::new(10).unwrap(),
@@ -2947,8 +3065,8 @@ mod tests {
         });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
-        let router = finalize_auth(routes, plan)
-            .expect("finalize_auth")
+        let router = finalize_health(routes, plan)
+            .expect("finalize_health")
             .with_edge_hardening(crate::protect::EdgeHardening {
                 body_limit: crate::protect::BodyLimit::new(
                     std::num::NonZeroUsize::new(10).unwrap(),
@@ -3001,8 +3119,8 @@ mod tests {
         });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
-        let router = finalize_auth(routes, plan)
-            .expect("finalize_auth")
+        let router = finalize_health(routes, plan)
+            .expect("finalize_health")
             .into_plaintext_router_for_test();
 
         let resp = oneshot_response(router, "/list").await;
@@ -3025,8 +3143,8 @@ mod tests {
         });
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
-        let router = finalize_auth(routes, plan)
-            .expect("finalize_auth")
+        let router = finalize_health(routes, plan)
+            .expect("finalize_health")
             .into_plaintext_router_for_test();
 
         let resp = oneshot_response(router, "/list").await;
@@ -3053,22 +3171,21 @@ mod tests {
         let plan = primitives::AuthPlan::new(ListenerKind::Health, primitives::AuthScheme::NoAuth)
             .expect("plan");
         // 探针层叠在验签桥位（correlation 内侧，sealed_router 封 correlation + request_id 后成为外侧）。
-        let probed =
-            finalize_auth(routes, plan)
-                .expect("finalize_auth")
-                .layer(axum::middleware::from_fn(
-                    |req: axum::extract::Request, next: axum::middleware::Next| async move {
-                        let saw = diagctx::correlation().is_some();
-                        let mut resp = next.run(req).await;
-                        if saw {
-                            resp.headers_mut().insert(
-                                "x-saw-correlation",
-                                axum::http::HeaderValue::from_static("1"),
-                            );
-                        }
-                        resp
-                    },
-                ));
+        let probed = finalize_health(routes, plan)
+            .expect("finalize_health")
+            .layer(axum::middleware::from_fn(
+                |req: axum::extract::Request, next: axum::middleware::Next| async move {
+                    let saw = diagctx::correlation().is_some();
+                    let mut resp = next.run(req).await;
+                    if saw {
+                        resp.headers_mut().insert(
+                            "x-saw-correlation",
+                            axum::http::HeaderValue::from_static("1"),
+                        );
+                    }
+                    resp
+                },
+            ));
         let resp = oneshot_response(probed.into_plaintext_router_for_test(), "/list").await;
         assert_eq!(
             resp.headers()

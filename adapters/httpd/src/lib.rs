@@ -1448,6 +1448,54 @@ mod tests {
         )
     }
 
+    #[derive(Default)]
+    struct RecordingRateLimiter {
+        keys: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl diport::RateLimiter for RecordingRateLimiter {
+        async fn check(
+            &self,
+            key: diport::RateLimitKey,
+        ) -> Result<diport::RateLimitDecision, diport::RateLimitError> {
+            self.keys
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .push(key.as_str().to_owned());
+            Ok(diport::RateLimitDecision::Allowed)
+        }
+
+        async fn shutdown(&self) -> Result<(), diport::RateLimitError> {
+            Ok(())
+        }
+    }
+
+    fn make_real_ip_svc(
+        config: httpserve::TrustedProxyConfig,
+        limiter: Arc<RecordingRateLimiter>,
+    ) -> httpserve::ServerService {
+        let routes = httpserve::routes::unfinalized_for_test::<httpserve::Admin>(|router| {
+            router.mount_raw_for_test(
+                httpserve::TestRoute {
+                    method: axum::http::Method::GET,
+                    path: "/test",
+                    contract_id: "test.httpd-real-ip",
+                },
+                get(|| async { "ok" }),
+            )
+        })
+        .unwrap_or_else(|_| unreachable!("fixed test route is valid"));
+        let plan = primitives::AuthPlan::new(
+            primitives::ListenerKind::Admin,
+            primitives::AuthScheme::RssAccessToken,
+        )
+        .unwrap_or_else(|_| unreachable!("admin RSS plan is valid"));
+        let authed = httpserve::finalize_auth(routes, plan)
+            .unwrap_or_else(|_| unreachable!("test route finalizes"));
+        httpserve::with_client_rate_limit(authed, limiter, config)
+            .into_server_service(httpserve::ServerRequestBudget::for_test())
+    }
+
     fn make_mtls_svc() -> httpserve::ServerService {
         httpserve::ServerService::from_router_for_test(
             Router::new().route(
@@ -1690,6 +1738,23 @@ mod tests {
         String::from_utf8_lossy(&buf).into_owned()
     }
 
+    #[allow(clippy::expect_used)]
+    async fn raw_get_with_xff(addr: SocketAddr, path: &str, xff: &str) -> String {
+        let mut stream = TcpStream::connect(addr)
+            .await
+            .expect("connect bound socket");
+        let req = format!(
+            "GET {path} HTTP/1.1\r\nHost: localhost\r\nX-Forwarded-For: {xff}\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(req.as_bytes())
+            .await
+            .expect("write request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).await.expect("read response");
+        String::from_utf8(buf).expect("HTTP response is utf-8")
+    }
+
     async fn raw_get_status_line(addr: SocketAddr, path: &str) -> String {
         raw_get_response(addr, path)
             .await
@@ -1906,6 +1971,49 @@ mod tests {
         // 阶段 1 广播：cancel token → drain；阶段 2：shutdown await task 收敛。
         token.cancel();
         assert!(server.shutdown().await.is_ok(), "funnel shutdown 收敛");
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn real_socket_rate_limit_uses_trusted_client_and_disabled_peer() {
+        for (name, config, expected) in [
+            (
+                "trusted",
+                httpserve::TrustedProxyConfig::try_from_json(Some(r#"["127.0.0.0/8"]"#))
+                    .expect("trusted loopback CIDR"),
+                "203.0.113.7",
+            ),
+            (
+                "disabled",
+                httpserve::TrustedProxyConfig::disabled(),
+                "127.0.0.1",
+            ),
+        ] {
+            let limiter = Arc::new(RecordingRateLimiter::default());
+            let bound = HttpServer::bind(
+                "http-real-ip",
+                "127.0.0.1:0".parse().expect("ephemeral address"),
+            )
+            .await
+            .expect("bind");
+            let local = bound.local_addr();
+            let server = bound.serve(
+                make_real_ip_svc(config, Arc::clone(&limiter)),
+                CancellationToken::new(),
+            );
+            let response = raw_get_with_xff(local, "/test", "203.0.113.7, 127.0.0.2").await;
+            assert!(response.starts_with("HTTP/1.1 "), "{name}: {response}");
+            assert_eq!(
+                limiter
+                    .keys
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .as_slice(),
+                [expected],
+                "{name} policy must select the correct bucket key"
+            );
+            assert!(server.shutdown().await.is_ok(), "{name} shutdown");
+        }
     }
 
     #[tokio::test]

@@ -14,6 +14,11 @@ pub const ADMIN_PORT_ENV: &str = "RSS_DEPLOYMENT_ADMIN_PORT";
 pub const HEALTH_PORT_ENV: &str = "RSS_DEPLOYMENT_HEALTH_PORT";
 pub const MTLS_ALLOW_SET_ENV: &str = "RSS_DEPLOYMENT_MTLS_SPIFFE_ALLOW_SET";
 pub const SPIFFE_ENDPOINT_ENV: &str = "SPIFFE_ENDPOINT_SOCKET";
+pub const TRUSTED_PROXY_CIDRS_ENV: &str = "RSS_DEPLOYMENT_TRUSTED_PROXY_CIDRS";
+pub const RATE_LIMIT_PER_SECOND_ENV: &str = "RSS_RATE_LIMIT_PER_SECOND";
+pub const RATE_LIMIT_BURST_ENV: &str = "RSS_RATE_LIMIT_BURST";
+pub const DEFAULT_RATE_LIMIT_PER_SECOND: u32 = 10;
+pub const DEFAULT_RATE_LIMIT_BURST: u32 = 20;
 
 /// Opaque JSON document whose allocation is erased on every success and error path.
 ///
@@ -102,13 +107,15 @@ impl<'de> Deserialize<'de> for SecretValue {
     }
 }
 
-pub struct ServingFrontendConfig {
+pub struct ServingFrontendConfig<P> {
     pub pod_ip: IpAddr,
     pub primary_port: u16,
     pub admin_port: u16,
     pub health_port: u16,
     pub allow_set: authn::MtlsAllowSet,
     pub spiffe_endpoint: String,
+    pub trusted_proxy_config: P,
+    pub rate_limit_quota: diport::RateLimitQuota,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -120,9 +127,10 @@ pub enum FrontendConfigError {
 }
 
 /// Capture the deployment frontend from its closed environment vocabulary exactly once.
-pub fn capture_serving_frontend(
+pub fn capture_serving_frontend<P>(
     mut read: impl FnMut(&'static str) -> Option<OsString>,
-) -> Result<ServingFrontendConfig, FrontendConfigError> {
+    parse_trusted_proxy: impl FnOnce(Option<&str>) -> Result<P, FrontendConfigError>,
+) -> Result<ServingFrontendConfig<P>, FrontendConfigError> {
     let pod_ip = required(&mut read, POD_IP_ENV)?
         .parse()
         .map_err(|_| FrontendConfigError::Invalid(POD_IP_ENV))?;
@@ -140,6 +148,17 @@ pub fn capture_serving_frontend(
     let allow_set = authn::MtlsAllowSet::new(peers)
         .map_err(|_| FrontendConfigError::Invalid(MTLS_ALLOW_SET_ENV))?;
     let spiffe_endpoint = required(&mut read, SPIFFE_ENDPOINT_ENV)?;
+    let trusted_proxy_raw = optional(&mut read, TRUSTED_PROXY_CIDRS_ENV)?;
+    let trusted_proxy_config = parse_trusted_proxy(trusted_proxy_raw.as_deref())?;
+    let rate_limit_quota = diport::RateLimitQuota::try_new(
+        quota_from_source(
+            &mut read,
+            RATE_LIMIT_PER_SECOND_ENV,
+            DEFAULT_RATE_LIMIT_PER_SECOND,
+        ),
+        quota_from_source(&mut read, RATE_LIMIT_BURST_ENV, DEFAULT_RATE_LIMIT_BURST),
+    )
+    .unwrap_or_else(|_| unreachable!("validated rate-limit defaults and values"));
     Ok(ServingFrontendConfig {
         pod_ip,
         primary_port,
@@ -147,7 +166,75 @@ pub fn capture_serving_frontend(
         health_port,
         allow_set,
         spiffe_endpoint,
+        trusted_proxy_config,
+        rate_limit_quota,
     })
+}
+
+fn optional(
+    read: &mut impl FnMut(&'static str) -> Option<OsString>,
+    name: &'static str,
+) -> Result<Option<String>, FrontendConfigError> {
+    read(name)
+        .map(|value| {
+            value
+                .into_string()
+                .map_err(|_| FrontendConfigError::NonUnicode(name))
+        })
+        .transpose()
+}
+
+pub fn rate_limit_quota_from_values(
+    per_second: Option<&str>,
+    burst: Option<&str>,
+) -> diport::RateLimitQuota {
+    let per_second = quota_value(
+        RATE_LIMIT_PER_SECOND_ENV,
+        per_second,
+        DEFAULT_RATE_LIMIT_PER_SECOND,
+    );
+    let burst = quota_value(RATE_LIMIT_BURST_ENV, burst, DEFAULT_RATE_LIMIT_BURST);
+    diport::RateLimitQuota::try_new(per_second, burst)
+        .unwrap_or_else(|_| unreachable!("validated rate-limit defaults and values"))
+}
+
+fn quota_value(name: &'static str, raw: Option<&str>, default: u32) -> u32 {
+    let Some(raw) = raw else {
+        return default;
+    };
+    match raw.parse::<u32>() {
+        Ok(value) if (1..=diport::MAX_RATE_LIMIT_QUOTA).contains(&value) => value,
+        _ => {
+            warn_invalid_quota(name, default);
+            default
+        }
+    }
+}
+
+fn quota_from_source(
+    read: &mut impl FnMut(&'static str) -> Option<OsString>,
+    name: &'static str,
+    default: u32,
+) -> u32 {
+    let Some(raw) = read(name) else {
+        return default;
+    };
+    match raw.into_string() {
+        Ok(raw) => quota_value(name, Some(&raw), default),
+        Err(_) => {
+            warn_invalid_quota(name, default);
+            default
+        }
+    }
+}
+
+fn warn_invalid_quota(name: &'static str, default: u32) {
+    tracing::warn!(
+        env = name,
+        default,
+        max = diport::MAX_RATE_LIMIT_QUOTA,
+        "invalid rate-limit quota value; using default"
+    );
 }
 
 fn required(
@@ -205,10 +292,45 @@ mod tests {
             (MTLS_ALLOW_SET_ENV, OsString::from("[]")),
             (SPIFFE_ENDPOINT_ENV, OsString::from("unix:///spire.sock")),
         ]);
-        let error = match capture_serving_frontend(|name| values.remove(name)) {
+        let error = match capture_serving_frontend(|name| values.remove(name), |_| Ok(())) {
             Ok(_) => panic!("invalid port must fail"),
             Err(error) => error,
         };
         assert_eq!(error, FrontendConfigError::Invalid(PRIMARY_PORT_ENV));
+    }
+
+    #[test]
+    fn quota_defaults_and_invalid_values_fail_soft_independently() {
+        let defaults = rate_limit_quota_from_values(None, None);
+        assert_eq!(defaults.per_second(), 10);
+        assert_eq!(defaults.burst(), 20);
+
+        let mixed = rate_limit_quota_from_values(Some("77"), Some("0"));
+        assert_eq!(mixed.per_second(), 77);
+        assert_eq!(mixed.burst(), 20);
+
+        let bounded = rate_limit_quota_from_values(Some("1000001"), Some("31"));
+        assert_eq!(bounded.per_second(), 10);
+        assert_eq!(bounded.burst(), 31);
+
+        let non_numeric = rate_limit_quota_from_values(Some("fast"), Some("1000000"));
+        assert_eq!(non_numeric.per_second(), 10);
+        assert_eq!(non_numeric.burst(), 1_000_000);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_unicode_quota_falls_back_without_failing_frontend_capture() {
+        use std::os::unix::ffi::OsStringExt as _;
+
+        let mut read = |_| Some(OsString::from_vec(vec![0xff]));
+        assert_eq!(
+            quota_from_source(
+                &mut read,
+                RATE_LIMIT_PER_SECOND_ENV,
+                DEFAULT_RATE_LIMIT_PER_SECOND,
+            ),
+            DEFAULT_RATE_LIMIT_PER_SECOND
+        );
     }
 }

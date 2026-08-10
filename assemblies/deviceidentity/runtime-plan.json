@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "assemblyFingerprint": "sha256:7a1c52b9d45d482774cf288d8a1a4337c9c2d5afa5242a2f9f31d9b4bb39e403",
-  "runtimePlanFingerprint": "sha256:aa001060e6b48ade98954963bf77943cafdcaf2726026facf36967cbf4a8985d",
+  "assemblyFingerprint": "sha256:5e60b7497d64e82628f719a4748c0ec4682e48d7105aa1914b69d27a430d8d82",
+  "runtimePlanFingerprint": "sha256:a5190c4cd8529557627d15b89dc918ff7b9d363a1773f42b0382b2bc1fddc11c",
   "providerPlans": [
     {
       "id": "device-certificate-store",

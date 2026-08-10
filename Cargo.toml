@@ -229,7 +229,7 @@ sqlx-core = { version = "0.8", default-features = false, features = ["migrate"] 
 # redis adapter 幂等 claimer（#1009）：rustls-only（禁 openssl/native-tls，与 deny.toml provider bans 一致）；
 # re-export redis cmd API + passthrough TLS feature。生产 URL 经 secure::RedisEndpoint 默认要求 rediss://；
 # testcontainer 明文 redis:// 仅 loopback + 显式 opt-in。webpki-roots 与 reqwest/otel 口径一致。
-deadpool-redis = { version = "0.23", default-features = false, features = ["rt_tokio_1", "tokio-comp", "tls-rustls", "tls-rustls-webpki-roots", "tokio-rustls-comp"] }
+deadpool-redis = { version = "0.23", default-features = false, features = ["rt_tokio_1", "tokio-comp", "tls-rustls", "tls-rustls-webpki-roots", "tokio-rustls-comp", "script"] }
 # AMQP broker I/O（adapters/amqp）：rustls + ring provider + webpki roots；default-features=false 禁默认漂移。
 # 生产 URL 经 secure::AmqpEndpoint 默认要求 amqps://；testcontainer 明文 amqp:// 仅 loopback + 显式 opt-in。
 # 不启 native-tls / openssl / rustls--aws_lc_rs；deny.toml 兜住 provider 漂移。
@@ -287,6 +287,7 @@ wiremock = "0.6"
 p256 = { version = "0.13", default-features = false, features = ["ecdsa"] }
 hmac = { version = "0.12", default-features = false }
 sha2 = { version = "0.10", default-features = false }
+ipnet = "2.11"
 # 可观测性导出（adapters/otel，#1011）：tracing span → OTLP/gRPC 导出。opentelemetry-otlp 选
 # grpc-tonic + tls-ring（rustls 走 ring，**禁** tls-aws-lc：aws-lc-sys 的 OpenSSL 派生 license 不在
 # deny.toml allow-list，与 sqlx/redis tls-rustls 同口径）+ tls-webpki-roots（打包 Mozilla 根，webpki-roots

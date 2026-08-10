@@ -208,7 +208,8 @@ pub use publisher::{
     DynPublisher, PublishErrorKind, PublishRequest, Publisher, PublisherError, Topic,
 };
 pub use rate_limiter::{
-    DynRateLimiter, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter,
+    DynRateLimiter, MAX_RATE_LIMIT_QUOTA, RateLimitDecision, RateLimitError, RateLimitKey,
+    RateLimitQuota, RateLimitQuotaError, RateLimiter,
 };
 pub use redacted::RedactedSource;
 pub use redacted_bytes::RedactedBytes;

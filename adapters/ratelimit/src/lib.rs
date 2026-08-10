@@ -9,10 +9,9 @@
 //! disallowed-methods。测试经 `FakeRelativeClock` 注入确定性时间。
 //! ref: antifuchs/governor src/state/keyed.rs@v0.8.1
 
-use std::num::NonZeroU32;
-
 use diport::{
-    ManagedResource, RateLimitDecision, RateLimitError, RateLimitKey, RateLimiter, ShutdownError,
+    ManagedResource, RateLimitDecision, RateLimitError, RateLimitKey, RateLimitQuota, RateLimiter,
+    ShutdownError,
 };
 use governor::Quota;
 use governor::RateLimiter as GovRateLimiter;
@@ -29,27 +28,13 @@ type KeyedGov<C> = GovRateLimiter<
     NoOpMiddleware<<C as Clock>::Instant>,
 >;
 
-/// 限流配额配置（per-key 速率 + 突发）。对标 `x/time/rate.NewLimiter(r, b)`：`per_second`=补充速率 r，
-/// `burst`=桶容量 b。
-///
-/// **业务上界由配置层负责**：`per_second` / `burst` 接受任意 `NonZeroU32`（含 `u32::MAX`≈无限速）；本类型
-/// 不设业务上界守卫——避免在 DI provider 层硬编码策略阈值。组合根 / httpserve wiring（#1106）从配置反序列化
-/// 时须校验合理上界（避免误配静默绕过限流）。
-#[derive(Debug, Clone, Copy)]
-pub struct QuotaConfig {
-    per_second: NonZeroU32,
-    burst: NonZeroU32,
-}
-
-impl QuotaConfig {
-    /// 由 per-second 速率 + burst 桶容量构造（均须非零）。
-    pub fn per_second(per_second: NonZeroU32, burst: NonZeroU32) -> Self {
-        Self { per_second, burst }
-    }
-
-    fn to_quota(self) -> Quota {
-        Quota::per_second(self.per_second).allow_burst(self.burst)
-    }
+fn to_governor_quota(quota: RateLimitQuota) -> Quota {
+    // RateLimitQuota rejects zero before reaching adapters.
+    let per_second = std::num::NonZeroU32::new(quota.per_second())
+        .unwrap_or_else(|| unreachable!("validated quota is non-zero"));
+    let burst = std::num::NonZeroU32::new(quota.burst())
+        .unwrap_or_else(|| unreachable!("validated quota is non-zero"));
+    Quota::per_second(per_second).allow_burst(burst)
 }
 
 /// in-mem keyed 限流 provider（governor GCRA）。每个 [`RateLimitKey`] 独立配额桶（per-key 隔离），用
@@ -63,7 +48,7 @@ pub struct GovernorLimiter<C: Clock = DefaultClock> {
 
 impl GovernorLimiter<DefaultClock> {
     /// 由配额配置构造（生产路径，monotonic 时钟）。
-    pub fn new(quota: QuotaConfig) -> Self {
+    pub fn new(quota: RateLimitQuota) -> Self {
         Self::with_clock(quota, DefaultClock::default())
     }
 }
@@ -76,8 +61,8 @@ where
     ///
     /// clock 同时交给 governor 限流器与本类型留存（`check` 取 `clock.now()` 算 `retry_after`）；二者须同源，
     /// 故 clone 注入。
-    pub fn with_clock(quota: QuotaConfig, clock: C) -> Self {
-        let inner = GovRateLimiter::dashmap_with_clock(quota.to_quota(), clock.clone());
+    pub fn with_clock(quota: RateLimitQuota, clock: C) -> Self {
+        let inner = GovRateLimiter::dashmap_with_clock(to_governor_quota(quota), clock.clone());
         Self { inner, clock }
     }
 }
@@ -88,7 +73,7 @@ where
 {
     async fn check(&self, key: RateLimitKey) -> Result<RateLimitDecision, RateLimitError> {
         // 内存 GCRA 检查同步即返、不产生 backend 错误（`Err(NotUntil)` = over-limit，不是 provider 故障）；
-        // RateLimitError 留给未来 redis-distributed provider 的网络故障路径。
+        // 本测试 provider 不产生 RateLimitError；production Redis provider 负责网络故障映射。
         match self.inner.check_key(&key) {
             Ok(()) => Ok(RateLimitDecision::Allowed),
             Err(not_until) => Ok(RateLimitDecision::Limited {
@@ -130,8 +115,8 @@ mod tests {
 
     // 测试构造用 expect：item-level carve-out（error-handling.md §Carve-out 要求 item-level）。
     #[allow(clippy::expect_used)]
-    fn nz(n: u32) -> NonZeroU32 {
-        NonZeroU32::new(n).expect("non-zero test quota")
+    fn quota(per_second: u32, burst: u32) -> RateLimitQuota {
+        RateLimitQuota::try_new(per_second, burst).expect("valid test quota")
     }
 
     fn limiter(
@@ -139,7 +124,7 @@ mod tests {
         burst: u32,
         clock: FakeRelativeClock,
     ) -> GovernorLimiter<FakeRelativeClock> {
-        GovernorLimiter::with_clock(QuotaConfig::per_second(nz(per_second), nz(burst)), clock)
+        GovernorLimiter::with_clock(quota(per_second, burst), clock)
     }
 
     // 断言判定为 Limited 并取出 retry_after。panic 的 item-level carve-out 集中于此一 helper
@@ -244,8 +229,7 @@ mod tests {
     // 7：dyn-injection（multi_thread spawn，Send 证明）。
     #[tokio::test(flavor = "multi_thread")]
     async fn dyn_injectable_across_spawn() {
-        let rl: Box<DynRateLimiter> =
-            DynRateLimiter::new_box(GovernorLimiter::new(QuotaConfig::per_second(nz(5), nz(5))));
+        let rl: Box<DynRateLimiter> = DynRateLimiter::new_box(GovernorLimiter::new(quota(5, 5)));
         let joined = tokio::spawn(async move {
             matches!(
                 rl.check(RateLimitKey::new("k")).await,
@@ -259,7 +243,7 @@ mod tests {
     // 8 / 9 / 10：ManagedResource name / shutdown + RateLimiter shutdown。
     #[tokio::test]
     async fn lifecycle_name_and_shutdowns() {
-        let rl = GovernorLimiter::new(QuotaConfig::per_second(nz(1), nz(1)));
+        let rl = GovernorLimiter::new(quota(1, 1));
         assert_eq!(ManagedResource::name(&rl), "ratelimit");
         assert!(ManagedResource::shutdown(&rl).await.is_ok());
         assert!(RateLimiter::shutdown(&rl).await.is_ok());

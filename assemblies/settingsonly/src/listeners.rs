@@ -2,7 +2,7 @@
 
 use std::future::Future;
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -10,7 +10,8 @@ use anyhow::Context as _;
 use diport::DynManagedResource;
 use httpd::HttpServer;
 use primitives::{AuthPlan, AuthScheme, ListenerKind};
-use ratelimit::{GovernorLimiter, QuotaConfig};
+#[cfg(any(test, feature = "test-support"))]
+use ratelimit::GovernorLimiter;
 
 use crate::auth_bridge::{self, FederatedVerifier};
 
@@ -57,13 +58,15 @@ impl httpserve::RouteAuthorizer for FederatedPermissionAuthorizer {
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+#[allow(
+    dead_code,
+    reason = "shared test-support fixtures select this typed limiter"
+)]
 pub(crate) fn rate_limiter() -> Arc<GovernorLimiter> {
-    let per_second =
-        NonZeroU32::new(10).unwrap_or_else(|| unreachable!("literal rate is non-zero"));
-    let burst = NonZeroU32::new(20).unwrap_or_else(|| unreachable!("literal burst is non-zero"));
-    Arc::new(GovernorLimiter::new(QuotaConfig::per_second(
-        per_second, burst,
-    )))
+    let quota = diport::RateLimitQuota::try_new(10, 20)
+        .unwrap_or_else(|_| unreachable!("valid test quota"));
+    Arc::new(GovernorLimiter::new(quota))
 }
 
 fn primary_auth_plan() -> anyhow::Result<AuthPlan> {
@@ -81,9 +84,9 @@ fn admin_auth_plan() -> anyhow::Result<AuthPlan> {
 }
 
 pub(crate) struct FinalizedListenerSet {
-    primary: httpserve::AuthenticatedRoutes,
-    admin: httpserve::AuthenticatedRoutes,
-    health: httpserve::AuthenticatedRoutes,
+    primary: httpserve::RateLimitedRoutes,
+    admin: httpserve::RateLimitedRoutes,
+    health: httpserve::HealthRoutes,
 }
 
 pub(crate) struct FinalizedProbeReceipt {
@@ -96,15 +99,19 @@ impl FinalizedProbeReceipt {
     }
 }
 
-pub(crate) fn finalize(
+pub(crate) fn finalize<S>(
     registry: &mut bootstrap::Registry,
     verifier: FederatedVerifier,
-    limiter: Arc<GovernorLimiter>,
+    limiter: Arc<S>,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
     metrics: Arc<dyn diport::MetricsExporter>,
     audit_sink: httpserve::AuditSinkHandle,
     reporter: Arc<bootstrap::HealthReporter>,
     framework_routes: &impl bootstrap::FrameworkRoutes,
-) -> anyhow::Result<(FinalizedListenerSet, FinalizedProbeReceipt)> {
+) -> anyhow::Result<(FinalizedListenerSet, FinalizedProbeReceipt)>
+where
+    S: diport::RateLimiter + Send + Sync + 'static,
+{
     registry
         .register_primary_authorizer(Arc::new(FederatedPermissionAuthorizer))
         .context("register settingsonly federated permission authorizer")?;
@@ -145,13 +152,18 @@ pub(crate) fn finalize(
         Arc::new(FederatedPermissionAuthorizer),
     )
     .context("finalize settingsonly Admin auth")?;
-    let primary = with_access_layers(primary, verifier.clone(), Arc::clone(&limiter));
-    let admin = with_access_layers(admin, verifier, limiter);
+    let primary = with_access_layers(
+        primary,
+        verifier.clone(),
+        Arc::clone(&limiter),
+        trusted_proxy_config.clone(),
+    );
+    let admin = with_access_layers(admin, verifier, limiter, trusted_proxy_config);
 
     let health_reporter = Arc::clone(&reporter);
     let health =
         httpserve::health::routes(move || health_reporter.report(), move || metrics.render());
-    let health = httpserve::finalize_auth(health, health_auth_plan()?)
+    let health = httpserve::finalize_health(health, health_auth_plan()?)
         .context("finalize settingsonly Health auth")?;
     Ok((
         FinalizedListenerSet {
@@ -174,15 +186,20 @@ fn take_routes(
     Ok(routes.swap_remove(index).1)
 }
 
-fn with_access_layers(
+fn with_access_layers<S>(
     routes: httpserve::AuthenticatedRoutes,
     verifier: FederatedVerifier,
-    limiter: Arc<GovernorLimiter>,
-) -> httpserve::AuthenticatedRoutes {
-    auth_bridge::apply(routes, verifier).layer(axum::middleware::from_fn_with_state(
+    limiter: Arc<S>,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
+) -> httpserve::RateLimitedRoutes
+where
+    S: diport::RateLimiter + Send + Sync + 'static,
+{
+    httpserve::with_client_rate_limit(
+        auth_bridge::apply(routes, verifier),
         limiter,
-        httpserve::rate_limit::<GovernorLimiter>,
-    ))
+        trusted_proxy_config,
+    )
 }
 
 pub(crate) struct LaunchAdapter {
@@ -472,16 +489,28 @@ pub(crate) async fn serve_inventory_journey(
     let companion = || {
         let reporter = Arc::clone(&reporter);
         let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(JourneyMetrics);
-        httpserve::finalize_auth(
+        httpserve::finalize_health(
             httpserve::health::routes(move || reporter.report(), move || metrics.render()),
             health_auth_plan()?,
         )
         .map_err(anyhow::Error::from)
     };
+    let business = || {
+        httpserve::finalize_auth(httpserve::UnfinalizedRoutes::empty(), admin_auth_plan()?)
+            .map_err(anyhow::Error::from)
+    };
     let adapter = LaunchAdapter::new(
         FinalizedListenerSet {
-            primary: companion()?,
-            admin,
+            primary: httpserve::with_client_rate_limit(
+                business()?,
+                rate_limiter(),
+                httpserve::TrustedProxyConfig::disabled(),
+            ),
+            admin: httpserve::with_client_rate_limit(
+                admin,
+                rate_limiter(),
+                httpserve::TrustedProxyConfig::disabled(),
+            ),
             health: companion()?,
         },
         "127.0.0.1:0".parse()?,
@@ -676,7 +705,7 @@ mod tests {
             Arc::new(FederatedPermissionAuthorizer),
         )?;
         let health_routes =
-            httpserve::finalize_auth(httpserve::UnfinalizedRoutes::empty(), health_auth_plan()?)?;
+            httpserve::finalize_health(httpserve::UnfinalizedRoutes::empty(), health_auth_plan()?)?;
         let admin_routes =
             httpserve::finalize_auth(httpserve::UnfinalizedRoutes::empty(), admin_auth_plan()?)?;
         let admin_reservation = std::net::TcpListener::bind("127.0.0.1:0")?;
@@ -684,8 +713,16 @@ mod tests {
         drop(admin_reservation);
         let adapter = LaunchAdapter::new(
             FinalizedListenerSet {
-                primary: primary_routes,
-                admin: admin_routes,
+                primary: httpserve::with_client_rate_limit(
+                    primary_routes,
+                    rate_limiter(),
+                    httpserve::TrustedProxyConfig::disabled(),
+                ),
+                admin: httpserve::with_client_rate_limit(
+                    admin_routes,
+                    rate_limiter(),
+                    httpserve::TrustedProxyConfig::disabled(),
+                ),
                 health: health_routes,
             },
             primary,

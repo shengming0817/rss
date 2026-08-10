@@ -1,19 +1,21 @@
 //! Closed three-listener finalization and all-sockets-before-serve adapter.
 
 use std::net::SocketAddr;
-use std::num::{NonZeroU32, NonZeroU64};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use diport::DynManagedResource;
 use httpd::HttpServer;
 use primitives::{AuthPlan, AuthScheme, ListenerKind};
-use ratelimit::{GovernorLimiter, QuotaConfig};
+#[cfg(any(test, feature = "test-support"))]
+use ratelimit::GovernorLimiter;
 
+#[cfg(any(test, feature = "test-support"))]
 pub(crate) fn rate_limiter() -> Arc<GovernorLimiter> {
-    let rate = NonZeroU32::new(10).unwrap_or_else(|| unreachable!("non-zero literal"));
-    let burst = NonZeroU32::new(20).unwrap_or_else(|| unreachable!("non-zero literal"));
-    Arc::new(GovernorLimiter::new(QuotaConfig::per_second(rate, burst)))
+    let quota = diport::RateLimitQuota::try_new(10, 20)
+        .unwrap_or_else(|_| unreachable!("valid test quota"));
+    Arc::new(GovernorLimiter::new(quota))
 }
 
 fn auth_plan(kind: ListenerKind) -> anyhow::Result<AuthPlan> {
@@ -27,9 +29,9 @@ fn auth_plan(kind: ListenerKind) -> anyhow::Result<AuthPlan> {
 }
 
 pub(crate) struct FinalizedListenerSet {
-    primary: httpserve::AuthenticatedRoutes,
-    admin: httpserve::AuthenticatedRoutes,
-    health: httpserve::AuthenticatedRoutes,
+    primary: httpserve::RateLimitedRoutes,
+    admin: httpserve::RateLimitedRoutes,
+    health: httpserve::HealthRoutes,
 }
 
 pub(crate) struct FinalizedProbeReceipt {
@@ -42,19 +44,23 @@ impl FinalizedProbeReceipt {
     }
 }
 
-pub(crate) struct FinalizeInputs {
+pub(crate) struct FinalizeInputs<S> {
     pub(crate) verifier: crate::auth_bridge::RssAccessVerifier,
-    pub(crate) limiter: Arc<GovernorLimiter>,
+    pub(crate) limiter: Arc<S>,
+    pub(crate) trusted_proxy_config: httpserve::TrustedProxyConfig,
     pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
     pub(crate) audit_sink: httpserve::AuditSinkHandle,
     pub(crate) audit_clock: Arc<dyn diport::Clock>,
     pub(crate) reporter: Arc<bootstrap::HealthReporter>,
 }
 
-pub(crate) fn finalize(
+pub(crate) fn finalize<S>(
     registry: &mut bootstrap::Registry,
-    inputs: FinalizeInputs,
-) -> anyhow::Result<(FinalizedListenerSet, FinalizedProbeReceipt)> {
+    inputs: FinalizeInputs<S>,
+) -> anyhow::Result<(FinalizedListenerSet, FinalizedProbeReceipt)>
+where
+    S: diport::RateLimiter + Send + Sync + 'static,
+{
     let authorizer = registry
         .take_primary_authorizer()
         .context("take Identity route authorizer")?;
@@ -90,14 +96,20 @@ pub(crate) fn finalize(
         primary,
         inputs.verifier.clone(),
         Arc::clone(&inputs.limiter),
+        inputs.trusted_proxy_config.clone(),
     );
-    let admin = with_access_layers(admin, inputs.verifier, inputs.limiter);
+    let admin = with_access_layers(
+        admin,
+        inputs.verifier,
+        inputs.limiter,
+        inputs.trusted_proxy_config,
+    );
 
     let reporter = inputs.reporter;
     let report = Arc::clone(&reporter);
     let health =
         httpserve::health::routes(move || report.report(), move || inputs.metrics.render());
-    let health = httpserve::finalize_auth(health, auth_plan(ListenerKind::Health)?)
+    let health = httpserve::finalize_health(health, auth_plan(ListenerKind::Health)?)
         .context("finalize identityaudit Health auth")?;
     Ok((
         FinalizedListenerSet {
@@ -120,15 +132,20 @@ fn take_routes(
     Ok(routes.swap_remove(index).1)
 }
 
-fn with_access_layers(
+fn with_access_layers<S>(
     routes: httpserve::AuthenticatedRoutes,
     verifier: crate::auth_bridge::RssAccessVerifier,
-    limiter: Arc<GovernorLimiter>,
-) -> httpserve::AuthenticatedRoutes {
-    crate::auth_bridge::apply(routes, verifier).layer(axum::middleware::from_fn_with_state(
+    limiter: Arc<S>,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
+) -> httpserve::RateLimitedRoutes
+where
+    S: diport::RateLimiter + Send + Sync + 'static,
+{
+    httpserve::with_client_rate_limit(
+        crate::auth_bridge::apply(routes, verifier),
         limiter,
-        httpserve::rate_limit::<GovernorLimiter>,
-    ))
+        trusted_proxy_config,
+    )
 }
 
 pub(crate) struct LaunchAdapter {
@@ -339,16 +356,31 @@ pub(crate) async fn serve_inventory_journey(
     let companion = || {
         let reporter = Arc::clone(&reporter);
         let metrics: Arc<dyn diport::MetricsExporter> = Arc::new(JourneyMetrics);
-        httpserve::finalize_auth(
+        httpserve::finalize_health(
             httpserve::health::routes(move || reporter.report(), move || metrics.render()),
             auth_plan(ListenerKind::Health)?,
         )
         .map_err(anyhow::Error::from)
     };
+    let business = || {
+        httpserve::finalize_auth(
+            httpserve::UnfinalizedRoutes::empty(),
+            auth_plan(ListenerKind::Admin)?,
+        )
+        .map_err(anyhow::Error::from)
+    };
     let adapter = LaunchAdapter::new(
         FinalizedListenerSet {
-            primary: companion()?,
-            admin,
+            primary: httpserve::with_client_rate_limit(
+                business()?,
+                rate_limiter(),
+                httpserve::TrustedProxyConfig::disabled(),
+            ),
+            admin: httpserve::with_client_rate_limit(
+                admin,
+                rate_limiter(),
+                httpserve::TrustedProxyConfig::disabled(),
+            ),
             health: companion()?,
         },
         "127.0.0.1:0".parse()?,
@@ -516,17 +548,32 @@ mod tests {
     use diport::RateLimiter as _;
 
     fn empty_listener_set() -> anyhow::Result<FinalizedListenerSet> {
-        let routes = || {
+        let business = || {
             httpserve::finalize_auth(
+                httpserve::UnfinalizedRoutes::empty(),
+                auth_plan(ListenerKind::Admin)?,
+            )
+            .map_err(anyhow::Error::from)
+        };
+        let health = || {
+            httpserve::finalize_health(
                 httpserve::UnfinalizedRoutes::empty(),
                 AuthPlan::none(ListenerKind::Health)?,
             )
             .map_err(anyhow::Error::from)
         };
         Ok(FinalizedListenerSet {
-            primary: routes()?,
-            admin: routes()?,
-            health: routes()?,
+            primary: httpserve::with_client_rate_limit(
+                business()?,
+                rate_limiter(),
+                httpserve::TrustedProxyConfig::disabled(),
+            ),
+            admin: httpserve::with_client_rate_limit(
+                business()?,
+                rate_limiter(),
+                httpserve::TrustedProxyConfig::disabled(),
+            ),
+            health: health()?,
         })
     }
 

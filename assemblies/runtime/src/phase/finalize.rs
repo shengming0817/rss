@@ -11,6 +11,7 @@ impl<'a> DomainsWired<'a> {
             context,
             listener_execution_plan,
             rate_limiter,
+            trusted_proxy_config,
             deps,
             runtime_rss_access,
             runtime_federated_access,
@@ -86,6 +87,7 @@ impl<'a> DomainsWired<'a> {
                 audit_sink: auth_audit_sink,
                 audit_clock: auth_audit_clock,
                 rate_limiter,
+                trusted_proxy_config,
                 metrics: metrics_exporter,
                 framework_routes: crate::runtime_inventory::RuntimeInventoryRoutes::new(
                     inventory_reader,

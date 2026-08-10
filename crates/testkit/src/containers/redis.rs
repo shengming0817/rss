@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use testcontainers::core::{IntoContainerPort as _, WaitFor};
 use testcontainers::{ContainerAsync, GenericImage, ImageExt as _};
-use testcontainers_modules::redis::{REDIS_PORT, Redis};
+use testcontainers_modules::redis::REDIS_PORT;
 
 use super::{
     ContainerService, NetworkAttachment, PUBLISHED_PORT_MAX_ATTEMPTS,
@@ -17,7 +17,7 @@ const REDISS_PORT: u16 = 6379;
 
 /// redis fixture guard：持容器句柄（自起路径）到 `Drop` + `redis://` URL。**须绑定到测试结束**。
 pub struct RedisFixture {
-    pub(super) _container: Option<Box<ContainerAsync<Redis>>>,
+    pub(super) _container: Option<Box<ContainerAsync<GenericImage>>>,
     pub(super) url: String,
 }
 
@@ -46,7 +46,10 @@ pub async fn env_or_redis() -> Result<RedisFixture> {
         });
     }
     for attempt in 1..=PUBLISHED_PORT_MAX_ATTEMPTS {
-        let container = runtime::start(Redis::default(), ContainerService::Redis).await?;
+        let image = GenericImage::new("redis", "7.4-alpine")
+            .with_exposed_port(REDIS_PORT.tcp())
+            .with_wait_for(WaitFor::message_on_stdout("Ready to accept connections"));
+        let container = runtime::start(image, ContainerService::Redis).await?;
         let host = container.get_host().await?;
         match container.get_host_port_ipv4(REDIS_PORT).await {
             Ok(port) => {

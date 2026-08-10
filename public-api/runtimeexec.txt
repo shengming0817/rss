@@ -78,7 +78,9 @@ pub runtimeexec::config::ServingFrontendConfig::allow_set: authn::mtls::MtlsAllo
 pub runtimeexec::config::ServingFrontendConfig::health_port: u16
 pub runtimeexec::config::ServingFrontendConfig::pod_ip: core::net::ip_addr::IpAddr
 pub runtimeexec::config::ServingFrontendConfig::primary_port: u16
+pub runtimeexec::config::ServingFrontendConfig::rate_limit_quota: diport::rate_limiter::RateLimitQuota
 pub runtimeexec::config::ServingFrontendConfig::spiffe_endpoint: alloc::string::String
+pub runtimeexec::config::ServingFrontendConfig::trusted_proxy_cidrs: alloc::vec::Vec<alloc::string::String>
 impl core::marker::Freeze for runtimeexec::config::ServingFrontendConfig
 impl core::marker::Send for runtimeexec::config::ServingFrontendConfig
 impl core::marker::Sync for runtimeexec::config::ServingFrontendConfig
@@ -87,13 +89,20 @@ impl core::marker::UnsafeUnpin for runtimeexec::config::ServingFrontendConfig
 impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::ServingFrontendConfig
 impl core::panic::unwind_safe::UnwindSafe for runtimeexec::config::ServingFrontendConfig
 pub const runtimeexec::config::ADMIN_PORT_ENV: &str
+pub const runtimeexec::config::DEFAULT_RATE_LIMIT_BURST: u32
+pub const runtimeexec::config::DEFAULT_RATE_LIMIT_PER_SECOND: u32
 pub const runtimeexec::config::HEALTH_PORT_ENV: &str
 pub const runtimeexec::config::MTLS_ALLOW_SET_ENV: &str
 pub const runtimeexec::config::POD_IP_ENV: &str
 pub const runtimeexec::config::PRIMARY_PORT_ENV: &str
+pub const runtimeexec::config::RATE_LIMIT_BURST_ENV: &str
+pub const runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV: &str
 pub const runtimeexec::config::SPIFFE_ENDPOINT_ENV: &str
+pub const runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV: &str
 pub fn runtimeexec::config::capture_serving_frontend(impl core::ops::function::FnMut(&'static str) -> core::option::Option<std::ffi::os_str::OsString>) -> core::result::Result<runtimeexec::config::ServingFrontendConfig, runtimeexec::config::FrontendConfigError>
+pub fn runtimeexec::config::rate_limit_quota_from_values(core::option::Option<&str>, core::option::Option<&str>) -> diport::rate_limiter::RateLimitQuota
 pub fn runtimeexec::config::read_secret_document(&std::path::Path) -> std::io::error::Result<runtimeexec::config::SecretDocument>
+pub fn runtimeexec::config::trusted_proxy_cidrs_from_value(core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, runtimeexec::config::FrontendConfigError>
 pub mod runtimeexec::inventory
 pub enum runtimeexec::inventory::InventoryEndpointScheme
 pub runtimeexec::inventory::InventoryEndpointScheme::Http

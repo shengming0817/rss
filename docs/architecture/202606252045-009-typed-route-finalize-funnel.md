@@ -33,7 +33,7 @@
   同时携擦除 marker 的 `HttpRouteEvidence` 与 handler。故不同契约的 evidence/handler 交换在类型层不可表达，
   path/method/auth/resource scope 不可分别传入。构造 `new` / 拆 `into_inner` 均 `pub(crate)`——域 crate
   只在 register 闭包里收到 builder、无 raw-bypass；Health 只能经 crate 内固定 builder 挂载。
-- **funnel 三态**：`UnfinalizedRoutes`（未认证态，兼 per-listener 累加器，`empty()` + `nest_group::<L>()`；**无 public service 出口**）→ `finalize_auth(UnfinalizedRoutes, AuthPlan) -> Result<AuthenticatedRoutes, _>`（**唯一**生产 `AuthenticatedRoutes`，构造 `pub(crate)`）→ `AuthenticatedRoutes::into_server_service()`（**唯一** transport core 出口；`layer()` 只能加层不能替换，保封印）。该 core 只实现 per-request `Service`、不能直接交给 `axum::serve`；`httpd` 的私有 make-service 才能在真实 bind 分支完成 lowering。
+- **funnel 闭值状态机**：`UnfinalizedRoutes`（未认证态，兼 per-listener 累加器，`empty()` + `nest_group::<L>()`；**无 public service 出口**）→ auth finalizer 产 `AuthenticatedRoutes`（构造私有、仍**无 public transport 出口**）。业务 listener 必须再经 `with_client_rate_limit` 换得 `RateLimitedRoutes`；Health 必须经独立 `finalize_health` 直接换得 `HealthRoutes`。只有后两种闭值能力可消费必填 `ServerRequestBudget` 产 `ServerService`。该 core 只实现 per-request `Service`、不能直接交给 `axum::serve`；`httpd` 的私有 make-service 才能在真实 bind 分支完成 lowering。
 - **不变量**：任何 public（非 `#[doc(hidden)]` test）API **都不**返回裸 `axum::Router`——裸 Router 全程不出 httpserve。
 
 ### 2.2 受控 `bootstrap → httpserve` 边
@@ -47,7 +47,7 @@
 - **ROUTE-ENDPOINT-ATOMIC-01 / ROUTE-MOUNT-NOBYPASS-01**（#1690 Hard）：production public API 不接受 raw
   `MethodRouter` 或 route 字段；endpoint 是 handler 与完整 evidence 的唯一注册单元。
 - **ROUTE-AUTH-FUNNEL-01**（#1113 Hard）：`UnfinalizedRoutes` 无 public bindable 出口。
-- **ROUTE-AUTH-FUNNEL-02**（#1113 Hard）：`finalize_auth` 是 `AuthenticatedRoutes` 唯一生产者，`into_server_service` 是唯一 transport core 出口。
+- **ROUTE-AUTH-FUNNEL-02**（#1113 Hard）：auth finalizer 是 `AuthenticatedRoutes` 唯一生产者，但该中间态不可 bind；业务只能由 `RateLimitedRoutes`、Health 只能由 `HealthRoutes` 进入唯一 transport core funnel。
 
 ## 3. 修订既有决策（ai-robust §审查要求：ADR amendment 须同步重评威胁矩阵）
 

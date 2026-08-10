@@ -18,9 +18,10 @@ manifest, RuntimePlan, generated artifacts and lock rotate together.
 ## Triggers
 
 - Flip an assembly to `profile = "production"` only in the same PR that proves the above gates.
-- Production provider posture is closed: declarations are active and persistent except the exact
-  replica-local `GovernorLimiter`; the executable RuntimePlan contains active declarations only.
-  Draft, noop, memory and fail-open alternatives are not outage recovery mechanisms.
+- Production provider posture is closed: declarations are active and persistent; the executable
+  RuntimePlan contains active declarations only. Draft, noop, and memory alternatives are not
+  outage recovery mechanisms. The Redis listener limiter is explicitly fail-open so a limiter
+  outage cannot become an authentication availability outage.
 - Rotate each access profile's JWKS independently and atomically; failed refresh must keep last-good keys and lower only that profile's readyz signal.
 - For Vault Transit RSS Access signing, `export-vault-transit` must merge **Active + Retiring (and optional
   Next)** public keys into `RSS_ACCESS_TOKEN_JWKS_PATH` before starting server. When Retiring is configured,

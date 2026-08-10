@@ -78,9 +78,15 @@ fn capture_from(
     let secrets: ResolvedSecrets = bundle.try_into()?;
     secrets.validate()?;
     let build_metadata = capture_build_metadata(source)?;
-    let frontend =
-        runtimeexec::config::capture_serving_frontend(|name| source.read_environment(name))
-            .map_err(frontend_error)?;
+    let frontend = runtimeexec::config::capture_serving_frontend(
+        |name| source.read_environment(name),
+        |raw| {
+            httpserve::TrustedProxyConfig::try_from_json(raw).map_err(|_| {
+                FrontendConfigError::Invalid(runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV)
+            })
+        },
+    )
+    .map_err(frontend_error)?;
     Ok(CapturedConfig {
         config,
         secrets,
@@ -314,7 +320,8 @@ impl CapturedConfig {
     }
 }
 
-pub(crate) type ServingFrontendConfig = runtimeexec::config::ServingFrontendConfig;
+pub(crate) type ServingFrontendConfig =
+    runtimeexec::config::ServingFrontendConfig<httpserve::TrustedProxyConfig>;
 
 fn frontend_error(error: FrontendConfigError) -> ConfigError {
     match error {
@@ -1326,9 +1333,16 @@ tenantAuthorityClockSkewSeconds = 60
         let mut source = TestSource::complete(VALID_CONFIG);
         let captured = capture_from(Path::new("ignored"), &mut source).expect("capture");
         assert_eq!(source.document_reads, 1);
-        assert_eq!(source.environment_reads.len(), 19);
+        assert_eq!(source.environment_reads.len(), 22);
         assert!(source.environment_reads.values().all(|reads| *reads == 1));
         assert_eq!(source.environment_reads[FORBIDDEN_SHARED_AMQP_URL_ENV], 1);
+        for key in [
+            runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV,
+            runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV,
+            runtimeexec::config::RATE_LIMIT_BURST_ENV,
+        ] {
+            assert_eq!(source.environment_reads[key], 1);
+        }
         assert!(!format!("{captured:?}").contains(SECRET_SENTINEL));
         let (_, secrets, build_metadata, frontend) = captured.into_runtime_inputs();
         let build_metadata = build_metadata.expect("build metadata");

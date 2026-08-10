@@ -95,12 +95,15 @@ outputs = ["probes", "resources", "workers"]
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
-providerCrate = "ratelimit"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "httpserve"
 lifecycle = "active"
-durability = "ephemeral-memory"
-purpose = "per-peer-IP request rate limiting before authentication"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-open"
+purpose = "trusted-client distributed request rate limiting before authentication"
 outputs = []
 
 [[diportProviders]]

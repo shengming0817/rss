@@ -306,7 +306,7 @@ provider_factory_symbols! {
     HttpserveOidcPdp => "httpserve::oidc-pdp",
     OidcPostgresServiceTokenReplayStore => "oidc::postgres-service-token-replay-store",
     HttpservePostgresAuthAuditSink => "httpserve::postgres-auth-audit-sink",
-    HttpserveGovernorRateLimiter => "httpserve::governor-rate-limiter",
+    HttpserveRedisRateLimiter => "httpserve::redis-rate-limiter",
     DistributedRedisLockStore => "distributed::redis-lock-store",
     DistributedPostgresCasStore => "distributed::postgres-cas-store",
     RuntimeS3ObjectStore => "runtime::s3-object-store",
@@ -332,8 +332,8 @@ pub enum ProviderConstructor {
     MqttSession,
     #[serde(rename = "postgres::PgRevocationStore")]
     PostgresRevocationStore,
-    #[serde(rename = "ratelimit::GovernorLimiter")]
-    RatelimitGovernorLimiter,
+    #[serde(rename = "redis::RedisRateLimiter")]
+    RedisRateLimiter,
     #[serde(rename = "amqp::AmqpPublisher")]
     AmqpPublisher,
     #[serde(rename = "amqp::AmqpSubscriber")]
@@ -372,7 +372,7 @@ impl ProviderConstructor {
             Self::IdentityDraftArtifactSimulator => "identity_composition::DraftArtifactSimulator",
             Self::MqttSession => "mqtt::MqttSession",
             Self::PostgresRevocationStore => "postgres::PgRevocationStore",
-            Self::RatelimitGovernorLimiter => "ratelimit::GovernorLimiter",
+            Self::RedisRateLimiter => "redis::RedisRateLimiter",
             Self::AmqpPublisher => "amqp::AmqpPublisher",
             Self::AmqpSubscriber => "amqp::AmqpSubscriber",
             Self::RedisLockStore => "redis::RedisLockStore",
@@ -399,7 +399,7 @@ impl ProviderConstructor {
             Self::IdentityDraftArtifactSimulator => DiportPort::CertificateArtifactSource,
             Self::MqttSession => DiportPort::MqttSession,
             Self::PostgresRevocationStore => DiportPort::RevocationStore,
-            Self::RatelimitGovernorLimiter => DiportPort::RateLimiter,
+            Self::RedisRateLimiter => DiportPort::RateLimiter,
             Self::AmqpPublisher => DiportPort::Publisher,
             Self::AmqpSubscriber => DiportPort::AckableSubscriber,
             Self::RedisLockStore => DiportPort::Lock,
@@ -421,6 +421,7 @@ impl ProviderConstructor {
         match self {
             Self::AmqpPublisher
             | Self::AmqpSubscriber
+            | Self::RedisRateLimiter
             | Self::RedisLockStore
             | Self::RedisCasStore
             | Self::VaultSigner
@@ -433,8 +434,7 @@ impl ProviderConstructor {
             Self::PostgresDeviceCertificateRepository | Self::PostgresDeviceCommandStore => {
                 &["domain-identity"]
             }
-            Self::RatelimitGovernorLimiter
-            | Self::IdentityDraftArtifactSimulator
+            Self::IdentityDraftArtifactSimulator
             | Self::MqttSession
             | Self::PostgresRevocationStore
             | Self::PostgresCasStore
@@ -444,10 +444,7 @@ impl ProviderConstructor {
     }
 
     pub const fn durability(self) -> ProviderDurability {
-        match self {
-            Self::RatelimitGovernorLimiter => ProviderDurability::EphemeralMemory,
-            _ => ProviderDurability::Persistent,
-        }
+        ProviderDurability::Persistent
     }
 
     pub const fn provider_crate(self) -> &'static str {
@@ -457,7 +454,7 @@ impl ProviderConstructor {
             | Self::PostgresRevocationStore => "postgres",
             Self::IdentityDraftArtifactSimulator => "identity-composition",
             Self::MqttSession => "mqtt",
-            Self::RatelimitGovernorLimiter => "ratelimit",
+            Self::RedisRateLimiter => "redis",
             Self::AmqpPublisher | Self::AmqpSubscriber => "amqp",
             Self::RedisLockStore | Self::RedisCasStore => "redis",
             Self::PostgresCasStore
@@ -873,15 +870,15 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
         role: ProviderRole::ListenerRateLimiter,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::RateLimiter,
-        constructor: ProviderConstructor::RatelimitGovernorLimiter,
-        provider_crate: "ratelimit",
-        required_features: &[],
+        constructor: ProviderConstructor::RedisRateLimiter,
+        provider_crate: "redis",
+        required_features: &["backend"],
         consumer: ProviderConsumer::Httpserve,
-        durability: ProviderDurability::EphemeralMemory,
-        scope: None,
-        failure_posture: None,
+        durability: ProviderDurability::Persistent,
+        scope: Some(ProviderScope::ClusterGlobal),
+        failure_posture: Some(ProviderFailurePosture::FailOpen),
         outputs: &[],
-        factory: Some(ProviderFactorySymbol::HttpserveGovernorRateLimiter),
+        factory: Some(ProviderFactorySymbol::HttpserveRedisRateLimiter),
     },
     ProviderRoleSpec {
         role: ProviderRole::DistributedLockStore,

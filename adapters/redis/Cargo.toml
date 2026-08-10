@@ -26,10 +26,12 @@ secure = { path = "../../crates/secure", optional = true }
 tracing = { workspace = true, optional = true }
 # 构造期 TTL 校验错误（fail-fast，非静默钳制）。
 thiserror = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["time"], optional = true }
 
 [features]
 default = []
-backend = ["dep:deadpool-redis", "dep:secure", "dep:tracing", "dep:thiserror", "dep:vocab"]
+backend = ["dep:deadpool-redis", "dep:secure", "dep:tracing", "dep:thiserror", "dep:vocab", "dep:sha2", "dep:tokio"]
 # Narrow provider-backed fixture used only by the fault matrix journeys.
 fault-matrix-test-support = ["backend"]
 # 集成测试需真实 redis 后端（Cargo `[[test]] required-features = ["integration"]`，nextest 按名串行）；
@@ -46,6 +48,11 @@ required-features = ["integration"]
 [[test]]
 name = "integration_saga_effect_fixture"
 path = "tests/integration_saga_effect_fixture.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "integration_rate_limit"
+path = "tests/integration_rate_limit.rs"
 required-features = ["integration"]
 
 [dev-dependencies]

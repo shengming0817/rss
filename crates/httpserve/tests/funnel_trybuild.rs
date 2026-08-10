@@ -3,6 +3,7 @@
 //! 负向证据（trybuild compile_fail）——锁住「错误不可表达」：
 //! - `cannot_bind_unfinalized`：`UnfinalizedRoutes` 无 `into_server_service`（无 public bindable 出口，ROUTE-AUTH-FUNNEL-01）。
 //! - `cannot_mint_authenticated`：`AuthenticatedRoutes::new` 是 `pub(crate)`，外部 crate 无法 mint（ROUTE-AUTH-FUNNEL-02）。
+//! - `authenticated_routes_cannot_bind`：auth-finalized 中间态没有 public transport 出口；业务必须取得 rate-limit receipt。
 //! - `cannot_mint_authenticated_evidence`：production `Authenticated::new_*` 需要 `authmint::AuthenticatedMint`，
 //!   缺 mint 首参即 compile_fail（AUTH-EVIDENCE-MINT-01 Hard；本例锁 `new_mtls` arity）。
 //! - `cannot_name_authmint_capability`：`AuthenticatedMint` 字段私有，不可 `AuthenticatedMint(())` 伪造
@@ -33,6 +34,7 @@ fn ui() {
     t.pass("tests/ui/producer_funnel_pass.rs");
     t.pass("tests/ui/declared_producer_funnel_pass.rs");
     t.compile_fail("tests/ui/cannot_bind_unfinalized.rs");
+    t.compile_fail("tests/ui/authenticated_routes_cannot_bind.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated.rs");
     t.compile_fail("tests/ui/cannot_mint_authenticated_evidence.rs");
     t.compile_fail("tests/ui/cannot_name_authmint_capability.rs");

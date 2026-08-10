@@ -15,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use base64::Engine as _;
 use runtimeexec::config::{SecretDocument, SecretValue};
 use secure::SecretText;
@@ -107,6 +108,9 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     DOMAIN_TRANSPORT_SHARED_URL_ENV,
     "RSS_HEALTH_LISTEN_ADDR",
     "RSS_HTTP_SERVER_REQUEST_BUDGET_MS",
+    runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV,
+    runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV,
+    runtimeexec::config::RATE_LIMIT_BURST_ENV,
     "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
     "RSS_IDENTITY_PSEUDONYM_KEY_B64URL",
     IDENTITY_DOMAIN_PLACEMENT_WORKLOAD_ENV,
@@ -1510,6 +1514,8 @@ pub(crate) struct RuntimeServingConfig {
     domain_modules: crate::domains::DomainModuleInputs,
     audit_consumer_key: primitives::MacKey,
     auth_grant_sweep_interval: std::time::Duration,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
+    rate_limit_quota: diport::RateLimitQuota,
 }
 
 pub(crate) struct RuntimeServingConfigParts {
@@ -1521,6 +1527,8 @@ pub(crate) struct RuntimeServingConfigParts {
     pub(crate) domain_modules: crate::domains::DomainModuleInputs,
     pub(crate) audit_consumer_key: primitives::MacKey,
     pub(crate) auth_grant_sweep_interval: std::time::Duration,
+    pub(crate) trusted_proxy_config: httpserve::TrustedProxyConfig,
+    pub(crate) rate_limit_quota: diport::RateLimitQuota,
 }
 
 impl RuntimeServingConfig {
@@ -1542,6 +1550,14 @@ impl RuntimeServingConfig {
             identity_token_profile,
         )?;
         let audit_consumer_key = domain_modules.audit_consumer_key();
+        let trusted_proxy_config = httpserve::TrustedProxyConfig::try_from_json(
+            config.value(runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV),
+        )
+        .context("build trusted proxy policy")?;
+        let rate_limit_quota = runtimeexec::config::rate_limit_quota_from_values(
+            config.value(runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV),
+            config.value(runtimeexec::config::RATE_LIMIT_BURST_ENV),
+        );
         Ok(Self {
             token_profiles,
             event_transport,
@@ -1551,6 +1567,8 @@ impl RuntimeServingConfig {
             domain_modules,
             audit_consumer_key,
             auth_grant_sweep_interval,
+            trusted_proxy_config,
+            rate_limit_quota,
         })
     }
 
@@ -1564,6 +1582,8 @@ impl RuntimeServingConfig {
             domain_modules: self.domain_modules,
             audit_consumer_key: self.audit_consumer_key,
             auth_grant_sweep_interval: self.auth_grant_sweep_interval,
+            trusted_proxy_config: self.trusted_proxy_config,
+            rate_limit_quota: self.rate_limit_quota,
         }
     }
 }

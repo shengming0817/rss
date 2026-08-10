@@ -12,6 +12,10 @@ use deadpool_redis::{Manager, Pool, Runtime};
 use diport::{DynCasStore, DynLockStore, DynManagedResource, ManagedResource, ShutdownError};
 
 use crate::{InvalidClaimTtl, RedisStore, claimer};
+use crate::{
+    InvalidRateLimitNamespace, RedisRateLimitCapabilityError, RedisRateLimiter,
+    RedisRateLimiterCapability,
+};
 
 /// Explicit private trust anchor for a REDISS connection.
 #[derive(Clone)]
@@ -170,6 +174,17 @@ pub struct RedisInfraDeps {
 }
 
 impl RedisInfraDeps {
+    /// Verify and mint the cluster-global rate-limiter capability from the existing pool.
+    pub async fn rate_limiter_capability(
+        &self,
+        namespace: &'static str,
+        quota: diport::RateLimitQuota,
+    ) -> Result<RedisRateLimiterCapability, RedisRateLimitCapabilityError> {
+        let limiter = RedisRateLimiter::new(Arc::clone(&self.store), namespace, quota)
+            .map_err(|_: InvalidRateLimitNamespace| RedisRateLimitCapabilityError)?;
+        limiter.verify_capability().await
+    }
+
     /// Fault-matrix-only real Redis effect handle.
     #[cfg(feature = "fault-matrix-test-support")]
     #[must_use]

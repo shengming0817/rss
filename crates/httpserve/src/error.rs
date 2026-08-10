@@ -232,9 +232,9 @@ pub fn too_many_requests(
     retry_after: std::time::Duration,
 ) -> axum::response::Response {
     let mut resp = core_error_response(&CoreError::new(CoreErrorKind::TooManyRequests), request_id);
-    // ceil 到整数秒：(ms + 999) / 1000，等价 u128::div_ceil(1000)；clamp 到 u64::MAX 防溢出。
-    let ms = retry_after.as_millis();
-    let secs = u64::try_from(ms.div_ceil(1000)).unwrap_or(u64::MAX);
+    let secs = retry_after
+        .as_secs()
+        .saturating_add(u64::from(retry_after.subsec_nanos() != 0));
     if let Ok(val) = axum::http::HeaderValue::from_str(&secs.to_string()) {
         resp.headers_mut().insert(
             axum::http::header::HeaderName::from_static("retry-after"),
@@ -515,6 +515,15 @@ mod tests {
             .to_str()
             .expect("str");
         assert_eq!(v1, "1", "1000ms → 1s");
+
+        let sub_millisecond = too_many_requests("rid", std::time::Duration::from_micros(1));
+        let sub_millisecond_value = sub_millisecond
+            .headers()
+            .get("retry-after")
+            .expect("须有 Retry-After")
+            .to_str()
+            .expect("str");
+        assert_eq!(sub_millisecond_value, "1", "非零亚毫秒须向上取整为 1s");
     }
 
     #[tokio::test]

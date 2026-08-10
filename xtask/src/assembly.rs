@@ -108,8 +108,10 @@ pub(crate) enum Rule {
     SettingsOnlyRawJwtReparse,
     /// production `diport::RevocationStore` provider 必须持久。
     RevocationDurability,
-    /// production provider 必须 active 且持久；仅 exact active GovernorLimiter 可为进程内临时态。
+    /// production provider 必须 active 且持久；不存在 replica-local 临时态例外。
     ProductionProviderPosture,
+    /// production listener finalizer 必须消费唯一 RealIP→rate-limit 封装漏斗。
+    ProductionEdgeRateLimitFunnel,
     /// active provider 必须由 assembly Cargo.toml `[dependencies]` 声明。
     ActiveProviderDependency,
     /// active provider 必须是 xtask 认识的 provider→port 映射。
@@ -990,6 +992,7 @@ fn validate_assembly(a: &GovernedAssembly) -> Vec<Finding> {
     validate_identityaudit_manifest_boundary(a, &mut findings);
     if let Some(production) = a.production() {
         validate_production_provider_posture(production, &mut findings);
+        validate_production_edge_rate_limit_funnel(production, &mut findings);
         validate_production_security_closeout(production, &mut findings);
     }
 
@@ -1069,23 +1072,15 @@ fn validate_assembly(a: &GovernedAssembly) -> Vec<Finding> {
 }
 
 fn validate_production_provider_posture(a: ProductionAssembly<'_>, findings: &mut Vec<Finding>) {
-    // INVARIANT: ASSEMBLY-PRODUCTION-PROVIDER-POSTURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::production_provider_posture_rejects_non_active_and_non_governor_ephemeral", anti_vacuity = "tests::production_provider_posture_allows_exact_governor_exception" } — production is a hard ratchet: every declaration is executable and durable except the exact process-local edge limiter.
+    // INVARIANT: ASSEMBLY-PRODUCTION-PROVIDER-POSTURE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::production_provider_posture_rejects_non_active_or_ephemeral", anti_vacuity = "tests::production_provider_posture_accepts_persistent_catalog" } — production is a hard ratchet: every declaration is executable and durable.
     let full_runtime = is_runtime_assembly(&a);
     for provider in a.manifest().diport_providers() {
-        let exact_governor = provider.lifecycle == ProviderLifecycle::Active
-            && provider.provider == ProviderConstructor::RatelimitGovernorLimiter
-            && provider.port == DiportPort::RateLimiter
-            && provider.provider_crate == "ratelimit"
-            && provider.consumer == ProviderConsumer::Httpserve
-            && provider.durability == ProviderDurability::EphemeralMemory;
-        if provider.lifecycle != ProviderLifecycle::Active
-            || (provider.durability != ProviderDurability::Persistent && !exact_governor)
-        {
+        if !production_provider_posture_is_valid(provider.lifecycle, provider.durability) {
             findings.push(finding(
                 Rule::ProductionProviderPosture,
                 a.manifest_label(),
                 format!(
-                    "field=diportProviders profile=production provider={} 必须 lifecycle=active 且 durability=persistent；仅 exact active ratelimit::GovernorLimiter 可为 ephemeral-memory；actual lifecycle={} durability={}",
+                    "field=diportProviders profile=production provider={} 必须 lifecycle=active 且 durability=persistent；actual lifecycle={} durability={}",
                     provider.provider, provider.lifecycle, provider.durability
                 ),
             ));
@@ -1105,6 +1100,116 @@ fn validate_production_provider_posture(a: ProductionAssembly<'_>, findings: &mu
             "field=diportProviders runtime production requires exact active persistent postgres::PgRevocationStore for deviceloop",
         ));
     }
+}
+
+const fn production_provider_posture_is_valid(
+    lifecycle: ProviderLifecycle,
+    durability: ProviderDurability,
+) -> bool {
+    matches!(lifecycle, ProviderLifecycle::Active)
+        && matches!(durability, ProviderDurability::Persistent)
+}
+
+fn validate_production_edge_rate_limit_funnel(
+    a: ProductionAssembly<'_>,
+    findings: &mut Vec<Finding>,
+) {
+    // INVARIANT: ASSEMBLY-PRODUCTION-EDGE-RATE-LIMIT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::production_edge_rate_limit_funnel_rejects_bypass_and_omission", anti_vacuity = "tests::production_edge_rate_limit_funnel_real_assemblies_are_exact" } — every production listener finalizer consumes the one closed RealIP→rate-limit funnel exactly once; direct layer assembly is rejected.
+    let relative = if a.manifest().name() == "runtime" {
+        "src/routes.rs"
+    } else {
+        "src/listeners.rs"
+    };
+    let path = a.dir().join(relative);
+    let valid = std::fs::read_to_string(&path)
+        .ok()
+        .is_some_and(|source| production_edge_rate_limit_funnel_source_is_valid(&source));
+    if !valid {
+        findings.push(finding(
+            Rule::ProductionEdgeRateLimitFunnel,
+            a.manifest_label(),
+            format!(
+                "source={} production listener finalizer 必须且只能调用一次 httpserve::with_client_rate_limit，业务存储必须为 RateLimitedRoutes、Health 存储必须为 HealthRoutes，且禁止 AuthenticatedRoutes 直接 bind 或手工拼装 RealIpLayer/rate_limit",
+                path.display()
+            ),
+        ));
+    }
+}
+
+fn production_edge_rate_limit_funnel_source_is_valid(source: &str) -> bool {
+    let Ok(file) = syn::parse_file(source) else {
+        return false;
+    };
+    let mut tokens = String::new();
+    for item in &file.items {
+        if item_attrs(item).is_some_and(has_test_or_test_support_cfg) {
+            continue;
+        }
+        tokens.push_str(&strip_string_literals(&item.to_token_stream().to_string()));
+    }
+    let compact: String = tokens.split_whitespace().collect();
+    let production_storage_requires_receipt = (compact
+        .contains("primary:httpserve::RateLimitedRoutes")
+        && compact.contains("admin:httpserve::RateLimitedRoutes")
+        && compact.contains("health:httpserve::HealthRoutes"))
+        || (compact.contains("RateLimited(httpserve::RateLimitedRoutes)")
+            && compact.contains("Health(httpserve::HealthRoutes)"));
+    production_storage_requires_receipt
+        && compact
+            .matches("httpserve::with_client_rate_limit(")
+            .count()
+            == 1
+        && !compact.contains("let_=httpserve::with_client_rate_limit(")
+        && !compact.contains("httpserve::RealIpLayer::new(")
+        && !compact.contains("httpserve::rate_limit::<")
+        && !file
+            .items
+            .iter()
+            .any(production_item_binds_authenticated_routes)
+}
+
+fn production_item_binds_authenticated_routes(item: &syn::Item) -> bool {
+    match item {
+        syn::Item::Fn(function) => {
+            signature_accepts_authenticated_routes(&function.sig)
+                && function
+                    .block
+                    .to_token_stream()
+                    .to_string()
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains(".into_server_service(")
+        }
+        syn::Item::Impl(implementation) => implementation.items.iter().any(|item| {
+            let syn::ImplItem::Fn(function) = item else {
+                return false;
+            };
+            signature_accepts_authenticated_routes(&function.sig)
+                && function
+                    .block
+                    .to_token_stream()
+                    .to_string()
+                    .split_whitespace()
+                    .collect::<String>()
+                    .contains(".into_server_service(")
+        }),
+        _ => false,
+    }
+}
+
+fn signature_accepts_authenticated_routes(signature: &syn::Signature) -> bool {
+    signature.inputs.iter().any(|input| {
+        let syn::FnArg::Typed(argument) = input else {
+            return false;
+        };
+        argument
+            .ty
+            .to_token_stream()
+            .to_string()
+            .split_whitespace()
+            .collect::<String>()
+            .contains("httpserve::AuthenticatedRoutes")
+    })
 }
 
 fn is_runtime_assembly(a: &GovernedAssembly) -> bool {
@@ -7020,8 +7125,8 @@ mqtt = { path = "../../adapters/mqtt" }
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
-providerCrate = "ratelimit"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
 consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
@@ -8854,7 +8959,7 @@ name = "runtime"
     }
 
     #[test]
-    fn production_provider_posture_rejects_non_active_and_non_governor_ephemeral()
+    fn production_provider_registry_rejects_non_active_or_ephemeral_declarations()
     -> anyhow::Result<()> {
         for (name, provider_extra) in [
             (
@@ -8901,7 +9006,66 @@ postgres = { path = "../../adapters/postgres" }
     }
 
     #[test]
-    fn production_provider_posture_allows_exact_governor_exception() -> anyhow::Result<()> {
+    fn production_provider_posture_rejects_non_active_or_ephemeral() {
+        assert!(!production_provider_posture_is_valid(
+            ProviderLifecycle::Draft,
+            ProviderDurability::Persistent,
+        ));
+        assert!(!production_provider_posture_is_valid(
+            ProviderLifecycle::Active,
+            ProviderDurability::EphemeralMemory,
+        ));
+    }
+
+    #[test]
+    fn production_provider_posture_accepts_persistent_catalog() {
+        assert!(production_provider_posture_is_valid(
+            ProviderLifecycle::Active,
+            ProviderDurability::Persistent,
+        ));
+    }
+
+    #[test]
+    fn production_edge_rate_limit_funnel_rejects_bypass_and_omission() {
+        assert!(!production_edge_rate_limit_funnel_source_is_valid(
+            "fn wire(routes: R) { routes.layer(httpserve::RealIpLayer::new(config)); }",
+        ));
+        assert!(!production_edge_rate_limit_funnel_source_is_valid(
+            "fn wire(routes: R) { httpserve::with_client_rate_limit(routes, limiter, config); httpserve::with_client_rate_limit(routes, limiter, config); }",
+        ));
+        assert!(production_edge_rate_limit_funnel_source_is_valid(
+            "struct Set { primary: httpserve::RateLimitedRoutes, admin: httpserve::RateLimitedRoutes, health: httpserve::HealthRoutes } fn wire(routes: R) -> httpserve::RateLimitedRoutes { httpserve::with_client_rate_limit(routes, limiter, config) }",
+        ));
+        assert!(!production_edge_rate_limit_funnel_source_is_valid(
+            "fn dead(routes: R) { httpserve::with_client_rate_limit(routes, limiter, config); } fn bind(routes: R) { routes.into_server_service(budget); }",
+        ));
+        assert!(!production_edge_rate_limit_funnel_source_is_valid(
+            "fn wire(routes: R) { let _ = httpserve::with_client_rate_limit(routes, limiter, config); }",
+        ));
+        assert!(!production_edge_rate_limit_funnel_source_is_valid(
+            "struct Set { primary: httpserve::RateLimitedRoutes, admin: httpserve::RateLimitedRoutes, health: httpserve::HealthRoutes } fn dead(routes: httpserve::AuthenticatedRoutes) { httpserve::with_client_rate_limit(routes, limiter, config); } fn bind(routes: httpserve::AuthenticatedRoutes) { routes.into_server_service(budget); }",
+        ));
+    }
+
+    #[test]
+    fn production_edge_rate_limit_funnel_real_assemblies_are_exact() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        for relative in [
+            "assemblies/runtime/src/routes.rs",
+            "assemblies/identityaudit/src/listeners.rs",
+            "assemblies/settingsonly/src/listeners.rs",
+        ] {
+            let source = std::fs::read_to_string(root.join(relative))?;
+            assert!(
+                production_edge_rate_limit_funnel_source_is_valid(&source),
+                "production listener funnel drifted: {relative}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn production_provider_posture_rejects_ephemeral_rate_limiter() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-production-provider-governor");
         let manifest = format!(
             "{}{}",
@@ -8914,11 +9078,14 @@ durability = "persistent""#,
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
-providerCrate = "ratelimit"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
+scope = "cluster-global"
+failurePosture = "fail-open"
 purpose = "edge-rate-limit"
 outputs = []
 "#,
@@ -8931,15 +9098,15 @@ name = "runtime"
 
 [dependencies]
 postgres = { path = "../../adapters/postgres" }
-ratelimit = { path = "../../adapters/ratelimit" }
+redis = { path = "../../adapters/redis", features = ["backend"] }
 "#,
         )?;
-        let (_count, findings) = validate_test_fixture_root_without_contracts(&root)?;
+        let error = validate_test_fixture_root_without_contracts(&root)
+            .expect_err("ephemeral production limiter must fail closed");
+        let message = format!("{error:#}");
         assert!(
-            findings
-                .iter()
-                .all(|finding| finding.rule != Rule::ProductionProviderPosture),
-            "exact active GovernorLimiter is the sole production ephemeral exception: {findings:?}"
+            message.contains("does not match canonical registry"),
+            "ephemeral rate limiter must be rejected by the catalog: {message}"
         );
         Ok(())
     }
@@ -10260,8 +10427,8 @@ outputs = ["probes", "workers"]
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
-providerCrate = "ratelimit"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
 consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"
@@ -10639,7 +10806,7 @@ redis = { path = "../../adapters/redis", features = ["backend"] }
     }
 
     /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "check", source = "code" }— provider↔providerCrate 绑定 red test（anti-vacuity）。
-    /// `ratelimit::GovernorLimiter` 与 `providerCrate = "softca"` 不匹配，active 声明必须被拒。
+    /// `redis::RedisRateLimiter` 与 `providerCrate = "softca"` 不匹配，active 声明必须被拒。
     #[test]
     fn active_provider_with_wrong_provider_crate_is_rejected() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-provider-crate-mismatch");
@@ -10673,7 +10840,7 @@ domains = []
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
+provider = "redis::RedisRateLimiter"
 providerCrate = "softca"
 consumer = "httpserve"
 lifecycle = "active"
@@ -10698,7 +10865,7 @@ softca = { path = "../../adapters/softca" }
     }
 
     /// INVARIANT: ASSEMBLY-PROVIDER-CRATE-01 { level = "Medium", exec = "check", source = "code" }— provider↔providerCrate 绑定正例（non-vacuous green path）。
-    /// `ratelimit::GovernorLimiter` + `providerCrate = "ratelimit"` 正确绑定，不应产生 ProviderCrateMismatch。
+    /// `redis::RedisRateLimiter` + `providerCrate = "redis"` 正确绑定，不应产生 ProviderCrateMismatch。
     #[test]
     fn active_provider_with_correct_provider_crate_is_allowed() -> anyhow::Result<()> {
         let root = unique_tmp("assembly-provider-crate-correct");
@@ -10732,8 +10899,8 @@ domains = []
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
-providerCrate = "ratelimit"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
 consumer = "httpserve"
 lifecycle = "active"
 durability = "ephemeral-memory"

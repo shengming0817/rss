@@ -11,14 +11,14 @@
       "path": "assemblies/runtime/assembly.toml",
       "digest": {
         "algorithm": "sha256",
-        "value": "86013539f14d26dffc9e83a35e6cec95b2d764f55001cdd06b0f133fa9743463"
+        "value": "4fbe9262515845ec94cdd42ead7d8e78333361520b46ab538e50a6e52580b092"
       }
     },
     {
       "path": "assemblies/runtime/src/generated/modules_gen.rs",
       "digest": {
         "algorithm": "sha256",
-        "value": "92ff1651238577dd207519a6f73d3d9c544ad30de074910b8ea515211b1fb985"
+        "value": "4a7a6dad5563a94edd5f721bb798b8c635187c73d95a09cb42a216c851d222d4"
       }
     },
     {
@@ -261,13 +261,18 @@
       ]
     },
     {
-      "id": "n_5c724f207600d6bdcf9fab27",
+      "id": "n_6fd9f14774ac458326a2938e",
       "kind": "provider",
-      "label": "ratelimit::GovernorLimiter (ratelimit)",
+      "label": "redis::RedisRateLimiter (redis)",
       "port": "diport::RateLimiter",
       "lifecycle": "active",
-      "durability": "ephemeral-memory",
-      "purpose": "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"
+      "durability": "persistent",
+      "scope": "cluster-global",
+      "failurePosture": "fail-open",
+      "purpose": "trusted-client distributed request rate limiting (pre-auth, DoS/brute-force 防护)",
+      "requiredFeatures": [
+        "backend"
+      ]
     },
     {
       "id": "n_fb2fbc8ca89d116b164660ae",
@@ -678,12 +683,12 @@
     },
     {
       "from": "n_f19e907a3e57f5b7e7deb34c",
-      "to": "n_5c724f207600d6bdcf9fab27",
+      "to": "n_6fd9f14774ac458326a2938e",
       "kind": "requires-capability"
     },
     {
       "from": "n_d954278a62814c4c97d6a2ee",
-      "to": "n_5c724f207600d6bdcf9fab27",
+      "to": "n_6fd9f14774ac458326a2938e",
       "kind": "declares-provider"
     },
     {

@@ -139,16 +139,19 @@ durability = "persistent"
 purpose = "http-auth-decision-audit"
 outputs = ["probes", "resources", "workers"]
 
-# edge 防护：per-peer-IP 限流（#1106，pre-auth DoS/brute-force 防护）——httpserve 消费、active。
+# edge 防护：trusted-client 跨副本限流（pre-auth DoS/brute-force 防护）——httpserve 消费、active。
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
-providerCrate = "ratelimit"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "httpserve"
 lifecycle = "active"
-durability = "ephemeral-memory"
-purpose = "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-open"
+purpose = "trusted-client distributed request rate limiting (pre-auth, DoS/brute-force 防护)"
 outputs = []
 
 # distributed lock/CAS providers（#1571 go-live）：runtime 经 `wire_distributed(&SharedRuntimeDeps)` 从

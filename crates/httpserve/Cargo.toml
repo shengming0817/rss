@@ -41,7 +41,9 @@ serde_json = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 # 结构化 span / 日志
 tracing = { workspace = true }
+metrics = { workspace = true }
 thiserror = { workspace = true }
+ipnet = { workspace = true }
 tokio = { workspace = true, features = ["time"] } # 全请求 server budget；timeout 通过 drop 取消整条 request future
 
 [dev-dependencies]

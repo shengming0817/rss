@@ -16,6 +16,8 @@ mod bundle;
 mod cas;
 #[cfg(feature = "backend")]
 mod lock;
+#[cfg(feature = "backend")]
+mod rate_limit;
 #[cfg(feature = "fault-matrix-test-support")]
 mod saga_effect_fixture;
 
@@ -23,6 +25,11 @@ mod saga_effect_fixture;
 pub use bundle::{
     RedisCasStore, RedisConnectError, RedisInboxStore, RedisInfraDeps, RedisLockStore,
     RedisPingError, RedisPrivateCa, RedisPrivateCaError, RedisRuntimeDeps,
+};
+#[cfg(feature = "backend")]
+pub use rate_limit::{
+    InvalidRateLimitNamespace, RedisRateLimitCapabilityError, RedisRateLimiter,
+    RedisRateLimiterCapability,
 };
 #[cfg(feature = "fault-matrix-test-support")]
 pub use saga_effect_fixture::{
@@ -98,6 +105,8 @@ mod smoke {
     fn assert_cas_store<T: diport::CasStore>(_: PhantomData<T>) {}
     #[cfg(feature = "backend")]
     fn assert_lock_store<T: diport::LockStore>(_: PhantomData<T>) {}
+    #[cfg(feature = "backend")]
+    fn assert_rate_limiter<T: diport::RateLimiter>(_: PhantomData<T>) {}
 
     #[cfg(feature = "backend")]
     #[test]
@@ -105,6 +114,7 @@ mod smoke {
         assert_inbox_store(PhantomData::<super::RedisInboxStore>);
         assert_cas_store(PhantomData::<super::RedisCasStore>);
         assert_lock_store(PhantomData::<super::RedisLockStore>);
+        assert_rate_limiter(PhantomData::<super::RedisRateLimiter>);
     }
 }
 

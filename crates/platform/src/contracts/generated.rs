@@ -14,7 +14,7 @@ impl crate::Contract for RuntimeInventory {
     const ID: ContractId = ContractId::from_static("runtime.inventory");
     const VERSION: ContractVersion = ContractVersion::new(1, 0);
     const SCHEMA_DIGEST: SchemaDigest = SchemaDigest::from_static(
-        "sha256:2068246486fd433631e0257d18f1e20209f9db354e67b5f554fe4e8b31e429a8",
+        "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b",
     );
     const PERMISSION: &'static str = "runtime:inventory:read";
 }

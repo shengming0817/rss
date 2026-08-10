@@ -361,7 +361,6 @@ pub(crate) struct ProvidersBuilt<'a> {
     provider_factories: crate::provider_output::ProviderFactoryDispatch,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
     placement_execution_plan: crate::plan::PlacementExecutionPlan,
-    rate_limiter: Arc<ratelimit::GovernorLimiter>,
     serving_config: crate::config::RuntimeServingConfigParts,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
@@ -375,7 +374,8 @@ pub(crate) struct InfraBuilt<'a> {
     provider_factories: crate::provider_output::ProviderFactoryDispatch,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
     placement_execution_plan: crate::plan::PlacementExecutionPlan,
-    rate_limiter: Arc<ratelimit::GovernorLimiter>,
+    rate_limiter: Arc<redis::RedisRateLimiter>,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
     deps: crate::SharedRuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
     wiring_inputs: infra::RuntimeWiringInputs,
@@ -393,7 +393,8 @@ pub(crate) struct InfraBuilt<'a> {
 pub(crate) struct DomainsWired<'a> {
     context: PhaseContext<'a>,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
-    rate_limiter: Arc<ratelimit::GovernorLimiter>,
+    rate_limiter: Arc<redis::RedisRateLimiter>,
+    trusted_proxy_config: httpserve::TrustedProxyConfig,
     deps: crate::SharedRuntimeDeps,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:

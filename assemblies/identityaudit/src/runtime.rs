@@ -50,6 +50,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             plan.workflow_runtime().projection_capture(),
             config,
             secrets,
+            frontend.rate_limit_quota,
             transaction,
         )
         .await?;
@@ -124,6 +125,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             listeners::FinalizeInputs {
                 verifier,
                 limiter,
+                trusted_proxy_config: frontend.trusted_proxy_config.clone(),
                 metrics,
                 audit_sink,
                 audit_clock: Arc::new(crate::SystemClock),

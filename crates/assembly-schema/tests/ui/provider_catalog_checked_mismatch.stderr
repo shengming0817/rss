@@ -5,7 +5,7 @@ error[E0080]: evaluation panicked: provider port drift
    |  ______________________________________^
  7 | |     ProviderRole::ListenerRateLimiter,
  8 | |     DiportPort::Signer,
- 9 | |     ProviderConstructor::RatelimitGovernorLimiter,
+ 9 | |     ProviderConstructor::RedisRateLimiter,
 ...  |
 17 | |     &[],
 18 | | );

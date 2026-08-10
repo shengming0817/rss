@@ -291,7 +291,7 @@ pub fn finalize_federated_listener(
 pub fn finalize_health_listener(
     reporter: Arc<bootstrap::HealthReporter>,
     metrics: Arc<dyn diport::MetricsExporter>,
-) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+) -> anyhow::Result<httpserve::HealthRoutes> {
     crate::routes::finalize_health_fixture(reporter, metrics)
 }
 

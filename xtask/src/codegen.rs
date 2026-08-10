@@ -350,7 +350,7 @@ fn validate_platform_contract_identity(
         && version == "v1"
         && auth_mode == HttpAuthMode::Permission
         && permission == Some("runtime:inventory:read")
-        && schema_hash == "sha256:2068246486fd433631e0257d18f1e20209f9db354e67b5f554fe4e8b31e429a8"
+        && schema_hash == "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b"
     {
         return Ok(());
     }
@@ -5071,7 +5071,7 @@ mod tests {
     #[test]
     fn platform_public_contract_identity_is_fail_closed() {
         const HASH: &str =
-            "sha256:2068246486fd433631e0257d18f1e20209f9db354e67b5f554fe4e8b31e429a8";
+            "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b";
         let validate = |id, domain, version, mode, permission, hash| {
             validate_platform_contract_identity(id, domain, version, mode, permission, hash)
         };

@@ -68,11 +68,11 @@ fn canonicalization_rejects_registry_drift() {
             "draft",
         ),
         (
-            "durability = \"ephemeral-memory\"",
             "durability = \"persistent\"",
+            "durability = \"ephemeral-memory\"",
             "durability",
-            "ephemeral-memory",
             "persistent",
+            "ephemeral-memory",
         ),
         (
             "outputs = [\"resources\"]",
@@ -181,14 +181,14 @@ fn listener_pdp_requires_probe_and_resource_lifecycle_outputs() {
 const RATE_LIMITER_ENTRY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::ListenerRateLimiter,
     DiportPort::RateLimiter,
-    ProviderConstructor::RatelimitGovernorLimiter,
-    ProviderFactorySymbol::HttpserveGovernorRateLimiter,
-    "ratelimit",
-    &[],
+    ProviderConstructor::RedisRateLimiter,
+    ProviderFactorySymbol::HttpserveRedisRateLimiter,
+    "redis",
+    &["backend"],
     ProviderConsumer::Httpserve,
-    ProviderDurability::EphemeralMemory,
-    None,
-    None,
+    ProviderDurability::Persistent,
+    Some(ProviderScope::ClusterGlobal),
+    Some(ProviderFailurePosture::FailOpen),
     &[],
 );
 
@@ -215,11 +215,11 @@ fn checked_entry_exposes_only_canonical_capability_evidence() {
     assert_eq!(RATE_LIMITER_ENTRY.role(), ProviderRole::ListenerRateLimiter);
     assert_eq!(
         RATE_LIMITER_ENTRY.factory(),
-        ProviderFactorySymbol::HttpserveGovernorRateLimiter
+        ProviderFactorySymbol::HttpserveRedisRateLimiter
     );
     assert_eq!(
         RATE_LIMITER_ENTRY.evidence().constructor(),
-        ProviderConstructor::RatelimitGovernorLimiter
+        ProviderConstructor::RedisRateLimiter
     );
     assert!(RATE_LIMITER_ENTRY.evidence().outputs().is_empty());
     assert_eq!(
@@ -228,13 +228,19 @@ fn checked_entry_exposes_only_canonical_capability_evidence() {
     );
     assert_eq!(
         RATE_LIMITER_ENTRY.evidence().durability(),
-        ProviderDurability::EphemeralMemory
+        ProviderDurability::Persistent
     );
-    assert_eq!(RATE_LIMITER_ENTRY.evidence().scope(), None);
-    assert_eq!(RATE_LIMITER_ENTRY.evidence().failure_posture(), None);
+    assert_eq!(
+        RATE_LIMITER_ENTRY.evidence().scope(),
+        Some(ProviderScope::ClusterGlobal)
+    );
+    assert_eq!(
+        RATE_LIMITER_ENTRY.evidence().failure_posture(),
+        Some(ProviderFailurePosture::FailOpen)
+    );
     assert_eq!(
         RATE_LIMITER_ENTRY.evidence().required_features(),
-        &[] as &[&str]
+        &["backend"]
     );
     assert_eq!(
         RATE_LIMITER_ENTRY.evidence().port(),

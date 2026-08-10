@@ -302,7 +302,23 @@ impl ProviderOutput {
         }
     }
 
-    pub(crate) fn listener_rate_limiter(permit: ListenerRateLimiterPermit) -> Self {
+    pub(crate) fn listener_rate_limiter(
+        permit: ListenerRateLimiterPermit,
+        capability: redis::RedisRateLimiterCapability,
+    ) -> (Self, redis::RedisRateLimiter) {
+        (
+            Self::new(
+                DomainModuleResult::default(),
+                vec![ProviderReceipt::ListenerRateLimiter(permit.0)],
+                "listener-rate-limiter",
+                CHANNELS_NONE,
+            ),
+            capability.into_limiter(),
+        )
+    }
+
+    #[cfg(test)]
+    fn listener_rate_limiter_test(permit: ListenerRateLimiterPermit) -> Self {
         Self::new(
             DomainModuleResult::default(),
             vec![ProviderReceipt::ListenerRateLimiter(permit.0)],
@@ -675,7 +691,7 @@ provider_permits! {
     },
     ListenerRateLimiterPermit {
         field: listener_rate_limiter,
-        factory: HttpserveGovernorRateLimiter,
+        factory: HttpserveRedisRateLimiter,
         receipt: ListenerRateLimiter,
         channels: CHANNELS_NONE,
     },
@@ -1698,7 +1714,7 @@ mod tests {
     ) {
         if include_rate_limiter {
             build
-                .record(ProviderOutput::listener_rate_limiter(
+                .record(ProviderOutput::listener_rate_limiter_test(
                     dispatch
                         .listener_rate_limiter()
                         .expect("rate-limiter permit"),

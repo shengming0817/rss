@@ -6,21 +6,21 @@ use assembly_schema::{
 const VALID: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::ListenerRateLimiter,
     DiportPort::RateLimiter,
-    ProviderConstructor::RatelimitGovernorLimiter,
-    ProviderFactorySymbol::HttpserveGovernorRateLimiter,
-    "ratelimit",
-    &[],
+    ProviderConstructor::RedisRateLimiter,
+    ProviderFactorySymbol::HttpserveRedisRateLimiter,
+    "redis",
+    &["backend"],
     ProviderConsumer::Httpserve,
-    ProviderDurability::EphemeralMemory,
-    None,
-    None,
+    ProviderDurability::Persistent,
+    Some(assembly_schema::ProviderScope::ClusterGlobal),
+    Some(assembly_schema::ProviderFailurePosture::FailOpen),
     &[],
 );
 
 fn main() {
     let _ = ProviderCatalogEntry {
         role: ProviderRole::ListenerRateLimiter,
-        factory: ProviderFactorySymbol::HttpserveGovernorRateLimiter,
+        factory: ProviderFactorySymbol::HttpserveRedisRateLimiter,
         evidence: *VALID.evidence(),
     };
 }

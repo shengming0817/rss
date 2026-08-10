@@ -13,10 +13,13 @@ domains = ["identity"]
 [[diportProviders]]
 id = "listener-rate-limiter"
 port = "diport::RateLimiter"
-provider = "ratelimit::GovernorLimiter"
-providerCrate = "ratelimit"
+provider = "redis::RedisRateLimiter"
+providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "unknown-consumer"
 lifecycle = "active"
-durability = "ephemeral-memory"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-open"
 purpose = "unknown-consumer"
 outputs = []

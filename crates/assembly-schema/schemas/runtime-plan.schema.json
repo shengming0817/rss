@@ -35,7 +35,7 @@
             "identity_composition::DraftArtifactSimulator",
             "mqtt::MqttSession",
             "postgres::PgRevocationStore",
-            "ratelimit::GovernorLimiter",
+            "redis::RedisRateLimiter",
             "amqp::AmqpPublisher",
             "amqp::AmqpSubscriber",
             "redis::RedisLockStore",

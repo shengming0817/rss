@@ -13,9 +13,9 @@ timestamps, exit codes and redacted logs. The accepted assembly is exactly `prof
 changing the profile, provider lifecycle or provider durability rotates the governed artifacts.
 
 The executable RuntimePlan contains exactly the manifest's active provider declarations. Draft
-providers are not executable alternatives and are forbidden in the production manifest. The sole
-ephemeral production provider is the exact active `GovernorLimiter`, which is replica-local DoS
-mitigation rather than an authorization or durability boundary.
+providers are not executable alternatives and are forbidden in the production manifest. Every
+production provider is persistent; listener rate limiting uses the assembly's existing Redis pool
+and is cluster-global.
 
 ## Required evidence
 

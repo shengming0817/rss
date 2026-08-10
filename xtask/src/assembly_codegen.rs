@@ -31,21 +31,32 @@ struct ProviderFinishShape {
     input_type: &'static str,
     /// Method name called as `let output = output.{materializer}();`, if any.
     materializer: Option<&'static str>,
+    /// Move-only provider value materialized alongside lifecycle evidence, if any.
+    bound_value: Option<(&'static str, &'static str)>,
 }
 
 const DEFAULT_PROVIDER_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
     input_type: "bootstrap::DomainModuleResult",
     materializer: None,
+    bound_value: None,
 };
 
 const LISTENER_PDP_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
     input_type: "ListenerPdpJwksLifecycle",
     materializer: Some("into_output"),
+    bound_value: None,
+};
+
+const LISTENER_RATE_LIMITER_FINISH_SHAPE: ProviderFinishShape = ProviderFinishShape {
+    input_type: "redis::RedisRateLimiterCapability",
+    materializer: None,
+    bound_value: Some(("redis::RedisRateLimiter", "into_limiter")),
 };
 
 const fn provider_finish_shape(role: ProviderRole) -> ProviderFinishShape {
     match role {
         ProviderRole::ListenerPdp => LISTENER_PDP_FINISH_SHAPE,
+        ProviderRole::ListenerRateLimiter => LISTENER_RATE_LIMITER_FINISH_SHAPE,
         _ => DEFAULT_PROVIDER_FINISH_SHAPE,
     }
 }
@@ -60,10 +71,15 @@ fn finish_matches_provider_shape(finish: &syn::ImplItemFn, shape: ProviderFinish
         return false;
     }
     let body = compact_tokens(&finish.block);
-    match shape.materializer {
+    let lifecycle_matches = match shape.materializer {
         Some(method) => body.contains(&format!("letoutput=output.{method}();")),
         None => !body.contains("letoutput=output."),
-    }
+    };
+    let value_matches = match shape.bound_value {
+        Some((_, method)) => body.contains(&format!("letvalue=output.{method}();")),
+        None => !body.contains("letvalue=output."),
+    };
+    lifecycle_matches && value_matches
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -675,8 +691,9 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV2, source_label: &str) 
     let providers = active_providers(manifest);
 
     let mut code = format!(
-        "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,\n    ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
-        manifest.manifest_digest()
+        "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,\n    ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\npub(crate) const ASSEMBLY_NAMESPACE: &str = {:?};\n\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
+        manifest.manifest_digest(),
+        manifest.name()
     );
     for provider in &providers {
         let factory = provider.id.factory_symbol().with_context(|| {
@@ -749,7 +766,7 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV2, source_label: &str) 
         render_provider_role_batches(&mut code, manifest.name(), &providers)?;
     }
     let formatted = crate::codegen::format_rust(&code)?;
-    validate_provider_catalog_syntax(&formatted, &providers, emits_role_batches)?;
+    validate_provider_catalog_syntax(&formatted, manifest.name(), &providers, emits_role_batches)?;
     Ok(formatted)
 }
 
@@ -951,31 +968,77 @@ fn render_provider_role_batches(
         };
         code.push_str(&format!(
             "\npub(crate) struct {constructor} {{\n    entry: &'static ProviderCatalogEntry,\n}}\n\
-             pub(crate) struct {batch}(bootstrap::DomainModuleResult);\n\
              pub(crate) struct {receipt} {{\n    probes: usize,\n    resources: usize,\n    workers: usize,\n    probe_names: Vec<primitives::ProbeName>,\n}}\n\
-             impl {constructor} {{\n\
-                 pub(crate) fn finish(self, output: {input_type}) -> anyhow::Result<{batch}> {{\n\
-{unwrap_output}\
-                     validate_lifecycle_output(self.entry, &output)?;\n\
-                     Ok({batch}(output))\n\
-                 }}\n\
-             }}\n\
-             impl {batch} {{\n\
-                 pub(crate) fn transfer(self, inventory: &mut bootstrap::DomainModuleResult) -> {receipt} {{\n\
-                     let probe_names = self.0.probes.iter().map(|(name, _)| name.clone()).collect();\n\
-                     let receipt = {receipt} {{ probes: self.0.probes.len(), resources: self.0.resources.len(), workers: self.0.workers.len(), probe_names }};\n\
-                     inventory.merge(self.0);\n\
+             impl {receipt} {{\n\
+                 fn transfer_lifecycle(output: bootstrap::DomainModuleResult, inventory: &mut bootstrap::DomainModuleResult) -> Self {{\n\
+                     let probe_names = output.probes.iter().map(|(name, _)| name.clone()).collect();\n\
+                     let receipt = Self {{ probes: output.probes.len(), resources: output.resources.len(), workers: output.workers.len(), probe_names }};\n\
+                     inventory.merge(output);\n\
                      receipt\n\
                  }}\n\
              }}\n",
-            input_type = shape.input_type,
         ));
+        match shape.bound_value {
+            Some((value_type, value_materializer)) => code.push_str(&format!(
+                r#"pub(crate) struct {batch} {{
+    lifecycle: bootstrap::DomainModuleResult,
+    value: {value_type},
+}}
+#[cfg(test)]
+pub(crate) struct {batch}ForTest(bootstrap::DomainModuleResult);
+impl {constructor} {{
+    pub(crate) fn finish(self, output: {input_type}) -> anyhow::Result<{batch}> {{
+        let value = output.{value_materializer}();
+        let lifecycle = bootstrap::DomainModuleResult::default();
+        validate_lifecycle_output(self.entry, &lifecycle)?;
+        Ok({batch} {{ lifecycle, value }})
+    }}
+}}
+#[cfg(test)]
+impl {constructor} {{
+    pub(crate) fn finish_for_test(self, output: bootstrap::DomainModuleResult) -> anyhow::Result<{batch}ForTest> {{
+        validate_lifecycle_output(self.entry, &output)?;
+        Ok({batch}ForTest(output))
+    }}
+}}
+impl {batch} {{
+    pub(crate) fn transfer(self, inventory: &mut bootstrap::DomainModuleResult) -> ({receipt}, {value_type}) {{
+        ({receipt}::transfer_lifecycle(self.lifecycle, inventory), self.value)
+    }}
+}}
+#[cfg(test)]
+impl {batch}ForTest {{
+    pub(crate) fn transfer(self, inventory: &mut bootstrap::DomainModuleResult) -> {receipt} {{
+        {receipt}::transfer_lifecycle(self.0, inventory)
+    }}
+}}
+"#,
+                input_type = shape.input_type,
+            )),
+            None => code.push_str(&format!(
+                "pub(crate) struct {batch}(bootstrap::DomainModuleResult);\n\
+                 impl {constructor} {{\n\
+                     pub(crate) fn finish(self, output: {input_type}) -> anyhow::Result<{batch}> {{\n\
+{unwrap_output}\
+                         validate_lifecycle_output(self.entry, &output)?;\n\
+                         Ok({batch}(output))\n\
+                     }}\n\
+                 }}\n\
+                 impl {batch} {{\n\
+                     pub(crate) fn transfer(self, inventory: &mut bootstrap::DomainModuleResult) -> {receipt} {{\n\
+                         {receipt}::transfer_lifecycle(self.0, inventory)\n\
+                     }}\n\
+                 }}\n",
+                input_type = shape.input_type,
+            )),
+        }
     }
     Ok(())
 }
 
 fn validate_provider_catalog_syntax(
     source: &str,
+    assembly_name: &str,
     providers: &[&assembly_schema::DiportProvider],
     emits_role_batches: bool,
 ) -> Result<()> {
@@ -983,6 +1046,21 @@ fn validate_provider_catalog_syntax(
     let Some((syn::Item::Use(import), remaining)) = syntax.items.split_first() else {
         bail!("provider catalog 缺少固定 import");
     };
+    let Some((syn::Item::Const(namespace), remaining)) = remaining.split_first() else {
+        bail!("provider catalog 缺少 generated assembly namespace");
+    };
+    ensure!(
+        namespace.attrs.is_empty()
+            && compact_tokens(&namespace.vis) == "pub(crate)"
+            && namespace.ident == "ASSEMBLY_NAMESPACE"
+            && compact_tokens(namespace.ty.as_ref()) == "&str"
+            && matches!(
+                namespace.expr.as_ref(),
+                syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(value), .. })
+                    if value.value() == assembly_name
+            ),
+        "generated assembly namespace 必须由 manifest name 铸造为 crate-private &str"
+    );
     let Some((syn::Item::Const(catalog), role_batch_items)) = remaining.split_first() else {
         bail!("provider catalog 缺少唯一 const catalog");
     };
@@ -1083,6 +1161,15 @@ fn provider_catalog_entry_role_variant(expression: &syn::Expr) -> Result<String>
         .context("provider catalog role 缺少 variant")
 }
 
+fn generated_test_only_item(item: &syn::Item) -> bool {
+    let attrs = match item {
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Impl(item) => &item.attrs,
+        _ => return false,
+    };
+    attrs.len() == 1 && compact_tokens(&attrs[0]) == "#[cfg(test)]"
+}
+
 fn validate_provider_role_batch_syntax(
     items: &[syn::Item],
     providers: &[&assembly_schema::DiportProvider],
@@ -1118,6 +1205,10 @@ fn validate_provider_role_batch_syntax(
         expected_impls.extend([
             (format!("{role}Constructor"), vec!["finish".to_owned()]),
             (format!("{role}Batch"), vec!["transfer".to_owned()]),
+            (
+                format!("{role}Receipt"),
+                vec!["transfer_lifecycle".to_owned()],
+            ),
         ]);
     }
     expected_structs.sort();
@@ -1138,6 +1229,9 @@ fn validate_provider_role_batch_syntax(
         finish_shapes_ok.insert(target, false);
     }
     for item in items {
+        if generated_test_only_item(item) {
+            continue;
+        }
         match item {
             syn::Item::Struct(item) => {
                 ensure!(
@@ -1479,7 +1573,7 @@ const fn constructor_variant(constructor: ProviderConstructor) -> &'static str {
         ProviderConstructor::IdentityDraftArtifactSimulator => "IdentityDraftArtifactSimulator",
         ProviderConstructor::MqttSession => "MqttSession",
         ProviderConstructor::PostgresRevocationStore => "PostgresRevocationStore",
-        ProviderConstructor::RatelimitGovernorLimiter => "RatelimitGovernorLimiter",
+        ProviderConstructor::RedisRateLimiter => "RedisRateLimiter",
         ProviderConstructor::AmqpPublisher => "AmqpPublisher",
         ProviderConstructor::AmqpSubscriber => "AmqpSubscriber",
         ProviderConstructor::RedisLockStore => "RedisLockStore",
@@ -1520,7 +1614,7 @@ const fn factory_variant(factory: ProviderFactorySymbol) -> &'static str {
             "OidcPostgresServiceTokenReplayStore"
         }
         ProviderFactorySymbol::HttpservePostgresAuthAuditSink => "HttpservePostgresAuthAuditSink",
-        ProviderFactorySymbol::HttpserveGovernorRateLimiter => "HttpserveGovernorRateLimiter",
+        ProviderFactorySymbol::HttpserveRedisRateLimiter => "HttpserveRedisRateLimiter",
         ProviderFactorySymbol::DistributedRedisLockStore => "DistributedRedisLockStore",
         ProviderFactorySymbol::DistributedPostgresCasStore => "DistributedPostgresCasStore",
         ProviderFactorySymbol::RuntimeS3ObjectStore => "RuntimeS3ObjectStore",
@@ -1783,7 +1877,7 @@ fn relative_label(root: &Path, path: &Path) -> String {
 mod tests {
     use super::*;
 
-    const RATE_PROVIDER: &str = r#"{ id = "listener-rate-limiter", port = "diport::RateLimiter", provider = "ratelimit::GovernorLimiter", providerCrate = "ratelimit", consumer = "httpserve", lifecycle = "active", durability = "ephemeral-memory", purpose = "test", outputs = [] }"#;
+    const RATE_PROVIDER: &str = r#"{ id = "listener-rate-limiter", port = "diport::RateLimiter", provider = "redis::RedisRateLimiter", providerCrate = "redis", requiredFeatures = ["backend"], consumer = "httpserve", lifecycle = "active", durability = "persistent", scope = "cluster-global", failurePosture = "fail-open", purpose = "test", outputs = [] }"#;
     const PDP_PROVIDER: &str = r#"{ id = "listener-pdp", port = "diport::Pdp", provider = "oidc::OidcProvider", providerCrate = "oidc", requiredFeatures = ["backend"], consumer = "httpserve", lifecycle = "active", durability = "persistent", purpose = "authorization", outputs = ["probes", "resources"] }"#;
 
     fn validate_provider_catalog_for_manifest(
@@ -1793,6 +1887,7 @@ mod tests {
         let providers = active_providers(manifest);
         validate_provider_catalog_syntax(
             source,
+            manifest.name(),
             &providers,
             matches!(manifest.name(), "settingsonly" | "identityaudit"),
         )
@@ -2035,7 +2130,7 @@ domains = [{domains}]
             .ok_or_else(|| anyhow::anyhow!("missing audit test call"))?;
         assert!(test_settings < test_identity && test_identity < test_audit);
         assert!(
-            !rendered.contains("ratelimit::GovernorLimiter"),
+            !rendered.contains("redis::RedisRateLimiter"),
             "provider catalog belongs exclusively to providers_gen.rs"
         );
         assert!(!rendered.contains("std::env"));
@@ -2409,10 +2504,13 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         assert!(rendered.starts_with(GENERATED_PROVIDER_OWNERSHIP_MARKER));
         assert!(rendered.contains("ProviderCatalogEntry::checked("));
         assert!(rendered.contains("ProviderRole::ListenerRateLimiter"));
-        assert!(rendered.contains("ProviderFactorySymbol::HttpserveGovernorRateLimiter"));
+        assert!(rendered.contains("ProviderFactorySymbol::HttpserveRedisRateLimiter"));
         assert!(rendered.contains("ProviderConsumer::Eventexec"));
         assert!(rendered.contains("ProviderConsumer::Settings"));
-        assert!(rendered.contains("ProviderDurability::EphemeralMemory"));
+        assert!(rendered.contains("pub(crate) const ASSEMBLY_NAMESPACE: &str = \"runtime\";"));
+        assert!(rendered.contains("ProviderDurability::Persistent"));
+        assert!(rendered.contains("Some(assembly_schema::ProviderScope::ClusterGlobal)"));
+        assert!(rendered.contains("Some(assembly_schema::ProviderFailurePosture::FailOpen)"));
         assert!(rendered.contains("&[]"));
         assert!(!rendered.contains("SECRET_BAIT"));
         for banned in [
@@ -2484,8 +2582,10 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
         assert!(rendered.contains("ProviderRole::SettingsSecretResolver"));
         let compact_rendered = rendered.split_whitespace().collect::<String>();
         let listener_shape = provider_finish_shape(ProviderRole::ListenerPdp);
+        let rate_limiter_shape = provider_finish_shape(ProviderRole::ListenerRateLimiter);
         let default_shape = provider_finish_shape(ProviderRole::SettingsKeyProvider);
         assert_eq!(listener_shape, LISTENER_PDP_FINISH_SHAPE);
+        assert_eq!(rate_limiter_shape, LISTENER_RATE_LIMITER_FINISH_SHAPE);
         assert_eq!(default_shape, DEFAULT_PROVIDER_FINISH_SHAPE);
         let typed_listener_pdp = format!("output:{}", listener_shape.input_type);
         let listener_materializer = listener_shape
@@ -2497,6 +2597,8 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
                     .contains(&format!("letoutput=output.{listener_materializer}();")),
             "listener-pdp constructor must consume the sealed JWKS lifecycle receipt via closed shape"
         );
+        assert!(compact_rendered.contains("output:redis::RedisRateLimiterCapability"));
+        assert!(compact_rendered.contains("letvalue=output.into_limiter();"));
         assert!(
             compact_rendered.contains(
                 "implDlxHotKeyProviderConstructor{pub(crate)fnfinish(self,output:bootstrap::DomainModuleResult,"
@@ -2691,9 +2793,17 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
                 assert_eq!(shape, LISTENER_PDP_FINISH_SHAPE);
                 assert_eq!(shape.input_type, "ListenerPdpJwksLifecycle");
                 assert_eq!(shape.materializer, Some("into_output"));
+            } else if role == ProviderRole::ListenerRateLimiter {
+                assert_eq!(shape, LISTENER_RATE_LIMITER_FINISH_SHAPE);
+                assert_eq!(shape.input_type, "redis::RedisRateLimiterCapability");
+                assert_eq!(
+                    shape.bound_value,
+                    Some(("redis::RedisRateLimiter", "into_limiter"))
+                );
             } else {
                 assert_eq!(shape, DEFAULT_PROVIDER_FINISH_SHAPE);
                 assert_eq!(shape.materializer, None);
+                assert_eq!(shape.bound_value, None);
             }
         }
     }

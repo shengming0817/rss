@@ -46,7 +46,5 @@ fn main() {
         primitives::AuthScheme::RssAccessToken,
     )
     .unwrap();
-    let _make = httpserve::finalize_auth(routes, plan)
-        .unwrap()
-        .into_server_service(httpserve::ServerRequestBudget::for_test());
+    let _authed = httpserve::finalize_auth(routes, plan).unwrap();
 }

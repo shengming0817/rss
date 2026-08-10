@@ -11,7 +11,6 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::Context as _;
 use primitives::{AuthPlan, AuthScheme, HealthCheck, HealthStatus, ListenerKind, ProbeName};
-use ratelimit::GovernorLimiter;
 
 /// Comma-separated exact SPIFFE IDs accepted on the Internal mTLS listener.
 pub(crate) const INTERNAL_MTLS_SPIFFE_ALLOW_SET_ENV: &str = "RSS_INTERNAL_MTLS_SPIFFE_ALLOW_SET";
@@ -112,8 +111,33 @@ impl ListenerAuthBinding {
 
 pub(crate) struct AssembledListener {
     spec: ListenerExecutionSpec,
-    routes: httpserve::AuthenticatedRoutes,
+    routes: BindableListenerRoutes,
     transport: ListenerTransport,
+}
+
+pub(crate) enum BindableListenerRoutes {
+    RateLimited(httpserve::RateLimitedRoutes),
+    Health(httpserve::HealthRoutes),
+}
+
+impl BindableListenerRoutes {
+    pub(crate) fn into_server_service(
+        self,
+        budget: httpserve::ServerRequestBudget,
+    ) -> httpserve::ServerService {
+        match self {
+            Self::RateLimited(routes) => routes.into_server_service(budget),
+            Self::Health(routes) => routes.into_server_service(budget),
+        }
+    }
+
+    #[cfg(any(test, feature = "integration"))]
+    fn into_authenticated_for_test(self) -> httpserve::AuthenticatedRoutes {
+        match self {
+            Self::RateLimited(routes) => routes.into_authenticated_for_test(),
+            Self::Health(routes) => routes.into_authenticated_for_test(),
+        }
+    }
 }
 
 /// The exact, plan-ordered listener set accepted by launch.
@@ -168,7 +192,7 @@ impl AssembledListener {
 
     #[cfg(any(test, feature = "integration"))]
     pub(crate) fn into_parts(self) -> (ListenerKind, httpserve::AuthenticatedRoutes) {
-        (self.spec.kind(), self.routes)
+        (self.spec.kind(), self.routes.into_authenticated_for_test())
     }
 
     pub(crate) fn into_launch_parts(
@@ -177,7 +201,7 @@ impl AssembledListener {
         String,
         ListenerKind,
         AuthScheme,
-        httpserve::AuthenticatedRoutes,
+        BindableListenerRoutes,
         ListenerTransport,
     ) {
         (
@@ -246,11 +270,16 @@ impl FinalizedListenerSet {
         ] {
             let spec = crate::plan::fixture_listener_spec(kind)?;
             let routes = if kind == assembly_schema::AssemblyListenerKind::Admin {
-                admin
-                    .take()
-                    .context("Admin journey route already consumed")?
+                BindableListenerRoutes::RateLimited(with_fixture_client_rate_limit(
+                    admin
+                        .take()
+                        .context("Admin journey route already consumed")?,
+                ))
             } else {
-                finalize_health_fixture(Arc::clone(&reporter), Arc::clone(&metrics))?
+                BindableListenerRoutes::Health(finalize_health_fixture(
+                    Arc::clone(&reporter),
+                    Arc::clone(&metrics),
+                )?)
             };
             listeners.push(AssembledListener {
                 spec,
@@ -260,6 +289,17 @@ impl FinalizedListenerSet {
         }
         Ok((Self { listeners }, FinalizedProbeReceipt { _private: () }))
     }
+}
+
+#[cfg(feature = "integration")]
+fn with_fixture_client_rate_limit(
+    routes: httpserve::AuthenticatedRoutes,
+) -> httpserve::RateLimitedRoutes {
+    httpserve::with_client_rate_limit(
+        routes,
+        build_runtime_rate_limiter(),
+        httpserve::TrustedProxyConfig::disabled(),
+    )
 }
 
 impl FinalizedListenerPlan {
@@ -393,22 +433,26 @@ fn mtls_route_authorizer(allow_set: authn::MtlsAllowSet) -> Arc<dyn httpserve::R
     Arc::new(MtlsRouteAuthorizer { allow_set })
 }
 
-/// 默认限流配额：10 req/s，burst 20（per-peer-IP keyed，组合根 owner；可配置化 follow-up #1106）。
-///
-/// `NonZeroU32::new(10/20)` 对字面量非零常量不可失败——`expect` 是构造期 programmer error
-/// （此处不可恢复，item-level carve-out，error-handling.md §Carve-out）。
-#[allow(clippy::expect_used)]
-fn default_rate_quota() -> ratelimit::QuotaConfig {
-    // reason: 10 / 20 是 compile-time 字面量，NonZeroU32::new 仅在 0 时返 None；
-    // 字面量非零，此 expect 是构造期 programmer error（不可恢复，item-level carve-out）。
-    ratelimit::QuotaConfig::per_second(
-        std::num::NonZeroU32::new(10).expect("non-zero rate-per-second constant"),
-        std::num::NonZeroU32::new(20).expect("non-zero burst constant"),
-    )
+#[cfg(any(test, feature = "integration"))]
+pub(crate) struct FixtureRateLimiter;
+
+#[cfg(any(test, feature = "integration"))]
+impl diport::RateLimiter for FixtureRateLimiter {
+    async fn check(
+        &self,
+        _key: diport::RateLimitKey,
+    ) -> Result<diport::RateLimitDecision, diport::RateLimitError> {
+        Ok(diport::RateLimitDecision::Allowed)
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::RateLimitError> {
+        Ok(())
+    }
 }
 
-pub(crate) fn build_runtime_rate_limiter() -> Arc<GovernorLimiter> {
-    Arc::new(GovernorLimiter::new(default_rate_quota()))
+#[cfg(any(test, feature = "integration"))]
+pub(crate) fn build_runtime_rate_limiter() -> Arc<FixtureRateLimiter> {
+    Arc::new(FixtureRateLimiter)
 }
 
 /// 排空 registry 的 per-listener `UnfinalizedRoutes`，按 listener 装配 auth finalizer + 外层验签桥
@@ -417,15 +461,15 @@ pub(crate) fn build_runtime_rate_limiter() -> Arc<GovernorLimiter> {
 /// Primary listener：从 Registry 一次性取得 authorizer，再由
 /// `finalize_primary_auth_with_audit(routes, plan, ..., primary_authorizer)` 注入
 /// `RouteAuthorizer`；Admin listener 也注入同一 Authorizer 供 field projection 消费；其它非 Primary
-/// listener：`finalize_auth_with_audit(routes, plan, ...)`。三者均消费
+/// listener：`finalize_auth_with_audit(routes, plan, ...)`。业务 listener 均消费
 /// `UnfinalizedRoutes` 产 `AuthenticatedRoutes` 并注入 AuthPlan 与 framework 中间件。随后据
 /// `required_scheme` 叠外层 `verify_bridge`（`NoAuth` listener 无桥）
-/// → 叠 rate-limit（[`httpserve::rate_limit`]，outer 于验签桥；peer-IP keyed per-request）。
-/// 产出 `AuthenticatedRoutes` 经 `into_server_service` 交给 launch phase 绑 socket + serve——bind 点
-/// 天生只能消费已认证 router（ROUTE-AUTH-FUNNEL-01/02：未跑 finalize_auth 的 router 无 bindable 出口）。
+/// → 经唯一 client-rate-limit funnel 换得 `RateLimitedRoutes`。Health 走 `finalize_health` 直接
+/// 取得 `HealthRoutes`。launch bind 只能消费这两个闭值状态；裸 `AuthenticatedRoutes` 没有 public
+/// transport 出口（ROUTE-AUTH-FUNNEL-01/02）。
 ///
 /// 层序（外→内）：security headers → request-id → correlation → 全请求 server budget → body-limit
-/// → rate-limit（本函数 verify-bridge 后叠）→ 验签桥 → trace → enforce → handler。rate-limit outer 于验签桥保证限流在 auth 计算前生效
+/// → RealIP → rate-limit → 验签桥 → trace → enforce → handler。rate-limit outer 于验签桥保证限流在 auth 计算前生效
 /// （INVARIANT RATELIMIT-BEFORE-AUTH-01：组合根在 verify-bridge 后 .layer ⇒ outer 于桥）。
 ///
 /// Health is produced only from the consumed plan entry and does not receive token bridges or
@@ -435,21 +479,25 @@ pub(crate) fn build_runtime_rate_limiter() -> Arc<GovernorLimiter> {
 /// [`bootstrap::Registry::take_health_reporter`] 取出探针装入 `Arc<HealthReporter>`（`Send + Sync`）注入
 /// Health listener 的 readyz handler（每请求 `report`）；整体非 `Sync` 的 `Registry`
 /// 无法进 axum handler 闭包。
-pub(crate) struct FinalizeListenerPlanInputs<'config, 'borrow> {
+pub(crate) struct FinalizeListenerPlanInputs<'config, 'borrow, S> {
     pub(crate) execution_plan: ListenerExecutionPlan,
     pub(crate) config: SnapshotConfig<'config>,
     pub(crate) registry: &'borrow mut bootstrap::Registry,
     pub(crate) providers: &'borrow TokenProviderBindings,
     pub(crate) audit_sink: httpserve::AuditSinkHandle,
     pub(crate) audit_clock: Arc<dyn diport::Clock>,
-    pub(crate) rate_limiter: Arc<GovernorLimiter>,
+    pub(crate) rate_limiter: Arc<S>,
+    pub(crate) trusted_proxy_config: httpserve::TrustedProxyConfig,
     pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
     pub(crate) framework_routes: crate::runtime_inventory::RuntimeInventoryRoutes,
 }
 
-pub(crate) fn finalize_listener_plan(
-    inputs: FinalizeListenerPlanInputs<'_, '_>,
-) -> anyhow::Result<FinalizedListenerPlan> {
+pub(crate) fn finalize_listener_plan<S>(
+    inputs: FinalizeListenerPlanInputs<'_, '_, S>,
+) -> anyhow::Result<FinalizedListenerPlan>
+where
+    S: diport::RateLimiter + Send + Sync + 'static,
+{
     let FinalizeListenerPlanInputs {
         execution_plan,
         config,
@@ -458,6 +506,7 @@ pub(crate) fn finalize_listener_plan(
         audit_sink,
         audit_clock,
         rate_limiter,
+        trusted_proxy_config,
         metrics,
         framework_routes,
     } = inputs;
@@ -469,12 +518,8 @@ pub(crate) fn finalize_listener_plan(
     let primary_authorizer = registry
         .take_primary_authorizer()
         .context("take Primary route authorizer")?;
-    // 默认限流配额（owner=组合根，可调）：10 req/s，burst 20。peer-IP keyed（见 #1106 / RealIP follow-up）。
-    // 共享跨所有 listener——统一 per-IP 预算，避免分散 listener 各自独立 bucket 使 burst 预算 N 倍膨胀。
-    //
-    // 已知限制（multi-instance）：in-mem `GovernorLimiter` 是 per-instance 独立桶，N 副本部署下
-    // 每实例独立配额（全局视图 ≈ N × 单实例率）；全局一致限流须 redis-distributed provider（future）。
-    // 叠加 peer-IP-after-proxy 退化（RealIP follow-up），本限流当前为单实例 best-effort 防护。
+    // 共享跨所有 listener 和副本的 Redis 配额。RealIP 仅在 immediate peer 属启动期闭合可信
+    // CIDR 时解析转发头，否则确定性使用 socket peer；原始地址不会进入 Redis key 或日志。
     let mut live_routes = registry.finalize_routes().context("finalize_routes")?;
     bootstrap::validate_framework_serving(&live_routes, crate::modules_gen::FRAMEWORK_HTTP_ROUTES)
         .context("validate framework serving")?;
@@ -529,6 +574,7 @@ pub(crate) fn finalize_listener_plan(
                 &audit_clock,
                 &primary_authorizer,
                 &rate_limiter,
+                &trusted_proxy_config,
                 internal_mtls_allow_set,
                 spiffe_endpoint,
             )?,
@@ -559,7 +605,7 @@ pub(crate) fn finalize_listener_plan(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn finalize_non_health_spec(
+fn finalize_non_health_spec<S>(
     spec: ListenerExecutionSpec,
     routes: httpserve::UnfinalizedRoutes,
     registry: &mut bootstrap::Registry,
@@ -567,10 +613,14 @@ fn finalize_non_health_spec(
     audit_sink: &httpserve::AuditSinkHandle,
     audit_clock: &Arc<dyn diport::Clock>,
     primary_authorizer: &Arc<dyn httpserve::RouteAuthorizer>,
-    rate_limiter: &Arc<GovernorLimiter>,
+    rate_limiter: &Arc<S>,
+    trusted_proxy_config: &httpserve::TrustedProxyConfig,
     internal_mtls_allow_set: Option<&str>,
     spiffe_endpoint: Option<&str>,
-) -> anyhow::Result<AssembledListener> {
+) -> anyhow::Result<AssembledListener>
+where
+    S: diport::RateLimiter + Send + Sync + 'static,
+{
     let listener = spec.kind();
     let scheme = spec.auth_scheme();
     let binding = match scheme {
@@ -627,10 +677,11 @@ fn finalize_non_health_spec(
         ListenerAuthBinding::Token(profile) => auth_bridge::apply_verify_bridge(authed, profile),
         ListenerAuthBinding::Mtls => auth_bridge::apply_mtls_verify_bridge(authed),
     };
-    let wired = wired.layer(axum::middleware::from_fn_with_state(
+    let wired = httpserve::with_client_rate_limit(
+        wired,
         Arc::clone(rate_limiter),
-        httpserve::rate_limit::<GovernorLimiter>,
-    ));
+        trusted_proxy_config.clone(),
+    );
     tracing::info!(
         plan_id = spec.id(),
         listener = ?listener,
@@ -640,7 +691,7 @@ fn finalize_non_health_spec(
     );
     Ok(AssembledListener {
         spec,
-        routes: wired,
+        routes: BindableListenerRoutes::RateLimited(wired),
         transport,
     })
 }
@@ -660,7 +711,9 @@ fn finalize_health_spec(
     let plan = AuthPlan::new(spec.kind(), spec.auth_scheme()).context("build Health auth plan")?;
     Ok(AssembledListener {
         spec,
-        routes: httpserve::finalize_auth(routes, plan).context("finalize_auth Health")?,
+        routes: BindableListenerRoutes::Health(
+            httpserve::finalize_health(routes, plan).context("finalize Health")?,
+        ),
         transport: ListenerTransport::Plaintext,
     })
 }
@@ -841,6 +894,7 @@ fn finalize_access_fixture_listener(
         &audit_clock,
         &primary_authorizer,
         &rate_limiter,
+        &httpserve::TrustedProxyConfig::disabled(),
         None,
         None,
     )
@@ -851,13 +905,18 @@ fn finalize_access_fixture_listener(
 pub(crate) fn finalize_health_fixture(
     reporter: Arc<bootstrap::HealthReporter>,
     metrics: Arc<dyn diport::MetricsExporter>,
-) -> anyhow::Result<httpserve::AuthenticatedRoutes> {
+) -> anyhow::Result<httpserve::HealthRoutes> {
     finalize_health_spec(
         crate::plan::fixture_listener_spec(assembly_schema::AssemblyListenerKind::Health)?,
         reporter,
         metrics,
     )
-    .map(|listener| listener.into_parts().1)
+    .and_then(|listener| match listener.routes {
+        BindableListenerRoutes::Health(routes) => Ok(routes),
+        BindableListenerRoutes::RateLimited(_) => {
+            anyhow::bail!("Health fixture produced rate-limited routes")
+        }
+    })
 }
 
 #[cfg(test)]
@@ -1089,6 +1148,7 @@ mod tests {
             audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             audit_clock: Arc::new(SystemClock),
             rate_limiter: build_runtime_rate_limiter(),
+            trusted_proxy_config: httpserve::TrustedProxyConfig::disabled(),
             metrics: noop_metrics(),
             framework_routes,
         })
@@ -1196,6 +1256,7 @@ mod tests {
             audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             audit_clock: Arc::new(SystemClock),
             rate_limiter: build_runtime_rate_limiter(),
+            trusted_proxy_config: httpserve::TrustedProxyConfig::disabled(),
             metrics: noop_metrics(),
             framework_routes,
         })
@@ -1230,6 +1291,7 @@ mod tests {
             audit_sink: httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
             audit_clock: Arc::new(SystemClock),
             rate_limiter: build_runtime_rate_limiter(),
+            trusted_proxy_config: httpserve::TrustedProxyConfig::disabled(),
             metrics: noop_metrics(),
             framework_routes,
         })

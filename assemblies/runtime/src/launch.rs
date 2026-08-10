@@ -686,7 +686,7 @@ mod tests {
         listener: ListenerKind,
         transport: PreparedListenerTransport,
     ) -> BoundListener {
-        let (_, routes) = test_health_assembled().into_parts();
+        let (_, _, _, routes, _) = test_health_assembled().into_launch_parts();
         let name = listeners::listener_name(listener);
         let bound = HttpServer::bind(name, "127.0.0.1:0".parse().expect("ephemeral address"))
             .await
@@ -1309,7 +1309,7 @@ mod tests {
             .expect("allow-set");
         let mtls = httpd::MtlsServerConfig::for_test(allow_set).expect("hermetic mTLS config");
         let health = Arc::new(routes::MtlsHealthSlot::new());
-        let (_, routes) = test_health_assembled().into_parts();
+        let (_, _, _, routes, _) = test_health_assembled().into_launch_parts();
         let bound = HttpServer::bind(
             "http-internal",
             "127.0.0.1:0".parse().expect("ephemeral address"),

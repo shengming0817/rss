@@ -819,9 +819,9 @@ pub assembly_schema::ProviderConstructor::PostgresDeviceCommandStore
 pub assembly_schema::ProviderConstructor::PostgresDlxLifecycleRepository
 pub assembly_schema::ProviderConstructor::PostgresRevocationStore
 pub assembly_schema::ProviderConstructor::PostgresServiceTokenReplayStore
-pub assembly_schema::ProviderConstructor::RatelimitGovernorLimiter
 pub assembly_schema::ProviderConstructor::RedisCasStore
 pub assembly_schema::ProviderConstructor::RedisLockStore
+pub assembly_schema::ProviderConstructor::RedisRateLimiter
 pub assembly_schema::ProviderConstructor::S3Store
 pub assembly_schema::ProviderConstructor::S3VerifiedDlxArchiveStore
 pub assembly_schema::ProviderConstructor::VaultKeyProvider
@@ -949,9 +949,9 @@ pub assembly_schema::ProviderFactorySymbol::EventexecPostgresDlxLifecycleReposit
 pub assembly_schema::ProviderFactorySymbol::EventexecS3DlxArchiveStore
 pub assembly_schema::ProviderFactorySymbol::EventexecVaultArchiveKeyProvider
 pub assembly_schema::ProviderFactorySymbol::EventexecVaultHotKeyProvider
-pub assembly_schema::ProviderFactorySymbol::HttpserveGovernorRateLimiter
 pub assembly_schema::ProviderFactorySymbol::HttpserveOidcPdp
 pub assembly_schema::ProviderFactorySymbol::HttpservePostgresAuthAuditSink
+pub assembly_schema::ProviderFactorySymbol::HttpserveRedisRateLimiter
 pub assembly_schema::ProviderFactorySymbol::IdentityDraftArtifactSimulator
 pub assembly_schema::ProviderFactorySymbol::IdentityMqttSession
 pub assembly_schema::ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore

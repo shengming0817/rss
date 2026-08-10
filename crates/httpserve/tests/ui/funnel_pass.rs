@@ -1,6 +1,22 @@
 //! 正向（compile pass）：funnel 正确用法编译通过（anti-vacuity——证明 compile_fail 用例非「整个 API 不可用」）。
 use axum::extract::State;
 use httpserve::routes::unfinalized_for_test;
+use std::sync::Arc;
+
+struct AllowAll;
+
+impl diport::RateLimiter for AllowAll {
+    async fn check(
+        &self,
+        _key: diport::RateLimitKey,
+    ) -> Result<diport::RateLimitDecision, diport::RateLimitError> {
+        Ok(diport::RateLimitDecision::Allowed)
+    }
+
+    async fn shutdown(&self) -> Result<(), diport::RateLimitError> {
+        Ok(())
+    }
+}
 
 enum RouteMarker {}
 enum StatefulRouteMarker {}
@@ -71,5 +87,10 @@ fn main() {
     )
     .unwrap();
     let authed = httpserve::finalize_auth(routes, plan).unwrap();
-    let _make = authed.into_server_service(httpserve::ServerRequestBudget::for_test());
+    let rate_limited = httpserve::with_client_rate_limit(
+        authed,
+        Arc::new(AllowAll),
+        httpserve::TrustedProxyConfig::disabled(),
+    );
+    let _make = rate_limited.into_server_service(httpserve::ServerRequestBudget::for_test());
 }

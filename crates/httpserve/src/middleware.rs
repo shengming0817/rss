@@ -257,17 +257,69 @@ pub(crate) async fn body_limit(
     next.run(req).await
 }
 
-/// 429 埋点独立 fn（tracing 宏展开对 cognitive_complexity 贡献高，分摊保 ≤15；每 fn 一条宏）。
+#[derive(Clone, Copy)]
+enum RateLimitOutcome {
+    Allowed,
+    Limited,
+    ProviderError,
+    UnknownAllowed,
+}
+
+impl RateLimitOutcome {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Allowed => "allowed",
+            Self::Limited => "limited",
+            Self::ProviderError => "provider_error",
+            Self::UnknownAllowed => "unknown_allowed",
+        }
+    }
+}
+
+fn record_rate_limit(outcome: RateLimitOutcome) {
+    metrics::counter!(
+        "http.server.rate_limit.decisions",
+        "outcome" => outcome.as_label()
+    )
+    .increment(1);
+}
+
+struct ProviderFailureEpisode(std::sync::atomic::AtomicBool);
+
+impl ProviderFailureEpisode {
+    const fn new() -> Self {
+        Self(std::sync::atomic::AtomicBool::new(false))
+    }
+
+    fn recover(&self) {
+        self.0.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn begins(&self) -> bool {
+        !self.0.swap(true, std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+static RATE_LIMIT_PROVIDER_FAILURE_EPISODE: ProviderFailureEpisode = ProviderFailureEpisode::new();
+
+/// Seal the production client-identification/rate-limit order around authenticated routes.
 ///
-/// FIX-7：rate-limit 超额时记 `retry_after_ms` + `request_id`，供运维关联流量溯源。
-/// 不记 peer IP（保守起见，IP 为中等 PII；`request_id` 已足够关联运维 context）。
-#[inline]
-fn log_rate_limited(rid: &str, retry_after: std::time::Duration) {
-    tracing::info!(
-        retry_after_ms = retry_after.as_millis() as u64,
-        request_id = %rid,
-        "rate-limit exceeded: 429"
-    );
+/// Axum applies the last layer outermost, so this sole funnel always yields
+/// `RealIP -> rate-limit -> auth`; callers cannot install the limiter without supplying the closed
+/// trusted-proxy policy.
+pub fn with_client_rate_limit<S>(
+    routes: crate::AuthenticatedRoutes,
+    limiter: Arc<S>,
+    trusted_proxy_config: crate::TrustedProxyConfig,
+) -> crate::RateLimitedRoutes
+where
+    S: RateLimiter + Send + Sync + 'static,
+{
+    let routes = routes.layer(axum::middleware::from_fn_with_state(
+        limiter,
+        rate_limit::<S>,
+    ));
+    crate::RateLimitedRoutes::new(routes.layer(crate::RealIpLayer::new(trusted_proxy_config)))
 }
 
 /// 中间件：IP 级限流——经 [`diport::RateLimiter`] port 判定，超配额则 429 Too Many Requests。
@@ -296,27 +348,51 @@ where
         .unwrap_or("")
         .to_owned();
 
-    // 读 peer IP；缺 ConnectInfo → fallback "unknown"（oneshot 测试场景）。
-    // reason: 生产经 httpd 私有 make-service 必有 ConnectInfo，fallback 仅测试路径。
+    // RealIpLayer owns proxy trust. Direct test/router users still fall back to the socket peer.
     let ip = req
         .extensions()
-        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
-        .map(|ci| ci.0.ip().to_string())
+        .get::<crate::ResolvedClientIp>()
+        .map(|resolved| resolved.get().to_string())
+        .or_else(|| {
+            req.extensions()
+                .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+                .map(|ci| ci.0.ip().to_string())
+        })
         .unwrap_or_else(|| "unknown".to_string());
 
     let key = RateLimitKey::new(ip);
 
     match limiter.check(key).await {
-        Ok(RateLimitDecision::Allowed) => next.run(req).await,
+        Ok(RateLimitDecision::Allowed) => {
+            RATE_LIMIT_PROVIDER_FAILURE_EPISODE.recover();
+            record_rate_limit(RateLimitOutcome::Allowed);
+            next.run(req).await
+        }
         Ok(RateLimitDecision::Limited { retry_after }) => {
-            log_rate_limited(&rid, retry_after);
+            RATE_LIMIT_PROVIDER_FAILURE_EPISODE.recover();
+            record_rate_limit(RateLimitOutcome::Limited);
             crate::error::too_many_requests(&rid, retry_after)
         }
         // reason: fail-open — 未知未来 variant 保守放行（non_exhaustive 演进窗口）。
-        Ok(_) => next.run(req).await,
+        Ok(_) => {
+            RATE_LIMIT_PROVIDER_FAILURE_EPISODE.recover();
+            record_rate_limit(RateLimitOutcome::UnknownAllowed);
+            next.run(req).await
+        }
         Err(e) => {
             // reason: fail-open — 限流器 provider 故障时服务可用性优先。
-            tracing::error!(error = %e, request_id = %rid, fail_open = true, "rate limiter check failed; fail-open");
+            record_rate_limit(RateLimitOutcome::ProviderError);
+            if RATE_LIMIT_PROVIDER_FAILURE_EPISODE.begins() {
+                tracing::error!(
+                    error = %e,
+                    request_id = %rid,
+                    resource = "listener_rate_limiter",
+                    operation = "check",
+                    reason = "provider_error",
+                    fail_open = true,
+                    "rate limiter check failed; fail-open"
+                );
+            }
             next.run(req).await
         }
     }
@@ -350,6 +426,15 @@ pub(crate) async fn panic_recovery(req: Request, next: Next) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provider_failure_episode_resets_after_recovery() {
+        let episode = ProviderFailureEpisode::new();
+        assert!(episode.begins());
+        assert!(!episode.begins());
+        episode.recover();
+        assert!(episode.begins());
+    }
     use axum::body::Body;
     use axum::http::{Method, Request, StatusCode};
     use axum::routing::get;

@@ -294,7 +294,10 @@ mod tests {
         let (verifier, grant_calls) = verifier().await?;
         let routes = httpserve::finalize_auth(
             httpserve::UnfinalizedRoutes::empty(),
-            primitives::AuthPlan::none(primitives::ListenerKind::Health)?,
+            primitives::AuthPlan::new(
+                primitives::ListenerKind::Admin,
+                primitives::AuthScheme::RssAccessToken,
+            )?,
         )?;
         let router = apply(routes, verifier).into_plaintext_router_for_test();
 

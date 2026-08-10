@@ -1,7 +1,7 @@
 {
   "schemaVersion": 2,
-  "assemblyFingerprint": "sha256:6eaa044bba85210e165183ea0b27252874663d6a2df780cc39e147c0ab6c6b77",
-  "runtimePlanFingerprint": "sha256:07d0b253764d0e64b23ad02b8d5a434b6315e1742ddf1763f5abdd7662edc859",
+  "assemblyFingerprint": "sha256:c665b217a8d247f70611f040758fc3f898eb28c9497c00088a76f9801d21c003",
+  "runtimePlanFingerprint": "sha256:44b0d1283bcf85d94d41987fbdc0548ae75adf22892addd583a34f7ae44612cc",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
@@ -93,7 +93,7 @@
     },
     {
       "id": "listener-rate-limiter",
-      "constructor": "ratelimit::GovernorLimiter",
+      "constructor": "redis::RedisRateLimiter",
       "outputs": []
     },
     {

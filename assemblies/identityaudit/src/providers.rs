@@ -22,7 +22,7 @@ pub(crate) struct ProviderBundle {
     pub(crate) verifier: crate::auth_bridge::RssAccessVerifier,
     pub(crate) audit_sink: httpserve::AuditSinkHandle,
     pub(crate) metrics: Arc<dyn diport::MetricsExporter>,
-    pub(crate) limiter: Arc<ratelimit::GovernorLimiter>,
+    pub(crate) limiter: Arc<redis::RedisRateLimiter>,
     pub(crate) audit_chain_key: primitives::MacKey,
     pub(crate) identity_pseudonym_keys: Arc<secure::PseudonymKeyRing>,
     pub(crate) tenant_authority: Arc<eventexec::TenantAuthority>,
@@ -102,6 +102,7 @@ pub(crate) async fn build(
     projection_capture: eventexec::ProjectionCaptureView<'_>,
     config: config::IdentityAuditConfig,
     secrets: config::ResolvedSecrets,
+    rate_limit_quota: diport::RateLimitQuota,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
 ) -> anyhow::Result<BuildResult> {
     let (listeners, identity, oidc, postgres, vault, eventing) = config.into_sections();
@@ -247,10 +248,15 @@ pub(crate) async fn build(
         self::commit_listener_pdp_jwks_lifecycle(listener_pdp_constructor, listener_pdp_lifecycle)?
             .transfer(transaction.provider_output_mut());
 
-    let limiter = crate::listeners::rate_limiter();
-    let listener_rate_limiter = listener_rate_limiter_constructor
-        .finish(bootstrap::DomainModuleResult::default())?
+    let rate_limiter_capability = redis
+        .infra()
+        .rate_limiter_capability(crate::providers_gen::ASSEMBLY_NAMESPACE, rate_limit_quota)
+        .await
+        .context("verify identityaudit Redis rate-limiter capability")?;
+    let (listener_rate_limiter, limiter) = listener_rate_limiter_constructor
+        .finish(rate_limiter_capability)?
         .transfer(transaction.provider_output_mut());
+    let limiter = Arc::new(limiter);
     let metrics = Arc::new(
         prometheus_adapter::PromExporter::install()
             .context("install identityaudit metrics exporter")?,
@@ -1382,7 +1388,7 @@ mod tests {
         let listener_rate_limiter = roles
             .listener_rate_limiter()
             .expect("limiter constructor")
-            .finish(lifecycle_output(false, false, false))
+            .finish_for_test(lifecycle_output(false, false, false))
             .expect("limiter output");
 
         let mut inventory = bootstrap::DomainModuleResult::default();
@@ -1486,7 +1492,7 @@ mod tests {
         let listener_rate_limiter = roles
             .listener_rate_limiter()
             .expect("limiter constructor")
-            .finish(lifecycle_output(false, false, false))
+            .finish_for_test(lifecycle_output(false, false, false))
             .expect("limiter output");
 
         let mut inventory = bootstrap::DomainModuleResult::default();

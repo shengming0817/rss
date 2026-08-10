@@ -7,6 +7,8 @@ use assembly_schema::{
     ProviderDurability, ProviderFactorySymbol, ProviderRole,
 };
 
+pub(crate) const ASSEMBLY_NAMESPACE: &str = "deviceidentity";
+
 pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ProviderCatalogEntry::checked(
         ProviderRole::DeviceCertificateStore,

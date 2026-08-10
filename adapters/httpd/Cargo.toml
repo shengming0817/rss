@@ -52,6 +52,7 @@ rcgen = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net", "test-util"] }
 rcgen = { workspace = true }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
+primitives = { path = "../../crates/primitives" }
 tracewiretest = { path = "../../crates/tracewiretest" }
 metrics-exporter-prometheus = { workspace = true }
 futures = { workspace = true }

@@ -103,15 +103,6 @@ impl<'a> Planned<'a> {
         .context("dispatch generated active provider catalog")?;
         let mut uncommitted_token_lifecycle = self::UncommittedListenerPdpLifecycle::new();
         let result = async {
-            let rate_limiter_permit = provider_factories.listener_rate_limiter()?;
-            let rate_limiter = crate::routes::build_runtime_rate_limiter();
-            provider_build
-                .record(
-                    crate::provider_output::ProviderOutput::listener_rate_limiter(
-                        rate_limiter_permit,
-                    ),
-                )
-                .context("record listener rate-limiter provider output")?;
             let listener_pdp_constructor = provider_factories.listener_pdp()?;
 
             let config = context.config();
@@ -166,24 +157,18 @@ impl<'a> Planned<'a> {
                 ))
                 .context("record listener PDP provider output")?;
 
-            Ok((
-                rate_limiter,
-                serving_config,
-                runtime_rss_access,
-                runtime_federated_access,
-            ))
+            Ok((serving_config, runtime_rss_access, runtime_federated_access))
         }
         .await;
 
         let result = match result {
-            Ok((rate_limiter, serving_config, runtime_rss_access, runtime_federated_access)) => {
+            Ok((serving_config, runtime_rss_access, runtime_federated_access)) => {
                 Ok(ProvidersBuilt {
                     context,
                     provider_build,
                     provider_factories,
                     listener_execution_plan,
                     placement_execution_plan,
-                    rate_limiter,
                     serving_config,
                     runtime_rss_access,
                     runtime_federated_access,

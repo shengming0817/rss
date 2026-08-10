@@ -3226,6 +3226,48 @@ impl core::marker::Unpin for diport::rate_limiter::RateLimitKey
 impl core::marker::UnsafeUnpin for diport::rate_limiter::RateLimitKey
 impl core::panic::unwind_safe::RefUnwindSafe for diport::rate_limiter::RateLimitKey
 impl core::panic::unwind_safe::UnwindSafe for diport::rate_limiter::RateLimitKey
+pub struct diport::rate_limiter::RateLimitQuota
+impl diport::rate_limiter::RateLimitQuota
+pub const fn diport::rate_limiter::RateLimitQuota::burst(self) -> u32
+pub const fn diport::rate_limiter::RateLimitQuota::per_second(self) -> u32
+pub const fn diport::rate_limiter::RateLimitQuota::try_new(u32, u32) -> core::result::Result<Self, diport::rate_limiter::RateLimitQuotaError>
+impl core::clone::Clone for diport::rate_limiter::RateLimitQuota
+pub fn diport::rate_limiter::RateLimitQuota::clone(&self) -> diport::rate_limiter::RateLimitQuota
+impl core::cmp::Eq for diport::rate_limiter::RateLimitQuota
+impl core::cmp::PartialEq for diport::rate_limiter::RateLimitQuota
+pub fn diport::rate_limiter::RateLimitQuota::eq(&self, &diport::rate_limiter::RateLimitQuota) -> bool
+impl core::fmt::Debug for diport::rate_limiter::RateLimitQuota
+pub fn diport::rate_limiter::RateLimitQuota::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::rate_limiter::RateLimitQuota
+impl core::marker::StructuralPartialEq for diport::rate_limiter::RateLimitQuota
+impl core::marker::Freeze for diport::rate_limiter::RateLimitQuota
+impl core::marker::Send for diport::rate_limiter::RateLimitQuota
+impl core::marker::Sync for diport::rate_limiter::RateLimitQuota
+impl core::marker::Unpin for diport::rate_limiter::RateLimitQuota
+impl core::marker::UnsafeUnpin for diport::rate_limiter::RateLimitQuota
+impl core::panic::unwind_safe::RefUnwindSafe for diport::rate_limiter::RateLimitQuota
+impl core::panic::unwind_safe::UnwindSafe for diport::rate_limiter::RateLimitQuota
+pub struct diport::rate_limiter::RateLimitQuotaError
+impl core::clone::Clone for diport::rate_limiter::RateLimitQuotaError
+pub fn diport::rate_limiter::RateLimitQuotaError::clone(&self) -> diport::rate_limiter::RateLimitQuotaError
+impl core::cmp::Eq for diport::rate_limiter::RateLimitQuotaError
+impl core::cmp::PartialEq for diport::rate_limiter::RateLimitQuotaError
+pub fn diport::rate_limiter::RateLimitQuotaError::eq(&self, &diport::rate_limiter::RateLimitQuotaError) -> bool
+impl core::error::Error for diport::rate_limiter::RateLimitQuotaError
+impl core::fmt::Debug for diport::rate_limiter::RateLimitQuotaError
+pub fn diport::rate_limiter::RateLimitQuotaError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::rate_limiter::RateLimitQuotaError
+pub fn diport::rate_limiter::RateLimitQuotaError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::StructuralPartialEq for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::Freeze for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::Send for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::Sync for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::Unpin for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::UnsafeUnpin for diport::rate_limiter::RateLimitQuotaError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::rate_limiter::RateLimitQuotaError
+impl core::panic::unwind_safe::UnwindSafe for diport::rate_limiter::RateLimitQuotaError
+pub const diport::rate_limiter::MAX_RATE_LIMIT_QUOTA: u32
 pub trait diport::rate_limiter::RateLimiter: core::marker::Send
 pub fn diport::rate_limiter::RateLimiter::check(&self, diport::rate_limiter::RateLimitKey) -> impl core::future::future::Future<Output = core::result::Result<diport::rate_limiter::RateLimitDecision, diport::rate_limiter::RateLimitError>> + core::marker::Send
 pub fn diport::rate_limiter::RateLimiter::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::rate_limiter::RateLimitError>> + core::marker::Send
@@ -8856,6 +8898,47 @@ impl core::marker::Unpin for diport::rate_limiter::RateLimitKey
 impl core::marker::UnsafeUnpin for diport::rate_limiter::RateLimitKey
 impl core::panic::unwind_safe::RefUnwindSafe for diport::rate_limiter::RateLimitKey
 impl core::panic::unwind_safe::UnwindSafe for diport::rate_limiter::RateLimitKey
+pub struct diport::RateLimitQuota
+impl diport::rate_limiter::RateLimitQuota
+pub const fn diport::rate_limiter::RateLimitQuota::burst(self) -> u32
+pub const fn diport::rate_limiter::RateLimitQuota::per_second(self) -> u32
+pub const fn diport::rate_limiter::RateLimitQuota::try_new(u32, u32) -> core::result::Result<Self, diport::rate_limiter::RateLimitQuotaError>
+impl core::clone::Clone for diport::rate_limiter::RateLimitQuota
+pub fn diport::rate_limiter::RateLimitQuota::clone(&self) -> diport::rate_limiter::RateLimitQuota
+impl core::cmp::Eq for diport::rate_limiter::RateLimitQuota
+impl core::cmp::PartialEq for diport::rate_limiter::RateLimitQuota
+pub fn diport::rate_limiter::RateLimitQuota::eq(&self, &diport::rate_limiter::RateLimitQuota) -> bool
+impl core::fmt::Debug for diport::rate_limiter::RateLimitQuota
+pub fn diport::rate_limiter::RateLimitQuota::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::rate_limiter::RateLimitQuota
+impl core::marker::StructuralPartialEq for diport::rate_limiter::RateLimitQuota
+impl core::marker::Freeze for diport::rate_limiter::RateLimitQuota
+impl core::marker::Send for diport::rate_limiter::RateLimitQuota
+impl core::marker::Sync for diport::rate_limiter::RateLimitQuota
+impl core::marker::Unpin for diport::rate_limiter::RateLimitQuota
+impl core::marker::UnsafeUnpin for diport::rate_limiter::RateLimitQuota
+impl core::panic::unwind_safe::RefUnwindSafe for diport::rate_limiter::RateLimitQuota
+impl core::panic::unwind_safe::UnwindSafe for diport::rate_limiter::RateLimitQuota
+pub struct diport::RateLimitQuotaError
+impl core::clone::Clone for diport::rate_limiter::RateLimitQuotaError
+pub fn diport::rate_limiter::RateLimitQuotaError::clone(&self) -> diport::rate_limiter::RateLimitQuotaError
+impl core::cmp::Eq for diport::rate_limiter::RateLimitQuotaError
+impl core::cmp::PartialEq for diport::rate_limiter::RateLimitQuotaError
+pub fn diport::rate_limiter::RateLimitQuotaError::eq(&self, &diport::rate_limiter::RateLimitQuotaError) -> bool
+impl core::error::Error for diport::rate_limiter::RateLimitQuotaError
+impl core::fmt::Debug for diport::rate_limiter::RateLimitQuotaError
+pub fn diport::rate_limiter::RateLimitQuotaError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::rate_limiter::RateLimitQuotaError
+pub fn diport::rate_limiter::RateLimitQuotaError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::StructuralPartialEq for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::Freeze for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::Send for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::Sync for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::Unpin for diport::rate_limiter::RateLimitQuotaError
+impl core::marker::UnsafeUnpin for diport::rate_limiter::RateLimitQuotaError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::rate_limiter::RateLimitQuotaError
+impl core::panic::unwind_safe::UnwindSafe for diport::rate_limiter::RateLimitQuotaError
 pub struct diport::RawCredential
 impl diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::federated_access(impl core::convert::Into<alloc::string::String>) -> Self
@@ -9975,6 +10058,7 @@ pub const diport::KEY_SUBJECT_ID: &str
 pub const diport::KEY_TENANT_AUTHORITY: &str
 pub const diport::KEY_TENANT_ID: &str
 pub const diport::KEY_TRACE: &str
+pub const diport::MAX_RATE_LIMIT_QUOTA: u32
 pub const diport::RESERVED_METADATA_KEYS: [&str; 10]
 pub const diport::SERVICE_TOKEN_TENANT_HEADER: &str
 pub trait diport::AckableSubscriber: core::marker::Send
