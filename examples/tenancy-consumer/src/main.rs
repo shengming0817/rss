@@ -3,9 +3,10 @@ use httpserve::{ContractMarker, GeneratedPrimaryEndpoint, ResourceProjection};
 use vocab::{HttpRouteAuth, HttpRouteBinding, ProjectionField, RoutePermissionId};
 
 enum ProfileRoute {}
+impl vocab::http::OpenHttpResponseMarker for ProfileRoute {}
 
 fn profile_endpoint<
-    M: 'static,
+    M: vocab::http::OpenHttpResponseMarker + 'static,
     C: vocab::http::HttpConsistencyClass + vocab::http::NonProducerHttpConsistency,
 >(
     binding: HttpRouteBinding<M, C>,
