@@ -52,7 +52,7 @@ rcgen = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "io-util", "net", "test-util"] }
 rcgen = { workspace = true }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
-tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0", features = ["test-util"] }
+tracewiretest = { path = "../../crates/tracewiretest" }
 metrics-exporter-prometheus = { workspace = true }
 futures = { workspace = true }
 http-body-util = { workspace = true }

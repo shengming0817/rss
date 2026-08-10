@@ -509,7 +509,7 @@ async fn handle_fresh<S, H>(
 
 /// 构造消费 span 并（若 producer 透传了 W3C `traceparent`）还原 remote parent，使 handler span 与 producer
 /// 同 `trace_id`（#1224）。`traceparent` 缺失（`None`）/ 畸形 → span 保持 root（fail-open，
-/// [`tracewire::restore_remote_parent`] no-op，不阻消费）。抽出为 helper 控制 [`handle_fresh`] 认知复杂度 ≤15。
+/// parse rejection 不阻消费）。抽出为 helper 控制 [`handle_fresh`] 认知复杂度 ≤15。
 #[doc(hidden)]
 pub fn build_consume_span(
     meta: &ConsumerMeta,
@@ -526,9 +526,39 @@ pub fn build_consume_span(
         messaging.message.id = message_id,
     );
     if let Some(tp) = traceparent {
-        tracewire::restore_remote_parent(&span, tp, None);
+        restore_consume_parent(&span, tp);
     }
     span
+}
+
+fn restore_consume_parent(span: &tracing::Span, traceparent: &str) {
+    match tracewire::TraceParent::parse(traceparent)
+        .map(|parent| tracewire::restore_remote_parent(span, &parent, None))
+    {
+        Ok(tracewire::RestoreOutcome::Restored) => {}
+        Ok(tracewire::RestoreOutcome::Unavailable) => observe_consume_trace_attach_unavailable(),
+        Err(reason) => observe_consume_trace_rejection(reason),
+    }
+}
+
+fn observe_consume_trace_attach_unavailable() {
+    tracing::debug!(
+        target: "rss.trace_context",
+        transport = "broker",
+        operation = "process",
+        reason = "attach_unavailable",
+        "remote trace parent attach unavailable"
+    );
+}
+
+fn observe_consume_trace_rejection(reason: tracewire::TraceParentError) {
+    tracing::debug!(
+        target: "rss.trace_context",
+        transport = "broker",
+        operation = "process",
+        reason = %reason,
+        "remote trace parent rejected"
+    );
 }
 
 /// 续租循环（#1213）：每 `lease_cfg.renew_interval` 调 [`consistency::InboxStore::extend`]。
@@ -3378,20 +3408,21 @@ mod tests {
     #[allow(clippy::expect_used)]
     #[test]
     fn build_consume_span_restores_producer_trace_id() {
-        tracewire::with_test_subscriber(|| {
+        tracewiretest::with_test_subscriber(|| {
             let producer_tp = tracing::info_span!("producer")
                 .in_scope(tracewire::capture_current)
                 .expect("producer traceparent")
                 .into_traceparent();
             // 消费侧：用透传的 traceparent 建消费 span，其 trace_id 应等于 producer。
-            let consume = super::build_consume_span(&meta(), "msg-trace-1", Some(&producer_tp));
+            let consume =
+                super::build_consume_span(&meta(), "msg-trace-1", Some(producer_tp.as_str()));
             let restored = consume
                 .in_scope(tracewire::capture_current)
                 .expect("consume span traceparent after restore")
                 .into_traceparent();
             assert_eq!(
-                trace_id_of(&restored),
-                trace_id_of(&producer_tp),
+                trace_id_of(restored.as_str()),
+                trace_id_of(producer_tp.as_str()),
                 "build_consume_span(Some) 还原 outbox 透传 traceparent ⇒ 消费 span 与 producer 同 trace_id"
             );
         });
@@ -3403,7 +3434,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     #[test]
     fn build_consume_span_without_trace_is_root() {
-        tracewire::with_test_subscriber(|| {
+        tracewiretest::with_test_subscriber(|| {
             let consume = super::build_consume_span(&meta(), "msg-trace-2", None);
             let tp = consume
                 .in_scope(tracewire::capture_current)
@@ -3411,10 +3442,68 @@ mod tests {
                 .into_traceparent();
             // 自生 root：版本前缀合法、不 panic（未挂任何畸形/外来 parent）。
             assert!(
-                tp.starts_with("00-"),
-                "root 消费 span traceparent 形态合法: {tp}"
+                tp.as_str().starts_with("00-"),
+                "root 消费 span traceparent 形态合法: {}",
+                tp.as_str()
             );
         });
+    }
+
+    // broker metadata 是未受信任边界：畸形 traceparent 只能丢弃，不能阻塞消费或传入 OTel。
+    #[allow(clippy::expect_used)]
+    #[test]
+    fn build_consume_span_with_malformed_trace_is_root() {
+        tracewiretest::with_test_subscriber(|| {
+            let consume =
+                super::build_consume_span(&meta(), "msg-trace-malformed", Some("not-traceparent"));
+            let tp = consume
+                .in_scope(tracewire::capture_current)
+                .expect("malformed remote parent must fail open to a usable root span")
+                .into_traceparent();
+            assert!(tp.as_str().starts_with("00-"));
+        });
+    }
+
+    #[test]
+    fn broker_trace_rejections_preserve_closed_reasons_without_raw_values() {
+        const MALFORMED: &str = "SENSITIVE-not-a-traceparent";
+        const UNSUPPORTED: &str = "ff-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        let oversized = "a".repeat(513);
+        let (_, events) = tracewiretest::with_test_event_capture(|| {
+            for value in [MALFORMED, oversized.as_str(), UNSUPPORTED] {
+                let _ =
+                    super::build_consume_span(&meta(), "message-must-not-be-logged", Some(value));
+            }
+        });
+
+        let trace_events = events
+            .iter()
+            .filter(|event| event.target == "rss.trace_context")
+            .collect::<Vec<_>>();
+        assert_eq!(trace_events.len(), 3);
+        assert!(trace_events.iter().all(|event| {
+            event.fields.get("transport").map(String::as_str) == Some("broker")
+                && event.fields.get("operation").map(String::as_str) == Some("process")
+        }));
+        let reasons = trace_events
+            .iter()
+            .filter_map(|event| event.fields.get("reason").map(String::as_str))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            reasons,
+            std::collections::BTreeSet::from([
+                "malformed traceparent",
+                "traceparent exceeds 512 bytes",
+                "unsupported traceparent version",
+            ])
+        );
+        assert!(
+            trace_events
+                .iter()
+                .flat_map(|event| event.fields.values())
+                .all(|value| !value.contains(MALFORMED)
+                    && !value.contains("message-must-not-be-logged"))
+        );
     }
 
     // 端到端（review #298 F#2）：Message 带 broker 透传的 KEY_TRACE → run_consumer → handle_fresh 读
@@ -3428,7 +3517,7 @@ mod tests {
         let seen: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         let seen_handler = seen.clone();
 
-        let producer_trace_id = tracewire::with_test_subscriber(|| {
+        let producer_trace_id = tracewiretest::with_test_subscriber(|| {
             let producer_tp = tracing::info_span!("producer")
                 .in_scope(tracewire::capture_current)
                 .expect("producer traceparent")
@@ -3436,7 +3525,7 @@ mod tests {
 
             // broker 透传等价物：subscriber 从 header rehydrate 出带 trace 键的 Message。
             let mut md = tenant_metadata("msg-e2e-trace");
-            md.insert_wire_pair(diport::KEY_TRACE, producer_tp.clone());
+            md.insert_wire_pair(diport::KEY_TRACE, producer_tp.as_str().to_owned());
             let msg = Message::new_with_metadata("msg-e2e-trace", b"payload".to_vec(), md);
 
             let handler = move |_m: Message| -> futures::future::BoxFuture<'static, HandleResult> {
@@ -3444,7 +3533,7 @@ mod tests {
                 Box::pin(async move {
                     // handler 经 `.instrument(consume_span)` 在还原后的消费 span 内执行。
                     *seen.lock().unwrap() = tracewire::capture_current()
-                        .map(|context| trace_id_of(context.traceparent()));
+                        .map(|context| trace_id_of(context.traceparent().as_str()));
                     HandleResult::ack()
                 })
             };
@@ -3461,7 +3550,7 @@ mod tests {
                 handler,
                 lease_cfg_test(),
             ));
-            trace_id_of(&producer_tp)
+            trace_id_of(producer_tp.as_str())
         });
 
         assert_eq!(

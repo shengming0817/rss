@@ -5,10 +5,10 @@
 - 产品面与候选/激活语义由 [`ADR-024`](../../architecture/202608012034-024-enterprise-framework-product-surface.md)
   拥有；公共消费和发布范围由 [`project-scope.md`](../../rules/project-scope.md) 拥有。
 - [`Spec 010`](../010-release-surface-convergence/research.md) 已决定未进入正向发布集合的 package 默认 internal。
-- `rss-diag-context` 已完成最终窄腰并以 crates.io-only eligibility 进入 Release Surface；`rss-trace-context` 仍为
-  `publish = false` 的 internal package。前者的 candidate eligibility 也不构成 RC、published 或支持承诺。
-- `diagctx` 已有仓内真实 consumer，并与授权 context 分离；`tracewire` 已承载 traceparent capture/restore，但其 internal
-  API 形状不能直接升级为外部承诺。
+- `rss-diag-context` 与 `rss-trace-context` 已完成最终窄腰，并以 crates.io-only eligibility 进入 Release Surface；
+  candidate eligibility 不构成 RC、published 或支持承诺。
+- `diagctx` 已有仓内真实 consumer，并与授权 context 分离；`tracewire` 的仓内 HTTP、outbox 与 consumer 调用方已
+  迁移到候选 typed API，不保留旧 raw-string 入口。
 
 本规格不复制 package inventory、代码行数或 API 符号快照。实现 PBI 必须重新从当前 Cargo metadata 与源码读取事实。
 
@@ -16,10 +16,10 @@
 
 - 当前 `diagctx` 同时公开 `ctx/local` 模块与根级 re-export，internal public-api snapshot 因而有双路径；这不是
   候选应继承的 SemVer 面。其 parse、ambient `Option` 与 opaque future 已证明输入拒绝和传播 fail-open 可行。
-- 当前 `tracewire` 已隐藏 OTel SDK 类型，但 restore 仍接受裸 `&str` 并返回 `()`；无法区分 malformed、
-  oversized、unsupported 与 attach unavailable。HTTP adapter 另有 validator，说明验证 owner 尚未收口。
-- diag 的历史 `public-api/*.txt` 已被破坏式移除，唯一 owner 是双 profile `release-api/rss-diag-context.txt`；trace 仍由
-  internal snapshot 持有。两类 baseline 互斥，不能互相冒充。#2047/#2048 分别拥有 baseline 分离与
+- `tracewire` 已由 owned `TraceParent` 收口严格 W3C 验证，restore 只接受 typed parent 并返回闭值 outcome；HTTP
+  与 broker 边界不再维护平行 validator，OpenTelemetry parser/error/context 只留在私有桥中。
+- 两个 candidate 的历史 `public-api/*.txt` 已被破坏式移除，唯一 owner 是各自双 profile
+  `release-api/*.txt`。两类 baseline 互斥，不能互相冒充。#2047/#2048 分别拥有 baseline 分离与
   release-selected leakage gate。
 - Tokio task-local 采用 `try_with` 而非缺值 panic 的 `with`；RSS 将缺诊断稳定为 `None`。OTel 0.32 propagator的
   SDK parser/error/context 在私有 adapter 层结束；候选只承诺 W3C 1.1 线语义和无原始输入的闭值分类。

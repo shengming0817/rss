@@ -1990,7 +1990,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn domain_transport_client_span_mints_w3c_and_parents_server_span() {
         const UPSTREAM: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
-        let (response_body, spans) = tracewire::with_test_span_capture(async {
+        let (response_body, spans) = tracewiretest::with_test_span_capture(async {
             let addr: SocketAddr = "127.0.0.1:0".parse().expect("addr");
             let server = HttpServer::serve("domain-trace", addr, make_domain_transport_svc())
                 .await
@@ -1999,7 +1999,8 @@ mod tests {
                 reqwest::Url::parse(&format!("http://{}/rpc", server.local_addr())).expect("url");
             let transport = test_domain_transport(endpoint);
             let ambient = tracing::info_span!(parent: None, "ambient.dispatch");
-            tracewire::restore_remote_parent(&ambient, UPSTREAM, Some("vendor=value"));
+            let upstream = tracewire::TraceParent::parse(UPSTREAM).expect("fixed traceparent");
+            let _ = tracewire::restore_remote_parent(&ambient, &upstream, Some("vendor=value"));
             let context = diagctx::DiagnosticCtx::new(
                 diagctx::CorrelationId::parse("corr-t2").expect("valid correlation"),
             );
@@ -2055,7 +2056,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn domain_transport_without_ambient_parent_starts_client_root_and_injects_it() {
-        let (_, spans) = tracewire::with_test_span_capture(async {
+        let (_, spans) = tracewiretest::with_test_span_capture(async {
             let server = HttpServer::serve(
                 "domain-root",
                 "127.0.0.1:0".parse().expect("addr"),
@@ -2163,7 +2164,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn domain_transport_timeout_settles_one_client_span() {
-        let (kind, spans) = tracewire::with_test_span_capture(async {
+        let (kind, spans) = tracewiretest::with_test_span_capture(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let addr = listener.local_addr().expect("addr");
             let server = tokio::spawn(async move {
@@ -2202,7 +2203,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn domain_transport_cancelled_future_settles_one_client_span() {
-        let (_, spans) = tracewire::with_test_span_capture(async {
+        let (_, spans) = tracewiretest::with_test_span_capture(async {
             let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
             let addr = listener.local_addr().expect("addr");
             let (accepted_tx, accepted_rx) = tokio::sync::oneshot::channel();
@@ -2244,7 +2245,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn domain_transport_http_error_status_is_transport_ok_and_otel_error() {
-        let (statuses, spans) = tracewire::with_test_span_capture(async {
+        let (statuses, spans) = tracewiretest::with_test_span_capture(async {
             let mut statuses = Vec::new();
             for wire in [
                 b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
@@ -2284,7 +2285,7 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn domain_transport_failure_taxonomy_settles_exactly_once() {
-        let (kinds, spans) = tracewire::with_test_span_capture(async {
+        let (kinds, spans) = tracewiretest::with_test_span_capture(async {
             let mut kinds = Vec::new();
             let oversized = format!(
                 "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n",
@@ -2384,7 +2385,7 @@ mod tests {
             }
         }
 
-        let (_, remote_spans) = tracewire::with_test_span_capture(async {
+        let (_, remote_spans) = tracewiretest::with_test_span_capture(async {
             let server = HttpServer::serve(
                 "logical-parent",
                 "127.0.0.1:0".parse().expect("addr"),
@@ -2415,7 +2416,7 @@ mod tests {
             .expect("client span");
         assert_eq!(client.parent_span_id, logical.span_id);
 
-        let (_, inproc_spans) = tracewire::with_test_span_capture(async {
+        let (_, inproc_spans) = tracewiretest::with_test_span_capture(async {
             distributed::InstrumentedHttpContractTransport::new(
                 InProc,
                 distributed::TransportMode::InProc,

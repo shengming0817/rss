@@ -774,7 +774,8 @@ pub(crate) fn metadata_with_ambient(
         m = m.with_correlation(c.as_str());
     }
     if let Some(context) = tracewire::capture_current() {
-        m = m.with_trace(context.into_traceparent());
+        let traceparent = context.into_traceparent();
+        m = m.with_trace(traceparent.as_str().to_owned());
     }
     m
 }
@@ -4002,7 +4003,7 @@ mod tests {
     //（本 crate 不直接 import otel）。
     #[test]
     fn metadata_with_ambient_stamps_trace_inside_span() {
-        let json = tracewire::with_test_subscriber(|| {
+        let json = tracewiretest::with_test_subscriber(|| {
             tracing::info_span!("producer").in_scope(|| {
                 OutboxEnvelope::new(
                     "d".to_string(),

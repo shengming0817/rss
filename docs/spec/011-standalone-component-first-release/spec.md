@@ -8,8 +8,8 @@
 
 [`Spec 010`](../010-release-surface-convergence/spec.md) 定义正向 Release Surface 与 Standalone Component waist。
 首批工作不应扩张为全 workspace 发布，而应以最低风险的真实组件证明治理、打包、外部消费和人工发布边界。
-`diagctx` 与 `tracewire` 是首批候选；diag 已完成本规格的 candidate 窄腰与同 revision artifact proof，trace 仍为
-internal package。candidate 身份不等于 RC 或 published。
+`diagctx` 与 `tracewire` 是首批候选；两者均已完成本规格的 candidate 窄腰与同 revision artifact proof。
+candidate 身份不等于 RC 或 published。
 
 ## 目标
 
@@ -117,9 +117,9 @@ trace/span id 校验，`01..fe` 按 future-version 扩展规则，`ff` 为 `Unsu
 
 两者 normal/default graph 的 RSS internal crate 为 0；trace 公共签名中的 `opentelemetry*` 与
 `tracing_opentelemetry` 类型为 0。现有 `test-util` helpers 不属于候选 manifest 或 Release API；#2054 必须将
-多 consumer 测试脚手架迁入 `publish = false`、dev-only 的内部载体。diag 以 crates.io-only eligibility 进入
-Release Surface，并由最终 artifact proof 持有 candidate verdict；trace 仍 `publish = false` 且未选择。本契约与
-Cargo eligibility 均不授予 RC、registry upload 或 published 身份。
+多 consumer 测试脚手架迁入 `publish = false`、dev-only 的内部载体。两个候选均以 crates.io-only eligibility 进入
+Release Surface，并由各自最终 artifact proof 持有 candidate verdict。本契约与 Cargo eligibility 均不授予 RC、
+registry upload 或 published 身份。
 
 ### 非授权机器边界
 

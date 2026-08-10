@@ -1648,6 +1648,16 @@ mod tests {
             PublicApiOwner::StandaloneComponent
         );
         assert_eq!(diag_release.api_stability(), ApiStability::Experimental);
+        let trace_release = surface
+            .packages()
+            .iter()
+            .find(|package| package.package() == "rss-trace-context")
+            .context("trace release package")?;
+        assert_eq!(
+            trace_release.public_api_owner(),
+            PublicApiOwner::StandaloneComponent
+        );
+        assert_eq!(trace_release.api_stability(), ApiStability::Experimental);
 
         // Issue #2050 acceptance input, not a production candidate registry. Spec 011 forbids a
         // package inventory; Cargo publish policy plus the positive Release Surface remain the
@@ -1676,13 +1686,8 @@ mod tests {
                 .iter()
                 .find(|package| package.key() == &key)
                 .context("candidate catalog row")?;
-            if name == "rss-diag-context" {
-                assert!(package.publish_policy().is_publishable());
-                assert!(selected.contains(name.as_str()));
-            } else {
-                assert_eq!(package.publish_policy(), &PublishPolicy::Disabled);
-                assert!(!selected.contains(name.as_str()));
-            }
+            assert!(package.publish_policy().is_publishable());
+            assert!(selected.contains(name.as_str()));
         }
 
         let diag = facts.package_key("rss-diag-context")?;
@@ -1711,12 +1716,18 @@ mod tests {
         );
 
         let trace = facts.package_key("rss-trace-context")?;
+        let trace_package = catalog
+            .iter()
+            .find(|package| package.key() == &trace)
+            .context("trace package catalog row")?;
+        assert_eq!(
+            trace_package.publish_metadata().features(),
+            &BTreeMap::from([("default".to_owned(), BTreeSet::new())])
+        );
         let trace_dependencies = facts.direct_dependencies_for(&trace)?;
         let production = trace_dependencies
             .iter()
-            .filter(|dependency| {
-                dependency.kind() == DependencyKind::Normal && !dependency.optional()
-            })
+            .filter(|dependency| dependency.kind() == DependencyKind::Normal)
             .map(|dependency| (dependency.name(), dependency))
             .collect::<BTreeMap<_, _>>();
         assert_eq!(
@@ -1731,7 +1742,7 @@ mod tests {
         assert!(
             production
                 .values()
-                .all(|dependency| !dependency.uses_default_features())
+                .all(|dependency| !dependency.optional() && !dependency.uses_default_features())
         );
         for name in ["opentelemetry", "opentelemetry_sdk"] {
             assert_eq!(
@@ -1739,6 +1750,15 @@ mod tests {
                 &BTreeSet::from(["trace".to_owned()])
             );
         }
+        assert_eq!(
+            production["tracing"].requested_features(),
+            &BTreeSet::from(["std".to_owned()])
+        );
+        assert!(
+            production["tracing-opentelemetry"]
+                .requested_features()
+                .is_empty()
+        );
         Ok(())
     }
 }

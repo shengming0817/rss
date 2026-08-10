@@ -65,8 +65,10 @@ fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留�
 
 ## HTTP server observation
 
-- `tracewire` is the only W3C/OpenTelemetry context bridge. The adapter-private `httpd` observation
-  seam restores the inbound remote parent through it; neither layer imports OpenTelemetry directly.
+- `tracewire` is the only W3C/OpenTelemetry context bridge. HTTP and broker boundaries first parse an
+  owned `TraceParent`; restore accepts only that validated type and maps SDK/lifecycle failure to the
+  closed fail-open `RestoreOutcome`. The adapter-private `httpd` observation seam imports no
+  OpenTelemetry type.
 - INVARIANT: HTTP-SERVER-OBSERVATION-POLICY-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed non-optional metadata + adapter-private emitter" }——every finalized router carries a non-optional closed listener policy to `httpd`. Health disables both the SERVER span and HTTP RED metrics; all other and unknown listeners are enabled. `httpserve` can produce only closed route/cause metadata, never an emitter.
 - INVARIANT: HTTP-SERVER-OBSERVATION-ORDER-01 { level = "Medium", exec = "test", source = "code" }——the single adapter-owned observation seam wraps request budget, body limit, authentication bridge, panic recovery, enforcement, handler work, and response-body polling. A transport T2 test is the executable carrier because axum layer order is not encoded by Rust types.
 - INVARIANT: HTTP-SERVER-TRANSPORT-SCHEME-01 { level = "Hard", exec = "native-compile", source = "code", native = "adapter-private emitter created only by actual bind branches" }——the private observation emitter owned by `httpd`'s actual plaintext and mTLS bind branches mints `http` and `https` respectively. `httpserve::ServerService` emits no transport evidence, so wrapping its public request service and injecting URI/extensions cannot forge RSS's official scheme. Scheme is never selected by an assembly, URI, forwarding header, or public lowering API.

@@ -1,31 +1,116 @@
-//! `tracewire` —— W3C Trace Context capture / remote-parent restore 单源。
+#![doc = include_str!("../README.md")]
+
+//! W3C Trace Context capture / remote-parent restore candidate.
 //!
 //! trace 在 `业务请求 → outbox → relay → broker → consumer` 跨 async 边界断链：emit 侧不捕获当前 trace、
-//! consumer 侧无法还原 ⇒ 端到端被 relay 切两段。本 crate 是**唯一碰 `opentelemetry` 的新落点**（#1224 决策 2）——
+//! consumer 侧无法还原 ⇒ 端到端被 relay 切两段。本 crate 是 W3C propagation 的**唯一生产 OpenTelemetry bridge**（#1224 决策 2）——
 //! producer 经 [`capture_current`] 把当前 `tracing` span 的 OTel 上下文导出为 W3C carrier（落 outbox
 //! `metadata` 保留键 `trace`），consumer 经 [`restore_remote_parent`] 还原成 remote parent 挂到消费 span，使 handler
 //! 与 producer **同一 `trace_id`**。HTTP server 入口也经同一 API 恢复 `traceparent` + `tracestate`。
-//! `adapters/postgres`（emit）、`crates/eventexec`（consume）与 `crates/httpserve`（HTTP server）只依赖本 crate、
+//! `adapters/postgres`（emit）、`crates/eventexec`（consume）与 `adapters/httpd`（HTTP server）只依赖本 crate、
 //! **不直接 import otel**，延续 RSS「otel 收口」治理（`adapters/otel` / `diagctx` / `observ` 同思路）。
 //!
 //! **fail-open**：诊断信道缺失从不阻塞投递——未装 otel 层 / span context 无效 ⇒ [`capture_current`] 返
-//! `None`（不写 trace 键）；有效但未采样的 context 仍以 flags `00` 传播。`traceparent` 畸形 ⇒
-//! [`restore_remote_parent`] 建立的新 span 保持 root，不 panic。
+//! `None`（不写 trace 键）；有效但未采样的 context 仍以 flags `00` 传播。入站值必须先经
+//! [`TraceParent::parse`] 验证；attach 不可用由闭值 [`RestoreOutcome::Unavailable`] 表达。
 //!
 //! W3C 线格式 `00-<32hex traceid>-<16hex spanid>-<2hex flags>`（W3C Trace Context；OTel messaging producer
 //! inject / consumer extract 约定）。
 //!
-//! ref: open-telemetry/opentelemetry-rust opentelemetry-sdk/src/propagation/trace_context.rs@0.32
-//! ref: tokio-rs/tracing-opentelemetry src/span_ext.rs@0.33
+//! ref: open-telemetry/opentelemetry-rust opentelemetry-sdk/src/propagation/trace_context.rs@284a37d93b3856e1975c2807ba3af1421ebd9b52
+//! ref: tokio-rs/tracing-opentelemetry src/span_ext.rs@1d5422f1f37932fd65e434da618b305d4c94ee9c
 
 use opentelemetry::propagation::TextMapPropagator;
+use opentelemetry::trace::TraceContextExt as _;
 use opentelemetry_sdk::propagation::TraceContextPropagator;
+use std::fmt;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// W3C Trace Context 透传 header 名（producer inject / consumer extract 的 carrier 键）。
 const TRACEPARENT: &str = "traceparent";
 const TRACESTATE: &str = "tracestate";
 const MAX_TRACE_CONTEXT_BYTES: usize = 512;
+
+/// A validated W3C `traceparent` header value.
+///
+/// The owned wire value deliberately has private fields and implements neither [`Debug`](fmt::Debug)
+/// nor [`Display`](fmt::Display). Callers can only create it through [`TraceParent::parse`] and can
+/// only expose the validated wire value explicitly through [`TraceParent::as_str`].
+pub struct TraceParent(String);
+
+impl TraceParent {
+    /// Parse and validate a W3C Trace Context 1.1 `traceparent` value.
+    ///
+    /// Version `00` is the strict four-field form. Versions `01..fe` preserve an optional opaque
+    /// suffix after the known 55-byte prefix. Version `ff` is reserved. Input is never trimmed or
+    /// normalized.
+    pub fn parse(value: &str) -> Result<Self, TraceParentError> {
+        let bytes = value.as_bytes();
+        if bytes.len() > MAX_TRACE_CONTEXT_BYTES {
+            return Err(TraceParentError::Oversized);
+        }
+        if bytes.len() < 55
+            || !bytes.is_ascii()
+            || bytes[2] != b'-'
+            || bytes[35] != b'-'
+            || bytes[52] != b'-'
+            || !bytes[..2].iter().copied().all(is_lower_hex)
+        {
+            return Err(TraceParentError::Malformed);
+        }
+        if bytes[..2] == *b"ff" {
+            return Err(TraceParentError::UnsupportedVersion);
+        }
+        if !bytes[3..35].iter().copied().all(is_lower_hex)
+            || bytes[3..35].iter().all(|byte| *byte == b'0')
+            || !bytes[36..52].iter().copied().all(is_lower_hex)
+            || bytes[36..52].iter().all(|byte| *byte == b'0')
+            || !bytes[53..55].iter().copied().all(is_lower_hex)
+        {
+            return Err(TraceParentError::Malformed);
+        }
+        let version_zero = bytes[..2] == *b"00";
+        if (version_zero && bytes.len() != 55)
+            || (!version_zero && bytes.len() > 55 && bytes[55] != b'-')
+        {
+            return Err(TraceParentError::Malformed);
+        }
+        Ok(Self(value.to_owned()))
+    }
+
+    /// Return the validated wire value.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+/// Closed, input-free `traceparent` rejection classes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TraceParentError {
+    /// The value does not satisfy the W3C Trace Context shape or identifier invariants.
+    Malformed,
+    /// The value exceeds the candidate's 512-byte defensive bound.
+    Oversized,
+    /// W3C version `ff` is reserved and cannot be propagated.
+    UnsupportedVersion,
+}
+
+impl fmt::Display for TraceParentError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Malformed => "malformed traceparent",
+            Self::Oversized => "traceparent exceeds 512 bytes",
+            Self::UnsupportedVersion => "unsupported traceparent version",
+        })
+    }
+}
+
+impl std::error::Error for TraceParentError {}
+
+const fn is_lower_hex(byte: u8) -> bool {
+    byte.is_ascii_digit() || (byte >= b'a' && byte <= b'f')
+}
 
 /// 当前 span mint 的 W3C Trace Context carrier。
 ///
@@ -34,14 +119,14 @@ const MAX_TRACE_CONTEXT_BYTES: usize = 512;
 ///
 /// INVARIANT: HTTP-CLIENT-CONTEXT-AUTHORITY-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields and sole mint funnel" }
 pub struct W3cTraceContext {
-    traceparent: String,
+    traceparent: TraceParent,
     tracestate: Option<String>,
 }
 
 impl W3cTraceContext {
     /// W3C `traceparent` header value.
     #[must_use]
-    pub fn traceparent(&self) -> &str {
+    pub fn traceparent(&self) -> &TraceParent {
         &self.traceparent
     }
 
@@ -53,7 +138,7 @@ impl W3cTraceContext {
 
     /// Consume the carrier and return its `traceparent` value.
     #[must_use]
-    pub fn into_traceparent(self) -> String {
+    pub fn into_traceparent(self) -> TraceParent {
         self.traceparent
     }
 }
@@ -73,8 +158,10 @@ pub fn capture_current() -> Option<W3cTraceContext> {
     // W3C propagator 仅在 span context `is_valid()` 时写 `traceparent`（含采样判定）；无效则 carrier 空 → None。
     let mut carrier = std::collections::HashMap::<String, String>::new();
     TraceContextPropagator::new().inject_context(&cx, &mut carrier);
-    let traceparent = carrier.remove(TRACEPARENT).filter(|s| !s.is_empty())?;
-    let tracestate = carrier.remove(TRACESTATE).filter(|s| !s.is_empty());
+    let traceparent = TraceParent::parse(carrier.remove(TRACEPARENT)?.as_str()).ok()?;
+    let tracestate = carrier
+        .remove(TRACESTATE)
+        .filter(|value| !value.is_empty() && value.len() <= MAX_TRACE_CONTEXT_BYTES);
     Some(W3cTraceContext {
         traceparent,
         tracestate,
@@ -83,37 +170,47 @@ pub fn capture_current() -> Option<W3cTraceContext> {
 
 /// 把 W3C `traceparent` / `tracestate` 还原成 remote parent 挂到 `span`。
 ///
-/// **fail-open**：`traceparent` 畸形 / 空 ⇒ 解析出无效 SpanContext，`set_parent` 不改 trace 归属（span 保持
-/// 自身 root），**不 panic**——迟到 / 损坏的诊断信道不影响消费正确性。
+/// **fail-open**：parent 已在 trust boundary 完成验证；若 SDK 无法提取它，或 span 的 OTel layer / 可变
+/// 状态不可用，则返回 [`RestoreOutcome::Unavailable`]，不 panic、不泄漏 SDK error，也不改变业务结果。
 ///
 /// caller 必须在 span 首次 enter/instrument 前调用。畸形 `tracestate` 只丢 state，不使合法 parent 失效。
-/// 生产 caller：`crates/httpserve` HTTP 入口与 `crates/eventexec` consumer Fresh 路径。
-pub fn restore_remote_parent(span: &tracing::Span, traceparent: &str, tracestate: Option<&str>) {
-    if traceparent.len() > MAX_TRACE_CONTEXT_BYTES {
-        return;
-    }
+/// 生产 caller：`adapters/httpd` HTTP 入口与 `crates/eventexec` consumer Fresh 路径。
+pub fn restore_remote_parent(
+    span: &tracing::Span,
+    traceparent: &TraceParent,
+    tracestate: Option<&str>,
+) -> RestoreOutcome {
     let mut carrier = std::collections::HashMap::<String, String>::new();
-    carrier.insert(TRACEPARENT.to_owned(), traceparent.to_owned());
+    carrier.insert(TRACEPARENT.to_owned(), traceparent.as_str().to_owned());
     if let Some(tracestate) = tracestate.filter(|value| value.len() <= MAX_TRACE_CONTEXT_BYTES) {
         carrier.insert(TRACESTATE.to_owned(), tracestate.to_owned());
     }
     let cx = TraceContextPropagator::new().extract(&carrier);
-    if let Err(e) = span.set_parent(cx) {
-        // reason: fail-open——set_parent 仅在 span 已 disabled/closed 或 layer 不可 downcast 时 Err（罕见）；
-        // trace 续传是 best-effort 诊断，降级为 debug、消费 span 保持 root，绝不阻断消费。
-        tracing::debug!(target: "tracewire", error = %e, "restore_remote_parent: set_parent failed; span stays root");
+    if !cx.span().span_context().is_valid() {
+        return RestoreOutcome::Unavailable;
     }
+    span.set_parent(cx)
+        .map(|()| RestoreOutcome::Restored)
+        .unwrap_or(RestoreOutcome::Unavailable)
 }
 
-/// **测试脚手架**（`test-util` feature / 本 crate 单测）：在装好 `tracing-opentelemetry` 层
+/// Closed result of attempting to attach a validated remote parent.
+#[must_use]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreOutcome {
+    /// The remote context was attached before the span started.
+    Restored,
+    /// The tracing/OpenTelemetry layer or mutable span state was unavailable.
+    Unavailable,
+}
+
+/// **私有单测脚手架**：在装好 `tracing-opentelemetry` 层
 /// （确定性 `SdkTracerProvider`，默认 `ParentBased(AlwaysOn)` 采样根 span）的 subscriber 内同步跑 `f`，
 /// 使 [`capture_current`] 在活跃 span 内产出有效 W3C carrier。
 ///
-/// 下游 crate（`adapters/postgres` emit 测试 / `crates/eventexec` consume 测试）经
-/// `tracewire = { features = ["test-util"] }` 复用本 helper——**otel 收口在本 crate，下游测试不直接 import otel**。
-/// 异步用例传 `|| rt.block_on(async { .. })`：current-thread runtime 在本线程驱动 ⇒ subscriber 全程有效。
-#[cfg(any(test, feature = "test-util"))]
-pub fn with_test_subscriber<R>(f: impl FnOnce() -> R) -> R {
+/// 跨 crate 测试复用 publish=false 的 `tracewiretest` carrier；本 helper 不进入 Release API。
+#[cfg(test)]
+fn with_test_subscriber<R>(f: impl FnOnce() -> R) -> R {
     use opentelemetry::trace::TracerProvider as _;
     use tracing_subscriber::prelude::*;
     let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder().build();
@@ -123,125 +220,102 @@ pub fn with_test_subscriber<R>(f: impl FnOnce() -> R) -> R {
     tracing::subscriber::with_default(subscriber, f)
 }
 
-/// Exported span snapshot for cross-crate conformance tests.
-#[cfg(any(test, feature = "test-util"))]
-pub struct TestSpan {
-    pub name: String,
-    pub kind: String,
-    pub trace_id: String,
-    pub span_id: String,
-    pub parent_span_id: String,
-    pub tracestate: String,
-    pub status: String,
-    pub attributes: std::collections::BTreeMap<String, String>,
-}
-
-#[cfg(any(test, feature = "test-util"))]
-static TEST_SPAN_CAPTURE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-#[cfg(any(test, feature = "test-util"))]
-static TEST_GLOBAL_SUBSCRIBER: std::sync::Once = std::sync::Once::new();
-
-/// Run `future` to completion under an isolated in-memory OTel exporter and return deterministic
-/// span snapshots.
-///
-/// The helper owns the current-thread runtime and binds every poll to one explicit dispatcher.
-/// Capture sessions are process-serialized because tracing callsite interest is process-global.
-#[cfg(any(test, feature = "test-util"))]
-#[allow(clippy::expect_used)]
-pub fn with_test_span_capture<F>(future: F) -> (F::Output, Vec<TestSpan>)
-where
-    F: std::future::Future,
-{
-    use opentelemetry::trace::TracerProvider as _;
-    use opentelemetry_sdk::trace::{InMemorySpanExporter, SdkTracerProvider};
-    use tracing::instrument::WithSubscriber as _;
-    use tracing_subscriber::prelude::*;
-
-    let _serial = TEST_SPAN_CAPTURE_LOCK
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    TEST_GLOBAL_SUBSCRIBER.call_once(|| {
-        // A process-wide registry prevents parallel no-subscriber test threads from caching newly
-        // registered production callsites as permanently disabled. Captured spans still route to
-        // the session-local dispatcher below; this baseline has no exporting layer.
-        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
-    });
-    let exporter = InMemorySpanExporter::default();
-    let provider = SdkTracerProvider::builder()
-        .with_simple_exporter(exporter.clone())
-        .build();
-    let layer = tracing_opentelemetry::layer().with_tracer(provider.tracer("tracewire-test"));
-    let subscriber = tracing_subscriber::registry().with(layer);
-    let dispatch = tracing::Dispatch::new(subscriber);
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("test span capture runtime");
-    let result = tracing::dispatcher::with_default(&dispatch, || {
-        tracing::callsite::rebuild_interest_cache();
-        runtime.block_on(future.with_subscriber(dispatch.clone()))
-    });
-    provider.force_flush().expect("flush captured spans");
-    let spans: Vec<TestSpan> = exporter
-        .get_finished_spans()
-        .expect("finished spans")
-        .into_iter()
-        .map(|span| TestSpan {
-            name: span.name.into_owned(),
-            kind: format!("{:?}", span.span_kind).to_ascii_lowercase(),
-            trace_id: span.span_context.trace_id().to_string(),
-            span_id: span.span_context.span_id().to_string(),
-            parent_span_id: span.parent_span_id.to_string(),
-            tracestate: span.span_context.trace_state().header(),
-            status: format!("{:?}", span.status).to_ascii_lowercase(),
-            attributes: span
-                .attributes
-                .into_iter()
-                .map(|kv| (kv.key.as_str().to_owned(), kv.value.to_string()))
-                .collect(),
-        })
-        .collect();
-    (result, spans)
-}
-
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::expect_used)]
+
     use super::*;
 
+    #[test]
+    fn trace_parent_parser_classifies_closed_errors_without_raw_input() {
+        const VALID: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        for malformed in [
+            "",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7",
+            "00-4BF92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            "00-00000000000000000000000000000000-00f067aa0ba902b7-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-0000000000000000-01",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01-extra",
+        ] {
+            assert!(matches!(
+                TraceParent::parse(malformed),
+                Err(TraceParentError::Malformed)
+            ));
+        }
+
+        let oversized = "a".repeat(MAX_TRACE_CONTEXT_BYTES + 1);
+        assert!(matches!(
+            TraceParent::parse(&oversized),
+            Err(TraceParentError::Oversized)
+        ));
+        let unsupported = VALID.replacen("00-", "ff-", 1);
+        let error = TraceParent::parse(&unsupported)
+            .err()
+            .expect("ff is reserved");
+        assert_eq!(error, TraceParentError::UnsupportedVersion);
+        assert!(!error.to_string().contains(&unsupported));
+    }
+
+    #[test]
+    fn trace_parent_version_zero_and_future_boundaries() {
+        const VALID: &str = "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01";
+        assert_eq!(TraceParent::parse(VALID).expect("v00").as_str(), VALID);
+
+        let future = VALID.replacen("00-", "01-", 1);
+        assert_eq!(
+            TraceParent::parse(&future).expect("future base").as_str(),
+            future
+        );
+        let future_with_opaque_suffix = format!("{future}-vendor-opaque");
+        assert_eq!(
+            TraceParent::parse(&future_with_opaque_suffix)
+                .expect("future suffix")
+                .as_str(),
+            future_with_opaque_suffix
+        );
+        let future_with_empty_opaque_suffix = format!("{future}-");
+        assert_eq!(
+            TraceParent::parse(&future_with_empty_opaque_suffix)
+                .expect("future delimiter")
+                .as_str(),
+            future_with_empty_opaque_suffix
+        );
+        let all_flags = VALID
+            .strip_suffix("01")
+            .expect("fixed flags prefix")
+            .to_owned()
+            + "ff";
+        assert_eq!(
+            TraceParent::parse(&all_flags)
+                .expect("flags are a bitfield")
+                .as_str(),
+            all_flags
+        );
+        assert!(matches!(
+            TraceParent::parse(&format!("{future}x")),
+            Err(TraceParentError::Malformed)
+        ));
+
+        let mut at_limit = future;
+        at_limit.push('-');
+        at_limit.push_str(&"x".repeat(MAX_TRACE_CONTEXT_BYTES - at_limit.len()));
+        assert_eq!(
+            TraceParent::parse(&at_limit).expect("512 bytes").as_str(),
+            at_limit
+        );
+        at_limit.push('x');
+        assert!(matches!(
+            TraceParent::parse(&at_limit),
+            Err(TraceParentError::Oversized)
+        ));
+    }
+
+    static_assertions::assert_not_impl_any!(TraceParent: std::fmt::Debug, std::fmt::Display);
     static_assertions::assert_not_impl_any!(W3cTraceContext: std::fmt::Debug, std::fmt::Display);
 
     /// `00-<32hex traceid>-<16hex spanid>-<2hex flags>` → trace_id 段（dash 间第 2 字段）。
     fn trace_id_of(traceparent: &str) -> &str {
         traceparent.split('-').nth(1).unwrap_or("")
-    }
-
-    fn shared_test_callsite() {
-        let span = tracing::info_span!("tracewire.shared.test.callsite");
-        let _entered = span.enter();
-    }
-
-    #[test]
-    fn span_capture_survives_parallel_preregistration_and_spawn() {
-        assert!(
-            std::thread::spawn(shared_test_callsite).join().is_ok(),
-            "pre-register callsite thread completes"
-        );
-
-        let (_, spans) = with_test_span_capture(async {
-            assert!(
-                tokio::spawn(async { shared_test_callsite() }).await.is_ok(),
-                "captured task completes"
-            );
-        });
-
-        assert_eq!(
-            spans
-                .iter()
-                .filter(|span| span.name == "tracewire.shared.test.callsite")
-                .count(),
-            1
-        );
     }
 
     // 活跃采样 span 内 capture → 合法 W3C traceparent（版本 00 + 32/16/2 hex）。
@@ -252,7 +326,7 @@ mod tests {
         let context =
             with_test_subscriber(|| tracing::info_span!("producer").in_scope(capture_current))
                 .expect("capture inside sampled otel span yields trace context");
-        let tp = context.traceparent();
+        let tp = context.traceparent().as_str();
         let parts: Vec<&str> = tp.split('-').collect();
         assert_eq!(parts.len(), 4, "traceparent 四段: {tp}");
         assert_eq!(parts[0], "00", "version");
@@ -282,7 +356,10 @@ mod tests {
                 .expect("producer traceparent")
                 .into_traceparent();
             let child = tracing::info_span!("consume");
-            restore_remote_parent(&child, &producer_tp, None);
+            assert_eq!(
+                restore_remote_parent(&child, &producer_tp, None),
+                RestoreOutcome::Restored
+            );
             let child_tp = child
                 .in_scope(capture_current)
                 .expect("child traceparent after restore")
@@ -290,19 +367,34 @@ mod tests {
             (producer_tp, child_tp)
         });
         assert_eq!(
-            trace_id_of(&producer_tp),
-            trace_id_of(&child_tp),
+            trace_id_of(producer_tp.as_str()),
+            trace_id_of(child_tp.as_str()),
             "restore_remote_parent 后 consumer span 与 producer 同 trace_id"
         );
     }
 
-    // 畸形 traceparent → no-op、不 panic（graceful degradation）。
     #[test]
-    fn restore_malformed_is_noop_no_panic() {
+    fn restore_without_otel_layer_is_unavailable() {
+        let parent = TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+            .expect("fixed parent");
+        let span = tracing::info_span!("consume");
+        assert_eq!(
+            restore_remote_parent(&span, &parent, None),
+            RestoreOutcome::Unavailable
+        );
+    }
+
+    #[test]
+    fn restore_after_span_start_is_unavailable() {
+        let parent = TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+            .expect("fixed parent");
         with_test_subscriber(|| {
-            let span = tracing::info_span!("consume");
-            restore_remote_parent(&span, "not-a-valid-traceparent", None);
-            let _ = span.in_scope(capture_current); // 不 panic 即通过
+            let span = tracing::info_span!(parent: None, "started");
+            let _started_context = span.context();
+            assert_eq!(
+                restore_remote_parent(&span, &parent, None),
+                RestoreOutcome::Unavailable
+            );
         });
     }
 
@@ -311,10 +403,12 @@ mod tests {
     fn capture_preserves_tracestate() {
         let context = with_test_subscriber(|| {
             let span = tracing::info_span!(parent: None, "remote-child");
-            restore_remote_parent(
-                &span,
-                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
-                Some("vendor=value"),
+            let parent =
+                TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01")
+                    .expect("fixed parent");
+            assert_eq!(
+                restore_remote_parent(&span, &parent, Some("vendor=value"),),
+                RestoreOutcome::Restored
             );
             span.in_scope(capture_current)
                 .expect("remote child trace context")
@@ -327,15 +421,17 @@ mod tests {
     fn capture_valid_unsampled_context_uses_zero_flags() {
         let context = with_test_subscriber(|| {
             let span = tracing::info_span!(parent: None, "remote-child");
-            restore_remote_parent(
-                &span,
-                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
-                None,
+            let parent =
+                TraceParent::parse("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+                    .expect("fixed parent");
+            assert_eq!(
+                restore_remote_parent(&span, &parent, None,),
+                RestoreOutcome::Restored
             );
             span.in_scope(capture_current)
                 .expect("valid unsampled context is propagated")
         });
-        assert!(context.traceparent().ends_with("-00"));
+        assert!(context.traceparent().as_str().ends_with("-00"));
     }
 
     #[allow(clippy::expect_used, clippy::unwrap_used)]
@@ -355,7 +451,11 @@ mod tests {
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
             let span = tracing::info_span!(parent: None, "remote-child");
-            restore_remote_parent(&span, traceparent, tracestate);
+            let traceparent = TraceParent::parse(traceparent).expect("fixed valid traceparent");
+            assert_eq!(
+                restore_remote_parent(&span, &traceparent, tracestate),
+                RestoreOutcome::Restored
+            );
             let _entered = span.enter();
         });
         exporter
@@ -381,12 +481,6 @@ mod tests {
     }
 
     #[test]
-    fn remote_parent_malformed_value_starts_new_root() {
-        let span = exported_remote_child("not-a-valid-traceparent", None);
-        assert_eq!(span.parent_span_id, opentelemetry::trace::SpanId::INVALID);
-    }
-
-    #[test]
     fn remote_parent_malformed_state_is_dropped_without_losing_parent() {
         let span = exported_remote_child(
             "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
@@ -394,12 +488,6 @@ mod tests {
         );
         assert_eq!(span.parent_span_id.to_string(), "00f067aa0ba902b7");
         assert_eq!(span.span_context.trace_state().header(), "");
-    }
-
-    #[test]
-    fn remote_parent_oversized_value_starts_new_root() {
-        let span = exported_remote_child(&"a".repeat(MAX_TRACE_CONTEXT_BYTES + 1), None);
-        assert_eq!(span.parent_span_id, opentelemetry::trace::SpanId::INVALID);
     }
 
     #[test]

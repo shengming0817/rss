@@ -9,7 +9,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use workspacefacts::{DependencyKind, DependencyResolution, DependencySource, WorkspaceFacts};
+use workspacefacts::{
+    BuildPlatforms, BuildSelection, BuildSide, CargoPlatform, DependencyKind, DependencyResolution,
+    DependencySource, FeatureSelection, ResolverVersion, WorkspaceFacts,
+};
 
 /// INVARIANT: RELEASE-PACKAGE-PROOF-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "proof_behavior_is_closed_and_unknown_release_packages_fail", anti_vacuity = "release_proof_plans_are_derived_from_the_complete_release_surface" }.
 /// Every package selected by the validated Release Surface is planned and executed exactly once.
@@ -135,6 +138,7 @@ struct PackageArtifact<'a> {
 enum ProofBehavior {
     Platform,
     DiagContext,
+    TraceContext,
 }
 
 impl ProofBehavior {
@@ -142,6 +146,7 @@ impl ProofBehavior {
         match package {
             "rss-platform" => Ok(Self::Platform),
             "rss-diag-context" => Ok(Self::DiagContext),
+            "rss-trace-context" => Ok(Self::TraceContext),
             _ => bail!("selected release package `{package}` has no closed proof behavior"),
         }
     }
@@ -150,6 +155,7 @@ impl ProofBehavior {
         match self {
             Self::Platform => "platform",
             Self::DiagContext => "diag-context",
+            Self::TraceContext => "trace-context",
         }
     }
 
@@ -157,6 +163,7 @@ impl ProofBehavior {
         let expected = match self {
             Self::Platform => platform_receipt(),
             Self::DiagContext => diag_context_receipt(),
+            Self::TraceContext => trace_context_receipt(),
         };
         if receipt != &expected {
             bail!("package consumer receipt is incomplete or non-canonical");
@@ -235,13 +242,17 @@ impl PackageProofPlan {
                 "package": package_rename,
             }));
         }
+        let behavior = ProofBehavior::for_package(release.package())?;
+        if behavior == ProofBehavior::TraceContext {
+            validate_trace_context_default_closure(facts, &key)?;
+        }
         Ok(Self {
             package: release.package().to_owned(),
             version: release.version().to_string(),
             minimum_rust_version: release.minimum_rust_version().to_string(),
             dependencies,
             features: package.publish_metadata().features().clone(),
-            behavior: ProofBehavior::for_package(release.package())?,
+            behavior,
         })
     }
 
@@ -256,6 +267,40 @@ impl PackageProofPlan {
             "links": null,
         })
     }
+}
+
+/// INVARIANT: TRACE-CONTEXT-DEFAULT-CLOSURE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "tests::trace_context_default_closure_rejects_forbidden_transitive_features", anti_vacuity = "tests::trace_context_default_closure_accepts_trace_only_graph|tests::release_proof_plans_are_derived_from_the_complete_release_surface" }.
+fn validate_trace_context_default_closure(
+    facts: &WorkspaceFacts,
+    package: &workspacefacts::PackageKey,
+) -> Result<()> {
+    let target = CargoPlatform::build_target()?;
+    let build = facts.resolve_build(BuildSelection::new(
+        package.clone(),
+        ResolverVersion::V2,
+        FeatureSelection::Default,
+        BuildPlatforms::new(target.clone(), target),
+        BTreeSet::new(),
+    ))?;
+    for side in [BuildSide::Target, BuildSide::Host] {
+        for package in [
+            "opentelemetry",
+            "opentelemetry_sdk",
+            "tracing-opentelemetry",
+        ] {
+            for feature in ["metrics", "logs", "internal-logs", "testing"] {
+                if !build.is_package_feature_enabled(side, package, feature) {
+                    continue;
+                }
+                bail!(
+                    "rss-trace-context default closure enables forbidden feature `{}/{}`",
+                    package,
+                    feature
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 fn platform_receipt() -> serde_json::Value {
@@ -284,6 +329,21 @@ fn diag_context_receipt() -> serde_json::Value {
         "scopeRoundtrip": true,
         "nestedRestored": true,
         "sendSync": true
+    })
+}
+
+fn trace_context_receipt() -> serde_json::Value {
+    json!({
+        "package": "rss-trace-context",
+        "v00Roundtrip": true,
+        "futureVersionAccepted": true,
+        "malformedRejected": true,
+        "oversizedRejected": true,
+        "unsupportedRejected": true,
+        "restoreRestored": true,
+        "restoreUnavailable": true,
+        "invalidStateDropped": true,
+        "failOpenNoPanic": true
     })
 }
 
@@ -485,8 +545,34 @@ fn validate_archive(plan: &PackageProofPlan, crate_root: &Path, head: &str) -> R
     }
     validate_packaged_dependencies(&manifest.document)?;
     validate_declared_content(&manifest, crate_root)?;
+    if plan.behavior == ProofBehavior::TraceContext {
+        let library = fs::read_to_string(crate_root.join(manifest.library_path()))?;
+        let readme_path = manifest
+            .package
+            .readme
+            .as_deref()
+            .context("rss-trace-context archive has no README")?;
+        let readme = fs::read_to_string(crate_root.join(readme_path))?;
+        validate_trace_context_doctest_source(&library, &readme)?;
+    }
     let vcs = fs::read_to_string(crate_root.join(".cargo_vcs_info.json"))?;
     validate_vcs_revision(&vcs, head)
+}
+
+/// INVARIANT: TRACE-CONTEXT-DOCTEST-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "tests::trace_context_doctest_source_rejects_unowned_or_empty_example", anti_vacuity = "tests::trace_context_archive_doctest_source_is_non_vacuous" }.
+/// The archive matrix may claim its doctest axis only when the packaged README is the crate-level
+/// rustdoc owner and contains at least one executable Rust fence.
+fn validate_trace_context_doctest_source(library: &str, readme: &str) -> Result<()> {
+    if !library
+        .lines()
+        .any(|line| line.trim() == "#![doc = include_str!(\"../README.md\")]")
+    {
+        bail!("rss-trace-context library does not include its packaged README as crate rustdoc");
+    }
+    if !readme.lines().any(|line| line.trim() == "```rust") {
+        bail!("rss-trace-context README has no executable Rust doctest");
+    }
+    Ok(())
 }
 
 fn parse_rust_version(value: &str) -> Result<semver::Version> {
@@ -791,6 +877,85 @@ impl Drop for TempProof {
 mod tests {
     use super::*;
 
+    fn trace_context_closure_facts(
+        dependency_feature: &str,
+    ) -> anyhow::Result<(WorkspaceFacts, workspacefacts::PackageKey)> {
+        use workspacefacts::testing::{
+            path_dependency_with_features, path_package, path_package_id, resolve_node,
+            resolve_node_with_features, target,
+        };
+
+        let root_path = "/workspace/crates/tracewire";
+        let dependency_path = "/workspace/vendor/opentelemetry";
+        let root = path_package(
+            "rss-trace-context",
+            root_path,
+            vec![target(
+                "rss_trace_context",
+                "lib",
+                "/workspace/crates/tracewire/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![path_dependency_with_features(
+                "opentelemetry",
+                dependency_path,
+                false,
+                false,
+                &[dependency_feature],
+            )],
+            json!({"default": []}),
+        );
+        let dependency_features = serde_json::Map::from_iter([
+            ("default".to_owned(), json!([])),
+            (dependency_feature.to_owned(), json!([])),
+        ]);
+        let dependency = path_package(
+            "opentelemetry",
+            dependency_path,
+            vec![target(
+                "opentelemetry",
+                "lib",
+                "/workspace/vendor/opentelemetry/src/lib.rs",
+                true,
+                &[],
+            )],
+            vec![],
+            serde_json::Value::Object(dependency_features),
+        );
+        let root_id = path_package_id(root_path);
+        let dependency_id = path_package_id(dependency_path);
+        let facts = crate::testutil::synthetic_workspace_facts_from_parts(
+            Path::new("/workspace"),
+            vec![root, dependency],
+            vec![root_id.clone()],
+            vec![
+                resolve_node(&root_id, &[("opentelemetry", &dependency_id)]),
+                resolve_node_with_features(&dependency_id, &[], &[dependency_feature]),
+            ],
+        )?;
+        let key = facts.package_key("rss-trace-context")?;
+        Ok((facts, key))
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn trace_context_default_closure_rejects_forbidden_transitive_features() -> anyhow::Result<()> {
+        for feature in ["metrics", "logs", "internal-logs", "testing"] {
+            let (facts, key) = trace_context_closure_facts(feature)?;
+            let error = validate_trace_context_default_closure(&facts, &key)
+                .expect_err("forbidden OpenTelemetry feature must fail closed");
+            assert!(error.to_string().contains(feature), "{error:#}");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn trace_context_default_closure_accepts_trace_only_graph() -> anyhow::Result<()> {
+        let (facts, key) = trace_context_closure_facts("trace")?;
+        validate_trace_context_default_closure(&facts, &key)
+    }
+
     #[test]
     #[allow(clippy::expect_used)]
     fn t2_receipt_requires_every_stage_and_exact_identity() {
@@ -844,6 +1009,52 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
+    fn trace_receipt_requires_every_public_behavior_axis() {
+        let green = trace_context_receipt();
+        assert!(ProofBehavior::TraceContext.validate_receipt(&green).is_ok());
+        for field in [
+            "package",
+            "v00Roundtrip",
+            "futureVersionAccepted",
+            "malformedRejected",
+            "oversizedRejected",
+            "unsupportedRejected",
+            "restoreRestored",
+            "restoreUnavailable",
+            "invalidStateDropped",
+            "failOpenNoPanic",
+        ] {
+            let mut red = green.clone();
+            red.as_object_mut().expect("receipt object").remove(field);
+            assert!(
+                ProofBehavior::TraceContext.validate_receipt(&red).is_err(),
+                "missing {field} must fail"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn trace_context_archive_doctest_source_is_non_vacuous() {
+        let root = crate::workspace_root().expect("workspace root");
+        let library = fs::read_to_string(root.join("crates/tracewire/src/lib.rs"))
+            .expect("trace-context library source");
+        let readme = fs::read_to_string(root.join("crates/tracewire/README.md"))
+            .expect("trace-context README");
+        assert!(validate_trace_context_doctest_source(&library, &readme).is_ok());
+    }
+
+    #[test]
+    fn trace_context_doctest_source_rejects_unowned_or_empty_example() {
+        const LIBRARY: &str = "#![doc = include_str!(\"../README.md\")]";
+        const README: &str = "# candidate\n\n```rust\nassert!(true);\n```";
+        assert!(validate_trace_context_doctest_source(LIBRARY, README).is_ok());
+        assert!(validate_trace_context_doctest_source("pub struct Candidate;", README).is_err());
+        assert!(validate_trace_context_doctest_source(LIBRARY, "# no example").is_err());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
     fn release_proof_plans_are_derived_from_the_complete_release_surface() {
         let root = crate::workspace_root().expect("workspace root");
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -861,6 +1072,7 @@ mod tests {
             BTreeMap::from([
                 ("rss-diag-context", ProofBehavior::DiagContext),
                 ("rss-platform", ProofBehavior::Platform),
+                ("rss-trace-context", ProofBehavior::TraceContext),
             ])
         );
         for plan in &plans {
@@ -883,6 +1095,10 @@ mod tests {
         assert_eq!(
             ProofBehavior::for_package("rss-diag-context").expect("diag behavior"),
             ProofBehavior::DiagContext
+        );
+        assert_eq!(
+            ProofBehavior::for_package("rss-trace-context").expect("trace behavior"),
+            ProofBehavior::TraceContext
         );
         assert!(ProofBehavior::for_package("future-release").is_err());
     }

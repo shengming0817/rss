@@ -51,9 +51,9 @@ pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &[
 ];
 /// 引擎 / 原语层（依赖基础）。
 ///
-/// `tracewire` 是 W3C Trace Context capture/remote-parent restore 单源（唯一新 otel 落点）：domain-neutral
-/// 纯 infra、无 workspace 内部边（出边全是外部 opentelemetry/tracing crate），被 service `httpserve` +
-/// `eventexec` 和 adapter `postgres` 依赖（`allows(Service,Engine)` / `allows(Adapter,Engine)` 均放行；
+/// `tracewire` 是 W3C Trace Context capture/remote-parent restore 的唯一生产 OpenTelemetry bridge：
+/// domain-neutral 纯 infra、无 workspace 内部边（出边全是外部 opentelemetry/tracing crate），被 service
+/// `eventexec` 和 adapters `httpd`/`postgres` 依赖（`allows(Service,Engine)` / `allows(Adapter,Engine)` 均放行；
 /// `service→service` 禁故不可置 Service 档）。
 pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives", "rss-trace-context"];
 /// DI-infra 层（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费）——可替换 provider 的
@@ -74,6 +74,7 @@ pub(crate) const SERVICE_CRATES: &[&str] = &[
     "distributed",
     "deviceloop",
     "testkit",
+    "tracewiretest",
 ];
 /// 域层（依赖基础 + 引擎 + 服务 + generated；兄弟域互不依赖）。
 pub(crate) const DOMAIN_CRATES: &[&str] = assembly_schema::REGISTERED_DOMAIN_LABELS;
@@ -106,7 +107,7 @@ pub(crate) fn is_proc_macro(name: &str) -> bool {
 /// [`check_test_support_confinement`](crate::layerdeps::check_test_support_confinement)（INVARIANT:
 /// LAYER-DEPS-08）承载：补 `allows` 矩阵盲区；layerdeps 只扫 shipped 依赖表，故任一指向本集成员的
 /// 内部边即 shipped 误用。`iotdevice` 仍是 Example 层外部 actor，不因 test-support 身份获得特殊层。
-pub(crate) const TEST_SUPPORT_CRATES: &[&str] = &["testkit", "iotdevice"];
+pub(crate) const TEST_SUPPORT_CRATES: &[&str] = &["testkit", "tracewiretest", "iotdevice"];
 
 /// 该 crate 是否 test-support 库（只准 dev-dependency 消费，见 [`TEST_SUPPORT_CRATES`]）。
 pub(crate) fn is_test_support(name: &str) -> bool {
@@ -356,11 +357,19 @@ mod tests {
 
     #[test]
     fn test_support_catalog_is_exact_without_reclassifying_iotdevice() {
-        assert_eq!(TEST_SUPPORT_CRATES, &["testkit", "iotdevice"]);
+        assert_eq!(
+            TEST_SUPPORT_CRATES,
+            &["testkit", "tracewiretest", "iotdevice"]
+        );
         assert!(is_test_support("testkit"));
+        assert!(is_test_support("tracewiretest"));
         assert!(is_test_support("iotdevice"));
         assert!(!is_test_support("identity"));
         assert_eq!(classify("testkit", "crates/testkit"), Some(Layer::Service));
+        assert_eq!(
+            classify("tracewiretest", "crates/tracewiretest"),
+            Some(Layer::Service)
+        );
         assert_eq!(
             classify("iotdevice", "examples/iotdevice"),
             Some(Layer::Example)

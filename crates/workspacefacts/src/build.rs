@@ -206,6 +206,8 @@ struct SideFacts {
     packages: BTreeSet<PackageKey>,
     /// Selected package names including registry/crates.io deps (for serving clap absence etc.).
     selected_package_names: BTreeSet<String>,
+    /// Selected named features for every package, including registry/crates.io dependencies.
+    selected_package_features: BTreeSet<(String, String)>,
     features: BTreeSet<FeatureKey>,
     selected_dependencies: BTreeSet<SelectedDependency>,
 }
@@ -227,6 +229,25 @@ impl BuildFacts {
     #[must_use]
     pub fn is_package_selected(&self, side: BuildSide, name: &str) -> bool {
         self.side_facts(side).selected_package_names.contains(name)
+    }
+
+    /// Whether any selected version of `package` enables the named Cargo `feature` on `side`.
+    ///
+    /// Unlike [`Self::enabled_features`], this query includes registry/crates.io packages. It is
+    /// intentionally name-based: policy checks normally need to reject the feature if any selected
+    /// version enables it.
+    #[must_use]
+    pub fn is_package_feature_enabled(
+        &self,
+        side: BuildSide,
+        package: &str,
+        feature: &str,
+    ) -> bool {
+        self.side_facts(side).selected_package_features.iter().any(
+            |(selected_package, selected_feature)| {
+                selected_package == package && selected_feature == feature
+            },
+        )
     }
 
     #[must_use]
@@ -471,10 +492,16 @@ fn collect_side_facts(
     let selected = selected_features(cargo_set, side);
     let mut packages = BTreeSet::new();
     let mut selected_package_names = BTreeSet::new();
+    let mut selected_package_features = BTreeSet::new();
     let mut features = BTreeSet::new();
     for feature_list in selected.packages_with_features(DependencyDirection::Forward) {
         let package = feature_list.package();
         selected_package_names.insert(package.name().to_owned());
+        selected_package_features.extend(
+            feature_list
+                .named_features()
+                .map(|name| (package.name().to_owned(), name.to_owned())),
+        );
         if !package.in_workspace() {
             continue;
         }
@@ -488,6 +515,7 @@ fn collect_side_facts(
     SideFacts {
         packages,
         selected_package_names,
+        selected_package_features,
         features,
         selected_dependencies,
     }

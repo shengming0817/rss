@@ -64,7 +64,7 @@ impl ObservedHttpClient {
             .body(request.body().to_vec());
 
         if let Some(context) = tracewire::capture_current() {
-            builder = builder.header("traceparent", context.traceparent());
+            builder = builder.header("traceparent", context.traceparent().as_str());
             if let Some(tracestate) = context.tracestate() {
                 builder = builder.header("tracestate", tracestate);
             }

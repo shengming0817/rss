@@ -31,7 +31,7 @@
 //! INVARIANT: LAYER-DEPS-06 { level = "Medium", exec = "check", source = "code" }—— deny.toml 分层 wrappers ⟷ 源分类一致（守 `LAYER-WRAP-01` 漂移）。
 //! INVARIANT: LAYER-DEPS-07 { level = "Medium", exec = "check", source = "code" }—— 含 path 的本地依赖须解析到现存 workspace 成员；逃逸 / 非成员
 //!   一律 fail-closed 报错（杜绝 path-dep 静默绕过分层门）。
-//! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "check", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，当前为 `testkit` 与 `iotdevice`）只准经
+//! INVARIANT: LAYER-DEPS-08 { level = "Medium", exec = "check", source = "code" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`，当前为 `testkit`、`tracewiretest` 与 `iotdevice`）只准经
 //!   `[dev-dependencies]` 消费，禁进生产 shipped 依赖图。本 lint 只扫 shipped 依赖表，故**任一**指向
 //!   test-support 成员的内部边即 shipped 误用（dev-dep 边压根不入 `edges`）；补 `allows` 矩阵盲区
 //!   （例如 `allows(Domain,Service)=true` 不阻止域 crate 误把 testkit 放进 `[dependencies]`，Example
@@ -47,7 +47,7 @@
 //!   （暂停 application-receipt relay 的测试控制）；生产构建启用即可伪造 tenant scope / 事件拓扑或
 //!   暴露 relay 控制，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
 //! INVARIANT: LAYER-DEPS-10 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::test_support_internal_dependencies_red_shipped_edges", anti_vacuity = "tests::test_support_internal_dependencies_green_no_shipped_edge" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`）的 shipped
-//!   出边只能指向外部 crate；任一指向 workspace 内部成员的出边均失败，保持 testkit/iotdevice 为零
+//!   出边只能指向外部 crate；任一指向 workspace 内部成员的出边均失败，保持 test-support crate 为零
 //!   production-adapter、零 workspace 依赖的独立测试工具。与 LAYER-DEPS-08 的 shipped 入边约束正交。
 //! INVARIANT: RUNTIMEEXEC-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_wrapper_widened_to_bin_red|tests::runtimeexec_wrapper_missing_assembly_red", anti_vacuity = "tests::runtimeexec_wrapper_exact_green" }——
 //!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
@@ -2445,7 +2445,7 @@ mod tests {
     /// LAYER-DEPS-08 anti-vacuity（绿）：test-support 仅经 dev-dep 消费 ⇒ shipped `edges` 无指向它们的边。
     #[test]
     fn check_test_support_confinement_green_no_shipped_edge() {
-        // identity→testkit 与 journeys→iotdevice 均为 dev-dep，不入 shipped edges。
+        // identity→testkit、httpd→tracewiretest 与 journeys→iotdevice 均为 dev-dep，不入 shipped edges。
         let edges = vec![e("identity", "httpserve"), e("identity", "generated")];
         assert!(check_test_support_confinement(&edges).is_empty());
     }
@@ -2455,9 +2455,10 @@ mod tests {
     fn check_test_support_confinement_red_shipped_dep() {
         let findings = check_test_support_confinement(&[
             e("identity", "testkit"),
+            e("httpd", "tracewiretest"),
             e("deviceidentity", "iotdevice"),
         ]);
-        assert_eq!(findings.len(), 2, "{findings:?}");
+        assert_eq!(findings.len(), 3, "{findings:?}");
         assert!(
             findings
                 .iter()
@@ -2472,9 +2473,10 @@ mod tests {
         let findings = check_test_support_internal_dependencies(&[
             e("testkit", "vocab"),
             e("testkit", "consistency"),
+            e("tracewiretest", "tracewire"),
             e("iotdevice", "mqtt"),
         ]);
-        assert_eq!(findings.len(), 3, "{findings:?}");
+        assert_eq!(findings.len(), 4, "{findings:?}");
         assert!(
             findings
                 .iter()

@@ -175,9 +175,8 @@ toml = { workspace = true }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }
 authn = { path = "../../crates/authn", features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
-# #1224 trace 接线单测：复用 tracewire 的 `test-util` 脚手架（with_test_subscriber）装 otel subscriber，
-# 验证 metadata_with_ambient 盖章 `trace`——**不直接 import otel**（otel 收口在 tracewire，同 identity test-support 范式）。
-tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0", features = ["test-util"] }
+# #2054：OTel 测试脚手架移入 publish=false、dev-only carrier，不进入候选 feature/API 图。
+tracewiretest = { path = "../../crates/tracewiretest" }
 # test-util 提供 tokio::time::advance / start_paused（采样 loop 时间控制单元测试）。
 # 集成测试用唯一 event_id 法（inbox_receipts 去重隔离验证，避免跨轮次清理）。
 uuid = { workspace = true, features = ["v4"] }

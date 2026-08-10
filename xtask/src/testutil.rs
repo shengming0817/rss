@@ -175,3 +175,23 @@ pub(crate) fn synthetic_workspace_facts(
     )
     .context("synthetic workspace facts")
 }
+
+/// Construct synthetic facts from fully specified Cargo metadata parts.
+///
+/// Tests that need feature-bearing external edges use this shared parse owner instead of creating
+/// a second Cargo metadata owner inside the production module under test.
+pub(crate) fn synthetic_workspace_facts_from_parts(
+    workspace_root: &Path,
+    packages: Vec<Value>,
+    workspace_member_ids: Vec<String>,
+    nodes: Vec<Value>,
+) -> Result<WorkspaceFacts> {
+    let root = workspace_root
+        .to_str()
+        .context("workspace root must be UTF-8")?;
+    WorkspaceFacts::from_metadata_json(
+        workspace_root,
+        &metadata_json(root, packages, workspace_member_ids, nodes),
+    )
+    .context("synthetic workspace facts from explicit metadata parts")
+}

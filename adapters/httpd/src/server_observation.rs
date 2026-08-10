@@ -36,23 +36,52 @@ const TRACESTATE: HeaderName = HeaderName::from_static("tracestate");
 const MAX_TRACE_HEADER_BYTES: usize = 512;
 
 pub(super) struct InboundTraceContext {
-    traceparent: String,
+    traceparent: tracewire::TraceParent,
     tracestate: Option<String>,
+}
+
+fn observe_traceparent_rejection(reason: impl std::fmt::Display) {
+    tracing::debug!(
+        target: "rss.trace_context",
+        transport = "http",
+        operation = "server.receive",
+        reason = %reason,
+        "remote trace parent rejected"
+    );
+}
+
+fn parse_single_traceparent(headers: &HeaderMap) -> Option<tracewire::TraceParent> {
+    let mut parents = headers.get_all(&TRACEPARENT).iter();
+    let value = match parents.next()?.to_str() {
+        Ok(value) => value,
+        Err(_) => {
+            observe_traceparent_rejection("malformed traceparent");
+            return None;
+        }
+    };
+    let traceparent = match tracewire::TraceParent::parse(value) {
+        Ok(parent) => parent,
+        Err(reason) => {
+            observe_traceparent_rejection(reason);
+            return None;
+        }
+    };
+    if parents.next().is_some() {
+        observe_traceparent_rejection("multiple traceparent headers");
+        return None;
+    }
+    Some(traceparent)
 }
 
 impl InboundTraceContext {
     pub(super) fn from_headers(headers: &HeaderMap) -> Option<Self> {
-        let mut parents = headers.get_all(&TRACEPARENT).iter();
-        let traceparent = parents.next()?.to_str().ok()?;
-        if parents.next().is_some() || !valid_traceparent(traceparent) {
-            return None;
-        }
+        let traceparent = parse_single_traceparent(headers)?;
 
         let mut tracestate = String::new();
         for value in headers.get_all(&TRACESTATE) {
             let Ok(value) = value.to_str() else {
                 return Some(Self {
-                    traceparent: traceparent.to_owned(),
+                    traceparent,
                     tracestate: None,
                 });
             };
@@ -62,7 +91,7 @@ impl InboundTraceContext {
                 .saturating_add(value.len());
             if next_len > MAX_TRACE_HEADER_BYTES {
                 return Some(Self {
-                    traceparent: traceparent.to_owned(),
+                    traceparent,
                     tracestate: None,
                 });
             }
@@ -73,43 +102,24 @@ impl InboundTraceContext {
         }
 
         Some(Self {
-            traceparent: traceparent.to_owned(),
+            traceparent,
             tracestate: (!tracestate.is_empty()).then_some(tracestate),
         })
     }
 
     pub(super) fn apply_to(&self, span: &tracing::Span) {
-        tracewire::restore_remote_parent(span, &self.traceparent, self.tracestate.as_deref());
+        if tracewire::restore_remote_parent(span, &self.traceparent, self.tracestate.as_deref())
+            == tracewire::RestoreOutcome::Unavailable
+        {
+            tracing::debug!(
+                target: "rss.trace_context",
+                transport = "http",
+                operation = "server.receive",
+                reason = "attach_unavailable",
+                "remote trace parent attach unavailable"
+            );
+        }
     }
-}
-
-fn valid_traceparent(value: &str) -> bool {
-    if value.len() > MAX_TRACE_HEADER_BYTES {
-        return false;
-    }
-    let parts: Vec<&str> = value.split('-').collect();
-    if parts.len() < 4
-        || parts[0].len() != 2
-        || parts[1].len() != 32
-        || parts[2].len() != 16
-        || parts[3].len() != 2
-        || !parts[0].bytes().all(is_lower_hex)
-        || !parts[1].bytes().all(is_lower_hex)
-        || !parts[2].bytes().all(is_lower_hex)
-        || !parts[3].bytes().all(is_lower_hex)
-        || parts[1].bytes().all(|byte| byte == b'0')
-        || parts[2].bytes().all(|byte| byte == b'0')
-    {
-        return false;
-    }
-    let Ok(version) = u8::from_str_radix(parts[0], 16) else {
-        return false;
-    };
-    version != u8::MAX && (version != 0 || parts.len() == 4)
-}
-
-const fn is_lower_hex(byte: u8) -> bool {
-    byte.is_ascii_digit() || (byte >= b'a' && byte <= b'f')
 }
 
 #[derive(Clone, Copy)]
@@ -564,6 +574,49 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn http_trace_diagnostics_are_closed_structured_and_raw_free() {
+        const RAW: &str = "SENSITIVE-not-a-traceparent";
+        let (_, events) = tracewiretest::with_test_event_capture(|| {
+            let mut rejected = HeaderMap::new();
+            rejected.insert(&TRACEPARENT, HeaderValue::from_static(RAW));
+            assert!(InboundTraceContext::from_headers(&rejected).is_none());
+
+            let mut accepted = HeaderMap::new();
+            accepted.insert(&TRACEPARENT, HeaderValue::from_static(VALID_PARENT));
+            InboundTraceContext::from_headers(&accepted)
+                .expect("valid parent")
+                .apply_to(&tracing::info_span!("http.trace.test"));
+        });
+
+        let trace_events = events
+            .iter()
+            .filter(|event| event.target == "rss.trace_context")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            trace_events.len(),
+            2,
+            "one rejection and one attach outcome"
+        );
+        assert!(trace_events.iter().all(|event| {
+            event.fields.get("transport").map(String::as_str) == Some("http")
+                && event.fields.get("operation").map(String::as_str) == Some("server.receive")
+        }));
+        assert!(trace_events.iter().any(|event| {
+            event.fields.get("reason").map(String::as_str) == Some("malformed traceparent")
+        }));
+        assert!(trace_events.iter().any(|event| {
+            event.fields.get("reason").map(String::as_str) == Some("attach_unavailable")
+        }));
+        assert!(
+            trace_events
+                .iter()
+                .flat_map(|event| event.fields.values())
+                .all(|value| !value.contains(RAW))
+        );
     }
 
     #[test]

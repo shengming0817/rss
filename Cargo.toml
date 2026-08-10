@@ -27,8 +27,10 @@ members = [
   # 引擎 / 原语（依赖基础）
   "crates/consistency",
   "crates/primitives",
-  # W3C traceparent capture/restore 单源（#1224）——唯一新 otel 落点，被 postgres emit + eventexec consumer 依赖。
+  # W3C traceparent capture/restore 生产单源（#1224），被 httpd/postgres/eventexec 依赖。
   "crates/tracewire",
+  # publish=false、dev-dependency-only 的 OTel 测试 subscriber / exporter 脚手架。
+  "crates/tracewiretest",
   # Cargo workspace facts（guppy 薄适配；仅 tooling/verification consumer）。
   "crates/workspacefacts",
   # DI-infra（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费——DI port trait 单源 + dynosaur unsafe 收敛）
@@ -101,6 +103,7 @@ exclude = ["lints"]
 packages = [
   { package = "rss-platform", public-api-owner = "platform-public", api-stability = "experimental", profiles = [] },
   { package = "rss-diag-context", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
+  { package = "rss-trace-context", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
 ]
 profile-artifacts = []
 

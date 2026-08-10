@@ -1,0 +1,138 @@
+== release-api profile: default ==
+pub mod rss_trace_context
+pub enum rss_trace_context::RestoreOutcome
+pub rss_trace_context::RestoreOutcome::Restored
+pub rss_trace_context::RestoreOutcome::Unavailable
+impl core::clone::Clone for rss_trace_context::RestoreOutcome
+pub fn rss_trace_context::RestoreOutcome::clone(&self) -> rss_trace_context::RestoreOutcome
+impl core::cmp::Eq for rss_trace_context::RestoreOutcome
+impl core::cmp::PartialEq for rss_trace_context::RestoreOutcome
+pub fn rss_trace_context::RestoreOutcome::eq(&self, &rss_trace_context::RestoreOutcome) -> bool
+impl core::fmt::Debug for rss_trace_context::RestoreOutcome
+pub fn rss_trace_context::RestoreOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_trace_context::RestoreOutcome
+impl core::marker::StructuralPartialEq for rss_trace_context::RestoreOutcome
+impl core::marker::Freeze for rss_trace_context::RestoreOutcome
+impl core::marker::Send for rss_trace_context::RestoreOutcome
+impl core::marker::Sync for rss_trace_context::RestoreOutcome
+impl core::marker::Unpin for rss_trace_context::RestoreOutcome
+impl core::marker::UnsafeUnpin for rss_trace_context::RestoreOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::RestoreOutcome
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::RestoreOutcome
+pub enum rss_trace_context::TraceParentError
+pub rss_trace_context::TraceParentError::Malformed
+pub rss_trace_context::TraceParentError::Oversized
+pub rss_trace_context::TraceParentError::UnsupportedVersion
+impl core::clone::Clone for rss_trace_context::TraceParentError
+pub fn rss_trace_context::TraceParentError::clone(&self) -> rss_trace_context::TraceParentError
+impl core::cmp::Eq for rss_trace_context::TraceParentError
+impl core::cmp::PartialEq for rss_trace_context::TraceParentError
+pub fn rss_trace_context::TraceParentError::eq(&self, &rss_trace_context::TraceParentError) -> bool
+impl core::error::Error for rss_trace_context::TraceParentError
+impl core::fmt::Debug for rss_trace_context::TraceParentError
+pub fn rss_trace_context::TraceParentError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_trace_context::TraceParentError
+pub fn rss_trace_context::TraceParentError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_trace_context::TraceParentError
+impl core::marker::StructuralPartialEq for rss_trace_context::TraceParentError
+impl core::marker::Freeze for rss_trace_context::TraceParentError
+impl core::marker::Send for rss_trace_context::TraceParentError
+impl core::marker::Sync for rss_trace_context::TraceParentError
+impl core::marker::Unpin for rss_trace_context::TraceParentError
+impl core::marker::UnsafeUnpin for rss_trace_context::TraceParentError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::TraceParentError
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::TraceParentError
+pub struct rss_trace_context::TraceParent(_)
+impl rss_trace_context::TraceParent
+pub fn rss_trace_context::TraceParent::as_str(&self) -> &str
+pub fn rss_trace_context::TraceParent::parse(&str) -> core::result::Result<Self, rss_trace_context::TraceParentError>
+impl core::marker::Freeze for rss_trace_context::TraceParent
+impl core::marker::Send for rss_trace_context::TraceParent
+impl core::marker::Sync for rss_trace_context::TraceParent
+impl core::marker::Unpin for rss_trace_context::TraceParent
+impl core::marker::UnsafeUnpin for rss_trace_context::TraceParent
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::TraceParent
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::TraceParent
+pub struct rss_trace_context::W3cTraceContext
+impl rss_trace_context::W3cTraceContext
+pub fn rss_trace_context::W3cTraceContext::into_traceparent(self) -> rss_trace_context::TraceParent
+pub fn rss_trace_context::W3cTraceContext::traceparent(&self) -> &rss_trace_context::TraceParent
+pub fn rss_trace_context::W3cTraceContext::tracestate(&self) -> core::option::Option<&str>
+impl core::marker::Freeze for rss_trace_context::W3cTraceContext
+impl core::marker::Send for rss_trace_context::W3cTraceContext
+impl core::marker::Sync for rss_trace_context::W3cTraceContext
+impl core::marker::Unpin for rss_trace_context::W3cTraceContext
+impl core::marker::UnsafeUnpin for rss_trace_context::W3cTraceContext
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::W3cTraceContext
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::W3cTraceContext
+pub fn rss_trace_context::capture_current() -> core::option::Option<rss_trace_context::W3cTraceContext>
+pub fn rss_trace_context::restore_remote_parent(&tracing::span::Span, &rss_trace_context::TraceParent, core::option::Option<&str>) -> rss_trace_context::RestoreOutcome
+== release-api profile: all-features ==
+pub mod rss_trace_context
+pub enum rss_trace_context::RestoreOutcome
+pub rss_trace_context::RestoreOutcome::Restored
+pub rss_trace_context::RestoreOutcome::Unavailable
+impl core::clone::Clone for rss_trace_context::RestoreOutcome
+pub fn rss_trace_context::RestoreOutcome::clone(&self) -> rss_trace_context::RestoreOutcome
+impl core::cmp::Eq for rss_trace_context::RestoreOutcome
+impl core::cmp::PartialEq for rss_trace_context::RestoreOutcome
+pub fn rss_trace_context::RestoreOutcome::eq(&self, &rss_trace_context::RestoreOutcome) -> bool
+impl core::fmt::Debug for rss_trace_context::RestoreOutcome
+pub fn rss_trace_context::RestoreOutcome::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_trace_context::RestoreOutcome
+impl core::marker::StructuralPartialEq for rss_trace_context::RestoreOutcome
+impl core::marker::Freeze for rss_trace_context::RestoreOutcome
+impl core::marker::Send for rss_trace_context::RestoreOutcome
+impl core::marker::Sync for rss_trace_context::RestoreOutcome
+impl core::marker::Unpin for rss_trace_context::RestoreOutcome
+impl core::marker::UnsafeUnpin for rss_trace_context::RestoreOutcome
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::RestoreOutcome
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::RestoreOutcome
+pub enum rss_trace_context::TraceParentError
+pub rss_trace_context::TraceParentError::Malformed
+pub rss_trace_context::TraceParentError::Oversized
+pub rss_trace_context::TraceParentError::UnsupportedVersion
+impl core::clone::Clone for rss_trace_context::TraceParentError
+pub fn rss_trace_context::TraceParentError::clone(&self) -> rss_trace_context::TraceParentError
+impl core::cmp::Eq for rss_trace_context::TraceParentError
+impl core::cmp::PartialEq for rss_trace_context::TraceParentError
+pub fn rss_trace_context::TraceParentError::eq(&self, &rss_trace_context::TraceParentError) -> bool
+impl core::error::Error for rss_trace_context::TraceParentError
+impl core::fmt::Debug for rss_trace_context::TraceParentError
+pub fn rss_trace_context::TraceParentError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_trace_context::TraceParentError
+pub fn rss_trace_context::TraceParentError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_trace_context::TraceParentError
+impl core::marker::StructuralPartialEq for rss_trace_context::TraceParentError
+impl core::marker::Freeze for rss_trace_context::TraceParentError
+impl core::marker::Send for rss_trace_context::TraceParentError
+impl core::marker::Sync for rss_trace_context::TraceParentError
+impl core::marker::Unpin for rss_trace_context::TraceParentError
+impl core::marker::UnsafeUnpin for rss_trace_context::TraceParentError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::TraceParentError
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::TraceParentError
+pub struct rss_trace_context::TraceParent(_)
+impl rss_trace_context::TraceParent
+pub fn rss_trace_context::TraceParent::as_str(&self) -> &str
+pub fn rss_trace_context::TraceParent::parse(&str) -> core::result::Result<Self, rss_trace_context::TraceParentError>
+impl core::marker::Freeze for rss_trace_context::TraceParent
+impl core::marker::Send for rss_trace_context::TraceParent
+impl core::marker::Sync for rss_trace_context::TraceParent
+impl core::marker::Unpin for rss_trace_context::TraceParent
+impl core::marker::UnsafeUnpin for rss_trace_context::TraceParent
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::TraceParent
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::TraceParent
+pub struct rss_trace_context::W3cTraceContext
+impl rss_trace_context::W3cTraceContext
+pub fn rss_trace_context::W3cTraceContext::into_traceparent(self) -> rss_trace_context::TraceParent
+pub fn rss_trace_context::W3cTraceContext::traceparent(&self) -> &rss_trace_context::TraceParent
+pub fn rss_trace_context::W3cTraceContext::tracestate(&self) -> core::option::Option<&str>
+impl core::marker::Freeze for rss_trace_context::W3cTraceContext
+impl core::marker::Send for rss_trace_context::W3cTraceContext
+impl core::marker::Sync for rss_trace_context::W3cTraceContext
+impl core::marker::Unpin for rss_trace_context::W3cTraceContext
+impl core::marker::UnsafeUnpin for rss_trace_context::W3cTraceContext
+impl core::panic::unwind_safe::RefUnwindSafe for rss_trace_context::W3cTraceContext
+impl core::panic::unwind_safe::UnwindSafe for rss_trace_context::W3cTraceContext
+pub fn rss_trace_context::capture_current() -> core::option::Option<rss_trace_context::W3cTraceContext>
+pub fn rss_trace_context::restore_remote_parent(&tracing::span::Span, &rss_trace_context::TraceParent, core::option::Option<&str>) -> rss_trace_context::RestoreOutcome
