@@ -165,6 +165,9 @@ fn generated_inventory_values_enforce_canonical_collections() {
 
 #[test]
 fn generated_inventory_values_enforce_stable_key_order() {
+    let unobserved = RuntimeProviderPosture::new("z", RuntimeProviderState::Unobserved)
+        .expect("valid unobserved provider");
+    assert_eq!(unobserved.state(), RuntimeProviderState::Unobserved);
     let listener = |id| {
         RuntimeListener::new(
             id,
@@ -181,8 +184,7 @@ fn generated_inventory_values_enforce_stable_key_order() {
     ));
     assert!(matches!(
         inventory_data().with_provider_posture(vec![
-            RuntimeProviderPosture::new("z", RuntimeProviderState::Ready)
-                .expect("valid provider"),
+            unobserved,
             RuntimeProviderPosture::new("a", RuntimeProviderState::Ready)
                 .expect("valid provider"),
         ]),

@@ -336,9 +336,7 @@ impl RuntimeProviderPosture {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeProviderState {
-    Ready,
-    Degraded,
-    Unavailable,
+__RUNTIME_PROVIDER_STATE_VARIANTS__
 }
 
 pub enum RuntimeActivatedWorkflow {

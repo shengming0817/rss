@@ -201,6 +201,7 @@ pub enum rss_platform::contracts::RuntimeProviderState
 pub rss_platform::contracts::RuntimeProviderState::Degraded
 pub rss_platform::contracts::RuntimeProviderState::Ready
 pub rss_platform::contracts::RuntimeProviderState::Unavailable
+pub rss_platform::contracts::RuntimeProviderState::Unobserved
 impl core::clone::Clone for rss_platform::contracts::RuntimeProviderState
 pub fn rss_platform::contracts::RuntimeProviderState::clone(&self) -> rss_platform::contracts::RuntimeProviderState
 impl core::cmp::Eq for rss_platform::contracts::RuntimeProviderState
@@ -1177,6 +1178,7 @@ pub enum rss_platform::contracts::RuntimeProviderState
 pub rss_platform::contracts::RuntimeProviderState::Degraded
 pub rss_platform::contracts::RuntimeProviderState::Ready
 pub rss_platform::contracts::RuntimeProviderState::Unavailable
+pub rss_platform::contracts::RuntimeProviderState::Unobserved
 impl core::clone::Clone for rss_platform::contracts::RuntimeProviderState
 pub fn rss_platform::contracts::RuntimeProviderState::clone(&self) -> rss_platform::contracts::RuntimeProviderState
 impl core::cmp::Eq for rss_platform::contracts::RuntimeProviderState

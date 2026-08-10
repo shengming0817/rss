@@ -31,7 +31,8 @@ compensation effect scope、idempotency/compensation/retry class 或 retry polic
 package 不继承历史 internal `pub` 承诺；从清单显式移除 package 即终止其后续轴 A 承诺，不扫描其 internal
 历史、不生成 shim，也不引入双读或退出 metadata。仍在 base/current 交集内的 package 必须完成 SemVer 证明。
 
-Platform Application 的 v0.1 单源是 `rss-platform` 的 Release API 与 canonical contract codegen projection。
+Platform Application 当前 experimental 0.x 的单源是 `rss-platform` Release API 与 canonical contract
+codegen projection；具体 package 版本从 Cargo metadata 派生，不在规则文档复制。
 旧 #2045 executable contract 已原子删除，不构成 compatibility authority。`cargo xtask public-api release --check`
 只验证 baseline exact-set；canonical ReleaseCheck 才聚合 default/all-features SemVer、publish closure、
 forbidden-type leakage，并在同一 release-only carrier 中执行 `cargo xtask package-proof`。后者从同一 revision 的

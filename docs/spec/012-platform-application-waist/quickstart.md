@@ -1,4 +1,4 @@
-# Quickstart: rss-platform v0.1
+# Quickstart: rss-platform v0.2
 
 ```bash
 cargo xtask codegen --check

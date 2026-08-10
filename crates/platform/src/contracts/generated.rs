@@ -336,6 +336,7 @@ impl RuntimeProviderPosture {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeProviderState {
+    Unobserved,
     Ready,
     Degraded,
     Unavailable,

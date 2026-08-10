@@ -1,9 +1,15 @@
 # Feature Specification: Platform Public application kernel 与外部消费证明
 
 **Created**: 2026-08-08
-**Amended**: 2026-08-09
-**Status**: Implemented experimental v0.1 contract
-**Owner issues**: #2049, #2051, #2052
+**Amended**: 2026-08-10
+**Status**: Implemented experimental v0.2 contract
+**Owner issues**: #2049, #2051, #2052, #2088, #2089
+
+## v0.2 amendment
+
+`rss-platform` v0.2 将已授权原地演进的 `runtime.inventory@v1` provider posture
+`unobserved` 闭值投影为公开 `RuntimeProviderState::Unobserved`，并由 schema 经 deterministic codegen
+派生 façade enum。该 breaking Release API 变更不保留 alias、shim 或旧 digest。
 
 ## 决策修正
 
@@ -60,7 +66,7 @@ permission universe，并必须证明投影 identity 与 Platform authority 完�
 
 ## Release 与独立证明
 
-`rss-platform` 0.1.0 是 experimental PlatformPublic package，normal/build dependency 只能是外部 crates。
+`rss-platform` 0.2.0 是 experimental PlatformPublic package，normal/build dependency 只能是外部 crates。
 Release Surface 同时守 default/all-features API、SemVer、publish closure 与 forbidden-type leakage。
 
 `cargo xtask package-proof` 必须从当前 revision 生成真实 `.crate`，建立本地 registry，在 workspace 外临时

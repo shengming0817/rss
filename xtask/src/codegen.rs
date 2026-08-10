@@ -263,8 +263,8 @@ fn plan_codegen_transaction(
 
 /// Project the exact framework-owned active HTTP contract set into the publishable façade.
 ///
-/// v0.1 intentionally accepts one reviewed schema shape. A canonical manifest/schema change fails
-/// closed here until the façade-owned typed DTO template is deliberately updated in the same PR.
+/// The experimental release accepts one reviewed schema shape. A canonical manifest/schema change
+/// fails closed until its deterministic façade projection is deliberately approved in the same PR.
 fn render_platform_public_contracts(contracts: &[GovernedContract]) -> Result<String> {
     let selected = contracts
         .iter()
@@ -292,6 +292,7 @@ fn render_platform_public_contracts(contracts: &[GovernedContract]) -> Result<St
         auth.permission.as_deref(),
         &schema_hash,
     )?;
+    let provider_state_variants = render_platform_provider_state_variants(contract)?;
     render_platform_contract_template(
         &manifest.id,
         &manifest.domain,
@@ -300,7 +301,54 @@ fn render_platform_public_contracts(contracts: &[GovernedContract]) -> Result<St
             .as_deref()
             .context("Platform Public runtime.inventory permission is absent")?,
         &schema_hash,
+        &provider_state_variants,
     )
+}
+
+fn render_platform_provider_state_variants(contract: &GovernedContract) -> Result<String> {
+    let response_schema = contract
+        .manifest()
+        .schemas
+        .response(200)
+        .context("Platform Public runtime.inventory must declare its 200 response schema")?;
+    let schema = contract
+        .resolved_schema(response_schema)
+        .with_context(|| format!("resolve Platform Public response schema {response_schema}"))?;
+    render_platform_provider_state_variants_from_schema(&schema)
+}
+
+fn render_platform_provider_state_variants_from_schema(
+    schema: &serde_json::Value,
+) -> Result<String> {
+    let values = schema
+        .pointer("/definitions/RuntimeProviderPosture/properties/state/enum")
+        .and_then(serde_json::Value::as_array)
+        .context("Platform Public runtime.inventory provider state must be a closed enum")?;
+    anyhow::ensure!(
+        !values.is_empty(),
+        "Platform Public runtime.inventory provider state enum cannot be empty"
+    );
+    let mut tokens = BTreeSet::new();
+    let mut variants = BTreeSet::new();
+    let mut rendered = String::new();
+    for value in values {
+        let token = value.as_str().context(
+            "Platform Public runtime.inventory provider state enum values must be strings",
+        )?;
+        anyhow::ensure!(
+            tokens.insert(token),
+            "Platform Public runtime.inventory provider state enum contains duplicate token {token:?}"
+        );
+        let variant = rust_enum_variant(token, "Platform Public provider state token")?;
+        anyhow::ensure!(
+            variants.insert(variant.clone()),
+            "Platform Public provider state tokens collide on Rust variant {variant:?}"
+        );
+        rendered.push_str("    ");
+        rendered.push_str(&variant);
+        rendered.push_str(",\n");
+    }
+    Ok(rendered.trim_end().to_owned())
 }
 
 fn render_platform_contract_template(
@@ -309,6 +357,7 @@ fn render_platform_contract_template(
     version: &str,
     permission: &str,
     schema_hash: &str,
+    provider_state_variants: &str,
 ) -> Result<String> {
     let major = version
         .strip_prefix('v')
@@ -321,9 +370,13 @@ fn render_platform_contract_template(
         .replace("__CONTRACT_VERSION__", version)
         .replace("__CONTRACT_MAJOR__", &major.to_string())
         .replace("__CONTRACT_PERMISSION__", &format!("{permission:?}"))
-        .replace("__CONTRACT_SCHEMA_DIGEST__", &format!("{schema_hash:?}"));
-    if rendered.contains("__CONTRACT_") {
-        bail!("Platform Public contract template contains an unresolved identity placeholder");
+        .replace("__CONTRACT_SCHEMA_DIGEST__", &format!("{schema_hash:?}"))
+        .replace(
+            "__RUNTIME_PROVIDER_STATE_VARIANTS__",
+            provider_state_variants,
+        );
+    if rendered.contains("__CONTRACT_") || rendered.contains("__RUNTIME_PROVIDER_") {
+        bail!("Platform Public contract template contains an unresolved placeholder");
     }
     Ok(normalize(&rendered))
 }
@@ -331,11 +384,30 @@ fn render_platform_contract_template(
 fn require_single_platform_contract(count: usize) -> Result<()> {
     if count != 1 {
         bail!(
-            "Platform Public v0.1 requires exactly one framework-owned active HTTP contract; found {count}"
+            "Platform Public requires exactly one framework-owned active HTTP contract; found {count}"
         );
     }
     Ok(())
 }
+
+struct ReviewedPlatformContractIdentity {
+    id: &'static str,
+    domain: &'static str,
+    version: &'static str,
+    auth_mode: HttpAuthMode,
+    permission: &'static str,
+    schema_hash: &'static str,
+}
+
+const REVIEWED_RUNTIME_INVENTORY: ReviewedPlatformContractIdentity =
+    ReviewedPlatformContractIdentity {
+        id: "runtime.inventory",
+        domain: "runtime",
+        version: "v1",
+        auth_mode: HttpAuthMode::Permission,
+        permission: "runtime:inventory:read",
+        schema_hash: "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b",
+    };
 
 fn validate_platform_contract_identity(
     id: &str,
@@ -345,17 +417,17 @@ fn validate_platform_contract_identity(
     permission: Option<&str>,
     schema_hash: &str,
 ) -> Result<()> {
-    if id == "runtime.inventory"
-        && domain == "runtime"
-        && version == "v1"
-        && auth_mode == HttpAuthMode::Permission
-        && permission == Some("runtime:inventory:read")
-        && schema_hash == "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b"
+    if id == REVIEWED_RUNTIME_INVENTORY.id
+        && domain == REVIEWED_RUNTIME_INVENTORY.domain
+        && version == REVIEWED_RUNTIME_INVENTORY.version
+        && auth_mode == REVIEWED_RUNTIME_INVENTORY.auth_mode
+        && permission == Some(REVIEWED_RUNTIME_INVENTORY.permission)
+        && schema_hash == REVIEWED_RUNTIME_INVENTORY.schema_hash
     {
         return Ok(());
     }
     bail!(
-        "Platform Public v0.1 runtime.inventory identity/schema/permission changed; update the reviewed typed projection atomically"
+        "Platform Public runtime.inventory identity/schema/permission changed; update the reviewed typed projection atomically"
     )
 }
 
@@ -736,11 +808,12 @@ fn slug_module_ident(slug: &str) -> Result<String> {
 /// Contract domain label → Rust enum variant. Separator-delimited segments become UpperCamelCase;
 /// `syn::Ident` closes the generated-code injection boundary. Callers reject cross-label collisions.
 fn producer_domain_variant(domain: &str) -> Result<String> {
+    rust_enum_variant(domain, "event domain")
+}
+
+fn rust_enum_variant(label: &str, subject: &str) -> Result<String> {
     let mut variant = String::new();
-    for segment in domain
-        .split(['.', '-', '_'])
-        .filter(|part| !part.is_empty())
-    {
+    for segment in label.split(['.', '-', '_']).filter(|part| !part.is_empty()) {
         let mut chars = segment.chars();
         if let Some(first) = chars.next() {
             variant.push(first.to_ascii_uppercase());
@@ -748,7 +821,7 @@ fn producer_domain_variant(domain: &str) -> Result<String> {
         }
     }
     if variant.starts_with("r#") || syn::parse_str::<syn::Ident>(&variant).is_err() {
-        bail!("event domain {domain:?} 派生非法 Rust enum variant {variant:?}");
+        bail!("{subject} {label:?} 派生非法 Rust enum variant {variant:?}");
     }
     Ok(variant)
 }
@@ -5070,8 +5143,7 @@ mod tests {
 
     #[test]
     fn platform_public_contract_identity_is_fail_closed() {
-        const HASH: &str =
-            "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b";
+        let hash = REVIEWED_RUNTIME_INVENTORY.schema_hash;
         let validate = |id, domain, version, mode, permission, hash| {
             validate_platform_contract_identity(id, domain, version, mode, permission, hash)
         };
@@ -5085,7 +5157,7 @@ mod tests {
                 "v1",
                 HttpAuthMode::Permission,
                 Some("runtime:inventory:read"),
-                HASH,
+                hash,
             )
             .is_ok()
         );
@@ -5096,7 +5168,7 @@ mod tests {
                 "v1",
                 HttpAuthMode::Permission,
                 Some("runtime:inventory:read"),
-                HASH,
+                hash,
             ),
             validate(
                 "runtime.inventory",
@@ -5104,7 +5176,7 @@ mod tests {
                 "v1",
                 HttpAuthMode::Permission,
                 Some("runtime:inventory:read"),
-                HASH,
+                hash,
             ),
             validate(
                 "runtime.inventory",
@@ -5112,7 +5184,7 @@ mod tests {
                 "v2",
                 HttpAuthMode::Permission,
                 Some("runtime:inventory:read"),
-                HASH,
+                hash,
             ),
             validate(
                 "runtime.inventory",
@@ -5120,7 +5192,7 @@ mod tests {
                 "v1",
                 HttpAuthMode::Permission,
                 Some("runtime:other"),
-                HASH,
+                hash,
             ),
             validate(
                 "runtime.inventory",
@@ -5136,6 +5208,49 @@ mod tests {
     }
 
     #[test]
+    fn platform_provider_states_are_schema_derived_and_fail_closed() {
+        let schema = serde_json::json!({
+            "definitions": {
+                "RuntimeProviderPosture": {
+                    "properties": {
+                        "state": {
+                            "enum": ["unobserved", "ready", "degraded", "unavailable"]
+                        }
+                    }
+                }
+            }
+        });
+        assert_eq!(
+            render_platform_provider_state_variants_from_schema(&schema)
+                .expect("render provider states"),
+            "    Unobserved,\n    Ready,\n    Degraded,\n    Unavailable,"
+        );
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({
+                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": []}}}}
+            }),
+            serde_json::json!({
+                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": ["ready", "ready"]}}}}
+            }),
+            serde_json::json!({
+                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": ["ready", "Ready"]}}}}
+            }),
+            serde_json::json!({
+                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": [1]}}}}
+            }),
+            serde_json::json!({
+                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": ["123-ready"]}}}}
+            }),
+            serde_json::json!({
+                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": ["self"]}}}}
+            }),
+        ] {
+            assert!(render_platform_provider_state_variants_from_schema(&invalid).is_err());
+        }
+    }
+
+    #[test]
     fn platform_public_contract_emitter_projects_validated_identity() {
         let rendered = render_platform_contract_template(
             "runtime.synthetic",
@@ -5143,6 +5258,7 @@ mod tests {
             "v7",
             "synthetic:read",
             "sha256:synthetic",
+            "    Synthetic,",
         )
         .expect("render contract identity");
         for expected in [
@@ -5151,6 +5267,7 @@ mod tests {
             "ContractVersion::new(7, 0)",
             "\"sha256:synthetic\"",
             "\"synthetic:read\"",
+            "pub enum RuntimeProviderState {\n    Synthetic,\n}",
         ] {
             assert!(rendered.contains(expected), "missing projected {expected}");
         }

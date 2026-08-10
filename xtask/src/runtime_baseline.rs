@@ -2763,6 +2763,61 @@ mod tests {
         }
     }
 
+    #[derive(Clone, Copy)]
+    enum ProcessHookMutation {
+        Remove,
+        Duplicate,
+        Replace,
+    }
+
+    fn mutate_process_hook(source: &str, mutation: ProcessHookMutation) -> Result<String> {
+        let mut file = syn::parse_file(source).context("parse canonical rss main")?;
+        let mut installers = file.items.iter_mut().filter_map(|item| match item {
+            syn::Item::Fn(function) if function.sig.ident == "install_process_hooks" => {
+                Some(function)
+            }
+            _ => None,
+        });
+        let installer = installers
+            .next()
+            .context("canonical rss main must declare install_process_hooks")?;
+        anyhow::ensure!(
+            installers.next().is_none(),
+            "canonical rss main must declare exactly one install_process_hooks"
+        );
+        anyhow::ensure!(
+            installer.block.stmts.len() == 1,
+            "install_process_hooks must contain exactly one statement"
+        );
+        let statement = installer.block.stmts[0].clone();
+        let syn::Stmt::Expr(syn::Expr::Call(call), _) = &statement else {
+            anyhow::bail!("install_process_hooks statement must be a call");
+        };
+        anyhow::ensure!(
+            call.args.is_empty()
+                && compact_tokens(&call.func) == "runtimeexec::install_redacted_panic_hook",
+            "install_process_hooks must call the canonical redacted panic hook"
+        );
+        match mutation {
+            ProcessHookMutation::Remove => installer.block.stmts.clear(),
+            ProcessHookMutation::Duplicate => {
+                let mut first = statement.clone();
+                let syn::Stmt::Expr(_, semicolon) = &mut first else {
+                    unreachable!("validated hook statement must remain an expression")
+                };
+                *semicolon = Some(Default::default());
+                installer.block.stmts[0] = first;
+                installer.block.stmts.push(statement);
+            }
+            ProcessHookMutation::Replace => {
+                installer.block.stmts[0] = syn::parse_quote! {
+                    runtimeexec::activate_structured_panic_observation();
+                };
+            }
+        }
+        Ok(prettyplease::unparse(&file))
+    }
+
     #[test]
     fn runtime_baseline_update_is_atomic_closed_and_idempotent() -> Result<()> {
         let root = unique_tmp("runtime-baseline-update");
@@ -3228,32 +3283,23 @@ mod tests {
         let hidden_nested_owner = format!(
             "fn lifecycle_container() {{\n    async fn hidden_lifecycle_owner() -> anyhow::Result<()> {{\n{owner_body}\n    }}\n}}"
         );
+        let missing_hook = mutate_process_hook(&canonical, ProcessHookMutation::Remove)?;
+        let duplicate_hook = mutate_process_hook(&canonical, ProcessHookMutation::Duplicate)?;
+        let replaced_hook = mutate_process_hook(&canonical, ProcessHookMutation::Replace)?;
         let cases = [
             (
                 "redacted panic hook is missing",
-                canonical.replacen(
-                    "    runtimeexec::install_redacted_panic_hook();\n",
-                    "",
-                    1,
-                ),
+                missing_hook,
                 "must install the redacted panic hook exactly once",
             ),
             (
                 "redacted panic hook is duplicated",
-                canonical.replacen(
-                    "    runtimeexec::install_redacted_panic_hook();\n",
-                    "    runtimeexec::install_redacted_panic_hook();\n    runtimeexec::install_redacted_panic_hook();\n",
-                    1,
-                ),
+                duplicate_hook,
                 "must install the redacted panic hook exactly once",
             ),
             (
                 "structured panic activation cannot replace hook installation",
-                canonical.replacen(
-                    "runtimeexec::install_redacted_panic_hook();",
-                    "runtimeexec::activate_structured_panic_observation();",
-                    1,
-                ),
+                replaced_hook,
                 "must install the redacted panic hook exactly once",
             ),
             (

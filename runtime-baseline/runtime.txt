@@ -45,7 +45,6 @@ p256 = workspace=true; features=[ecdsa,pem]
 postgres = path=../../adapters/postgres; features=[domain-settings,domain-identity,domain-audit,auth-audit-sink]
 primitives = path=../../crates/primitives
 prometheus-adapter = path=../../adapters/prometheus; features=[backend]
-ratelimit = path=../../adapters/ratelimit
 redis = package=redis-adapter; path=../../adapters/redis; features=[backend]
 reqwest = workspace=true; features=[rustls-tls-webpki-roots]
 runctx = path=../../crates/runctx
