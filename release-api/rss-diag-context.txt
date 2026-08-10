@@ -1,0 +1,88 @@
+== release-api profile: default ==
+pub mod rss_diag_context
+pub enum rss_diag_context::CorrelationIdError
+pub rss_diag_context::CorrelationIdError::Empty
+pub rss_diag_context::CorrelationIdError::InvalidChar
+pub rss_diag_context::CorrelationIdError::TooLong
+impl core::error::Error for rss_diag_context::CorrelationIdError
+impl core::fmt::Debug for rss_diag_context::CorrelationIdError
+pub fn rss_diag_context::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_diag_context::CorrelationIdError
+pub fn rss_diag_context::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_diag_context::CorrelationIdError
+impl core::marker::Send for rss_diag_context::CorrelationIdError
+impl core::marker::Sync for rss_diag_context::CorrelationIdError
+impl core::marker::Unpin for rss_diag_context::CorrelationIdError
+impl core::marker::UnsafeUnpin for rss_diag_context::CorrelationIdError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::CorrelationIdError
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::CorrelationIdError
+pub struct rss_diag_context::CorrelationId(_)
+impl rss_diag_context::CorrelationId
+pub const rss_diag_context::CorrelationId::MAX_LEN: usize
+pub fn rss_diag_context::CorrelationId::as_str(&self) -> &str
+pub fn rss_diag_context::CorrelationId::parse(&str) -> core::result::Result<Self, rss_diag_context::CorrelationIdError>
+impl core::marker::Freeze for rss_diag_context::CorrelationId
+impl core::marker::Send for rss_diag_context::CorrelationId
+impl core::marker::Sync for rss_diag_context::CorrelationId
+impl core::marker::Unpin for rss_diag_context::CorrelationId
+impl core::marker::UnsafeUnpin for rss_diag_context::CorrelationId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::CorrelationId
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::CorrelationId
+pub struct rss_diag_context::DiagnosticCtx
+impl rss_diag_context::DiagnosticCtx
+pub fn rss_diag_context::DiagnosticCtx::correlation(&self) -> &rss_diag_context::CorrelationId
+pub fn rss_diag_context::DiagnosticCtx::new(rss_diag_context::CorrelationId) -> Self
+impl core::marker::Freeze for rss_diag_context::DiagnosticCtx
+impl core::marker::Send for rss_diag_context::DiagnosticCtx
+impl core::marker::Sync for rss_diag_context::DiagnosticCtx
+impl core::marker::Unpin for rss_diag_context::DiagnosticCtx
+impl core::marker::UnsafeUnpin for rss_diag_context::DiagnosticCtx
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::DiagnosticCtx
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::DiagnosticCtx
+pub fn rss_diag_context::correlation() -> core::option::Option<rss_diag_context::CorrelationId>
+pub fn rss_diag_context::current() -> core::option::Option<rss_diag_context::DiagnosticCtx>
+pub fn rss_diag_context::scope<F>(rss_diag_context::DiagnosticCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
+== release-api profile: all-features ==
+pub mod rss_diag_context
+pub enum rss_diag_context::CorrelationIdError
+pub rss_diag_context::CorrelationIdError::Empty
+pub rss_diag_context::CorrelationIdError::InvalidChar
+pub rss_diag_context::CorrelationIdError::TooLong
+impl core::error::Error for rss_diag_context::CorrelationIdError
+impl core::fmt::Debug for rss_diag_context::CorrelationIdError
+pub fn rss_diag_context::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_diag_context::CorrelationIdError
+pub fn rss_diag_context::CorrelationIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for rss_diag_context::CorrelationIdError
+impl core::marker::Send for rss_diag_context::CorrelationIdError
+impl core::marker::Sync for rss_diag_context::CorrelationIdError
+impl core::marker::Unpin for rss_diag_context::CorrelationIdError
+impl core::marker::UnsafeUnpin for rss_diag_context::CorrelationIdError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::CorrelationIdError
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::CorrelationIdError
+pub struct rss_diag_context::CorrelationId(_)
+impl rss_diag_context::CorrelationId
+pub const rss_diag_context::CorrelationId::MAX_LEN: usize
+pub fn rss_diag_context::CorrelationId::as_str(&self) -> &str
+pub fn rss_diag_context::CorrelationId::parse(&str) -> core::result::Result<Self, rss_diag_context::CorrelationIdError>
+impl core::marker::Freeze for rss_diag_context::CorrelationId
+impl core::marker::Send for rss_diag_context::CorrelationId
+impl core::marker::Sync for rss_diag_context::CorrelationId
+impl core::marker::Unpin for rss_diag_context::CorrelationId
+impl core::marker::UnsafeUnpin for rss_diag_context::CorrelationId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::CorrelationId
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::CorrelationId
+pub struct rss_diag_context::DiagnosticCtx
+impl rss_diag_context::DiagnosticCtx
+pub fn rss_diag_context::DiagnosticCtx::correlation(&self) -> &rss_diag_context::CorrelationId
+pub fn rss_diag_context::DiagnosticCtx::new(rss_diag_context::CorrelationId) -> Self
+impl core::marker::Freeze for rss_diag_context::DiagnosticCtx
+impl core::marker::Send for rss_diag_context::DiagnosticCtx
+impl core::marker::Sync for rss_diag_context::DiagnosticCtx
+impl core::marker::Unpin for rss_diag_context::DiagnosticCtx
+impl core::marker::UnsafeUnpin for rss_diag_context::DiagnosticCtx
+impl core::panic::unwind_safe::RefUnwindSafe for rss_diag_context::DiagnosticCtx
+impl core::panic::unwind_safe::UnwindSafe for rss_diag_context::DiagnosticCtx
+pub fn rss_diag_context::correlation() -> core::option::Option<rss_diag_context::CorrelationId>
+pub fn rss_diag_context::current() -> core::option::Option<rss_diag_context::DiagnosticCtx>
+pub fn rss_diag_context::scope<F>(rss_diag_context::DiagnosticCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future

@@ -4,11 +4,11 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use p256::ecdsa::signature::Signer as _;
 use p256::ecdsa::{Signature, SigningKey};
-use rss_platform::contracts::{
+use release_package::contracts::{
     RuntimeDomain, RuntimeInventory, RuntimeInventoryData, RuntimeInventoryRequest,
     RuntimeInventoryResponse, Sha256Fingerprint,
 };
-use rss_platform::{
+use release_package::{
     AccessToken, ApplicationBuilder, ApplicationModule, ApplicationName, ConditionCode,
     DiagnosticCode, Handler, HandlerError, ModuleName, RequestContext, RequestId, TrustedIssuer,
 };

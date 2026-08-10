@@ -1630,7 +1630,24 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert_eq!(surfaced, selected);
         assert!(surface.profile_artifacts().is_empty());
-        assert!(surface.publish_order().is_empty());
+        let publish_order = surface
+            .publish_order()
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(publish_order, selected);
+        assert_eq!(surface.publish_order().len(), selected.len());
+
+        let diag_release = surface
+            .packages()
+            .iter()
+            .find(|package| package.package() == "rss-diag-context")
+            .context("diag release package")?;
+        assert_eq!(
+            diag_release.public_api_owner(),
+            PublicApiOwner::StandaloneComponent
+        );
+        assert_eq!(diag_release.api_stability(), ApiStability::Experimental);
 
         // Issue #2050 acceptance input, not a production candidate registry. Spec 011 forbids a
         // package inventory; Cargo publish policy plus the positive Release Surface remain the
@@ -1659,8 +1676,13 @@ mod tests {
                 .iter()
                 .find(|package| package.key() == &key)
                 .context("candidate catalog row")?;
-            assert_eq!(package.publish_policy(), &PublishPolicy::Disabled);
-            assert!(!selected.contains(name.as_str()));
+            if name == "rss-diag-context" {
+                assert!(package.publish_policy().is_publishable());
+                assert!(selected.contains(name.as_str()));
+            } else {
+                assert_eq!(package.publish_policy(), &PublishPolicy::Disabled);
+                assert!(!selected.contains(name.as_str()));
+            }
         }
 
         let diag = facts.package_key("rss-diag-context")?;

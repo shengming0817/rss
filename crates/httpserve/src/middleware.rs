@@ -513,7 +513,7 @@ mod tests {
     // reason: 测试层断言 HTTP 响应/header；tower oneshot Result + header Option 输入均已控制，unwrap 等价 assert。
     #[tokio::test]
     async fn correlation_rejects_oversized_header_falls_back() {
-        let oversized = "x".repeat(129); // len=129 > MAX_CORRELATION_ID_LEN(128)
+        let oversized = "x".repeat(129); // len=129 > CorrelationId::MAX_LEN (128)
         let app = stacked_app(get(|| async { "ok" }));
         let req = Request::builder()
             .method(Method::GET)

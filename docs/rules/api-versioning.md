@@ -35,7 +35,9 @@ Platform Application 的 v0.1 单源是 `rss-platform` 的 Release API 与 canon
 旧 #2045 executable contract 已原子删除，不构成 compatibility authority。`cargo xtask public-api release --check`
 只验证 baseline exact-set；canonical ReleaseCheck 才聚合 default/all-features SemVer、publish closure、
 forbidden-type leakage，并在同一 release-only carrier 中执行 `cargo xtask package-proof`。后者从同一 revision 的
-真实 `.crate` 建立 local-registry、独立 Git/Cargo.lock 与 `--locked --offline` T2 consumer proof。
+每个 selected package 生成真实 `.crate`，验证 clean HEAD/VCS revision、结构化 package content、feature/MSRV/docs，
+再建立 local-registry、独立 Git/Cargo.lock 与 `--locked --offline` consumer proof。Release Surface 的 selected、
+planned 与 executed package 集合必须精确相等；package-specific behavior 只作闭合执行投影，不能另行选择 lifecycle。
 任何 internal path alias、deprecated re-export、shim 或 From/TryFrom 兼容入口都不允许作为迁移手段。
 
 根 `Cargo.toml` 的 `[workspace.metadata.release-surface]` 是轴 A 唯一正向发布选择：只有被选 package 及其

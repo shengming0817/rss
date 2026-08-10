@@ -31,32 +31,40 @@ tokio::task_local! {
     static DIAGNOSTIC_CTX: DiagnosticCtx;
 }
 
-/// 在 `fut` 执行期间绑定诊断 `ctx`。httpserve correlation middleware 每请求调一次。
+/// Binds `ctx` while `future` is polled.
 ///
-/// 返回**不透明** `Future`（隐藏 tokio 内部 `TaskLocalFuture`）；绑定生命周期 = 被 await 的 future。
-#[must_use = "scope 返回的 future 不 await 不会绑定诊断 ctx"]
-pub fn scope<F>(ctx: DiagnosticCtx, fut: F) -> impl Future<Output = F::Output>
+/// The returned future is opaque and preserves the supplied future's conditional `Send` property;
+/// no Tokio implementation type is exposed. The binding exists only while the returned future is
+/// being polled. Spawned tasks do not inherit it unless a snapshot from [`current`] is explicitly
+/// rebound.
+#[must_use = "the diagnostic context is not bound unless the returned future is polled"]
+pub fn scope<F>(ctx: DiagnosticCtx, future: F) -> impl Future<Output = F::Output>
 where
     F: Future,
 {
-    DIAGNOSTIC_CTX.scope(ctx, fut)
+    DIAGNOSTIC_CTX.scope(ctx, future)
 }
 
-/// clone 出当前 correlation；不在任何 [`scope`] 内时返回 `None`（**fail-open**，绝不 panic）。
-/// outbox emit adapter 据此「有则盖章、无则省略」。
+/// Returns a snapshot of the ambient correlation identifier.
+///
+/// This function returns `None` outside [`scope`]. Missing diagnostic context is fail-open: callers
+/// should omit diagnostic enrichment and must not change an authorization outcome.
 pub fn correlation() -> Option<CorrelationId> {
-    DIAGNOSTIC_CTX.try_with(|c| c.correlation().clone()).ok()
+    DIAGNOSTIC_CTX
+        .try_with(|ctx| ctx.correlation().snapshot())
+        .ok()
 }
 
-/// clone 出当前诊断 ctx；缺失返回 `None`（fail-open）。
+/// Returns a snapshot of the ambient diagnostic context, or `None` outside [`scope`].
 pub fn current() -> Option<DiagnosticCtx> {
-    DIAGNOSTIC_CTX.try_with(Clone::clone).ok()
+    DIAGNOSTIC_CTX.try_with(DiagnosticCtx::snapshot).ok()
 }
 
 #[cfg(test)]
 mod tests {
     use crate::ctx::{CorrelationId, DiagnosticCtx};
     use crate::local::{correlation, current, scope};
+    use std::rc::Rc;
 
     // 测试 fixture：合法诊断 ctx。item-level carve-out（workspace expect_used=deny）。
     // reason: 仅测试 fixture，输入恒为白名单合法串。
@@ -78,7 +86,7 @@ mod tests {
     // fail-open 核心不变式（与 runctx fail-closed 刻意相反）：无 scope 返回 None，绝不 panic / Err。
     #[tokio::test]
     async fn correlation_outside_scope_is_none() {
-        assert_eq!(correlation(), None);
+        assert!(correlation().is_none());
     }
 
     // total 函数：缺失产出 None，永不 panic（workspace panic=deny）。
@@ -91,7 +99,10 @@ mod tests {
     #[tokio::test]
     async fn current_inside_scope_reads_ctx() {
         let seen = scope(ctx("corr-2"), async { current() }).await;
-        assert_eq!(seen, Some(ctx("corr-2")));
+        assert_eq!(
+            seen.map(|ctx| ctx.correlation().as_str().to_owned()),
+            Some("corr-2".to_owned())
+        );
     }
 
     // 嵌套：内层 scope 遮蔽外层；内层完成后外层快照恢复。
@@ -120,7 +131,26 @@ mod tests {
             tokio::spawn(async { correlation() }).await.ok().flatten()
         })
         .await;
-        assert_eq!(bare, None);
+        assert!(bare.is_none());
+    }
+
+    #[tokio::test]
+    async fn spawned_task_can_explicitly_rebind_a_snapshot() {
+        let rebound = scope(ctx("captured"), async {
+            let snapshot = current();
+            match snapshot {
+                Some(snapshot) => tokio::spawn(scope(snapshot, async { correlation() }))
+                    .await
+                    .ok()
+                    .flatten(),
+                None => None,
+            }
+        })
+        .await;
+        assert_eq!(
+            rebound.map(|id| id.as_str().to_owned()),
+            Some("captured".to_owned())
+        );
     }
 
     // 并发隔离：两任务各自 scope 不同 correlation，互不串台。
@@ -138,5 +168,36 @@ mod tests {
             rb.ok().flatten().map(|c| c.as_str().to_string()),
             Some("cb".to_string())
         );
+    }
+
+    #[tokio::test]
+    async fn scope_returns_a_send_future() {
+        fn assert_send<T: Send>(_: &T) {}
+        let future = scope(ctx("send"), async { correlation() });
+        assert_send(&future);
+        assert_eq!(
+            future.await.map(|id| id.as_str().to_owned()),
+            Some("send".to_owned())
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scope_preserves_a_non_send_future_on_a_local_set() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let marker = Rc::new("local");
+                let seen = scope(ctx("local"), async move {
+                    tokio::task::yield_now().await;
+                    (Rc::strong_count(&marker), correlation())
+                })
+                .await;
+                assert_eq!(seen.0, 1);
+                assert_eq!(
+                    seen.1.map(|id| id.as_str().to_owned()),
+                    Some("local".to_owned())
+                );
+            })
+            .await;
     }
 }

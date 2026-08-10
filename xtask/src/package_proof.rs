@@ -1,17 +1,24 @@
 //! Real `.crate` → local registry → independent locked/offline consumer proof.
 
 use anyhow::{Context, Result, bail};
+use serde::Deserialize;
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use workspacefacts::{
-    DependencyKind, DependencyResolution, DependencySource, PublicApiOwner, WorkspaceFacts,
-};
+use workspacefacts::{DependencyKind, DependencyResolution, DependencySource, WorkspaceFacts};
 
+/// INVARIANT: RELEASE-PACKAGE-PROOF-COVERAGE-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "proof_behavior_is_closed_and_unknown_release_packages_fail", anti_vacuity = "release_proof_plans_are_derived_from_the_complete_release_surface" }.
+/// Every package selected by the validated Release Surface is planned and executed exactly once.
+/// The closed behavior projection supplies only package-specific consumer semantics; it cannot
+/// select, omit, or invent lifecycle entries.
+///
+/// INVARIANT: RELEASE-PACKAGE-SAME-HEAD-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "vcs_revision_requires_exact_clean_head" }.
+/// The proof packages a tracked-clean checkout without `--allow-dirty`, parses the archive's
+/// `.cargo_vcs_info.json`, and requires its revision to equal the checkout HEAD.
 pub(crate) fn run_command() -> Result<()> {
     let root = crate::workspace_root()?;
     let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -25,114 +32,171 @@ pub(crate) fn run(
     facts: &WorkspaceFacts,
     surface: &crate::release_surface::ReleaseSurface,
 ) -> Result<()> {
-    let plan = ReleaseProofPlan::derive(facts, surface)?;
+    require_tracked_clean(root)?;
+    let head = crate::cmd::source_revision(root)?;
+    let plans = PackageProofPlan::derive_all(facts, surface)?;
+    if plans.is_empty() {
+        bail!("package proof requires at least one selected Release Surface package");
+    }
     let temp = TempProof::new()?;
     let target = temp.root.join("target");
-    package(root, &target, &plan)?;
-    let package = target
-        .join("package")
-        .join(format!("{}-{}.crate", plan.package, plan.version));
-    if !package.is_file() {
-        bail!("cargo package did not produce {}", package.display());
+    let unpacked = temp.root.join("unpacked");
+    fs::create_dir_all(&unpacked)?;
+    let mut artifacts = Vec::with_capacity(plans.len());
+    for plan in &plans {
+        package(root, &target, plan)?;
+        let archive = target
+            .join("package")
+            .join(format!("{}-{}.crate", plan.package, plan.version));
+        if !archive.is_file() {
+            bail!("cargo package did not produce {}", archive.display());
+        }
+        let crate_root = extract_archive(&archive, &unpacked)?;
+        validate_archive(plan, &crate_root, &head)
+            .with_context(|| format!("archive validation failed for `{}`", plan.package))?;
+        run_archive_matrix(plan, &crate_root, &temp.root)
+            .with_context(|| format!("archive matrix failed for `{}`", plan.package))?;
+        let checksum = format!("{:x}", Sha256::digest(fs::read(&archive)?));
+        artifacts.push(PackageArtifact {
+            plan,
+            archive,
+            checksum,
+        });
     }
 
     let registry = temp.root.join("registry");
     let index = registry.join("index");
-    let index_entry = index.join(index_relative_path(&plan.package));
-    fs::create_dir_all(index_entry.parent().context("index path has no parent")?)?;
-    let download = registry
-        .join("crates")
-        .join(&plan.package)
-        .join(&plan.version)
-        .join("download");
-    fs::create_dir_all(download.parent().context("download path has no parent")?)?;
-    fs::copy(&package, &download)?;
-    let checksum = format!("{:x}", Sha256::digest(fs::read(&package)?));
+    fs::create_dir_all(registry.join("crates"))?;
+    fs::create_dir_all(&index)?;
     let download_root = file_url(&registry.join("crates"))?;
     fs::write(
         index.join("config.json"),
         serde_json::to_vec(&json!({ "dl": download_root, "api": null }))?,
     )?;
-    fs::write(
-        index_entry,
-        format!("{}\n", plan.registry_record(&checksum)),
-    )?;
+    for artifact in &artifacts {
+        let plan = artifact.plan;
+        let index_entry = index.join(index_relative_path(&plan.package));
+        fs::create_dir_all(index_entry.parent().context("index path has no parent")?)?;
+        let download = registry
+            .join("crates")
+            .join(&plan.package)
+            .join(&plan.version)
+            .join("download");
+        fs::create_dir_all(download.parent().context("download path has no parent")?)?;
+        fs::copy(&artifact.archive, &download)?;
+        fs::write(
+            index_entry,
+            format!("{}\n", plan.registry_record(&artifact.checksum)),
+        )?;
+    }
     init_git(&index)?;
 
-    let consumer = temp.root.join("consumer");
-    copy_tree(
-        &root.join("xtask/tests/fixtures/platform_public_consumer"),
-        &consumer,
-    )?;
-    render_consumer_manifest(&consumer.join("Cargo.toml"), &plan)?;
-    fs::create_dir_all(consumer.join(".cargo"))?;
-    fs::write(
-        consumer.join(".cargo/config.toml"),
-        format!("[registries.local]\nindex = {:?}\n", file_url(&index)?),
-    )?;
-    run_cargo(
-        crate::cmd::CargoSubcommand::GenerateLockfile,
-        &[],
-        &consumer,
-        "generate independent Cargo.lock",
-    )?;
-    run_cargo(
-        crate::cmd::CargoSubcommand::Fetch,
-        &["--locked"],
-        &consumer,
-        "fetch the local-registry crate archive",
-    )?;
-    init_git(&consumer)?;
-    run_cargo(
-        crate::cmd::CargoSubcommand::Check,
-        &["--locked", "--offline"],
-        &consumer,
-        "build independent local-registry consumer",
-    )?;
-    let receipt = run_cargo_output(
-        crate::cmd::CargoSubcommand::Run,
-        &["--locked", "--offline"],
-        &consumer,
-        "run independent T2 consumer",
-    )?;
-    let receipt: serde_json::Value = serde_json::from_slice(&receipt.stdout)
-        .context("T2 consumer stdout is not the structured receipt")?;
-    validate_receipt(&receipt)?;
-    println!(
-        "package-proof: {}@{} real .crate local-registry T2 passed",
-        plan.package, plan.version
-    );
+    let mut executed = BTreeSet::new();
+    for artifact in &artifacts {
+        run_consumer(root, artifact.plan, &index, &temp.root).with_context(|| {
+            format!(
+                "independent consumer proof failed for `{}`",
+                artifact.plan.package
+            )
+        })?;
+        if !executed.insert(artifact.plan.package.clone()) {
+            bail!("package proof executed a selected package more than once");
+        }
+        println!(
+            "package-proof: package={} version={} head={} sha256={} axes=content,vcs,default,no-default,all-features,msrv,docs,doctest,consumer",
+            artifact.plan.package, artifact.plan.version, head, artifact.checksum
+        );
+    }
+    validate_execution_coverage(&plans, &executed)?;
     Ok(())
 }
 
-struct ReleaseProofPlan {
-    package: String,
-    version: String,
-    dependencies: Vec<serde_json::Value>,
-    features: BTreeMap<String, std::collections::BTreeSet<String>>,
+fn validate_execution_coverage(
+    plans: &[PackageProofPlan],
+    executed: &BTreeSet<String>,
+) -> Result<()> {
+    let planned = plans
+        .iter()
+        .map(|plan| plan.package.clone())
+        .collect::<BTreeSet<_>>();
+    if executed != &planned {
+        bail!("selected/planned/executed package proof sets differ");
+    }
+    Ok(())
 }
 
-impl ReleaseProofPlan {
-    fn derive(
+struct PackageArtifact<'a> {
+    plan: &'a PackageProofPlan,
+    archive: PathBuf,
+    checksum: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProofBehavior {
+    Platform,
+    DiagContext,
+}
+
+impl ProofBehavior {
+    fn for_package(package: &str) -> Result<Self> {
+        match package {
+            "rss-platform" => Ok(Self::Platform),
+            "rss-diag-context" => Ok(Self::DiagContext),
+            _ => bail!("selected release package `{package}` has no closed proof behavior"),
+        }
+    }
+
+    const fn fixture(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::DiagContext => "diag-context",
+        }
+    }
+
+    fn validate_receipt(self, receipt: &serde_json::Value) -> Result<()> {
+        let expected = match self {
+            Self::Platform => platform_receipt(),
+            Self::DiagContext => diag_context_receipt(),
+        };
+        if receipt != &expected {
+            bail!("package consumer receipt is incomplete or non-canonical");
+        }
+        Ok(())
+    }
+}
+
+struct PackageProofPlan {
+    package: String,
+    version: String,
+    minimum_rust_version: String,
+    dependencies: Vec<serde_json::Value>,
+    features: BTreeMap<String, BTreeSet<String>>,
+    behavior: ProofBehavior,
+}
+
+impl PackageProofPlan {
+    fn derive_all(
         facts: &WorkspaceFacts,
         surface: &crate::release_surface::ReleaseSurface,
-    ) -> Result<Self> {
-        let selected = surface
+    ) -> Result<Vec<Self>> {
+        surface
             .packages()
             .iter()
-            .filter(|package| package.public_api_owner() == PublicApiOwner::PlatformPublic)
-            .collect::<Vec<_>>();
-        if selected.len() != 1 {
-            bail!("package proof requires exactly one Platform Public release package");
-        }
-        let release = selected[0];
+            .map(|release| Self::derive(facts, release))
+            .collect()
+    }
+
+    fn derive(
+        facts: &WorkspaceFacts,
+        release: &crate::release_surface::ReleasePackage,
+    ) -> Result<Self> {
         let package = facts
             .workspace_packages()
             .into_iter()
             .find(|candidate| candidate.key().as_str() == release.package())
-            .context("Platform Public release package is absent from workspace facts")?;
+            .context("selected release package is absent from workspace facts")?;
         if package.version() != release.version() {
-            bail!("Platform Public Release Surface version drifted from workspace facts");
+            bail!("selected Release Surface version drifted from workspace facts");
         }
         let key = facts.package_key(release.package())?;
         let mut dependencies = Vec::new();
@@ -145,9 +209,7 @@ impl ReleaseProofPlan {
             }
             let registry = match dependency.source() {
                 DependencySource::Registry { url } | DependencySource::Sparse { url } => url,
-                _ => bail!(
-                    "Platform Public package proof forbids non-registry production dependencies"
-                ),
+                _ => bail!("release package proof forbids non-registry production dependencies"),
             };
             let resolved = match dependency.resolution() {
                 DependencyResolution::Resolved(package) => package.as_str(),
@@ -176,8 +238,10 @@ impl ReleaseProofPlan {
         Ok(Self {
             package: release.package().to_owned(),
             version: release.version().to_string(),
+            minimum_rust_version: release.minimum_rust_version().to_string(),
             dependencies,
             features: package.publish_metadata().features().clone(),
+            behavior: ProofBehavior::for_package(release.package())?,
         })
     }
 
@@ -194,7 +258,7 @@ impl ReleaseProofPlan {
     }
 }
 
-fn expected_receipt() -> serde_json::Value {
+fn platform_receipt() -> serde_json::Value {
     json!({
         "contract": "runtime.inventory",
         "subjectMatched": true,
@@ -209,14 +273,21 @@ fn expected_receipt() -> serde_json::Value {
     })
 }
 
-fn validate_receipt(receipt: &serde_json::Value) -> Result<()> {
-    if receipt != &expected_receipt() {
-        bail!("T2 consumer receipt is incomplete or non-canonical");
-    }
-    Ok(())
+fn diag_context_receipt() -> serde_json::Value {
+    json!({
+        "package": "rss-diag-context",
+        "maxLen": 128,
+        "emptyRejected": true,
+        "tooLongRejected": true,
+        "invalidCharRejected": true,
+        "ambientMissingFailOpen": true,
+        "scopeRoundtrip": true,
+        "nestedRestored": true,
+        "sendSync": true
+    })
 }
 
-fn package(root: &Path, target: &Path, plan: &ReleaseProofPlan) -> Result<()> {
+fn package(root: &Path, target: &Path, plan: &PackageProofPlan) -> Result<()> {
     let target = target
         .to_str()
         .context("package proof target path is not UTF-8")?;
@@ -226,6 +297,318 @@ fn package(root: &Path, target: &Path, plan: &ReleaseProofPlan) -> Result<()> {
         root,
         "build real crate archive",
     )
+}
+
+fn require_tracked_clean(root: &Path) -> Result<()> {
+    let output = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::SystemGit,
+        &["status", "--porcelain", "--untracked-files=no"],
+        &[],
+        Some(root),
+    )
+    .output()?;
+    if !output.status.success() || !output.stdout.is_empty() {
+        bail!("package proof requires a tracked-clean checkout");
+    }
+    Ok(())
+}
+
+fn extract_archive(archive: &Path, destination: &Path) -> Result<PathBuf> {
+    let archive = archive
+        .to_str()
+        .context("crate archive path is not UTF-8")?;
+    let destination_text = destination
+        .to_str()
+        .context("crate extraction path is not UTF-8")?;
+    let output = crate::cmd::external_cmd(
+        crate::cmd::ExternalProgram::Tar,
+        &["-xzf", archive, "-C", destination_text],
+        &[],
+        None,
+    )
+    .output()?;
+    if !output.status.success() {
+        bail!("crate archive extraction failed");
+    }
+    let stem = archive
+        .strip_suffix(".crate")
+        .context("crate archive does not have .crate suffix")?;
+    let name = Path::new(stem)
+        .file_name()
+        .context("crate archive has no filename")?;
+    Ok(destination.join(name))
+}
+
+#[derive(Deserialize)]
+struct CargoVcsInfo {
+    git: CargoVcsGit,
+}
+
+#[derive(Deserialize)]
+struct CargoVcsGit {
+    sha1: String,
+    #[serde(default)]
+    dirty: bool,
+}
+
+fn validate_vcs_revision(text: &str, head: &str) -> Result<()> {
+    let info: CargoVcsInfo = serde_json::from_str(text).context("invalid .cargo_vcs_info.json")?;
+    if info.git.dirty || info.git.sha1 != head {
+        bail!("crate archive revision does not equal the clean checkout HEAD");
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct PackagedManifest {
+    package: PackagedPackage,
+    #[serde(default)]
+    lib: Option<PackagedTarget>,
+    #[serde(default, rename = "bin")]
+    bins: Vec<PackagedTarget>,
+    #[serde(default)]
+    example: Vec<PackagedTarget>,
+    #[serde(default)]
+    test: Vec<PackagedTarget>,
+    #[serde(default)]
+    bench: Vec<PackagedTarget>,
+    #[serde(skip)]
+    document: toml::Table,
+}
+
+#[derive(Deserialize)]
+struct PackagedPackage {
+    name: String,
+    version: String,
+    #[serde(rename = "rust-version")]
+    rust_version: Option<String>,
+    readme: Option<String>,
+    #[serde(rename = "license-file")]
+    license_file: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PackagedTarget {
+    path: Option<String>,
+}
+
+impl PackagedManifest {
+    fn library_path(&self) -> &Path {
+        self.lib
+            .as_ref()
+            .and_then(|target| target.path.as_deref())
+            .map(Path::new)
+            .unwrap_or_else(|| Path::new("src/lib.rs"))
+    }
+
+    fn declared_content(&self) -> Vec<&Path> {
+        let mut paths = vec![Path::new("Cargo.toml"), self.library_path()];
+        if let Some(readme) = self.package.readme.as_deref() {
+            paths.push(Path::new(readme));
+        }
+        if let Some(license) = self.package.license_file.as_deref() {
+            paths.push(Path::new(license));
+        }
+        for target in self
+            .bins
+            .iter()
+            .chain(&self.example)
+            .chain(&self.test)
+            .chain(&self.bench)
+        {
+            if let Some(path) = target.path.as_deref() {
+                paths.push(Path::new(path));
+            }
+        }
+        paths
+    }
+}
+
+fn parse_packaged_manifest(text: &str) -> Result<PackagedManifest> {
+    let document = toml::from_str::<toml::Table>(text).context("invalid packaged Cargo.toml")?;
+    let mut manifest = toml::from_str::<PackagedManifest>(text)
+        .context("packaged Cargo.toml lacks required release metadata")?;
+    manifest.document = document;
+    Ok(manifest)
+}
+
+fn validate_packaged_dependencies(document: &toml::Table) -> Result<()> {
+    fn validate_table(table: &toml::value::Table) -> Result<()> {
+        for (name, dependency) in table {
+            if let Some(detail) = dependency.as_table() {
+                for forbidden in ["path", "git", "workspace"] {
+                    if detail.contains_key(forbidden) {
+                        bail!("packaged dependency `{name}` contains forbidden `{forbidden}`");
+                    }
+                }
+                if !detail.contains_key("version") {
+                    bail!("packaged dependency `{name}` has no registry version");
+                }
+            } else if !dependency.is_str() {
+                bail!("packaged dependency `{name}` has an unsupported shape");
+            }
+        }
+        Ok(())
+    }
+    for key in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        if let Some(table) = document.get(key).and_then(toml::Value::as_table) {
+            validate_table(table)?;
+        }
+    }
+    if let Some(targets) = document.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values().filter_map(toml::Value::as_table) {
+            for key in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                if let Some(table) = target.get(key).and_then(toml::Value::as_table) {
+                    validate_table(table)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_archive(plan: &PackageProofPlan, crate_root: &Path, head: &str) -> Result<()> {
+    let manifest_text = fs::read_to_string(crate_root.join("Cargo.toml"))?;
+    let manifest = parse_packaged_manifest(&manifest_text)?;
+    let packaged_msrv = manifest
+        .package
+        .rust_version
+        .as_deref()
+        .context("packaged manifest has no rust-version")?;
+    if manifest.package.name != plan.package
+        || manifest.package.version != plan.version
+        || parse_rust_version(packaged_msrv)?
+            != semver::Version::parse(&plan.minimum_rust_version)
+                .context("typed proof plan has invalid MSRV")?
+    {
+        bail!("packaged manifest identity or MSRV differs from the typed proof plan");
+    }
+    validate_packaged_dependencies(&manifest.document)?;
+    validate_declared_content(&manifest, crate_root)?;
+    let vcs = fs::read_to_string(crate_root.join(".cargo_vcs_info.json"))?;
+    validate_vcs_revision(&vcs, head)
+}
+
+fn parse_rust_version(value: &str) -> Result<semver::Version> {
+    let normalized = match value.bytes().filter(|byte| *byte == b'.').count() {
+        0 => format!("{value}.0.0"),
+        1 => format!("{value}.0"),
+        _ => value.to_owned(),
+    };
+    semver::Version::parse(&normalized).context("packaged manifest has invalid rust-version")
+}
+
+fn validate_declared_content(manifest: &PackagedManifest, crate_root: &Path) -> Result<()> {
+    for relative in manifest.declared_content() {
+        if relative.is_absolute()
+            || relative
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+            || !crate_root.join(relative).is_file()
+        {
+            bail!(
+                "packaged manifest declares missing or unsafe content: {}",
+                relative.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn run_archive_matrix(plan: &PackageProofPlan, crate_root: &Path, proof_root: &Path) -> Result<()> {
+    let target = proof_root.join("matrix-target").join(&plan.package);
+    let target = target.to_str().context("matrix target path is not UTF-8")?;
+    let env = [
+        ("RUSTUP_TOOLCHAIN", plan.minimum_rust_version.as_str()),
+        ("CARGO_TARGET_DIR", target),
+    ];
+    for (args, operation) in [
+        (&["--locked", "--offline"][..], "archive default check"),
+        (
+            &["--locked", "--offline", "--no-default-features"][..],
+            "archive no-default-features check",
+        ),
+        (
+            &["--locked", "--offline", "--all-features"][..],
+            "archive all-features check",
+        ),
+    ] {
+        run_cargo_env(
+            crate::cmd::CargoSubcommand::Check,
+            args,
+            &env,
+            crate_root,
+            operation,
+        )?;
+    }
+    run_cargo_env(
+        crate::cmd::CargoSubcommand::Doc,
+        &["--locked", "--offline", "--no-deps", "--all-features"],
+        &env,
+        crate_root,
+        "archive rustdoc",
+    )?;
+    run_cargo_env(
+        crate::cmd::CargoSubcommand::Test,
+        &["--locked", "--offline", "--doc", "--all-features"],
+        &env,
+        crate_root,
+        "archive doctest",
+    )
+}
+
+fn run_consumer(
+    root: &Path,
+    plan: &PackageProofPlan,
+    index: &Path,
+    proof_root: &Path,
+) -> Result<()> {
+    let consumer = proof_root.join("consumer").join(&plan.package);
+    copy_tree(
+        &root
+            .join("xtask/tests/fixtures/package_proof")
+            .join(plan.behavior.fixture()),
+        &consumer,
+    )?;
+    render_consumer_manifest(&consumer.join("Cargo.toml"), plan)?;
+    fs::create_dir_all(consumer.join(".cargo"))?;
+    fs::write(
+        consumer.join(".cargo/config.toml"),
+        format!("[registries.local]\nindex = {:?}\n", file_url(index)?),
+    )?;
+    let env = [("RUSTUP_TOOLCHAIN", plan.minimum_rust_version.as_str())];
+    run_cargo_env(
+        crate::cmd::CargoSubcommand::GenerateLockfile,
+        &[],
+        &env,
+        &consumer,
+        "generate independent Cargo.lock",
+    )?;
+    run_cargo_env(
+        crate::cmd::CargoSubcommand::Fetch,
+        &["--locked"],
+        &env,
+        &consumer,
+        "fetch local-registry crate archive",
+    )?;
+    init_git(&consumer)?;
+    run_cargo_env(
+        crate::cmd::CargoSubcommand::Check,
+        &["--locked", "--offline"],
+        &env,
+        &consumer,
+        "build independent local-registry consumer",
+    )?;
+    let receipt = run_cargo_output_env(
+        crate::cmd::CargoSubcommand::Run,
+        &["--locked", "--offline"],
+        &env,
+        &consumer,
+        "run independent package consumer",
+    )?;
+    let receipt: serde_json::Value = serde_json::from_slice(&receipt.stdout)
+        .context("package consumer stdout is not the structured receipt")?;
+    plan.behavior.validate_receipt(&receipt)
 }
 
 fn run_cargo(
@@ -256,7 +639,37 @@ fn run_cargo_output(
     Ok(output)
 }
 
-fn render_consumer_manifest(path: &Path, plan: &ReleaseProofPlan) -> Result<()> {
+fn run_cargo_env(
+    subcommand: crate::cmd::CargoSubcommand,
+    args: &[&str],
+    env: &[(&str, &str)],
+    cwd: &Path,
+    operation: &str,
+) -> Result<()> {
+    let _ = run_cargo_output_env(subcommand, args, env, cwd, operation)?;
+    Ok(())
+}
+
+fn run_cargo_output_env(
+    subcommand: crate::cmd::CargoSubcommand,
+    args: &[&str],
+    env: &[(&str, &str)],
+    cwd: &Path,
+    operation: &str,
+) -> Result<std::process::Output> {
+    let output = crate::cmd::cargo_cmd(subcommand, args, env, Some(cwd))
+        .output()
+        .with_context(|| operation.to_owned())?;
+    if !output.status.success() {
+        bail!(
+            "{operation} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(output)
+}
+
+fn render_consumer_manifest(path: &Path, plan: &PackageProofPlan) -> Result<()> {
     let template = fs::read_to_string(path)?;
     let rendered = template
         .replace("__RELEASE_PACKAGE__", &plan.package)
@@ -330,10 +743,13 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
 
 fn file_url(path: &Path) -> Result<String> {
     let canonical = fs::canonicalize(path)?;
-    let text = canonical
-        .to_str()
-        .context("local registry path is not UTF-8")?;
-    Ok(format!("file://{text}"))
+    let url = url::Url::from_file_path(&canonical).map_err(|()| {
+        anyhow::anyhow!(
+            "local registry path cannot be represented as a file URL: {}",
+            canonical.display()
+        )
+    })?;
+    Ok(url.into())
 }
 
 struct TempProof {
@@ -378,8 +794,8 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn t2_receipt_requires_every_stage_and_exact_identity() {
-        let green = expected_receipt();
-        assert!(validate_receipt(&green).is_ok());
+        let green = platform_receipt();
+        assert!(ProofBehavior::Platform.validate_receipt(&green).is_ok());
         for field in [
             "contract",
             "subjectMatched",
@@ -394,26 +810,164 @@ mod tests {
         ] {
             let mut red = green.clone();
             red.as_object_mut().expect("receipt object").remove(field);
-            assert!(validate_receipt(&red).is_err(), "missing {field} must fail");
+            assert!(
+                ProofBehavior::Platform.validate_receipt(&red).is_err(),
+                "missing {field} must fail"
+            );
         }
     }
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn release_proof_plan_is_derived_from_canonical_workspace_facts() {
+    fn diag_receipt_requires_every_public_behavior_axis() {
+        let green = diag_context_receipt();
+        assert!(ProofBehavior::DiagContext.validate_receipt(&green).is_ok());
+        for field in [
+            "package",
+            "maxLen",
+            "emptyRejected",
+            "tooLongRejected",
+            "invalidCharRejected",
+            "ambientMissingFailOpen",
+            "scopeRoundtrip",
+            "nestedRestored",
+            "sendSync",
+        ] {
+            let mut red = green.clone();
+            red.as_object_mut().expect("receipt object").remove(field);
+            assert!(
+                ProofBehavior::DiagContext.validate_receipt(&red).is_err(),
+                "missing {field} must fail"
+            );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn release_proof_plans_are_derived_from_the_complete_release_surface() {
         let root = crate::workspace_root().expect("workspace root");
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
         let facts = command_facts.get().expect("workspace facts");
         let surface = crate::publicapi::validated_release_surface(&root, facts)
             .expect("validated release surface");
-        let plan = ReleaseProofPlan::derive(facts, &surface).expect("release proof plan");
-        assert_eq!(plan.package, "rss-platform");
-        assert_eq!(plan.version, "0.1.0");
-        assert!(plan.dependencies.iter().all(|dependency| {
-            dependency["registry"].as_str().is_some()
-                && dependency["target"].is_null()
-                && dependency["kind"] != "dev"
-        }));
+        let plans = PackageProofPlan::derive_all(facts, &surface).expect("release proof plans");
+        assert_eq!(plans.len(), surface.packages().len());
+        let projected = plans
+            .iter()
+            .map(|plan| (plan.package.as_str(), plan.behavior))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(
+            projected,
+            BTreeMap::from([
+                ("rss-diag-context", ProofBehavior::DiagContext),
+                ("rss-platform", ProofBehavior::Platform),
+            ])
+        );
+        for plan in &plans {
+            assert_eq!(plan.version, "0.1.0");
+            assert_eq!(plan.minimum_rust_version, "1.96.0");
+            assert!(plan.dependencies.iter().all(|dependency| {
+                dependency["registry"].as_str().is_some()
+                    && dependency["target"].is_null()
+                    && dependency["kind"] != "dev"
+            }));
+        }
+    }
+
+    #[test]
+    fn proof_behavior_is_closed_and_unknown_release_packages_fail() {
+        assert_eq!(
+            ProofBehavior::for_package("rss-platform").expect("platform behavior"),
+            ProofBehavior::Platform
+        );
+        assert_eq!(
+            ProofBehavior::for_package("rss-diag-context").expect("diag behavior"),
+            ProofBehavior::DiagContext
+        );
+        assert!(ProofBehavior::for_package("future-release").is_err());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn proof_execution_coverage_is_exact_and_non_vacuous() {
+        let root = crate::workspace_root().expect("workspace root");
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get().expect("workspace facts");
+        let surface = crate::publicapi::validated_release_surface(&root, facts)
+            .expect("validated release surface");
+        let plans = PackageProofPlan::derive_all(facts, &surface).expect("release proof plans");
+        let complete = plans
+            .iter()
+            .map(|plan| plan.package.clone())
+            .collect::<BTreeSet<_>>();
+        assert!(validate_execution_coverage(&plans, &complete).is_ok());
+        let mut missing = complete.clone();
+        missing.pop_first();
+        assert!(validate_execution_coverage(&plans, &missing).is_err());
+        let mut extra = complete;
+        extra.insert("unselected-package".to_owned());
+        assert!(validate_execution_coverage(&plans, &extra).is_err());
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn packaged_manifest_validation_is_structured_and_fail_closed() {
+        let valid = r#"
+            [package]
+            name = "rss-diag-context"
+            version = "0.1.0"
+            rust-version = "1.96"
+            readme = "README.md"
+            license-file = "LICENSE"
+
+            [lib]
+            path = "src/lib.rs"
+
+            [features]
+            default = []
+
+            [dependencies.tokio]
+            version = "1"
+            default-features = false
+        "#;
+        let parsed = parse_packaged_manifest(valid).expect("valid packaged manifest");
+        assert_eq!(parsed.package.name, "rss-diag-context");
+        assert_eq!(parsed.library_path(), Path::new("src/lib.rs"));
+        assert!(validate_packaged_dependencies(&parsed.document).is_ok());
+        assert_eq!(
+            parse_rust_version("1.96").expect("Cargo partial MSRV"),
+            semver::Version::new(1, 96, 0)
+        );
+
+        let root = TempProof::new().expect("temporary package root");
+        fs::write(root.root.join("Cargo.toml"), valid).expect("manifest fixture");
+        fs::write(root.root.join("README.md"), "readme").expect("readme fixture");
+        fs::write(root.root.join("LICENSE"), "license").expect("license fixture");
+        fs::create_dir_all(root.root.join("src")).expect("source directory");
+        assert!(validate_declared_content(&parsed, &root.root).is_err());
+        fs::write(root.root.join("src/lib.rs"), "").expect("library fixture");
+        assert!(validate_declared_content(&parsed, &root.root).is_ok());
+
+        for forbidden in [
+            valid.replace("version = \"1\"", "version = \"1\"\npath = \"../tokio\""),
+            valid.replace(
+                "version = \"1\"",
+                "version = \"1\"\ngit = \"https://invalid\"",
+            ),
+            valid.replace("version = \"1\"", "workspace = true"),
+        ] {
+            let parsed = parse_packaged_manifest(&forbidden).expect("TOML remains structured");
+            assert!(validate_packaged_dependencies(&parsed.document).is_err());
+        }
+    }
+
+    #[test]
+    fn vcs_revision_requires_exact_clean_head() {
+        let clean = r#"{"git":{"sha1":"0123456789abcdef0123456789abcdef01234567"}}"#;
+        assert!(validate_vcs_revision(clean, "0123456789abcdef0123456789abcdef01234567").is_ok());
+        assert!(validate_vcs_revision(clean, "1123456789abcdef0123456789abcdef01234567").is_err());
+        let dirty = r#"{"git":{"sha1":"0123456789abcdef0123456789abcdef01234567","dirty":true}}"#;
+        assert!(validate_vcs_revision(dirty, "0123456789abcdef0123456789abcdef01234567").is_err());
     }
 
     #[test]
@@ -450,5 +1004,17 @@ mod tests {
             index_relative_path("rss-platform"),
             PathBuf::from("rs/s-/rss-platform")
         );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn file_urls_percent_encode_reserved_path_characters() {
+        let root = TempProof::new().expect("temporary root");
+        let reserved = root.root.join("registry # proof");
+        fs::create_dir(&reserved).expect("reserved-character directory");
+        let rendered = file_url(&reserved).expect("file URL");
+        assert!(rendered.starts_with("file://"));
+        assert!(rendered.contains("registry%20%23%20proof"));
+        assert!(!rendered.contains('#'));
     }
 }

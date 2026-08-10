@@ -41,8 +41,9 @@ package 使用品牌 **RSS** 与 `rss-` 前缀；首批两个 Standalone Compone
 `rss-trace-context` 与 `rss-platform` 当时未登记。未登记只是一项带时间的冲突检查，不构成名称保留、ownership 或发布授权；首次
 发布前必须重新查询精确名称，并在 crate 创建后验证 registry owner 列表。`crates/diagctx` / `diagctx` 与
 `crates/tracewire` / `tracewire` 分别是仓内路径与 dependency rename key，不构成旧 package alias。Cargo closure
-PBI 直接采用上表公开 package identity，但在最终 API 与同 revision artifact proof 完成前继续保持
-`publish = false`，且不得选择进 Release Surface、声明 RC 或 published。
+PBI 直接采用上表公开 package identity。未完成最终 API 与同 revision artifact proof 的 package 保持
+`publish = false` 且不得选择进 Release Surface；完成者可以进入正向 candidate selection，但仍不得据此声明
+RC、registry upload 或 published。
 
 ## 核心载体
 

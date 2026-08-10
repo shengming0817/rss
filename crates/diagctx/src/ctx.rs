@@ -1,27 +1,23 @@
-//! [`DiagnosticCtx`] 值类型 + [`CorrelationId`] newtype。
-//!
-//! 诊断 ID（correlation 等）是**可观测信号**，非授权控制流值——故归本 crate（与 `runctx` 物理隔离），
-//! 失败语义 fail-open（缺失 = 省略，见 [`crate::local`]），与 `runctx` 的 fail-closed 刻意相反。
-
-/// correlation id 最大长度——防 attacker-controlled 入站 `X-Correlation-ID` 撑爆持久 metadata / 日志。
-pub const MAX_CORRELATION_ID_LEN: usize = 128;
-
-/// 跨服务关联 ID newtype——funnel（私有字段 + 单一受控构造入口 [`CorrelationId::parse`]）。
+/// A validated identifier for correlating diagnostic events across asynchronous work.
 ///
-/// 入站 `X-Correlation-ID` 是 attacker-controlled 且会落进持久 `outbox.metadata` + tracing span / 日志：
-/// [`CorrelationId::parse`] 强制非空 + 长度上限（[`MAX_CORRELATION_ID_LEN`]）+ 字符集白名单
-/// （`[A-Za-z0-9._-]`），把 log / header / metadata 注入从构造面挡掉（安全控制，非洁癖）。
-/// 诊断 ID 非凭据（对齐 `request_id` / `TenantId` 可观测约定），`Debug` 有意可见、不脱敏。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// The value has a private representation and can only be created through [`CorrelationId::parse`].
+/// Parsing rejects empty, oversized, and non-ASCII-allowlisted input before it can be copied into
+/// headers, logs, or persistent diagnostic metadata.
 pub struct CorrelationId(String);
 
 impl CorrelationId {
-    /// 校验并构造 correlation id。fail-closed 拒空 / 超长 / 非白名单字符（防注入）。
+    /// Maximum accepted identifier length in bytes.
+    pub const MAX_LEN: usize = 128;
+
+    /// Parses an identifier using the ASCII allowlist `[A-Za-z0-9._-]`.
+    ///
+    /// Validation runs in this order: empty, longer than [`Self::MAX_LEN`] bytes, then invalid
+    /// characters. The returned error never contains the input value.
     pub fn parse(raw: &str) -> Result<Self, CorrelationIdError> {
         if raw.is_empty() {
             return Err(CorrelationIdError::Empty);
         }
-        if raw.len() > MAX_CORRELATION_ID_LEN {
+        if raw.len() > Self::MAX_LEN {
             return Err(CorrelationIdError::TooLong);
         }
         if !raw.bytes().all(is_allowed_byte) {
@@ -30,9 +26,13 @@ impl CorrelationId {
         Ok(Self(raw.to_string()))
     }
 
-    /// 借出底层标识。
+    /// Returns the validated identifier as a string slice.
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub(crate) fn snapshot(&self) -> Self {
+        Self(self.0.clone())
     }
 }
 
@@ -42,43 +42,47 @@ fn is_allowed_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.')
 }
 
-/// [`CorrelationId::parse`] 失败原因。
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+/// A closed reason why [`CorrelationId::parse`] rejected an input.
+#[derive(Debug, thiserror::Error)]
 pub enum CorrelationIdError {
-    /// 空串。
+    /// The input was empty.
     #[error("correlation id is empty")]
     Empty,
-    /// 超过 [`MAX_CORRELATION_ID_LEN`]。
+    /// The input exceeded [`CorrelationId::MAX_LEN`] bytes.
     #[error("correlation id exceeds max length")]
     TooLong,
-    /// 含非白名单字符（注入防护）。
+    /// The input contained a character outside `[A-Za-z0-9._-]`.
     #[error("correlation id contains a disallowed character")]
     InvalidChar,
 }
 
-/// 请求级**诊断** context——当前仅承载 correlation；cell / request 为后续扩展槽
-/// （trace 经 #1224 由 `tracewire` 独立承载、读 tracing span 而非本 ctx；principal 待安全决策）。
-/// 不被任何授权闸门读取（ADR-002 §D1-bis）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// An owned diagnostic context containing one validated correlation identifier.
+///
+/// This context carries observability data only. It does not represent identity, tenancy,
+/// authentication, authorization, or a security decision.
 pub struct DiagnosticCtx {
     correlation: CorrelationId,
 }
 
 impl DiagnosticCtx {
-    /// 由 correlation 构造诊断 context。
+    /// Creates a diagnostic context from a validated correlation identifier.
     pub fn new(correlation: CorrelationId) -> Self {
         Self { correlation }
     }
 
-    /// 借出 correlation。
+    /// Borrows the context's correlation identifier.
     pub fn correlation(&self) -> &CorrelationId {
         &self.correlation
+    }
+
+    pub(crate) fn snapshot(&self) -> Self {
+        Self::new(self.correlation.snapshot())
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CorrelationId, CorrelationIdError, DiagnosticCtx, MAX_CORRELATION_ID_LEN};
+    use super::{CorrelationId, CorrelationIdError, DiagnosticCtx};
 
     // 测试 fixture：构造合法 CorrelationId。item-level carve-out（workspace expect_used=deny）。
     // reason: 仅测试 fixture，输入恒为白名单合法串。
@@ -96,18 +100,21 @@ mod tests {
 
     #[test]
     fn parse_rejects_empty() {
-        assert_eq!(CorrelationId::parse(""), Err(CorrelationIdError::Empty));
+        assert!(matches!(
+            CorrelationId::parse(""),
+            Err(CorrelationIdError::Empty)
+        ));
     }
 
     #[test]
     fn parse_rejects_too_long() {
-        let long = "a".repeat(MAX_CORRELATION_ID_LEN + 1);
-        assert_eq!(
+        let long = "a".repeat(CorrelationId::MAX_LEN + 1);
+        assert!(matches!(
             CorrelationId::parse(&long),
             Err(CorrelationIdError::TooLong)
-        );
+        ));
         // 边界：恰好 MAX 长度合法（anti-vacuity，证明拒绝不是恒真）。
-        let at_max = "a".repeat(MAX_CORRELATION_ID_LEN);
+        let at_max = "a".repeat(CorrelationId::MAX_LEN);
         assert!(CorrelationId::parse(&at_max).is_ok());
     }
 
@@ -122,24 +129,37 @@ mod tests {
             "semi;col",
             "uni\u{200b}code",
         ] {
-            assert_eq!(
-                CorrelationId::parse(raw),
-                Err(CorrelationIdError::InvalidChar),
+            assert!(
+                matches!(
+                    CorrelationId::parse(raw),
+                    Err(CorrelationIdError::InvalidChar)
+                ),
                 "应拒注入字符: {raw:?}"
             );
         }
     }
 
     #[test]
-    fn debug_is_visible_not_redacted() {
-        // 诊断 ID 非凭据，Debug 有意可见（对齐 request_id / TenantId）。
-        assert!(format!("{:?}", corr("corr-visible-42")).contains("corr-visible-42"));
+    fn parse_errors_never_echo_raw_input_and_length_precedes_charset() {
+        let raw = format!("{}\nprivate", "x".repeat(CorrelationId::MAX_LEN));
+        let error = CorrelationId::parse(&raw).err();
+        assert!(matches!(error, Some(CorrelationIdError::TooLong)));
+        let rendered = error.map(|error| error.to_string()).unwrap_or_default();
+        assert!(!rendered.contains("private"));
+        assert!(!rendered.contains('\n'));
+    }
+
+    #[test]
+    fn public_types_are_send_and_sync() {
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<CorrelationId>();
+        assert_send_sync::<CorrelationIdError>();
+        assert_send_sync::<DiagnosticCtx>();
     }
 
     #[test]
     fn diagnostic_ctx_borrows_correlation() {
-        let id = corr("corr-1");
-        let ctx = DiagnosticCtx::new(id.clone());
-        assert_eq!(ctx.correlation(), &id);
+        let ctx = DiagnosticCtx::new(corr("corr-1"));
+        assert_eq!(ctx.correlation().as_str(), "corr-1");
     }
 }

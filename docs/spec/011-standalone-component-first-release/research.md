@@ -5,7 +5,8 @@
 - 产品面与候选/激活语义由 [`ADR-024`](../../architecture/202608012034-024-enterprise-framework-product-surface.md)
   拥有；公共消费和发布范围由 [`project-scope.md`](../../rules/project-scope.md) 拥有。
 - [`Spec 010`](../010-release-surface-convergence/research.md) 已决定未进入正向发布集合的 package 默认 internal。
-- 当前候选 package 仍使用仓内版本与 `publish = false`；这只证明尚未发布，不构成品牌、SemVer 或支持承诺。
+- `rss-diag-context` 已完成最终窄腰并以 crates.io-only eligibility 进入 Release Surface；`rss-trace-context` 仍为
+  `publish = false` 的 internal package。前者的 candidate eligibility 也不构成 RC、published 或支持承诺。
 - `diagctx` 已有仓内真实 consumer，并与授权 context 分离；`tracewire` 已承载 traceparent capture/restore，但其 internal
   API 形状不能直接升级为外部承诺。
 
@@ -17,8 +18,9 @@
   候选应继承的 SemVer 面。其 parse、ambient `Option` 与 opaque future 已证明输入拒绝和传播 fail-open 可行。
 - 当前 `tracewire` 已隐藏 OTel SDK 类型，但 restore 仍接受裸 `&str` 并返回 `()`；无法区分 malformed、
   oversized、unsupported 与 attach unavailable。HTTP adapter 另有 validator，说明验证 owner 尚未收口。
-- 两个 package 目前均 `publish = false`、未被 Release Surface 选中；现有 `public-api/*.txt` 是 internal snapshot，
-  不能冒充 Release API proof。#2047/#2048 分别拥有 baseline 分离与 release-selected leakage gate。
+- diag 的历史 `public-api/*.txt` 已被破坏式移除，唯一 owner 是双 profile `release-api/rss-diag-context.txt`；trace 仍由
+  internal snapshot 持有。两类 baseline 互斥，不能互相冒充。#2047/#2048 分别拥有 baseline 分离与
+  release-selected leakage gate。
 - Tokio task-local 采用 `try_with` 而非缺值 panic 的 `with`；RSS 将缺诊断稳定为 `None`。OTel 0.32 propagator的
   SDK parser/error/context 在私有 adapter 层结束；候选只承诺 W3C 1.1 线语义和无原始输入的闭值分类。
 - #1400 已由 `rss_diagctx_auth_source` 吸收：授权 owner 的真实 `diagctx` path 由 HIR `DefId` 门约束，HTTP audit

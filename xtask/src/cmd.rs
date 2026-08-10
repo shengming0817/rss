@@ -315,6 +315,7 @@ pub(crate) enum ExternalProgram {
     SystemShell,
     Git,
     SystemGit,
+    Tar,
 }
 
 impl ExternalProgram {
@@ -326,6 +327,7 @@ impl ExternalProgram {
             Self::SystemShell => "/bin/sh",
             Self::Git => "git",
             Self::SystemGit => "/usr/bin/git",
+            Self::Tar => "tar",
         }
     }
 }
@@ -341,6 +343,7 @@ pub(crate) enum CargoSubcommand {
     Fmt,
     Build,
     Test,
+    Doc,
     Clippy,
     Deny,
     Audit,
@@ -384,6 +387,7 @@ impl CargoSubcommand {
             Self::Fmt => "fmt",
             Self::Build => "build",
             Self::Test => "test",
+            Self::Doc => "doc",
             Self::Clippy => "clippy",
             Self::Deny => "deny",
             Self::Audit => "audit",
