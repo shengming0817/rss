@@ -210,6 +210,7 @@ version = "0.0.0"
 dependencies = [
  "anyhow",
  "jsonschema",
+ "runtimeinventorymint",
  "schemars 0.8.22",
  "serde",
  "serde_json",
@@ -2437,6 +2438,7 @@ dependencies = [
 name = "generated"
 version = "0.0.0"
 dependencies = [
+ "assembly-schema",
  "axum",
  "jsonschema",
  "regress",
@@ -2444,6 +2446,7 @@ dependencies = [
  "secure",
  "serde",
  "serde_json",
+ "trybuild",
  "uuid",
  "vocab",
 ]
@@ -5429,6 +5432,7 @@ dependencies = [
  "diport",
  "eventexec",
  "primitives",
+ "runtimeinventorymint",
  "secure",
  "serde",
  "serde_json",
@@ -5443,6 +5447,10 @@ dependencies = [
  "trybuild",
  "zeroize",
 ]
+
+[[package]]
+name = "runtimeinventorymint"
+version = "0.0.0"
 
 [[package]]
 name = "rustc-hash"

@@ -900,7 +900,7 @@ fn render_provider_role_batches(
         let field = provider.id.as_str().replace('-', "_");
         let receipt = format!("{}Receipt", provider_role_variant(provider.id));
         code.push_str(&format!(
-            "        let {receipt} {{ probes, resources, workers, probe_names }} = {field};\n        staged[0] += probes;\n        staged[1] += resources;\n        staged[2] += workers;\n        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(\"{}\", probe_names)?);\n",
+            "        let {receipt} {{ probes, resources, workers, probe_names }} = {field};\n        staged[0] += probes;\n        staged[1] += resources;\n        staged[2] += workers;\n        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(\"{}\", probe_names)?);\n",
             provider.id.as_str(),
         ));
     }

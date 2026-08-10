@@ -1,11 +1,8 @@
 //! Assembly-owned HTTP projection for the provider-independent runtime inventory.
 
-use std::num::NonZeroU64;
-
-use anyhow::Context as _;
-use axum::extract::State;
-use axum::response::IntoResponse as _;
+use axum::extract::{Extension, State};
 use generated::http::runtime_v1::inventory as wire;
+#[cfg(any(test, feature = "test-support"))]
 use runtimeexec::inventory as model;
 
 #[derive(Clone)]
@@ -14,7 +11,7 @@ pub(crate) struct InventoryFrameworkRoutes {
 }
 
 impl InventoryFrameworkRoutes {
-    pub(crate) const fn new(reader: model::InventoryReader) -> Self {
+    pub(crate) const fn new(reader: runtimeexec::inventory::InventoryReader) -> Self {
         Self { reader }
     }
 }
@@ -31,7 +28,7 @@ impl ::bootstrap::FrameworkRoutes for InventoryFrameworkRoutes {
     ) -> Result<(), ::bootstrap::KernelError> {
         let state = InventoryFrameworkRoutes::new(self.reader.clone());
         registry.route_group::<::httpserve::Admin>("/api/v1/runtime", move |routes| {
-            let endpoint = ::httpserve::GeneratedEndpoint::new(
+            let endpoint = ::httpserve::GeneratedEndpoint::new_declared(
                 ::generated::http::runtime_v1::inventory::ROUTE,
                 inventory_handler,
             )?
@@ -44,260 +41,30 @@ impl ::bootstrap::FrameworkRoutes for InventoryFrameworkRoutes {
 async fn inventory_handler(
     _: ::httpserve::ContractMarker<::generated::http::runtime_v1::inventory::RouteMarker>,
     State(state): State<InventoryFrameworkRoutes>,
-    request: axum::extract::Request,
-) -> axum::response::Response {
-    let request_id =
-        httpserve::request_id_str(request.extensions()).unwrap_or("settingsonly-runtime-inventory");
+    Extension(request_id): Extension<httpserve::VerifiedRequestId>,
+) -> wire::RuntimeInventoryHandlerResult {
     inventory_response(&state.reader, request_id)
 }
 
 fn inventory_response(
-    reader: &model::InventoryReader,
-    request_id: &str,
-) -> axum::response::Response {
-    let snapshot = match reader.read() {
-        Ok(snapshot) => snapshot,
-        Err(model::InventoryError::Unavailable) => {
-            return httpserve::error::provider_unavailable(request_id);
-        }
-        Err(error) => {
-            tracing::error!(
-                contract_id = wire::CONTRACT_ID,
-                error = %error,
-                "settingsonly runtime inventory is unavailable"
+    reader: &runtimeexec::inventory::InventoryReader,
+    request_id: httpserve::VerifiedRequestId,
+) -> wire::RuntimeInventoryHandlerResult {
+    match wire::project_read_result(reader.read()) {
+        Ok(response) => Ok(wire::RuntimeInventoryResponseEnvelope::Success(response)),
+        Err(failure) => {
+            let error = failure.core_error();
+            httpserve::error::log_contract_core_error(
+                wire::CONTRACT_ID,
+                &error,
+                request_id.as_str(),
+                failure.diagnostic_stage(),
             );
-            return httpserve::error::internal_error(request_id);
-        }
-    };
-    project_inventory_response(&snapshot, request_id)
-}
-
-fn project_inventory_response(
-    snapshot: &model::RuntimeInventorySnapshot,
-    request_id: &str,
-) -> axum::response::Response {
-    match response_from_snapshot(snapshot) {
-        Ok(response) => axum::Json(response).into_response(),
-        Err(error) => {
-            tracing::error!(
-                contract_id = wire::CONTRACT_ID,
-                error = %error,
-                "settingsonly runtime inventory projection failed"
-            );
-            httpserve::error::internal_error(request_id)
+            Ok(wire::RuntimeInventoryResponseEnvelope::Error(
+                failure.into_response_error(request_id.into_wire()),
+            ))
         }
     }
-}
-
-fn response_from_snapshot(
-    snapshot: &model::RuntimeInventorySnapshot,
-) -> anyhow::Result<wire::RuntimeInventoryResponse> {
-    Ok(wire::RuntimeInventoryResponse {
-        data: wire::RuntimeInventoryData {
-            activated_workflows: snapshot
-                .activated_workflows()
-                .iter()
-                .map(activated_workflow_to_wire)
-                .collect::<anyhow::Result<_>>()?,
-            schema_version: i64::from(snapshot.schema_version()),
-            assembly_fingerprint: snapshot
-                .assembly_fingerprint()
-                .parse()
-                .context("convert assembly fingerprint")?,
-            build_metadata: snapshot
-                .build_metadata()
-                .map(|metadata| {
-                    Ok::<_, anyhow::Error>(wire::RuntimeBuildMetadata {
-                        image_digest: metadata
-                            .image_digest()
-                            .parse()
-                            .context("convert declared image digest")?,
-                        source_revision: metadata
-                            .source_revision()
-                            .parse()
-                            .context("convert build source revision")?,
-                    })
-                })
-                .transpose()?,
-            runtime_plan_fingerprint: snapshot
-                .runtime_plan_fingerprint()
-                .parse()
-                .context("convert RuntimePlan fingerprint")?,
-            domains: snapshot
-                .domains()
-                .iter()
-                .map(|domain| domain.as_str().parse().context("convert runtime domain"))
-                .collect::<anyhow::Result<_>>()?,
-            listeners: snapshot
-                .listeners()
-                .iter()
-                .map(listener_to_wire)
-                .collect::<anyhow::Result<_>>()?,
-            provider_posture: snapshot
-                .provider_posture()
-                .iter()
-                .map(provider_to_wire)
-                .collect::<anyhow::Result<_>>()?,
-            placements: snapshot
-                .placements()
-                .iter()
-                .map(placement_to_wire)
-                .collect::<anyhow::Result<_>>()?,
-        },
-    })
-}
-
-fn activated_workflow_to_wire(
-    workflow: &model::ActivatedWorkflowObservation,
-) -> anyhow::Result<wire::RuntimeActivatedWorkflow> {
-    match workflow.activation() {
-        model::InventoryWorkflowActivation::Projection(activation) => Ok(
-            wire::RuntimeActivatedWorkflow::Projection(wire::RuntimeActivatedProjection {
-                activation: match activation {
-                    model::InventoryProjectionActivation::CaptureOnly => {
-                        wire::RuntimeActivatedProjectionActivation::CaptureOnly
-                    }
-                    model::InventoryProjectionActivation::Shadow => {
-                        wire::RuntimeActivatedProjectionActivation::Shadow
-                    }
-                    model::InventoryProjectionActivation::Active => {
-                        wire::RuntimeActivatedProjectionActivation::Active
-                    }
-                },
-                definition_schema_digest: workflow
-                    .definition_schema_digest()
-                    .parse()
-                    .context("convert workflow definition schema digest")?,
-                definition_version: workflow
-                    .definition_version()
-                    .parse()
-                    .context("convert workflow definition version")?,
-                id: workflow.id().parse().context("convert workflow id")?,
-                mode: wire::RuntimeActivatedProjectionMode::Projection,
-            }),
-        ),
-        model::InventoryWorkflowActivation::Saga(model::InventorySagaActivation::Active) => Ok(
-            wire::RuntimeActivatedWorkflow::Saga(wire::RuntimeActivatedSaga {
-                activation: wire::RuntimeActivatedSagaActivation::Active,
-                definition_schema_digest: workflow
-                    .definition_schema_digest()
-                    .parse()
-                    .context("convert workflow definition schema digest")?,
-                definition_version: workflow
-                    .definition_version()
-                    .parse()
-                    .context("convert workflow definition version")?,
-                id: workflow.id().parse().context("convert workflow id")?,
-                mode: wire::RuntimeActivatedSagaMode::Saga,
-            }),
-        ),
-    }
-}
-
-fn listener_to_wire(
-    listener: &model::BoundListenerObservation,
-) -> anyhow::Result<wire::RuntimeListener> {
-    Ok(wire::RuntimeListener {
-        id: listener.id().parse().context("convert listener id")?,
-        kind: listener
-            .kind()
-            .as_str()
-            .parse()
-            .context("convert listener kind")?,
-        auth_scheme: match listener.auth() {
-            assembly_schema::ListenerAuth::NoAuth => wire::RuntimeAuthScheme::NoAuth,
-            assembly_schema::ListenerAuth::RssAccessToken => {
-                wire::RuntimeAuthScheme::RssAccessToken
-            }
-            assembly_schema::ListenerAuth::FederatedAccessToken => {
-                wire::RuntimeAuthScheme::FederatedAccessToken
-            }
-            assembly_schema::ListenerAuth::Mtls => wire::RuntimeAuthScheme::Mtls,
-            assembly_schema::ListenerAuth::ServiceToken => wire::RuntimeAuthScheme::ServiceToken,
-        },
-        endpoint: endpoint_to_wire(listener.endpoint())?,
-    })
-}
-
-fn endpoint_to_wire(
-    endpoint: &model::InventoryEndpoint,
-) -> anyhow::Result<wire::RuntimeListenerEndpoint> {
-    endpoint_parts_to_wire(endpoint.scheme(), endpoint.host(), endpoint.port())
-}
-
-fn placement_endpoint_to_wire(
-    endpoint: &model::PlacementEndpoint,
-) -> anyhow::Result<wire::RuntimeListenerEndpoint> {
-    endpoint_parts_to_wire(endpoint.scheme(), endpoint.host(), endpoint.port())
-}
-
-fn endpoint_parts_to_wire(
-    endpoint_scheme: model::InventoryEndpointScheme,
-    host: &str,
-    port: u16,
-) -> anyhow::Result<wire::RuntimeListenerEndpoint> {
-    let scheme = match endpoint_scheme {
-        model::InventoryEndpointScheme::Http => wire::RuntimeListenerEndpointScheme::Http,
-        model::InventoryEndpointScheme::Https => wire::RuntimeListenerEndpointScheme::Https,
-    };
-    Ok(wire::RuntimeListenerEndpoint {
-        scheme,
-        host: host.parse().context("convert listener host")?,
-        port: NonZeroU64::new(u64::from(port)).context("convert listener port")?,
-    })
-}
-
-fn provider_to_wire(
-    provider: &model::ProviderPosture,
-) -> anyhow::Result<wire::RuntimeProviderPosture> {
-    let state = match provider.state() {
-        model::InventoryProviderState::Ready => wire::RuntimeProviderPostureState::Ready,
-        model::InventoryProviderState::Degraded => wire::RuntimeProviderPostureState::Degraded,
-        model::InventoryProviderState::Unavailable => {
-            wire::RuntimeProviderPostureState::Unavailable
-        }
-    };
-    Ok(wire::RuntimeProviderPosture {
-        id: provider.id().parse().context("convert provider id")?,
-        state,
-    })
-}
-
-fn placement_to_wire(
-    placement: &model::PlacementObservation,
-) -> anyhow::Result<wire::RuntimePlacement> {
-    let mode = match placement.mode() {
-        model::InventoryPlacementMode::Local => wire::RuntimePlacementMode::Local,
-        model::InventoryPlacementMode::Remote => wire::RuntimePlacementMode::Remote,
-    };
-    let readiness = match placement.readiness() {
-        model::InventoryPlacementReadiness::Ready => wire::RuntimePlacementReadiness::Ready,
-        model::InventoryPlacementReadiness::MtlsSourceUnavailable => {
-            wire::RuntimePlacementReadiness::MtlsSourceUnavailable
-        }
-    };
-    Ok(wire::RuntimePlacement {
-        domain: placement
-            .domain()
-            .as_str()
-            .parse()
-            .context("convert placement domain")?,
-        workload: placement
-            .workload()
-            .parse()
-            .context("convert placement workload")?,
-        mode,
-        endpoint: placement
-            .endpoint()
-            .map(placement_endpoint_to_wire)
-            .transpose()?,
-        spiffe_identity: placement
-            .spiffe_identity()
-            .map(str::parse)
-            .transpose()
-            .context("convert placement SPIFFE identity")?,
-        readiness,
-    })
 }
 
 #[cfg(feature = "test-support")]
@@ -436,7 +203,10 @@ pub mod test_support {
                 } else {
                     Vec::new()
                 };
-                model::ProviderProbeBinding::new(provider.role().as_str(), probe_names)
+                model::ProviderProbeBinding::from_probe_receipt(
+                    provider.role().as_str(),
+                    probe_names,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         let seed = plan.into_inventory_seed_fixture(bindings)?;
@@ -492,6 +262,7 @@ mod tests {
     use std::time::SystemTime;
 
     use super::*;
+    use anyhow::Context as _;
 
     struct TestAuditSink {
         fail: bool,
@@ -527,11 +298,16 @@ mod tests {
         assert_eq!(wire::PATH, "/api/v1/runtime/inventory");
     }
 
-    fn inventory_reader(publish: bool) -> anyhow::Result<model::InventoryReader> {
+    fn inventory_reader(publish: bool) -> anyhow::Result<runtimeexec::inventory::InventoryReader> {
         let plan = crate::plan::SettingsOnlyPlan::bundled()?;
         let bindings = crate::providers_gen::PROVIDER_CATALOG
             .iter()
-            .map(|provider| model::ProviderProbeBinding::new(provider.role().as_str(), Vec::new()))
+            .map(|provider| {
+                model::ProviderProbeBinding::from_probe_receipt(
+                    provider.role().as_str(),
+                    Vec::new(),
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let seed = plan.into_inventory_seed_fixture(bindings)?;
         let reporter = Arc::new(bootstrap::Registry::new().take_health_reporter());
@@ -565,13 +341,20 @@ mod tests {
         Ok(reader)
     }
 
-    fn published_inventory_reader() -> anyhow::Result<model::InventoryReader> {
+    fn published_inventory_reader() -> anyhow::Result<runtimeexec::inventory::InventoryReader> {
         inventory_reader(true)
     }
 
     #[tokio::test]
     async fn unpublished_inventory_returns_retryable_provider_unavailable() -> anyhow::Result<()> {
-        let response = inventory_response(&inventory_reader(false)?, "inventory-unpublished");
+        let response = inventory_response(
+            &inventory_reader(false)?,
+            httpserve::VerifiedRequestId::for_test("inventory-unpublished"),
+        );
+        let Ok(response) = response else {
+            anyhow::bail!("inventory handler returned a framework failure");
+        };
+        let response = axum::response::IntoResponse::into_response(response);
         assert_eq!(
             response.status(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE
@@ -586,7 +369,7 @@ mod tests {
     }
 
     fn published_inventory_routes() -> anyhow::Result<(
-        model::InventoryReader,
+        runtimeexec::inventory::InventoryReader,
         Vec<(primitives::ListenerKind, httpserve::UnfinalizedRoutes)>,
     )> {
         let reader = published_inventory_reader()?;
@@ -693,7 +476,7 @@ mod tests {
     #[test]
     fn framework_route_and_generated_dto_mapping_are_exact() -> anyhow::Result<()> {
         let (reader, _) = published_inventory_routes()?;
-        let response = response_from_snapshot(&reader.read()?)?;
+        let response = wire::RuntimeInventoryResponse::try_from(reader.read()?)?;
         assert_eq!(response.data.schema_version, 1);
         assert_eq!(response.data.activated_workflows.len(), 1);
         assert_eq!(response.data.domains, [wire::RuntimeDomain::Settings]);

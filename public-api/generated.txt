@@ -11310,7 +11310,8 @@ impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::Local
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::LocalOnlyConformanceMarker
 pub enum generated::http::runtime_v1::inventory::RouteMarker
-impl vocab::http::OpenHttpResponseMarker for generated::http::runtime_v1::inventory::RouteMarker
+impl vocab::http::DeclaredHttpResponseMarker for generated::http::runtime_v1::inventory::RouteMarker
+pub type generated::http::runtime_v1::inventory::RouteMarker::HandlerOutput = core::result::Result<generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope, generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure>
 impl core::marker::Freeze for generated::http::runtime_v1::inventory::RouteMarker
 impl core::marker::Send for generated::http::runtime_v1::inventory::RouteMarker
 impl core::marker::Sync for generated::http::runtime_v1::inventory::RouteMarker
@@ -11602,6 +11603,244 @@ impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeDoma
 impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeDomain
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeDomain
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeDomain
+pub enum generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::ErrCoreInternal
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::eq(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub enum generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::InternalError
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::eq(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub enum generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::ObservationInvariant(assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind)
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::Projection(generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage)
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::ProviderUnavailable
+impl generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::core_error(self) -> vocab::error::CoreError
+pub const fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::diagnostic_stage(self) -> core::option::Option<&'static str>
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::into_response_error(self, requestidmint::WireRequestId) -> generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::eq(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure) -> bool
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure
+pub enum generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ActivatedWorkflowId
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::AssemblyFingerprint
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::BuildImageDigest
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::BuildSourceRevision
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ListenerEndpointHost
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ListenerEndpointPort
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ListenerId
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::PlacementEndpointHost
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::PlacementEndpointPort
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::PlacementSpiffeIdentity
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::PlacementWorkload
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::ProviderId
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::RuntimePlanFingerprint
+impl generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+pub const fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::diagnostic_stage(self) -> &'static str
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::eq(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage) -> bool
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+pub enum generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::ErrCoreProviderUnavailable
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::eq(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub enum generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::ProviderUnavailable
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::cmp::Ord for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::cmp(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage) -> core::cmp::Ordering
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::eq(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage) -> bool
+impl core::cmp::PartialOrd for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::partial_cmp(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage) -> core::option::Option<core::cmp::Ordering>
+impl core::convert::TryFrom<&alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::try_from(&alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<&str> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::try_from(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::convert::TryFrom<alloc::string::String> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::Error = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::try_from(alloc::string::String) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::str::traits::FromStr for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::Err = generated::http::runtime_v1::inventory::error::ConversionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::from_str(&str) -> core::result::Result<Self, generated::http::runtime_v1::inventory::error::ConversionError>
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub enum generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
+pub generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope::Error(generated::http::runtime_v1::inventory::RuntimeInventoryResponseError)
+pub generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope::Success(generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess)
+impl axum_core::response::into_response::IntoResponse for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope
 pub enum generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme
 pub generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::Http
 pub generated::http::runtime_v1::inventory::RuntimeListenerEndpointScheme::Https
@@ -11780,6 +12019,7 @@ pub enum generated::http::runtime_v1::inventory::RuntimeProviderPostureState
 pub generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Degraded
 pub generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Ready
 pub generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Unavailable
+pub generated::http::runtime_v1::inventory::RuntimeProviderPostureState::Unobserved
 impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
 pub fn generated::http::runtime_v1::inventory::RuntimeProviderPostureState::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeProviderPostureState
 impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeProviderPostureState
@@ -12142,6 +12382,146 @@ impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInve
 impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryData
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryData
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryData
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+impl generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure::internal(requestidmint::WireRequestId) -> Self
+impl axum_core::response::into_response::IntoResponse for generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+pub generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::code: generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorCode
+pub generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::message: generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorMessage
+pub generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::request_id: alloc::string::String
+pub generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::retryable: bool
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::error: generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerError
+impl axum_core::response::into_response::IntoResponse for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::into_response(self) -> axum_core::response::Response
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::http::HttpResponseBinding for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::SCHEMA: &'static str
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::STATUS: u16
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess(_)
+impl axum_core::response::into_response::IntoResponse for generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+pub const fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError::stage(self) -> generated::http::runtime_v1::inventory::RuntimeInventoryProjectionStage
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::cmp::Eq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::cmp::PartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError::eq(&self, &generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError) -> bool
+impl core::error::Error for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::marker::StructuralPartialEq for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::code: generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorCode
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::details: alloc::vec::Vec<std::collections::hash::map::HashMap<alloc::string::String, alloc::string::String>>
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::message: generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableErrorMessage
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::request_id: alloc::string::String
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::retryable: bool
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::error: generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableError
+impl axum_core::response::into_response::IntoResponse for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::into_response(self) -> axum_core::response::Response
+impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::http::HttpResponseBinding for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::SCHEMA: &'static str
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::STATUS: u16
+impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
+impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
+impl<'de> serde_core::de::Deserialize<'de> for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::deserialize<__D>(__D) -> core::result::Result<Self, <__D as serde_core::de::Deserializer>::Error> where __D: serde_core::de::Deserializer<'de>
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
 pub struct generated::http::runtime_v1::inventory::RuntimeInventoryRequest
 impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
 pub fn generated::http::runtime_v1::inventory::RuntimeInventoryRequest::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryRequest
@@ -12162,12 +12542,21 @@ impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInve
 impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryRequest
-pub struct generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+#[non_exhaustive] pub struct generated::http::runtime_v1::inventory::RuntimeInventoryResponse
 pub generated::http::runtime_v1::inventory::RuntimeInventoryResponse::data: generated::http::runtime_v1::inventory::RuntimeInventoryData
+impl axum_core::response::into_response::IntoResponse for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::into_response(self) -> axum_core::response::Response
 impl core::clone::Clone for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
 pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::clone(&self) -> generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+impl core::convert::TryFrom<assembly_schema::runtime_inventory::RuntimeInventoryObservation> for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryResponse::Error = generated::http::runtime_v1::inventory::RuntimeInventoryProjectionError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::try_from(assembly_schema::runtime_inventory::RuntimeInventoryObservation) -> core::result::Result<Self, Self::Error>
 impl core::fmt::Debug for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
 pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl generated::http::HttpResponseBinding for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryResponse::SCHEMA: &'static str
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryResponse::STATUS: u16
 impl secure::redaction::Redact for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
 pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponse::redact_scoped(&self, secure::redaction::RedactScope) -> alloc::string::String
 impl serde_core::ser::Serialize for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
@@ -12181,6 +12570,19 @@ impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInve
 impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
 impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub struct generated::http::runtime_v1::inventory::RuntimeInventoryResponseError(_)
+impl generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponseError::status_500(requestidmint::WireRequestId) -> Self
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponseError::status_503(requestidmint::WireRequestId) -> Self
+impl axum_core::response::into_response::IntoResponse for generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+pub fn generated::http::runtime_v1::inventory::RuntimeInventoryResponseError::into_response(self) -> axum_core::response::Response
+impl core::marker::Freeze for generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+impl core::marker::Send for generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+impl core::marker::Sync for generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+impl core::marker::Unpin for generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+impl core::marker::UnsafeUnpin for generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
+impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::RuntimeInventoryResponseError
 pub struct generated::http::runtime_v1::inventory::RuntimeListener
 pub generated::http::runtime_v1::inventory::RuntimeListener::auth_scheme: generated::http::runtime_v1::inventory::RuntimeAuthScheme
 pub generated::http::runtime_v1::inventory::RuntimeListener::endpoint: generated::http::runtime_v1::inventory::RuntimeListenerEndpoint
@@ -12545,8 +12947,11 @@ pub const generated::http::runtime_v1::inventory::EFFECT_PROFILE: vocab::http::H
 pub const generated::http::runtime_v1::inventory::PATH: &str
 pub const generated::http::runtime_v1::inventory::PROJECTION_FIELDS: &[generated::http::HttpProjectionFieldSpec]
 pub const generated::http::runtime_v1::inventory::QUERY_PARAMETERS: &[vocab::http::HttpQueryParameterSpec]
+pub const generated::http::runtime_v1::inventory::RESPONSES: &[generated::http::HttpResponseSpec]
 pub const generated::http::runtime_v1::inventory::ROUTE: vocab::http::HttpRouteBinding<generated::http::runtime_v1::inventory::RouteMarker, vocab::http::LocalOnly>
 pub const generated::http::runtime_v1::inventory::SPEC: generated::http::HttpSpec
+pub fn generated::http::runtime_v1::inventory::project_read_result(core::result::Result<assembly_schema::runtime_inventory::RuntimeInventoryObservation, assembly_schema::runtime_inventory::RuntimeInventoryReadFailure>) -> core::result::Result<generated::http::runtime_v1::inventory::RuntimeInventoryProjectedSuccess, generated::http::runtime_v1::inventory::RuntimeInventoryProjectionFailure>
+pub type generated::http::runtime_v1::inventory::RuntimeInventoryHandlerResult = core::result::Result<generated::http::runtime_v1::inventory::RuntimeInventoryResponseEnvelope, generated::http::runtime_v1::inventory::RuntimeInventoryFrameworkFailure>
 pub mod generated::http::settings_v1
 pub mod generated::http::settings_v1::error
 pub struct generated::http::settings_v1::error::ConversionError(_)
@@ -13304,6 +13709,18 @@ impl generated::http::HttpResponseBinding for generated::http::identity_v2::devi
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::SCHEMA: &'static str
 pub const generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponse::STATUS: u16
+impl generated::http::HttpResponseBinding for generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::SCHEMA: &'static str
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryInternalServerErrorResponse::STATUS: u16
+impl generated::http::HttpResponseBinding for generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::SCHEMA: &'static str
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryProviderUnavailableResponse::STATUS: u16
+impl generated::http::HttpResponseBinding for generated::http::runtime_v1::inventory::RuntimeInventoryResponse
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryResponse::CONTRACT: vocab::contract::binding::ContractBinding
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryResponse::SCHEMA: &'static str
+pub const generated::http::runtime_v1::inventory::RuntimeInventoryResponse::STATUS: u16
 pub mod generated::projection
 pub mod generated::projection::audit_v2
 pub const generated::projection::audit_v2::CONTRACT: vocab::contract::binding::ContractBinding

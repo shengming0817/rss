@@ -118,7 +118,7 @@
       "required": ["id", "state"],
       "properties": {
         "id": { "type": "string", "minLength": 1 },
-        "state": { "type": "string", "enum": ["ready", "degraded", "unavailable"] }
+        "state": { "type": "string", "enum": ["unobserved", "ready", "degraded", "unavailable"] }
       },
       "additionalProperties": false
     },

@@ -19,6 +19,9 @@ members = [
   "crates/authmint",
   "crates/sagaauthmint",
   "crates/requestidmint",
+  # Runtime inventory live-evidence mint capability; only assembly-schema declares the receipt
+  # signature and runtimeexec holds the mint token.
+  "crates/runtimeinventorymint",
   # contract authoring/provenance schema；仅依赖更低位 vocab（typed StepName/DomainName）+ 外部 crate。
   "crates/assembly-schema",
   # 引擎 / 原语（依赖基础）

@@ -950,13 +950,16 @@ impl ProviderBuild {
             .probe_bindings
             .iter()
             .map(|(role, probes)| {
-                runtimeexec::inventory::ProviderProbeBinding::new(role.as_str(), probes.clone())
-                    .map_err(|_| ProviderBuildError::PlanCatalogDrift {
-                        detail: format!(
-                            "provider role '{}' produced an invalid probe binding",
-                            role.as_str()
-                        ),
-                    })
+                runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                    role.as_str(),
+                    probes.clone(),
+                )
+                .map_err(|_| ProviderBuildError::PlanCatalogDrift {
+                    detail: format!(
+                        "provider role '{}' produced an invalid probe binding",
+                        role.as_str()
+                    ),
+                })
             })
             .collect::<Result<Vec<_>, _>>()
         {

@@ -153,11 +153,20 @@ fn assert_allow(
             .context("provider plans")?
             .len()
     );
-    assert!(
-        data.provider_posture
-            .iter()
-            .all(|provider| provider.state == wire::RuntimeProviderPostureState::Ready)
+    let listener_pdp = data
+        .provider_posture
+        .iter()
+        .find(|provider| provider.id.as_str() == "listener-pdp")
+        .context("listener-pdp provider posture")?;
+    assert_eq!(
+        listener_pdp.state,
+        wire::RuntimeProviderPostureState::Ready,
+        "{name} healthy listener-pdp receipt must be ready"
     );
+    assert!(data.provider_posture.iter().all(|provider| {
+        provider.id.as_str() == "listener-pdp"
+            || provider.state == wire::RuntimeProviderPostureState::Unobserved
+    }));
     assert_eq!(
         data.placements.len(),
         expected_runtime["placementPlans"]
@@ -253,7 +262,7 @@ fn assert_provider_posture(
     assert!(
         response.data.provider_posture.iter().all(|provider| {
             provider.id.as_str() == "listener-pdp"
-                || provider.state == wire::RuntimeProviderPostureState::Ready
+                || provider.state == wire::RuntimeProviderPostureState::Unobserved
         }),
         "{name} leaked listener-pdp readiness into another provider posture"
     );

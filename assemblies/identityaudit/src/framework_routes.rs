@@ -1,17 +1,7 @@
 //! Assembly-local serving adapter for framework-owned runtime inventory.
 
-use std::num::NonZeroU64;
-
-use anyhow::Context as _;
-use assembly_schema::{AssemblyDomain, AssemblyListenerKind, ListenerAuth};
-use axum::Json;
-use axum::extract::State;
-use axum::response::{IntoResponse as _, Response};
+use axum::extract::{Extension, State};
 use generated::http::runtime_v1::inventory as wire;
-use runtimeexec::inventory::{
-    InventoryEndpoint, InventoryEndpointScheme, InventoryPlacementMode,
-    InventoryPlacementReadiness, InventoryProviderState, RuntimeInventorySnapshot,
-};
 
 const ROUTE_PREFIX: &str = "/api/v1/runtime";
 
@@ -38,7 +28,7 @@ impl ::bootstrap::FrameworkRoutes for IdentityAuditFrameworkRoutes {
     ) -> Result<(), ::bootstrap::KernelError> {
         let state = IdentityAuditFrameworkRoutes::new(self.inventory.clone());
         registry.route_group::<::httpserve::Admin>(ROUTE_PREFIX, move |routes| {
-            let endpoint = ::httpserve::GeneratedEndpoint::new(
+            let endpoint = ::httpserve::GeneratedEndpoint::new_declared(
                 ::generated::http::runtime_v1::inventory::ROUTE,
                 inventory_handler,
             )?
@@ -51,252 +41,28 @@ impl ::bootstrap::FrameworkRoutes for IdentityAuditFrameworkRoutes {
 async fn inventory_handler(
     _: ::httpserve::ContractMarker<::generated::http::runtime_v1::inventory::RouteMarker>,
     State(state): State<IdentityAuditFrameworkRoutes>,
-    request: axum::extract::Request,
-) -> Response {
-    let request_id = httpserve::request_id_str(request.extensions())
-        .unwrap_or("identityaudit-runtime-inventory");
+    Extension(request_id): Extension<httpserve::VerifiedRequestId>,
+) -> wire::RuntimeInventoryHandlerResult {
     inventory_http_response(&state.inventory, request_id)
 }
 
-#[allow(
-    clippy::cognitive_complexity,
-    reason = "closed inventory error mapping keeps each typed failure at the HTTP boundary"
-)]
 fn inventory_http_response(
     reader: &runtimeexec::inventory::InventoryReader,
-    request_id: &str,
-) -> Response {
-    match reader.read() {
-        Ok(snapshot) => match inventory_response(&snapshot) {
-            Ok(response) => Json(response).into_response(),
-            Err(error) => {
-                tracing::error!(
-                    contract_id = wire::CONTRACT_ID,
-                    error = %error,
-                    "identityaudit runtime inventory projection failed"
-                );
-                httpserve::error::internal_error(request_id)
-            }
-        },
-        Err(runtimeexec::inventory::InventoryError::Unavailable) => {
-            httpserve::error::provider_unavailable(request_id)
-        }
-        Err(error) => {
-            tracing::error!(
-                contract_id = wire::CONTRACT_ID,
-                error = %error,
-                "identityaudit runtime inventory is unavailable"
+    request_id: httpserve::VerifiedRequestId,
+) -> wire::RuntimeInventoryHandlerResult {
+    match wire::project_read_result(reader.read()) {
+        Ok(response) => Ok(wire::RuntimeInventoryResponseEnvelope::Success(response)),
+        Err(failure) => {
+            let error = failure.core_error();
+            httpserve::error::log_contract_core_error(
+                wire::CONTRACT_ID,
+                &error,
+                request_id.as_str(),
+                failure.diagnostic_stage(),
             );
-            httpserve::error::internal_error(request_id)
-        }
-    }
-}
-
-fn inventory_response(
-    snapshot: &RuntimeInventorySnapshot,
-) -> anyhow::Result<wire::RuntimeInventoryResponse> {
-    Ok(wire::RuntimeInventoryResponse {
-        data: wire::RuntimeInventoryData {
-            activated_workflows: snapshot
-                .activated_workflows()
-                .iter()
-                .map(activated_workflow)
-                .collect::<anyhow::Result<_>>()?,
-            assembly_fingerprint: parse(snapshot.assembly_fingerprint(), "assembly fingerprint")?,
-            build_metadata: snapshot
-                .build_metadata()
-                .map(|metadata| {
-                    Ok::<_, anyhow::Error>(wire::RuntimeBuildMetadata {
-                        image_digest: parse(metadata.image_digest(), "declared image digest")?,
-                        source_revision: parse(
-                            metadata.source_revision(),
-                            "build source revision",
-                        )?,
-                    })
-                })
-                .transpose()?,
-            domains: snapshot.domains().iter().copied().map(domain).collect(),
-            listeners: snapshot
-                .listeners()
-                .iter()
-                .map(|listener| {
-                    Ok(wire::RuntimeListener {
-                        auth_scheme: auth(listener.auth()),
-                        endpoint: endpoint(listener.endpoint())?,
-                        id: parse(listener.id(), "listener id")?,
-                        kind: listener_kind(listener.kind()),
-                    })
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?,
-            placements: snapshot
-                .placements()
-                .iter()
-                .map(|placement| {
-                    Ok(wire::RuntimePlacement {
-                        domain: domain(placement.domain()),
-                        endpoint: placement.endpoint().map(placement_endpoint).transpose()?,
-                        mode: placement_mode(placement.mode()),
-                        readiness: placement_readiness(placement.readiness()),
-                        spiffe_identity: placement
-                            .spiffe_identity()
-                            .map(|identity| parse(identity, "placement SPIFFE identity"))
-                            .transpose()?,
-                        workload: parse(placement.workload(), "placement workload")?,
-                    })
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?,
-            provider_posture: snapshot
-                .provider_posture()
-                .iter()
-                .map(|provider| {
-                    Ok(wire::RuntimeProviderPosture {
-                        id: parse(provider.id(), "provider id")?,
-                        state: provider_state(provider.state()),
-                    })
-                })
-                .collect::<anyhow::Result<Vec<_>>>()?,
-            runtime_plan_fingerprint: parse(
-                snapshot.runtime_plan_fingerprint(),
-                "runtime plan fingerprint",
-            )?,
-            schema_version: i64::from(snapshot.schema_version()),
-        },
-    })
-}
-
-fn activated_workflow(
-    workflow: &runtimeexec::inventory::ActivatedWorkflowObservation,
-) -> anyhow::Result<wire::RuntimeActivatedWorkflow> {
-    match workflow.activation() {
-        runtimeexec::inventory::InventoryWorkflowActivation::Projection(activation) => Ok(
-            wire::RuntimeActivatedWorkflow::Projection(wire::RuntimeActivatedProjection {
-                activation: match activation {
-                    runtimeexec::inventory::InventoryProjectionActivation::CaptureOnly => {
-                        wire::RuntimeActivatedProjectionActivation::CaptureOnly
-                    }
-                    runtimeexec::inventory::InventoryProjectionActivation::Shadow => {
-                        wire::RuntimeActivatedProjectionActivation::Shadow
-                    }
-                    runtimeexec::inventory::InventoryProjectionActivation::Active => {
-                        wire::RuntimeActivatedProjectionActivation::Active
-                    }
-                },
-                definition_schema_digest: parse(
-                    workflow.definition_schema_digest(),
-                    "workflow definition schema digest",
-                )?,
-                definition_version: parse(
-                    workflow.definition_version(),
-                    "workflow definition version",
-                )?,
-                id: parse(workflow.id(), "workflow id")?,
-                mode: wire::RuntimeActivatedProjectionMode::Projection,
-            }),
-        ),
-        runtimeexec::inventory::InventoryWorkflowActivation::Saga(
-            runtimeexec::inventory::InventorySagaActivation::Active,
-        ) => Ok(wire::RuntimeActivatedWorkflow::Saga(
-            wire::RuntimeActivatedSaga {
-                activation: wire::RuntimeActivatedSagaActivation::Active,
-                definition_schema_digest: parse(
-                    workflow.definition_schema_digest(),
-                    "workflow definition schema digest",
-                )?,
-                definition_version: parse(
-                    workflow.definition_version(),
-                    "workflow definition version",
-                )?,
-                id: parse(workflow.id(), "workflow id")?,
-                mode: wire::RuntimeActivatedSagaMode::Saga,
-            },
-        )),
-    }
-}
-
-fn parse<T>(value: &str, field: &'static str) -> anyhow::Result<T>
-where
-    T: std::str::FromStr,
-    T::Err: std::error::Error + Send + Sync + 'static,
-{
-    value.parse().with_context(|| format!("map {field}"))
-}
-
-fn endpoint(value: &InventoryEndpoint) -> anyhow::Result<wire::RuntimeListenerEndpoint> {
-    endpoint_parts(value.scheme(), value.host(), value.port())
-}
-
-fn placement_endpoint(
-    value: &runtimeexec::inventory::PlacementEndpoint,
-) -> anyhow::Result<wire::RuntimeListenerEndpoint> {
-    endpoint_parts(value.scheme(), value.host(), value.port())
-}
-
-fn endpoint_parts(
-    scheme: InventoryEndpointScheme,
-    host: &str,
-    port: u16,
-) -> anyhow::Result<wire::RuntimeListenerEndpoint> {
-    Ok(wire::RuntimeListenerEndpoint {
-        host: parse(host, "listener endpoint host")?,
-        port: NonZeroU64::new(u64::from(port)).context("listener endpoint port is zero")?,
-        scheme: match scheme {
-            InventoryEndpointScheme::Http => wire::RuntimeListenerEndpointScheme::Http,
-            InventoryEndpointScheme::Https => wire::RuntimeListenerEndpointScheme::Https,
-        },
-    })
-}
-
-const fn domain(value: AssemblyDomain) -> wire::RuntimeDomain {
-    match value {
-        AssemblyDomain::Identity => wire::RuntimeDomain::Identity,
-        AssemblyDomain::Settings => wire::RuntimeDomain::Settings,
-        AssemblyDomain::Audit => wire::RuntimeDomain::Audit,
-        AssemblyDomain::Contractreg => wire::RuntimeDomain::Contractreg,
-        AssemblyDomain::Syshealth => wire::RuntimeDomain::Syshealth,
-    }
-}
-
-const fn listener_kind(value: AssemblyListenerKind) -> wire::RuntimeListenerKind {
-    match value {
-        AssemblyListenerKind::Primary => wire::RuntimeListenerKind::Primary,
-        AssemblyListenerKind::Internal => wire::RuntimeListenerKind::Internal,
-        AssemblyListenerKind::Health => wire::RuntimeListenerKind::Health,
-        AssemblyListenerKind::Admin => wire::RuntimeListenerKind::Admin,
-    }
-}
-
-const fn auth(value: ListenerAuth) -> wire::RuntimeAuthScheme {
-    match value {
-        ListenerAuth::NoAuth => wire::RuntimeAuthScheme::NoAuth,
-        ListenerAuth::RssAccessToken => wire::RuntimeAuthScheme::RssAccessToken,
-        ListenerAuth::FederatedAccessToken => wire::RuntimeAuthScheme::FederatedAccessToken,
-        ListenerAuth::Mtls => wire::RuntimeAuthScheme::Mtls,
-        ListenerAuth::ServiceToken => wire::RuntimeAuthScheme::ServiceToken,
-    }
-}
-
-const fn provider_state(value: InventoryProviderState) -> wire::RuntimeProviderPostureState {
-    match value {
-        InventoryProviderState::Ready => wire::RuntimeProviderPostureState::Ready,
-        InventoryProviderState::Degraded => wire::RuntimeProviderPostureState::Degraded,
-        InventoryProviderState::Unavailable => wire::RuntimeProviderPostureState::Unavailable,
-    }
-}
-
-const fn placement_mode(value: InventoryPlacementMode) -> wire::RuntimePlacementMode {
-    match value {
-        InventoryPlacementMode::Local => wire::RuntimePlacementMode::Local,
-        InventoryPlacementMode::Remote => wire::RuntimePlacementMode::Remote,
-    }
-}
-
-const fn placement_readiness(
-    value: InventoryPlacementReadiness,
-) -> wire::RuntimePlacementReadiness {
-    match value {
-        InventoryPlacementReadiness::Ready => wire::RuntimePlacementReadiness::Ready,
-        InventoryPlacementReadiness::MtlsSourceUnavailable => {
-            wire::RuntimePlacementReadiness::MtlsSourceUnavailable
+            Ok(wire::RuntimeInventoryResponseEnvelope::Error(
+                failure.into_response_error(request_id.into_wire()),
+            ))
         }
     }
 }
@@ -466,7 +232,10 @@ pub mod test_support {
                 } else {
                     Vec::new()
                 };
-                model::ProviderProbeBinding::new(provider.role().as_str(), probe_names)
+                model::ProviderProbeBinding::from_probe_receipt(
+                    provider.role().as_str(),
+                    probe_names,
+                )
             })
             .collect::<Result<Vec<_>, _>>()?;
         let seed = plan.inventory_seed_fixture(bindings)?;
@@ -529,7 +298,10 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use runtimeexec::inventory::{BoundListenerObservation, ProviderProbeBinding};
+    use assembly_schema::{AssemblyListenerKind, ListenerAuth};
+    use runtimeexec::inventory::{
+        BoundListenerObservation, InventoryEndpointScheme, ProviderProbeBinding,
+    };
 
     fn inventory_channel_fixture() -> anyhow::Result<(
         runtimeexec::inventory::InventoryPublisher,
@@ -538,7 +310,9 @@ mod tests {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
         let provider_bindings = crate::providers_gen::PROVIDER_CATALOG
             .iter()
-            .map(|entry| ProviderProbeBinding::new(entry.role().as_str(), Vec::new()))
+            .map(|entry| {
+                ProviderProbeBinding::from_probe_receipt(entry.role().as_str(), Vec::new())
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let seed = plan.inventory_seed_fixture(provider_bindings)?;
         let reporter = Arc::new(bootstrap::Registry::new().take_health_reporter());
@@ -548,7 +322,14 @@ mod tests {
     #[tokio::test]
     async fn unpublished_inventory_returns_retryable_provider_unavailable() -> anyhow::Result<()> {
         let (_publisher, reader) = inventory_channel_fixture()?;
-        let response = inventory_http_response(&reader, "inventory-unpublished");
+        let response = inventory_http_response(
+            &reader,
+            httpserve::VerifiedRequestId::for_test("inventory-unpublished"),
+        );
+        let Ok(response) = response else {
+            anyhow::bail!("inventory handler returned a framework failure");
+        };
+        let response = axum::response::IntoResponse::into_response(response);
         assert_eq!(
             response.status(),
             axum::http::StatusCode::SERVICE_UNAVAILABLE
@@ -596,7 +377,7 @@ mod tests {
                 "127.0.0.1:18083".parse()?,
             ),
         ])?;
-        let response = inventory_response(&reader.read()?)?;
+        let response = wire::RuntimeInventoryResponse::try_from(reader.read()?)?;
         assert_eq!(response.data.schema_version, 1);
         assert!(response.data.activated_workflows.is_empty());
         assert_eq!(response.data.listeners.len(), 3);

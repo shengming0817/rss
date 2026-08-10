@@ -20,6 +20,7 @@ bootstrap = { path = "../bootstrap" }
 diport = { path = "../diport" }
 eventexec = { path = "../eventexec" }
 primitives = { path = "../primitives" }
+runtimeinventorymint = { path = "../runtimeinventorymint" }
 secure = { path = "../secure" }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -1,6 +1,63 @@
 use generated::http::runtime_v1::inventory::{
-    ROUTE, RuntimeInventoryRequest, RuntimeInventoryResponse,
+    ROUTE, RuntimeInventoryRequest, RuntimeInventoryResponse, project_read_result,
 };
+
+fn observation() -> Result<
+    assembly_schema::runtime_inventory::RuntimeInventoryObservation,
+    Box<dyn std::error::Error>,
+> {
+    use assembly_schema::runtime_inventory as model;
+    let digest = |byte: char| {
+        model::CanonicalSha256Digest::parse(format!("sha256:{}", byte.to_string().repeat(64)))
+    };
+    let parts = model::RuntimeInventoryParts::new(
+        model::RuntimeInventoryIdentity::for_test(digest('a')?, digest('b')?),
+        Some(model::RuntimeInventoryBuildMetadata::new(
+            "d".repeat(40),
+            digest('e')?,
+        )),
+        vec![assembly_schema::AssemblyDomain::Identity],
+        vec![
+            model::RuntimeInventoryActivatedWorkflow::new(
+                "settings.config-projection".to_owned(),
+                "v1".to_owned(),
+                digest('c')?,
+                model::RuntimeInventoryWorkflowActivation::Projection(
+                    model::RuntimeInventoryProjectionActivation::Shadow,
+                ),
+            ),
+            model::RuntimeInventoryActivatedWorkflow::new(
+                "identity.rotate-credential".to_owned(),
+                "v2".to_owned(),
+                digest('f')?,
+                model::RuntimeInventoryWorkflowActivation::SagaActive,
+            ),
+        ],
+        vec![model::RuntimeInventoryListener::new(
+            "admin".to_owned(),
+            assembly_schema::AssemblyListenerKind::Admin,
+            assembly_schema::ListenerAuth::Mtls,
+            model::RuntimeInventoryEndpoint::new(
+                model::RuntimeInventoryEndpointScheme::Http,
+                "127.0.0.1".to_owned(),
+                8080,
+            ),
+        )],
+        vec![model::RuntimeInventoryProviderPosture::new(
+            "construction-only".to_owned(),
+            model::RuntimeInventoryProviderState::Unobserved,
+        )],
+        vec![model::RuntimeInventoryPlacement::new(
+            assembly_schema::AssemblyDomain::Identity,
+            "runtime".to_owned(),
+            model::RuntimeInventoryPlacementMode::Local,
+            None,
+            None,
+            model::RuntimeInventoryPlacementReadiness::Ready,
+        )],
+    );
+    Ok(model::RuntimeInventoryObservation::for_test(parts)?)
+}
 
 fn response_schema() -> Result<serde_json::Value, serde_json::Error> {
     serde_json::from_slice(include_bytes!(
@@ -142,6 +199,24 @@ fn runtime_inventory_instances_obey_response_schema() -> Result<(), Box<dyn std:
 }
 
 #[test]
+fn runtime_inventory_accepts_unobserved_and_rejects_unknown_provider_state()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut unobserved = valid_response();
+    unobserved["data"]["providerPosture"] = serde_json::json!([
+        {"id": "construction-only", "state": "unobserved"}
+    ]);
+    serde_json::from_value::<RuntimeInventoryResponse>(unobserved.clone())?;
+    let schema = response_schema()?;
+    let validator = jsonschema::draft7::options().build(&schema)?;
+    assert!(validator.validate(&unobserved).is_ok());
+
+    unobserved["data"]["providerPosture"][0]["state"] = serde_json::json!("unknown");
+    assert!(serde_json::from_value::<RuntimeInventoryResponse>(unobserved.clone()).is_err());
+    assert!(validator.validate(&unobserved).is_err());
+    Ok(())
+}
+
+#[test]
 fn runtime_inventory_route_identity_is_exact() {
     let evidence = ROUTE.evidence();
     assert_eq!(evidence.contract_id(), "runtime.inventory");
@@ -156,4 +231,68 @@ fn runtime_inventory_route_identity_is_exact() {
         evidence.auth(),
         vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::RuntimeInventoryRead)
     );
+}
+
+#[test]
+fn runtime_inventory_projection_is_complete_and_owns_schema_version()
+-> Result<(), Box<dyn std::error::Error>> {
+    let response = RuntimeInventoryResponse::try_from(observation()?)?;
+    let value = serde_json::to_value(response)?;
+    let schema = response_schema()?;
+    let validator = jsonschema::draft7::options().build(&schema)?;
+    assert!(validator.validate(&value).is_ok());
+    assert_eq!(value["data"]["schemaVersion"], 1);
+    assert_eq!(value["data"]["providerPosture"][0]["state"], "unobserved");
+    assert_eq!(
+        value["data"]["activatedWorkflows"].as_array().map(Vec::len),
+        Some(2)
+    );
+    assert_eq!(value["data"]["listeners"][0]["endpoint"]["port"], 8080);
+    assert_eq!(value["data"]["placements"][0]["readiness"], "ready");
+    assert_eq!(
+        value["data"]["buildMetadata"]["sourceRevision"],
+        "d".repeat(40)
+    );
+    Ok(())
+}
+
+#[test]
+fn runtime_inventory_read_failures_have_one_closed_core_policy()
+-> Result<(), Box<dyn std::error::Error>> {
+    use assembly_schema::runtime_inventory::{
+        RuntimeInventoryInvariantKind, RuntimeInventoryReadFailure,
+    };
+    use generated::http::runtime_v1::inventory::{
+        RuntimeInventoryProjectionFailure, RuntimeInventoryProjectionStage,
+    };
+    let unavailable = project_read_result(Err(RuntimeInventoryReadFailure::Unavailable))
+        .err()
+        .ok_or_else(|| std::io::Error::other("unpublished inventory must fail"))?
+        .core_error();
+    assert_eq!(
+        unavailable.kind(),
+        vocab::CoreErrorKind::ProviderUnavailable
+    );
+    let invariant_failure = project_read_result(Err(RuntimeInventoryReadFailure::Invariant(
+        RuntimeInventoryInvariantKind::Listeners,
+    )))
+    .err()
+    .ok_or_else(|| std::io::Error::other("invariant failure must fail"))?;
+    assert_eq!(
+        invariant_failure.diagnostic_stage(),
+        Some("observation.listeners")
+    );
+    let invariant = invariant_failure.core_error();
+    assert_eq!(invariant.kind(), vocab::CoreErrorKind::Internal);
+    let projection =
+        RuntimeInventoryProjectionFailure::Projection(RuntimeInventoryProjectionStage::ListenerId);
+    assert_eq!(
+        projection.diagnostic_stage(),
+        Some("projection.listener.id")
+    );
+    assert_eq!(
+        projection.core_error().kind(),
+        vocab::CoreErrorKind::Internal
+    );
+    Ok(())
 }

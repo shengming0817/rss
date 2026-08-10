@@ -1147,6 +1147,550 @@ pub mod inventory {
         #[redact(sensitivity = public)]
         pub schema_version: i64,
     }
+    ///`RuntimeInventoryInternalServerError`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeInventoryInternalServerError",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "code",
+    ///    "details",
+    ///    "message",
+    ///    "requestId",
+    ///    "retryable"
+    ///  ],
+    ///  "properties": {
+    ///    "code": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ERR_CORE_INTERNAL"
+    ///      ]
+    ///    },
+    ///    "details": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "object",
+    ///        "additionalProperties": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "maxItems": 0
+    ///    },
+    ///    "message": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "internal error"
+    ///      ]
+    ///    },
+    ///    "requestId": {
+    ///      "type": "string"
+    ///    },
+    ///    "retryable": {
+    ///      "type": "boolean",
+    ///      "const": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeInventoryInternalServerError {
+        #[redact(sensitivity = public)]
+        pub code: RuntimeInventoryInternalServerErrorCode,
+        #[redact(sensitivity = public)]
+        pub details: ::std::vec::Vec<
+            ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+        >,
+        #[redact(sensitivity = public)]
+        pub message: RuntimeInventoryInternalServerErrorMessage,
+        #[serde(rename = "requestId")]
+        #[redact(sensitivity = public)]
+        pub request_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub retryable: bool,
+    }
+    ///`RuntimeInventoryInternalServerErrorCode`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ERR_CORE_INTERNAL"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeInventoryInternalServerErrorCode {
+        #[serde(rename = "ERR_CORE_INTERNAL")]
+        ErrCoreInternal,
+    }
+    impl ::std::fmt::Display for RuntimeInventoryInternalServerErrorCode {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::ErrCoreInternal => f.write_str("ERR_CORE_INTERNAL"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeInventoryInternalServerErrorCode {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ERR_CORE_INTERNAL" => Ok(Self::ErrCoreInternal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeInventoryInternalServerErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeInventoryInternalServerErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeInventoryInternalServerErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeInventoryInternalServerErrorMessage`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "internal error"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeInventoryInternalServerErrorMessage {
+        #[serde(rename = "internal error")]
+        InternalError,
+    }
+    impl ::std::fmt::Display for RuntimeInventoryInternalServerErrorMessage {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::InternalError => f.write_str("internal error"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeInventoryInternalServerErrorMessage {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "internal error" => Ok(Self::InternalError),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeInventoryInternalServerErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeInventoryInternalServerErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeInventoryInternalServerErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeInventoryInternalServerErrorResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeInventoryInternalServerErrorResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "error"
+    ///  ],
+    ///  "properties": {
+    ///    "error": {
+    ///      "title": "RuntimeInventoryInternalServerError",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "code",
+    ///        "details",
+    ///        "message",
+    ///        "requestId",
+    ///        "retryable"
+    ///      ],
+    ///      "properties": {
+    ///        "code": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "ERR_CORE_INTERNAL"
+    ///          ]
+    ///        },
+    ///        "details": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "object",
+    ///            "additionalProperties": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "maxItems": 0
+    ///        },
+    ///        "message": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "internal error"
+    ///          ]
+    ///        },
+    ///        "requestId": {
+    ///          "type": "string"
+    ///        },
+    ///        "retryable": {
+    ///          "type": "boolean",
+    ///          "const": false
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeInventoryInternalServerErrorResponse {
+        #[redact(sensitivity = public)]
+        pub error: RuntimeInventoryInternalServerError,
+    }
+    ///`RuntimeInventoryProviderUnavailableError`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeInventoryProviderUnavailableError",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "code",
+    ///    "details",
+    ///    "message",
+    ///    "requestId",
+    ///    "retryable"
+    ///  ],
+    ///  "properties": {
+    ///    "code": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "ERR_CORE_PROVIDER_UNAVAILABLE"
+    ///      ]
+    ///    },
+    ///    "details": {
+    ///      "type": "array",
+    ///      "items": {
+    ///        "type": "object",
+    ///        "additionalProperties": {
+    ///          "type": "string"
+    ///        }
+    ///      },
+    ///      "maxItems": 0
+    ///    },
+    ///    "message": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "provider unavailable"
+    ///      ]
+    ///    },
+    ///    "requestId": {
+    ///      "type": "string"
+    ///    },
+    ///    "retryable": {
+    ///      "type": "boolean",
+    ///      "const": true
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeInventoryProviderUnavailableError {
+        #[redact(sensitivity = public)]
+        pub code: RuntimeInventoryProviderUnavailableErrorCode,
+        #[redact(sensitivity = public)]
+        pub details: ::std::vec::Vec<
+            ::std::collections::HashMap<::std::string::String, ::std::string::String>,
+        >,
+        #[redact(sensitivity = public)]
+        pub message: RuntimeInventoryProviderUnavailableErrorMessage,
+        #[serde(rename = "requestId")]
+        #[redact(sensitivity = public)]
+        pub request_id: ::std::string::String,
+        #[redact(sensitivity = public)]
+        pub retryable: bool,
+    }
+    ///`RuntimeInventoryProviderUnavailableErrorCode`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "ERR_CORE_PROVIDER_UNAVAILABLE"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeInventoryProviderUnavailableErrorCode {
+        #[serde(rename = "ERR_CORE_PROVIDER_UNAVAILABLE")]
+        ErrCoreProviderUnavailable,
+    }
+    impl ::std::fmt::Display for RuntimeInventoryProviderUnavailableErrorCode {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::ErrCoreProviderUnavailable => f.write_str("ERR_CORE_PROVIDER_UNAVAILABLE"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeInventoryProviderUnavailableErrorCode {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "ERR_CORE_PROVIDER_UNAVAILABLE" => Ok(Self::ErrCoreProviderUnavailable),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeInventoryProviderUnavailableErrorCode {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeInventoryProviderUnavailableErrorCode
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeInventoryProviderUnavailableErrorCode
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeInventoryProviderUnavailableErrorMessage`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "provider unavailable"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeInventoryProviderUnavailableErrorMessage {
+        #[serde(rename = "provider unavailable")]
+        ProviderUnavailable,
+    }
+    impl ::std::fmt::Display for RuntimeInventoryProviderUnavailableErrorMessage {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::ProviderUnavailable => f.write_str("provider unavailable"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeInventoryProviderUnavailableErrorMessage {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "provider unavailable" => Ok(Self::ProviderUnavailable),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeInventoryProviderUnavailableErrorMessage {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeInventoryProviderUnavailableErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeInventoryProviderUnavailableErrorMessage
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeInventoryProviderUnavailableResponse`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeInventoryProviderUnavailableResponse",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "error"
+    ///  ],
+    ///  "properties": {
+    ///    "error": {
+    ///      "title": "RuntimeInventoryProviderUnavailableError",
+    ///      "type": "object",
+    ///      "required": [
+    ///        "code",
+    ///        "details",
+    ///        "message",
+    ///        "requestId",
+    ///        "retryable"
+    ///      ],
+    ///      "properties": {
+    ///        "code": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "ERR_CORE_PROVIDER_UNAVAILABLE"
+    ///          ]
+    ///        },
+    ///        "details": {
+    ///          "type": "array",
+    ///          "items": {
+    ///            "type": "object",
+    ///            "additionalProperties": {
+    ///              "type": "string"
+    ///            }
+    ///          },
+    ///          "maxItems": 0
+    ///        },
+    ///        "message": {
+    ///          "type": "string",
+    ///          "enum": [
+    ///            "provider unavailable"
+    ///          ]
+    ///        },
+    ///        "requestId": {
+    ///          "type": "string"
+    ///        },
+    ///        "retryable": {
+    ///          "type": "boolean",
+    ///          "const": true
+    ///        }
+    ///      },
+    ///      "additionalProperties": false
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeInventoryProviderUnavailableResponse {
+        #[redact(sensitivity = public)]
+        pub error: RuntimeInventoryProviderUnavailableError,
+    }
     ///`RuntimeInventoryRequest`
     ///
     /// <details><summary>JSON schema</summary>
@@ -1258,6 +1802,7 @@ pub mod inventory {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
+    #[non_exhaustive]
     pub struct RuntimeInventoryResponse {
         #[redact(sensitivity = public)]
         pub data: RuntimeInventoryData,
@@ -2020,6 +2565,7 @@ pub mod inventory {
     ///    "state": {
     ///      "type": "string",
     ///      "enum": [
+    ///        "unobserved",
     ///        "ready",
     ///        "degraded",
     ///        "unavailable"
@@ -2114,6 +2660,7 @@ pub mod inventory {
     ///{
     ///  "type": "string",
     ///  "enum": [
+    ///    "unobserved",
     ///    "ready",
     ///    "degraded",
     ///    "unavailable"
@@ -2134,6 +2681,8 @@ pub mod inventory {
         PartialOrd,
     )]
     pub enum RuntimeProviderPostureState {
+        #[serde(rename = "unobserved")]
+        Unobserved,
         #[serde(rename = "ready")]
         Ready,
         #[serde(rename = "degraded")]
@@ -2144,6 +2693,7 @@ pub mod inventory {
     impl ::std::fmt::Display for RuntimeProviderPostureState {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
+                Self::Unobserved => f.write_str("unobserved"),
                 Self::Ready => f.write_str("ready"),
                 Self::Degraded => f.write_str("degraded"),
                 Self::Unavailable => f.write_str("unavailable"),
@@ -2154,6 +2704,7 @@ pub mod inventory {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
+                "unobserved" => Ok(Self::Unobserved),
                 "ready" => Ok(Self::Ready),
                 "degraded" => Ok(Self::Degraded),
                 "unavailable" => Ok(Self::Unavailable),
@@ -2264,8 +2815,215 @@ pub mod inventory {
         "runtime",
         "runtime.inventory",
         "v1",
-        "sha256:2068246486fd433631e0257d18f1e20209f9db354e67b5f554fe4e8b31e429a8",
+        "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b",
     );
+
+    impl super::super::HttpResponseBinding for RuntimeInventoryResponse {
+        const CONTRACT: ::vocab::ContractBinding = CONTRACT;
+        const STATUS: u16 = 200;
+        const SCHEMA: &'static str = "response.schema.json";
+    }
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
+    }
+
+    impl super::super::HttpResponseBinding for RuntimeInventoryInternalServerErrorResponse {
+        const CONTRACT: ::vocab::ContractBinding = CONTRACT;
+        const STATUS: u16 = 500;
+        const SCHEMA: &'static str = "internal-server-error.schema.json";
+    }
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryInternalServerErrorResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
+    }
+
+    impl super::super::HttpResponseBinding for RuntimeInventoryProviderUnavailableResponse {
+        const CONTRACT: ::vocab::ContractBinding = CONTRACT;
+        const STATUS: u16 = 503;
+        const SCHEMA: &'static str = "provider-unavailable.schema.json";
+    }
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryProviderUnavailableResponse {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+                <Self as super::super::HttpResponseBinding>::STATUS,
+            )
+            .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (status, ::axum::Json(self)).into_response()
+        }
+    }
+
+    /// Declared business error responses for this contract.
+    pub struct RuntimeInventoryResponseError(RuntimeInventoryResponseErrorKind);
+
+    struct RuntimeInventoryResponseErrorStatus500 {
+        request_id: ::requestidmint::WireRequestId,
+    }
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryResponseErrorStatus500 {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+            <RuntimeInventoryInternalServerErrorResponse as super::super::HttpResponseBinding>::STATUS,
+        )
+        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (
+                status,
+                ::axum::Json(::serde_json::json!({
+                    "error": {
+                        "code": "ERR_CORE_INTERNAL",
+                        "message": "internal error",
+                        "retryable": false,
+                        "details": [],
+                        "requestId": self.request_id.as_str(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+
+    struct RuntimeInventoryResponseErrorStatus503 {
+        request_id: ::requestidmint::WireRequestId,
+    }
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryResponseErrorStatus503 {
+        fn into_response(self) -> ::axum::response::Response {
+            let status = ::axum::http::StatusCode::from_u16(
+            <RuntimeInventoryProviderUnavailableResponse as super::super::HttpResponseBinding>::STATUS,
+        )
+        .unwrap_or(::axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+            (
+                status,
+                ::axum::Json(::serde_json::json!({
+                    "error": {
+                        "code": "ERR_CORE_PROVIDER_UNAVAILABLE",
+                        "message": "provider unavailable",
+                        "retryable": true,
+                        "details": [],
+                        "requestId": self.request_id.as_str(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+
+    enum RuntimeInventoryResponseErrorKind {
+        Status500(RuntimeInventoryResponseErrorStatus500),
+        Status503(RuntimeInventoryResponseErrorStatus503),
+    }
+
+    impl RuntimeInventoryResponseError {
+        /// Construct the validator-approved fixed `500` response.
+        pub fn status_500(request_id: ::requestidmint::WireRequestId) -> Self {
+            Self(RuntimeInventoryResponseErrorKind::Status500(
+                RuntimeInventoryResponseErrorStatus500 { request_id },
+            ))
+        }
+
+        /// Construct the validator-approved fixed `503` response.
+        pub fn status_503(request_id: ::requestidmint::WireRequestId) -> Self {
+            Self(RuntimeInventoryResponseErrorKind::Status503(
+                RuntimeInventoryResponseErrorStatus503 { request_id },
+            ))
+        }
+    }
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryResponseError {
+        fn into_response(self) -> ::axum::response::Response {
+            match self.0 {
+                RuntimeInventoryResponseErrorKind::Status500(response) => response.into_response(),
+                RuntimeInventoryResponseErrorKind::Status503(response) => response.into_response(),
+            }
+        }
+    }
+
+    /// Opaque server-success carrier constructible only by the canonical inventory projection.
+    pub struct RuntimeInventoryProjectedSuccess(RuntimeInventoryResponse);
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryProjectedSuccess {
+        fn into_response(self) -> ::axum::response::Response {
+            self.0.into_response()
+        }
+    }
+
+    /// Complete declared response envelope. Outer `Err` is reserved for framework failures.
+    pub enum RuntimeInventoryResponseEnvelope {
+        Success(RuntimeInventoryProjectedSuccess),
+        Error(RuntimeInventoryResponseError),
+    }
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryResponseEnvelope {
+        fn into_response(self) -> ::axum::response::Response {
+            match self {
+                Self::Success(response) => response.into_response(),
+                Self::Error(response) => response.into_response(),
+            }
+        }
+    }
+
+    /// Closed framework failure channel. It cannot be created from arbitrary `IntoResponse` values.
+    pub struct RuntimeInventoryFrameworkFailure {
+        request_id: ::requestidmint::WireRequestId,
+    }
+
+    impl RuntimeInventoryFrameworkFailure {
+        /// Construct the fail-closed response used when framework request context is unavailable.
+        pub fn internal(request_id: ::requestidmint::WireRequestId) -> Self {
+            Self { request_id }
+        }
+    }
+
+    impl ::axum::response::IntoResponse for RuntimeInventoryFrameworkFailure {
+        fn into_response(self) -> ::axum::response::Response {
+            (
+                ::axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                ::axum::Json(::serde_json::json!({
+                    "error": {
+                        "code": "ERR_CORE_INTERNAL",
+                        "message": "internal error",
+                        "retryable": false,
+                        "details": [],
+                        "requestId": self.request_id.as_str(),
+                    }
+                })),
+            )
+                .into_response()
+        }
+    }
+
+    /// Exact handler output required by the generated route marker.
+    pub type RuntimeInventoryHandlerResult =
+        ::std::result::Result<RuntimeInventoryResponseEnvelope, RuntimeInventoryFrameworkFailure>;
+
+    /// Known HTTP responses, indexed by status in `contract.toml`.
+    pub const RESPONSES: &[super::super::HttpResponseSpec] = &[
+        super::super::HttpResponseSpec {
+            status: 200,
+            schema: "response.schema.json",
+        },
+        super::super::HttpResponseSpec {
+            status: 500,
+            schema: "internal-server-error.schema.json",
+        },
+        super::super::HttpResponseSpec {
+            status: 503,
+            schema: "provider-unavailable.schema.json",
+        },
+    ];
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/runtime/inventory";
@@ -2288,7 +3046,9 @@ pub mod inventory {
 
     /// Contract-specific route identity. Each generated HTTP contract owns a distinct marker type.
     pub enum RouteMarker {}
-    impl ::vocab::http::OpenHttpResponseMarker for RouteMarker {}
+    impl ::vocab::http::DeclaredHttpResponseMarker for RouteMarker {
+        type HandlerOutput = RuntimeInventoryHandlerResult;
+    }
 
     /// Typed route binding（metadata + contract identity 单一载体）。由 codegen 派生；勿手改。
     pub const ROUTE: ::vocab::HttpRouteBinding<RouteMarker, ::vocab::http::LocalOnly> =
@@ -2321,4 +3081,390 @@ pub mod inventory {
         projection_fields: PROJECTION_FIELDS,
         headers: &[],
     };
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// Closed, non-sensitive stages at which neutral facts can fail wire projection.
+    pub enum RuntimeInventoryProjectionStage {
+        ActivatedWorkflowDefinitionSchemaDigest,
+        ActivatedWorkflowDefinitionVersion,
+        ActivatedWorkflowId,
+        ListenerEndpointHost,
+        ListenerEndpointPort,
+        ListenerId,
+        ProviderId,
+        PlacementEndpointHost,
+        PlacementEndpointPort,
+        PlacementSpiffeIdentity,
+        PlacementWorkload,
+        AssemblyFingerprint,
+        BuildImageDigest,
+        BuildSourceRevision,
+        RuntimePlanFingerprint,
+    }
+
+    impl RuntimeInventoryProjectionStage {
+        /// Return a stable diagnostic coordinate without runtime values.
+        pub const fn diagnostic_stage(self) -> &'static str {
+            match self {
+                Self::ActivatedWorkflowDefinitionSchemaDigest => {
+                    "projection.activated_workflow.definition_schema_digest"
+                }
+                Self::ActivatedWorkflowDefinitionVersion => {
+                    "projection.activated_workflow.definition_version"
+                }
+                Self::ActivatedWorkflowId => "projection.activated_workflow.id",
+                Self::ListenerEndpointHost => "projection.listener.endpoint.host",
+                Self::ListenerEndpointPort => "projection.listener.endpoint.port",
+                Self::ListenerId => "projection.listener.id",
+                Self::ProviderId => "projection.provider.id",
+                Self::PlacementEndpointHost => "projection.placement.endpoint.host",
+                Self::PlacementEndpointPort => "projection.placement.endpoint.port",
+                Self::PlacementSpiffeIdentity => "projection.placement.spiffe_identity",
+                Self::PlacementWorkload => "projection.placement.workload",
+                Self::AssemblyFingerprint => "projection.assembly_fingerprint",
+                Self::BuildImageDigest => "projection.build_metadata.image_digest",
+                Self::BuildSourceRevision => "projection.build_metadata.source_revision",
+                Self::RuntimePlanFingerprint => "projection.runtime_plan_fingerprint",
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct RuntimeInventoryProjectionError {
+        stage: RuntimeInventoryProjectionStage,
+    }
+
+    impl RuntimeInventoryProjectionError {
+        /// Return the closed stage that rejected a value.
+        pub const fn stage(self) -> RuntimeInventoryProjectionStage {
+            self.stage
+        }
+    }
+
+    impl ::std::fmt::Display for RuntimeInventoryProjectionError {
+        fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            write!(
+                formatter,
+                "runtime inventory projection failed at {:?}",
+                self.stage
+            )
+        }
+    }
+
+    impl ::std::error::Error for RuntimeInventoryProjectionError {}
+
+    fn runtime_inventory_parse<T>(
+        value: &str,
+        stage: RuntimeInventoryProjectionStage,
+    ) -> Result<T, RuntimeInventoryProjectionError>
+    where
+        T: ::std::str::FromStr,
+    {
+        value
+            .parse()
+            .map_err(|_| RuntimeInventoryProjectionError { stage })
+    }
+
+    fn runtime_inventory_endpoint(
+        endpoint: &::assembly_schema::runtime_inventory::RuntimeInventoryEndpoint,
+        host_stage: RuntimeInventoryProjectionStage,
+        port_stage: RuntimeInventoryProjectionStage,
+    ) -> Result<RuntimeListenerEndpoint, RuntimeInventoryProjectionError> {
+        Ok(RuntimeListenerEndpoint {
+            scheme: match endpoint.scheme() {
+                ::assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::Http => {
+                    RuntimeListenerEndpointScheme::Http
+                }
+                ::assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::Https => {
+                    RuntimeListenerEndpointScheme::Https
+                }
+            },
+            host: runtime_inventory_parse(endpoint.host(), host_stage)?,
+            port: ::std::num::NonZeroU64::new(u64::from(endpoint.port()))
+                .ok_or(RuntimeInventoryProjectionError { stage: port_stage })?,
+        })
+    }
+
+    impl ::std::convert::TryFrom<::assembly_schema::runtime_inventory::RuntimeInventoryObservation>
+        for RuntimeInventoryResponse
+    {
+        type Error = RuntimeInventoryProjectionError;
+
+        fn try_from(
+            observation: ::assembly_schema::runtime_inventory::RuntimeInventoryObservation,
+        ) -> Result<Self, Self::Error> {
+            use ::assembly_schema::runtime_inventory as model;
+            let activated_workflows = observation.activated_workflows().iter().map(|workflow| {
+            match workflow.activation() {
+                model::RuntimeInventoryWorkflowActivation::Projection(activation) => {
+                    Ok(RuntimeActivatedWorkflow::Projection(RuntimeActivatedProjection {
+                        activation: match activation {
+                            model::RuntimeInventoryProjectionActivation::CaptureOnly => RuntimeActivatedProjectionActivation::CaptureOnly,
+                            model::RuntimeInventoryProjectionActivation::Shadow => RuntimeActivatedProjectionActivation::Shadow,
+                            model::RuntimeInventoryProjectionActivation::Active => RuntimeActivatedProjectionActivation::Active,
+                        },
+                        definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
+                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?,
+                        id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?,
+                        mode: RuntimeActivatedProjectionMode::Projection,
+                    }))
+                }
+                model::RuntimeInventoryWorkflowActivation::SagaActive => {
+                    Ok(RuntimeActivatedWorkflow::Saga(RuntimeActivatedSaga {
+                        activation: RuntimeActivatedSagaActivation::Active,
+                        definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
+                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?,
+                        id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?,
+                        mode: RuntimeActivatedSagaMode::Saga,
+                    }))
+                }
+            }
+        }).collect::<Result<Vec<_>, RuntimeInventoryProjectionError>>()?;
+            let listeners = observation
+                .listeners()
+                .iter()
+                .map(|listener| {
+                    Ok(RuntimeListener {
+                        auth_scheme: match listener.auth() {
+                            ::assembly_schema::ListenerAuth::NoAuth => RuntimeAuthScheme::NoAuth,
+                            ::assembly_schema::ListenerAuth::RssAccessToken => {
+                                RuntimeAuthScheme::RssAccessToken
+                            }
+                            ::assembly_schema::ListenerAuth::FederatedAccessToken => {
+                                RuntimeAuthScheme::FederatedAccessToken
+                            }
+                            ::assembly_schema::ListenerAuth::Mtls => RuntimeAuthScheme::Mtls,
+                            ::assembly_schema::ListenerAuth::ServiceToken => {
+                                RuntimeAuthScheme::ServiceToken
+                            }
+                        },
+                        endpoint: runtime_inventory_endpoint(
+                            listener.endpoint(),
+                            RuntimeInventoryProjectionStage::ListenerEndpointHost,
+                            RuntimeInventoryProjectionStage::ListenerEndpointPort,
+                        )?,
+                        id: runtime_inventory_parse(
+                            listener.id(),
+                            RuntimeInventoryProjectionStage::ListenerId,
+                        )?,
+                        kind: match listener.kind() {
+                            ::assembly_schema::AssemblyListenerKind::Primary => {
+                                RuntimeListenerKind::Primary
+                            }
+                            ::assembly_schema::AssemblyListenerKind::Internal => {
+                                RuntimeListenerKind::Internal
+                            }
+                            ::assembly_schema::AssemblyListenerKind::Health => {
+                                RuntimeListenerKind::Health
+                            }
+                            ::assembly_schema::AssemblyListenerKind::Admin => {
+                                RuntimeListenerKind::Admin
+                            }
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, RuntimeInventoryProjectionError>>()?;
+            let provider_posture = observation
+                .provider_posture()
+                .iter()
+                .map(|provider| {
+                    Ok(RuntimeProviderPosture {
+                        id: runtime_inventory_parse(
+                            provider.id(),
+                            RuntimeInventoryProjectionStage::ProviderId,
+                        )?,
+                        state: match provider.state() {
+                            model::RuntimeInventoryProviderState::Unobserved => {
+                                RuntimeProviderPostureState::Unobserved
+                            }
+                            model::RuntimeInventoryProviderState::Ready => {
+                                RuntimeProviderPostureState::Ready
+                            }
+                            model::RuntimeInventoryProviderState::Degraded => {
+                                RuntimeProviderPostureState::Degraded
+                            }
+                            model::RuntimeInventoryProviderState::Unavailable => {
+                                RuntimeProviderPostureState::Unavailable
+                            }
+                        },
+                    })
+                })
+                .collect::<Result<Vec<_>, RuntimeInventoryProjectionError>>()?;
+            let placements = observation
+                .placements()
+                .iter()
+                .map(|placement| {
+                    Ok(RuntimePlacement {
+                        domain: match placement.domain() {
+                            ::assembly_schema::AssemblyDomain::Identity => RuntimeDomain::Identity,
+                            ::assembly_schema::AssemblyDomain::Settings => RuntimeDomain::Settings,
+                            ::assembly_schema::AssemblyDomain::Audit => RuntimeDomain::Audit,
+                            ::assembly_schema::AssemblyDomain::Contractreg => {
+                                RuntimeDomain::Contractreg
+                            }
+                            ::assembly_schema::AssemblyDomain::Syshealth => {
+                                RuntimeDomain::Syshealth
+                            }
+                        },
+                        endpoint: placement
+                            .endpoint()
+                            .map(|endpoint| {
+                                runtime_inventory_endpoint(
+                                    endpoint,
+                                    RuntimeInventoryProjectionStage::PlacementEndpointHost,
+                                    RuntimeInventoryProjectionStage::PlacementEndpointPort,
+                                )
+                            })
+                            .transpose()?,
+                        mode: match placement.mode() {
+                            model::RuntimeInventoryPlacementMode::Local => {
+                                RuntimePlacementMode::Local
+                            }
+                            model::RuntimeInventoryPlacementMode::Remote => {
+                                RuntimePlacementMode::Remote
+                            }
+                        },
+                        readiness: match placement.readiness() {
+                            model::RuntimeInventoryPlacementReadiness::Ready => {
+                                RuntimePlacementReadiness::Ready
+                            }
+                            model::RuntimeInventoryPlacementReadiness::MtlsSourceUnavailable => {
+                                RuntimePlacementReadiness::MtlsSourceUnavailable
+                            }
+                        },
+                        spiffe_identity: placement
+                            .spiffe_identity()
+                            .map(|identity| {
+                                runtime_inventory_parse(
+                                    identity,
+                                    RuntimeInventoryProjectionStage::PlacementSpiffeIdentity,
+                                )
+                            })
+                            .transpose()?,
+                        workload: runtime_inventory_parse(
+                            placement.workload(),
+                            RuntimeInventoryProjectionStage::PlacementWorkload,
+                        )?,
+                    })
+                })
+                .collect::<Result<Vec<_>, RuntimeInventoryProjectionError>>()?;
+            Ok(Self {
+                data: RuntimeInventoryData {
+                    activated_workflows,
+                    assembly_fingerprint: runtime_inventory_parse(
+                        observation.assembly_fingerprint().as_str(),
+                        RuntimeInventoryProjectionStage::AssemblyFingerprint,
+                    )?,
+                    build_metadata: observation
+                        .build_metadata()
+                        .map(|metadata| {
+                            Ok(RuntimeBuildMetadata {
+                                image_digest: runtime_inventory_parse(
+                                    metadata.image_digest().as_str(),
+                                    RuntimeInventoryProjectionStage::BuildImageDigest,
+                                )?,
+                                source_revision: runtime_inventory_parse(
+                                    metadata.source_revision(),
+                                    RuntimeInventoryProjectionStage::BuildSourceRevision,
+                                )?,
+                            })
+                        })
+                        .transpose()?,
+                    domains: observation
+                        .domains()
+                        .iter()
+                        .copied()
+                        .map(|domain| match domain {
+                            ::assembly_schema::AssemblyDomain::Identity => RuntimeDomain::Identity,
+                            ::assembly_schema::AssemblyDomain::Settings => RuntimeDomain::Settings,
+                            ::assembly_schema::AssemblyDomain::Audit => RuntimeDomain::Audit,
+                            ::assembly_schema::AssemblyDomain::Contractreg => {
+                                RuntimeDomain::Contractreg
+                            }
+                            ::assembly_schema::AssemblyDomain::Syshealth => {
+                                RuntimeDomain::Syshealth
+                            }
+                        })
+                        .collect(),
+                    listeners,
+                    placements,
+                    provider_posture,
+                    runtime_plan_fingerprint: runtime_inventory_parse(
+                        observation.runtime_plan_fingerprint().as_str(),
+                        RuntimeInventoryProjectionStage::RuntimePlanFingerprint,
+                    )?,
+                    schema_version: 1,
+                },
+            })
+        }
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    /// Closed failure classes produced by runtime inventory read and projection.
+    pub enum RuntimeInventoryProjectionFailure {
+        /// The live inventory has not published all required evidence yet.
+        ProviderUnavailable,
+        /// The reader rejected published facts at one closed invariant category.
+        ObservationInvariant(::assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind),
+        /// A reader-minted observation failed at one closed wire projection stage.
+        Projection(RuntimeInventoryProjectionStage),
+    }
+
+    impl RuntimeInventoryProjectionFailure {
+        /// Return the canonical core error classification used for logging policy.
+        pub fn core_error(self) -> ::vocab::CoreError {
+            match self {
+                Self::ProviderUnavailable => {
+                    ::vocab::CoreError::new(::vocab::CoreErrorKind::ProviderUnavailable)
+                }
+                Self::ObservationInvariant(_) | Self::Projection(_) => {
+                    ::vocab::CoreError::new(::vocab::CoreErrorKind::Internal)
+                }
+            }
+        }
+
+        /// Return a stable, non-sensitive stage for structured internal diagnostics.
+        pub const fn diagnostic_stage(self) -> Option<&'static str> {
+            match self {
+                Self::ProviderUnavailable => None,
+                Self::ObservationInvariant(kind) => Some(kind.diagnostic_stage()),
+                Self::Projection(stage) => Some(stage.diagnostic_stage()),
+            }
+        }
+
+        /// Consume the failure into the contract-declared fixed error response.
+        pub fn into_response_error(
+            self,
+            request_id: ::requestidmint::WireRequestId,
+        ) -> RuntimeInventoryResponseError {
+            match self {
+                Self::ProviderUnavailable => RuntimeInventoryResponseError::status_503(request_id),
+                Self::ObservationInvariant(_) | Self::Projection(_) => {
+                    RuntimeInventoryResponseError::status_500(request_id)
+                }
+            }
+        }
+    }
+
+    /// Project one live read into the only success carrier accepted by the declared route seam.
+    pub fn project_read_result(
+        result: Result<
+            ::assembly_schema::runtime_inventory::RuntimeInventoryObservation,
+            ::assembly_schema::runtime_inventory::RuntimeInventoryReadFailure,
+        >,
+    ) -> Result<RuntimeInventoryProjectedSuccess, RuntimeInventoryProjectionFailure> {
+        match result {
+            Ok(observation) => RuntimeInventoryResponse::try_from(observation)
+                .map(RuntimeInventoryProjectedSuccess)
+                .map_err(|error| RuntimeInventoryProjectionFailure::Projection(error.stage())),
+            Err(::assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::Unavailable) => {
+                Err(RuntimeInventoryProjectionFailure::ProviderUnavailable)
+            }
+            Err(::assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::Invariant(
+                kind,
+            )) => Err(RuntimeInventoryProjectionFailure::ObservationInvariant(
+                kind,
+            )),
+        }
+    }
 }

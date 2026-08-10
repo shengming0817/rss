@@ -1,0 +1,5 @@
+error[E0639]: cannot create non-exhaustive struct using struct expression
+ --> tests/ui/runtime_inventory_response_direct.rs:4:21
+  |
+4 |     let _response = RuntimeInventoryResponse { data };
+  |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

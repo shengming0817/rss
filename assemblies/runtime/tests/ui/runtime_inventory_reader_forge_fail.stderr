@@ -1,0 +1,16 @@
+error[E0624]: associated function `new` is private
+ --> tests/ui/runtime_inventory_reader_forge_fail.rs:5:35
+  |
+5 |       let reader = InventoryReader::new(move || Ok::<_, RuntimeInventoryReadFailure>(parts.clone()));
+  |                                     ^^^ private associated function
+  |
+ ::: $WORKSPACE/crates/runtimeexec/src/inventory.rs
+  |
+  | /     fn new(
+  | |         source: impl Fn() -> Result<
+  | |             observation::RuntimeInventoryParts,
+  | |             observation::RuntimeInventoryReadFailure,
+... |
+  | |         + 'static,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here

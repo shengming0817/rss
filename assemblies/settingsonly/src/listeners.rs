@@ -751,7 +751,7 @@ mod tests {
         let bindings = crate::providers_gen::PROVIDER_CATALOG
             .iter()
             .map(|provider| {
-                runtimeexec::inventory::ProviderProbeBinding::new(
+                runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
                     provider.role().as_str(),
                     Vec::new(),
                 )

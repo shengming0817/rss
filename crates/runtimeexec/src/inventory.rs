@@ -1,13 +1,12 @@
 //! Provider-independent, non-serializable runtime inventory observation model.
 
+use assembly_schema::runtime_inventory as observation;
 use assembly_schema::{AssemblyDomain, AssemblyListenerKind, ListenerAuth, RuntimePlan};
 use bootstrap::HealthReporter;
 use primitives::{HealthStatus, ProbeName};
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, OnceLock};
-
-const SCHEMA_VERSION: u32 = 1;
 
 /// Build metadata declared to the process by its launch environment.
 ///
@@ -17,7 +16,7 @@ const SCHEMA_VERSION: u32 = 1;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BuildMetadata {
     source_revision: String,
-    image_digest: String,
+    image_digest: observation::CanonicalSha256Digest,
 }
 
 impl BuildMetadata {
@@ -25,15 +24,11 @@ impl BuildMetadata {
         if !matches!(source_revision.len(), 40 | 64) || !is_lower_hex(source_revision) {
             return Err(InventoryError::BuildMetadata);
         }
-        if image_digest.len() != 71
-            || !image_digest.starts_with("sha256:")
-            || !is_lower_hex(&image_digest[7..])
-        {
-            return Err(InventoryError::BuildMetadata);
-        }
+        let image_digest = observation::CanonicalSha256Digest::parse(image_digest)
+            .map_err(|_| InventoryError::BuildMetadata)?;
         Ok(Self {
             source_revision: source_revision.to_owned(),
-            image_digest: image_digest.to_owned(),
+            image_digest,
         })
     }
 
@@ -42,7 +37,7 @@ impl BuildMetadata {
     }
 
     pub fn image_digest(&self) -> &str {
-        &self.image_digest
+        self.image_digest.as_str()
     }
 
     /// Parse an optional launch assertion. The pair is atomic: a partial claim is rejected.
@@ -184,15 +179,24 @@ impl BoundListenerObservation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderProbeBinding {
     provider_id: String,
-    probe_names: Vec<ProbeName>,
+    evidence: ProviderProbeEvidence,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ProviderProbeEvidence {
+    ConstructionOnly,
+    Observed(NonEmptyProbeSet),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct NonEmptyProbeSet(Vec<ProbeName>);
 
 /// A workflow activation copied from the sealed workflow runtime plan.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActivatedWorkflowObservation {
     id: String,
     definition_version: String,
-    definition_schema_digest: String,
+    definition_schema_digest: observation::CanonicalSha256Digest,
     activation: InventoryWorkflowActivation,
 }
 
@@ -206,7 +210,7 @@ impl ActivatedWorkflowObservation {
     }
 
     pub fn definition_schema_digest(&self) -> &str {
-        &self.definition_schema_digest
+        self.definition_schema_digest.as_str()
     }
 
     pub const fn activation(&self) -> InventoryWorkflowActivation {
@@ -233,7 +237,7 @@ pub enum InventorySagaActivation {
 }
 
 impl ProviderProbeBinding {
-    pub fn new(
+    pub fn from_probe_receipt(
         provider_id: impl Into<String>,
         probe_names: Vec<ProbeName>,
     ) -> Result<Self, InventoryError> {
@@ -250,7 +254,11 @@ impl ProviderProbeBinding {
         }
         Ok(Self {
             provider_id,
-            probe_names,
+            evidence: if probe_names.is_empty() {
+                ProviderProbeEvidence::ConstructionOnly
+            } else {
+                ProviderProbeEvidence::Observed(NonEmptyProbeSet(probe_names))
+            },
         })
     }
 
@@ -259,7 +267,10 @@ impl ProviderProbeBinding {
     }
 
     pub fn probe_names(&self) -> &[ProbeName] {
-        &self.probe_names
+        match &self.evidence {
+            ProviderProbeEvidence::ConstructionOnly => &[],
+            ProviderProbeEvidence::Observed(probe_names) => &probe_names.0,
+        }
     }
 }
 
@@ -343,9 +354,8 @@ impl PlacementObservation {
 }
 
 pub struct RuntimeInventorySeed {
-    assembly_fingerprint: String,
+    identity: observation::RuntimeInventoryIdentity,
     build_metadata: Option<BuildMetadata>,
-    runtime_plan_fingerprint: String,
     domains: Vec<AssemblyDomain>,
     activated_workflows: Vec<ActivatedWorkflowObservation>,
     listeners: Vec<ExpectedListener>,
@@ -405,7 +415,10 @@ impl RuntimeInventorySeed {
                 Ok(ActivatedWorkflowObservation {
                     id: workflow.id().to_owned(),
                     definition_version: workflow.definition_version().to_owned(),
-                    definition_schema_digest: workflow.definition_schema_digest().to_owned(),
+                    definition_schema_digest: observation::CanonicalSha256Digest::parse(
+                        workflow.definition_schema_digest(),
+                    )
+                    .map_err(|_| InventoryError::ActivatedWorkflow)?,
                     activation,
                 })
             })
@@ -445,9 +458,8 @@ impl RuntimeInventorySeed {
         }
 
         Ok(Self {
-            assembly_fingerprint: runtime.assembly_fingerprint().as_str().to_owned(),
+            identity: observation::RuntimeInventoryIdentity::from_runtime_plan(runtime),
             build_metadata: None,
-            runtime_plan_fingerprint: runtime.runtime_plan_fingerprint().as_str().to_owned(),
             domains: runtime
                 .domain_plans()
                 .iter()
@@ -475,77 +487,46 @@ impl RuntimeInventorySeed {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum InventoryProviderState {
-    Ready,
-    Degraded,
-    Unavailable,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProviderPosture {
-    id: String,
-    state: InventoryProviderState,
-}
-
-impl ProviderPosture {
-    pub fn id(&self) -> &str {
-        &self.id
-    }
-
-    pub const fn state(&self) -> InventoryProviderState {
-        self.state
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RuntimeInventorySnapshot {
-    schema_version: u32,
-    assembly_fingerprint: String,
-    build_metadata: Option<BuildMetadata>,
-    runtime_plan_fingerprint: String,
-    domains: Vec<AssemblyDomain>,
-    activated_workflows: Vec<ActivatedWorkflowObservation>,
-    listeners: Vec<BoundListenerObservation>,
-    provider_posture: Vec<ProviderPosture>,
-    placements: Vec<PlacementObservation>,
-}
-
-impl RuntimeInventorySnapshot {
-    pub const fn schema_version(&self) -> u32 {
-        self.schema_version
-    }
-    pub fn assembly_fingerprint(&self) -> &str {
-        &self.assembly_fingerprint
-    }
-    pub fn build_metadata(&self) -> Option<&BuildMetadata> {
-        self.build_metadata.as_ref()
-    }
-    pub fn runtime_plan_fingerprint(&self) -> &str {
-        &self.runtime_plan_fingerprint
-    }
-    pub fn domains(&self) -> &[AssemblyDomain] {
-        &self.domains
-    }
-    pub fn activated_workflows(&self) -> &[ActivatedWorkflowObservation] {
-        &self.activated_workflows
-    }
-    pub fn listeners(&self) -> &[BoundListenerObservation] {
-        &self.listeners
-    }
-    pub fn provider_posture(&self) -> &[ProviderPosture] {
-        &self.provider_posture
-    }
-    pub fn placements(&self) -> &[PlacementObservation] {
-        &self.placements
-    }
-}
-
 struct InventoryState {
     seed: RuntimeInventorySeed,
     health: OnceLock<Arc<HealthReporter>>,
     listeners: OnceLock<Vec<BoundListenerObservation>>,
     placement_readiness: OnceLock<PlacementReadinessSampler>,
+}
+
+type LiveInventorySource = dyn Fn() -> Result<observation::RuntimeInventoryParts, observation::RuntimeInventoryReadFailure>
+    + Send
+    + Sync;
+
+/// Cloneable live runtime-inventory reader.
+///
+/// Instances are issued only by [`inventory_channel`] or [`deferred_inventory_channel`]; the
+/// source constructor is crate-private so assembly roots cannot replace runtime health evidence.
+#[derive(Clone)]
+pub struct InventoryReader(Arc<LiveInventorySource>);
+
+impl InventoryReader {
+    fn new(
+        source: impl Fn() -> Result<
+            observation::RuntimeInventoryParts,
+            observation::RuntimeInventoryReadFailure,
+        > + Send
+        + Sync
+        + 'static,
+    ) -> Self {
+        Self(Arc::new(source))
+    }
+
+    /// Resample live listeners, health, and placement state and mint one opaque observation.
+    pub fn read(
+        &self,
+    ) -> Result<observation::RuntimeInventoryObservation, observation::RuntimeInventoryReadFailure>
+    {
+        observation::RuntimeInventoryObservation::from_runtimeexec(
+            (self.0)()?,
+            runtimeinventorymint::RuntimeInventoryMint::capability(),
+        )
+    }
 }
 
 pub type PlacementReadinessSampler = Arc<dyn Fn() -> InventoryPlacementReadiness + Send + Sync>;
@@ -555,9 +536,6 @@ pub struct InventoryPublisher(Arc<InventoryState>);
 pub struct InventoryHealthPublisher(Arc<InventoryState>);
 
 pub struct InventoryPlacementReadinessPublisher(Arc<InventoryState>);
-
-#[derive(Clone)]
-pub struct InventoryReader(Arc<InventoryState>);
 
 pub fn inventory_channel(
     seed: RuntimeInventorySeed,
@@ -569,10 +547,9 @@ pub fn inventory_channel(
         listeners: OnceLock::new(),
         placement_readiness: OnceLock::new(),
     });
-    (
-        InventoryPublisher(Arc::clone(&state)),
-        InventoryReader(state),
-    )
+    let reader_state = Arc::clone(&state);
+    let reader = InventoryReader::new(move || read_parts(&reader_state));
+    (InventoryPublisher(state), reader)
 }
 
 pub fn deferred_inventory_channel(
@@ -589,9 +566,11 @@ pub fn deferred_inventory_channel(
         listeners: OnceLock::new(),
         placement_readiness: OnceLock::new(),
     });
+    let reader_state = Arc::clone(&state);
+    let reader = InventoryReader::new(move || read_parts(&reader_state));
     (
         InventoryPublisher(Arc::clone(&state)),
-        InventoryReader(Arc::clone(&state)),
+        reader,
         InventoryHealthPublisher(Arc::clone(&state)),
         InventoryPlacementReadinessPublisher(state),
     )
@@ -639,76 +618,181 @@ impl InventoryPublisher {
     }
 }
 
-impl InventoryReader {
-    pub fn read(&self) -> Result<RuntimeInventorySnapshot, InventoryError> {
-        let listeners = self.0.listeners.get().ok_or(InventoryError::Unavailable)?;
-        let health = self.0.health.get().ok_or(InventoryError::Unavailable)?;
-        let report = health.report();
-        let checks = report
-            .checks()
-            .iter()
-            .map(|check| (check.name().as_str(), check.status()))
-            .collect::<BTreeMap<_, _>>();
-        let provider_posture = self
-            .0
-            .seed
-            .provider_bindings
-            .iter()
-            .map(|binding| ProviderPosture {
-                id: binding.provider_id.clone(),
-                state: provider_state(binding, &checks),
-            })
-            .collect();
-        let live_placement_readiness = self.0.placement_readiness.get().map(|sampler| sampler());
-        let placements = self
-            .0
-            .seed
-            .placements
-            .iter()
-            .cloned()
-            .map(|mut placement| {
-                if placement.mode == InventoryPlacementMode::Remote
-                    && let Some(readiness) = live_placement_readiness
-                {
-                    placement.readiness = readiness;
-                }
-                placement
-            })
-            .collect();
-        Ok(RuntimeInventorySnapshot {
-            schema_version: SCHEMA_VERSION,
-            assembly_fingerprint: self.0.seed.assembly_fingerprint.clone(),
-            build_metadata: self.0.seed.build_metadata.clone(),
-            runtime_plan_fingerprint: self.0.seed.runtime_plan_fingerprint.clone(),
-            domains: self.0.seed.domains.clone(),
-            activated_workflows: self.0.seed.activated_workflows.clone(),
-            listeners: listeners.clone(),
-            provider_posture,
-            placements,
+fn read_parts(
+    state: &InventoryState,
+) -> Result<observation::RuntimeInventoryParts, observation::RuntimeInventoryReadFailure> {
+    let listeners = state
+        .listeners
+        .get()
+        .ok_or(observation::RuntimeInventoryReadFailure::Unavailable)?;
+    let health = state
+        .health
+        .get()
+        .ok_or(observation::RuntimeInventoryReadFailure::Unavailable)?;
+    let report = health.report();
+    let checks = report
+        .checks()
+        .iter()
+        .map(|check| (check.name().as_str(), check.status()))
+        .collect::<BTreeMap<_, _>>();
+    let provider_posture = state
+        .seed
+        .provider_bindings
+        .iter()
+        .map(|binding| {
+            observation::RuntimeInventoryProviderPosture::new(
+                binding.provider_id.clone(),
+                provider_state(binding, &checks),
+            )
         })
-    }
+        .collect();
+    let live_placement_readiness = state.placement_readiness.get().map(|sampler| sampler());
+    let placements: Vec<PlacementObservation> = state
+        .seed
+        .placements
+        .iter()
+        .cloned()
+        .map(|mut placement| {
+            if placement.mode == InventoryPlacementMode::Remote
+                && let Some(readiness) = live_placement_readiness
+            {
+                placement.readiness = readiness;
+            }
+            placement
+        })
+        .collect();
+    Ok(observation::RuntimeInventoryParts::new(
+        state.seed.identity.clone(),
+        state.seed.build_metadata.as_ref().map(|metadata| {
+            observation::RuntimeInventoryBuildMetadata::new(
+                metadata.source_revision.clone(),
+                metadata.image_digest.clone(),
+            )
+        }),
+        state.seed.domains.clone(),
+        state
+            .seed
+            .activated_workflows
+            .iter()
+            .map(workflow_observation)
+            .collect(),
+        listeners.iter().map(listener_observation).collect(),
+        provider_posture,
+        placements.iter().map(placement_observation).collect(),
+    ))
 }
 
 fn provider_state(
     binding: &ProviderProbeBinding,
     checks: &BTreeMap<&str, HealthStatus>,
-) -> InventoryProviderState {
-    if binding.probe_names.is_empty() {
-        return InventoryProviderState::Ready;
-    }
-    let mut state = InventoryProviderState::Ready;
-    for probe in &binding.probe_names {
+) -> observation::RuntimeInventoryProviderState {
+    let ProviderProbeEvidence::Observed(probe_names) = &binding.evidence else {
+        return observation::RuntimeInventoryProviderState::Unobserved;
+    };
+    let mut state = observation::RuntimeInventoryProviderState::Ready;
+    for probe in &probe_names.0 {
         let Some(status) = checks.get(probe.as_str()) else {
-            return InventoryProviderState::Unavailable;
+            return observation::RuntimeInventoryProviderState::Unavailable;
         };
-        state = state.max(match status {
-            HealthStatus::Healthy => InventoryProviderState::Ready,
-            HealthStatus::Degraded => InventoryProviderState::Degraded,
-            HealthStatus::Unhealthy => InventoryProviderState::Unavailable,
-            _ => InventoryProviderState::Unavailable,
-        });
+        state = match (state, status) {
+            (_, HealthStatus::Unhealthy) => observation::RuntimeInventoryProviderState::Unavailable,
+            (_, status) if !matches!(status, HealthStatus::Healthy | HealthStatus::Degraded) => {
+                observation::RuntimeInventoryProviderState::Unavailable
+            }
+            (observation::RuntimeInventoryProviderState::Ready, HealthStatus::Degraded) => {
+                observation::RuntimeInventoryProviderState::Degraded
+            }
+            (current, _) => current,
+        };
     }
     state
+}
+
+fn endpoint_observation(
+    scheme: InventoryEndpointScheme,
+    host: &str,
+    port: u16,
+) -> observation::RuntimeInventoryEndpoint {
+    observation::RuntimeInventoryEndpoint::new(
+        match scheme {
+            InventoryEndpointScheme::Http => observation::RuntimeInventoryEndpointScheme::Http,
+            InventoryEndpointScheme::Https => observation::RuntimeInventoryEndpointScheme::Https,
+        },
+        host.to_owned(),
+        port,
+    )
+}
+
+fn workflow_observation(
+    workflow: &ActivatedWorkflowObservation,
+) -> observation::RuntimeInventoryActivatedWorkflow {
+    let activation = match workflow.activation {
+        InventoryWorkflowActivation::Projection(InventoryProjectionActivation::CaptureOnly) => {
+            observation::RuntimeInventoryWorkflowActivation::Projection(
+                observation::RuntimeInventoryProjectionActivation::CaptureOnly,
+            )
+        }
+        InventoryWorkflowActivation::Projection(InventoryProjectionActivation::Shadow) => {
+            observation::RuntimeInventoryWorkflowActivation::Projection(
+                observation::RuntimeInventoryProjectionActivation::Shadow,
+            )
+        }
+        InventoryWorkflowActivation::Projection(InventoryProjectionActivation::Active) => {
+            observation::RuntimeInventoryWorkflowActivation::Projection(
+                observation::RuntimeInventoryProjectionActivation::Active,
+            )
+        }
+        InventoryWorkflowActivation::Saga(InventorySagaActivation::Active) => {
+            observation::RuntimeInventoryWorkflowActivation::SagaActive
+        }
+    };
+    observation::RuntimeInventoryActivatedWorkflow::new(
+        workflow.id.clone(),
+        workflow.definition_version.clone(),
+        workflow.definition_schema_digest.clone(),
+        activation,
+    )
+}
+
+fn listener_observation(
+    listener: &BoundListenerObservation,
+) -> observation::RuntimeInventoryListener {
+    observation::RuntimeInventoryListener::new(
+        listener.id.clone(),
+        listener.kind,
+        listener.auth,
+        endpoint_observation(
+            listener.endpoint.scheme,
+            &listener.endpoint.host,
+            listener.endpoint.port,
+        ),
+    )
+}
+
+fn placement_observation(
+    placement: &PlacementObservation,
+) -> observation::RuntimeInventoryPlacement {
+    observation::RuntimeInventoryPlacement::new(
+        placement.domain,
+        placement.workload.clone(),
+        match placement.mode {
+            InventoryPlacementMode::Local => observation::RuntimeInventoryPlacementMode::Local,
+            InventoryPlacementMode::Remote => observation::RuntimeInventoryPlacementMode::Remote,
+        },
+        placement
+            .endpoint
+            .as_ref()
+            .map(|endpoint| endpoint_observation(endpoint.scheme, &endpoint.host, endpoint.port)),
+        placement.spiffe_identity.clone(),
+        match placement.readiness {
+            InventoryPlacementReadiness::Ready => {
+                observation::RuntimeInventoryPlacementReadiness::Ready
+            }
+            InventoryPlacementReadiness::MtlsSourceUnavailable => {
+                observation::RuntimeInventoryPlacementReadiness::MtlsSourceUnavailable
+            }
+        },
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -727,8 +811,6 @@ pub enum InventoryError {
     Placement,
     #[error("runtime inventory endpoint is invalid")]
     Endpoint,
-    #[error("runtime inventory is unavailable")]
-    Unavailable,
     #[error("runtime inventory was already published")]
     AlreadyPublished,
 }
@@ -839,7 +921,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, provider)| {
-                ProviderProbeBinding::new(
+                ProviderProbeBinding::from_probe_receipt(
                     provider.id(),
                     if index == 0 {
                         probe.clone().into_iter().collect()
@@ -898,7 +980,7 @@ mod tests {
             .clone();
         assert_eq!(metadata.source_revision(), "a".repeat(40));
         assert_eq!(
-            metadata.image_digest(),
+            metadata.image_digest().as_str(),
             format!("sha256:{}", "b".repeat(64))
         );
         Ok(())
@@ -924,31 +1006,33 @@ mod tests {
 
     #[test]
     fn inventory_provider_state_is_dynamic_and_missing_is_unavailable() -> TestResult {
-        let binding =
-            ProviderProbeBinding::new("provider", vec![ProbeName::parse("provider-health")?])?;
+        let binding = ProviderProbeBinding::from_probe_receipt(
+            "provider",
+            vec![ProbeName::parse("provider-health")?],
+        )?;
         let healthy = BTreeMap::from([("provider-health", HealthStatus::Healthy)]);
         let degraded = BTreeMap::from([("provider-health", HealthStatus::Degraded)]);
         let unhealthy = BTreeMap::from([("provider-health", HealthStatus::Unhealthy)]);
         assert_eq!(
             provider_state(&binding, &healthy),
-            InventoryProviderState::Ready
+            observation::RuntimeInventoryProviderState::Ready
         );
         assert_eq!(
             provider_state(&binding, &degraded),
-            InventoryProviderState::Degraded
+            observation::RuntimeInventoryProviderState::Degraded
         );
         assert_eq!(
             provider_state(&binding, &unhealthy),
-            InventoryProviderState::Unavailable
+            observation::RuntimeInventoryProviderState::Unavailable
         );
         assert_eq!(
             provider_state(&binding, &BTreeMap::new()),
-            InventoryProviderState::Unavailable
+            observation::RuntimeInventoryProviderState::Unavailable
         );
-        let no_probe = ProviderProbeBinding::new("provider", Vec::new())?;
+        let no_probe = ProviderProbeBinding::from_probe_receipt("provider", Vec::new())?;
         assert_eq!(
             provider_state(&no_probe, &BTreeMap::new()),
-            InventoryProviderState::Ready
+            observation::RuntimeInventoryProviderState::Unobserved
         );
         Ok(())
     }
@@ -1039,17 +1123,17 @@ mod tests {
 
         assert_eq!(
             reader.read()?.provider_posture()[0].state(),
-            InventoryProviderState::Ready
+            observation::RuntimeInventoryProviderState::Ready
         );
         state.store(1, Ordering::SeqCst);
         assert_eq!(
             reader.read()?.provider_posture()[0].state(),
-            InventoryProviderState::Degraded
+            observation::RuntimeInventoryProviderState::Degraded
         );
         state.store(2, Ordering::SeqCst);
         assert_eq!(
             reader.read()?.provider_posture()[0].state(),
-            InventoryProviderState::Unavailable
+            observation::RuntimeInventoryProviderState::Unavailable
         );
         Ok(())
     }
@@ -1081,12 +1165,12 @@ mod tests {
 
         assert_eq!(
             reader.read()?.placements()[0].readiness(),
-            InventoryPlacementReadiness::MtlsSourceUnavailable
+            observation::RuntimeInventoryPlacementReadiness::MtlsSourceUnavailable
         );
         readiness.store(1, Ordering::Release);
         assert_eq!(
             reader.read()?.placements()[0].readiness(),
-            InventoryPlacementReadiness::Ready
+            observation::RuntimeInventoryPlacementReadiness::Ready
         );
         Ok(())
     }
@@ -1108,7 +1192,7 @@ mod tests {
         let mut bindings = runtime
             .provider_plans()
             .iter()
-            .map(|provider| ProviderProbeBinding::new(provider.id(), Vec::new()))
+            .map(|provider| ProviderProbeBinding::from_probe_receipt(provider.id(), Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
         let missing = bindings.pop().ok_or("fixture must contain a provider")?;
         assert_eq!(
@@ -1134,7 +1218,10 @@ mod tests {
             .err(),
             Some(InventoryError::ProviderBinding)
         );
-        bindings.push(ProviderProbeBinding::new("unknown-provider", Vec::new())?);
+        bindings.push(ProviderProbeBinding::from_probe_receipt(
+            "unknown-provider",
+            Vec::new(),
+        )?);
         assert_eq!(
             RuntimeInventorySeed::from_runtime_plan(
                 runtime.as_plan(),
@@ -1150,7 +1237,9 @@ mod tests {
         let exact = runtime
             .provider_plans()
             .iter()
-            .map(|provider| ProviderProbeBinding::new(provider.id(), vec![shared.clone()]))
+            .map(|provider| {
+                ProviderProbeBinding::from_probe_receipt(provider.id(), vec![shared.clone()])
+            })
             .collect::<Result<Vec<_>, _>>()?;
         RuntimeInventorySeed::from_runtime_plan(
             runtime.as_plan(),
@@ -1168,7 +1257,7 @@ mod tests {
         let providers = runtime
             .provider_plans()
             .iter()
-            .map(|provider| ProviderProbeBinding::new(provider.id(), Vec::new()))
+            .map(|provider| ProviderProbeBinding::from_probe_receipt(provider.id(), Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
         let placements = runtime
             .placement_plans()
@@ -1182,11 +1271,13 @@ mod tests {
             placements,
         )?;
         let (publisher, reader) = inventory_channel(seed, reporter(HealthStatus::Healthy)?);
-        assert!(matches!(reader.read(), Err(InventoryError::Unavailable)));
+        assert!(matches!(
+            reader.read(),
+            Err(observation::RuntimeInventoryReadFailure::Unavailable)
+        ));
         let listeners = exact_listeners(&runtime)?;
         publisher.publish(listeners)?;
         let snapshot = reader.read()?;
-        assert_eq!(snapshot.schema_version(), 1);
         assert_eq!(snapshot.listeners().len(), runtime.listener_plans().len());
         assert_eq!(
             snapshot.provider_posture().len(),
@@ -1202,7 +1293,7 @@ mod tests {
         let providers = runtime
             .provider_plans()
             .iter()
-            .map(|provider| ProviderProbeBinding::new(provider.id(), Vec::new()))
+            .map(|provider| ProviderProbeBinding::from_probe_receipt(provider.id(), Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
         let placements = runtime
             .placement_plans()
@@ -1230,7 +1321,7 @@ mod tests {
         let providers = runtime
             .provider_plans()
             .iter()
-            .map(|provider| ProviderProbeBinding::new(provider.id(), Vec::new()))
+            .map(|provider| ProviderProbeBinding::from_probe_receipt(provider.id(), Vec::new()))
             .collect::<Result<Vec<_>, _>>()?;
         let placements = runtime
             .placement_plans()

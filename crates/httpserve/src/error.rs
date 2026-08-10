@@ -160,6 +160,28 @@ pub fn core_error_response(err: &CoreError, request_id: &str) -> axum::response:
     (status, axum::Json(envelope)).into_response()
 }
 
+/// Log one contract-classified failure at the canonical contract boundary.
+///
+/// Expected provider unavailability is not logged on a polling endpoint. Internal failures are
+/// logged once with only stable contract, error-kind, request-id, and closed failure-stage
+/// metadata; runtime values and internal attributes are never rendered.
+pub fn log_contract_core_error(
+    contract_id: &'static str,
+    err: &CoreError,
+    request_id: &str,
+    failure_stage: Option<&'static str>,
+) {
+    if err.kind() == CoreErrorKind::Internal {
+        tracing::error!(
+            contract_id,
+            error_code = err.kind().code(),
+            request_id,
+            failure_stage = failure_stage.unwrap_or("contract.internal"),
+            "contract response failed"
+        );
+    }
+}
+
 /// 400 Validation 信封（参数 / 请求体校验失败）：`ERR_CORE_VALIDATION` + `BAD_REQUEST` 固定配对。
 pub fn validation_bad_request(request_id: &str) -> axum::response::Response {
     core_error_response(&CoreError::new(CoreErrorKind::Validation), request_id)
@@ -354,6 +376,18 @@ mod tests {
         let json = body_json(resp).await;
         assert_eq!(json["error"]["details"].as_array().expect("array").len(), 0);
         assert!(!json.to_string().contains("should-be-stripped"));
+    }
+
+    #[test]
+    fn contract_failure_logging_accepts_safe_correlation_metadata() {
+        let internal = CoreError::new(CoreErrorKind::Internal)
+            .with_details(PublicDetail::Str("must_strip", "secret".to_owned()));
+        log_contract_core_error(
+            "runtime.inventory",
+            &internal,
+            "rid",
+            Some("projection.listener.id"),
+        );
     }
 
     #[allow(clippy::expect_used)]

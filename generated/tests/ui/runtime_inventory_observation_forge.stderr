@@ -1,0 +1,5 @@
+error[E0451]: field `parts` of struct `RuntimeInventoryObservation` is private
+ --> tests/ui/runtime_inventory_observation_forge.rs:4:43
+  |
+4 |     let _ = RuntimeInventoryObservation { parts };
+  |                                           ^^^^^ private field

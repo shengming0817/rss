@@ -171,7 +171,10 @@ fn fixture_inventory_seed() -> anyhow::Result<runtimeexec::inventory::RuntimeInv
     let bindings = crate::providers_gen::PROVIDER_CATALOG
         .iter()
         .map(|provider| {
-            runtimeexec::inventory::ProviderProbeBinding::new(provider.role().as_str(), Vec::new())
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                provider.role().as_str(),
+                Vec::new(),
+            )
         })
         .collect::<Result<Vec<_>, _>>()?;
     plan.into_inventory_seed_fixture(bindings)

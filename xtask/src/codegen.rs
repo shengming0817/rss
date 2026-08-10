@@ -897,6 +897,7 @@ fn render_contract_body(
     apply_redaction_policy(&mut parsed, &redaction_policies);
     allow_derivable_default_impls(&mut parsed);
     allow_unwrap_in_defaults_mod(&mut parsed);
+    seal_runtime_inventory_response(c, &mut parsed)?;
     let mut payload = prettyplease::unparse(&parsed);
     payload.push_str(&render_field_protection_impls(
         &parsed,
@@ -911,13 +912,327 @@ fn render_contract_body(
         ContractKind::Event => Ok(format!("{}{}", payload, render_event_glue(c, sup)?)),
         ContractKind::Command => Ok(format!("{}{}", payload, render_command_glue(c, sup)?)),
         ContractKind::Http => Ok(format!(
-            "{}{}",
+            "{}{}{}",
             payload,
-            render_http_glue(c, sup, contracts)?
+            render_http_glue(c, sup, contracts)?,
+            render_runtime_inventory_projection(c)?
         )),
         ContractKind::Saga => Ok(format!("{}{}", payload, render_saga_glue(c, sup)?)),
         ContractKind::Projection => unreachable!("projection returned before DTO generation"),
     }
+}
+
+fn is_runtime_inventory_v1(c: &GovernedContract) -> bool {
+    c.manifest().kind == ContractKind::Http
+        && c.manifest().id == "runtime.inventory"
+        && c.manifest().version == "v1"
+}
+
+fn seal_runtime_inventory_response(c: &GovernedContract, file: &mut syn::File) -> Result<()> {
+    if !is_runtime_inventory_v1(c) {
+        return Ok(());
+    }
+    let response = file.items.iter_mut().find_map(|item| match item {
+        syn::Item::Struct(item) if item.ident == "RuntimeInventoryResponse" => Some(item),
+        _ => None,
+    });
+    let response = response
+        .context("runtime.inventory@v1 response schema must generate RuntimeInventoryResponse")?;
+    response.attrs.push(syn::parse_quote!(#[non_exhaustive]));
+    Ok(())
+}
+
+fn render_runtime_inventory_projection(c: &GovernedContract) -> Result<String> {
+    if !is_runtime_inventory_v1(c) {
+        return Ok(String::new());
+    }
+    let response_schema = c
+        .manifest()
+        .schemas
+        .response(200)
+        .context("runtime.inventory@v1 must declare its 200 response schema")?;
+    let schema = c
+        .resolved_schema(response_schema)
+        .with_context(|| format!("resolve runtime inventory response schema {response_schema}"))?;
+    let schema_version = schema
+        .pointer("/properties/data/properties/schemaVersion/const")
+        .and_then(serde_json::Value::as_i64)
+        .context(
+            "runtime.inventory@v1 response schema must declare integer data.schemaVersion.const",
+        )?;
+    Ok(r#"
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Closed, non-sensitive stages at which neutral facts can fail wire projection.
+pub enum RuntimeInventoryProjectionStage {
+    ActivatedWorkflowDefinitionSchemaDigest,
+    ActivatedWorkflowDefinitionVersion,
+    ActivatedWorkflowId,
+    ListenerEndpointHost,
+    ListenerEndpointPort,
+    ListenerId,
+    ProviderId,
+    PlacementEndpointHost,
+    PlacementEndpointPort,
+    PlacementSpiffeIdentity,
+    PlacementWorkload,
+    AssemblyFingerprint,
+    BuildImageDigest,
+    BuildSourceRevision,
+    RuntimePlanFingerprint,
+}
+
+impl RuntimeInventoryProjectionStage {
+    /// Return a stable diagnostic coordinate without runtime values.
+    pub const fn diagnostic_stage(self) -> &'static str {
+        match self {
+            Self::ActivatedWorkflowDefinitionSchemaDigest => "projection.activated_workflow.definition_schema_digest",
+            Self::ActivatedWorkflowDefinitionVersion => "projection.activated_workflow.definition_version",
+            Self::ActivatedWorkflowId => "projection.activated_workflow.id",
+            Self::ListenerEndpointHost => "projection.listener.endpoint.host",
+            Self::ListenerEndpointPort => "projection.listener.endpoint.port",
+            Self::ListenerId => "projection.listener.id",
+            Self::ProviderId => "projection.provider.id",
+            Self::PlacementEndpointHost => "projection.placement.endpoint.host",
+            Self::PlacementEndpointPort => "projection.placement.endpoint.port",
+            Self::PlacementSpiffeIdentity => "projection.placement.spiffe_identity",
+            Self::PlacementWorkload => "projection.placement.workload",
+            Self::AssemblyFingerprint => "projection.assembly_fingerprint",
+            Self::BuildImageDigest => "projection.build_metadata.image_digest",
+            Self::BuildSourceRevision => "projection.build_metadata.source_revision",
+            Self::RuntimePlanFingerprint => "projection.runtime_plan_fingerprint",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeInventoryProjectionError {
+    stage: RuntimeInventoryProjectionStage,
+}
+
+impl RuntimeInventoryProjectionError {
+    /// Return the closed stage that rejected a value.
+    pub const fn stage(self) -> RuntimeInventoryProjectionStage {
+        self.stage
+    }
+}
+
+impl ::std::fmt::Display for RuntimeInventoryProjectionError {
+    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        write!(formatter, "runtime inventory projection failed at {:?}", self.stage)
+    }
+}
+
+impl ::std::error::Error for RuntimeInventoryProjectionError {}
+
+fn runtime_inventory_parse<T>(
+    value: &str,
+    stage: RuntimeInventoryProjectionStage,
+) -> Result<T, RuntimeInventoryProjectionError>
+where
+    T: ::std::str::FromStr,
+{
+    value.parse().map_err(|_| RuntimeInventoryProjectionError { stage })
+}
+
+fn runtime_inventory_endpoint(
+    endpoint: &::assembly_schema::runtime_inventory::RuntimeInventoryEndpoint,
+    host_stage: RuntimeInventoryProjectionStage,
+    port_stage: RuntimeInventoryProjectionStage,
+) -> Result<RuntimeListenerEndpoint, RuntimeInventoryProjectionError> {
+    Ok(RuntimeListenerEndpoint {
+        scheme: match endpoint.scheme() {
+            ::assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::Http => RuntimeListenerEndpointScheme::Http,
+            ::assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::Https => RuntimeListenerEndpointScheme::Https,
+        },
+        host: runtime_inventory_parse(endpoint.host(), host_stage)?,
+        port: ::std::num::NonZeroU64::new(u64::from(endpoint.port()))
+            .ok_or(RuntimeInventoryProjectionError { stage: port_stage })?,
+    })
+}
+
+impl ::std::convert::TryFrom<::assembly_schema::runtime_inventory::RuntimeInventoryObservation>
+    for RuntimeInventoryResponse
+{
+    type Error = RuntimeInventoryProjectionError;
+
+    fn try_from(
+        observation: ::assembly_schema::runtime_inventory::RuntimeInventoryObservation,
+    ) -> Result<Self, Self::Error> {
+        use ::assembly_schema::runtime_inventory as model;
+        let activated_workflows = observation.activated_workflows().iter().map(|workflow| {
+            match workflow.activation() {
+                model::RuntimeInventoryWorkflowActivation::Projection(activation) => {
+                    Ok(RuntimeActivatedWorkflow::Projection(RuntimeActivatedProjection {
+                        activation: match activation {
+                            model::RuntimeInventoryProjectionActivation::CaptureOnly => RuntimeActivatedProjectionActivation::CaptureOnly,
+                            model::RuntimeInventoryProjectionActivation::Shadow => RuntimeActivatedProjectionActivation::Shadow,
+                            model::RuntimeInventoryProjectionActivation::Active => RuntimeActivatedProjectionActivation::Active,
+                        },
+                        definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
+                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?,
+                        id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?,
+                        mode: RuntimeActivatedProjectionMode::Projection,
+                    }))
+                }
+                model::RuntimeInventoryWorkflowActivation::SagaActive => {
+                    Ok(RuntimeActivatedWorkflow::Saga(RuntimeActivatedSaga {
+                        activation: RuntimeActivatedSagaActivation::Active,
+                        definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
+                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?,
+                        id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?,
+                        mode: RuntimeActivatedSagaMode::Saga,
+                    }))
+                }
+            }
+        }).collect::<Result<Vec<_>, RuntimeInventoryProjectionError>>()?;
+        let listeners = observation.listeners().iter().map(|listener| {
+            Ok(RuntimeListener {
+                auth_scheme: match listener.auth() {
+                    ::assembly_schema::ListenerAuth::NoAuth => RuntimeAuthScheme::NoAuth,
+                    ::assembly_schema::ListenerAuth::RssAccessToken => RuntimeAuthScheme::RssAccessToken,
+                    ::assembly_schema::ListenerAuth::FederatedAccessToken => RuntimeAuthScheme::FederatedAccessToken,
+                    ::assembly_schema::ListenerAuth::Mtls => RuntimeAuthScheme::Mtls,
+                    ::assembly_schema::ListenerAuth::ServiceToken => RuntimeAuthScheme::ServiceToken,
+                },
+                endpoint: runtime_inventory_endpoint(listener.endpoint(), RuntimeInventoryProjectionStage::ListenerEndpointHost, RuntimeInventoryProjectionStage::ListenerEndpointPort)?,
+                id: runtime_inventory_parse(listener.id(), RuntimeInventoryProjectionStage::ListenerId)?,
+                kind: match listener.kind() {
+                    ::assembly_schema::AssemblyListenerKind::Primary => RuntimeListenerKind::Primary,
+                    ::assembly_schema::AssemblyListenerKind::Internal => RuntimeListenerKind::Internal,
+                    ::assembly_schema::AssemblyListenerKind::Health => RuntimeListenerKind::Health,
+                    ::assembly_schema::AssemblyListenerKind::Admin => RuntimeListenerKind::Admin,
+                },
+            })
+        }).collect::<Result<Vec<_>, RuntimeInventoryProjectionError>>()?;
+        let provider_posture = observation.provider_posture().iter().map(|provider| {
+            Ok(RuntimeProviderPosture {
+                id: runtime_inventory_parse(provider.id(), RuntimeInventoryProjectionStage::ProviderId)?,
+                state: match provider.state() {
+                    model::RuntimeInventoryProviderState::Unobserved => RuntimeProviderPostureState::Unobserved,
+                    model::RuntimeInventoryProviderState::Ready => RuntimeProviderPostureState::Ready,
+                    model::RuntimeInventoryProviderState::Degraded => RuntimeProviderPostureState::Degraded,
+                    model::RuntimeInventoryProviderState::Unavailable => RuntimeProviderPostureState::Unavailable,
+                },
+            })
+        }).collect::<Result<Vec<_>, RuntimeInventoryProjectionError>>()?;
+        let placements = observation.placements().iter().map(|placement| {
+            Ok(RuntimePlacement {
+                domain: match placement.domain() {
+                    ::assembly_schema::AssemblyDomain::Identity => RuntimeDomain::Identity,
+                    ::assembly_schema::AssemblyDomain::Settings => RuntimeDomain::Settings,
+                    ::assembly_schema::AssemblyDomain::Audit => RuntimeDomain::Audit,
+                    ::assembly_schema::AssemblyDomain::Contractreg => RuntimeDomain::Contractreg,
+                    ::assembly_schema::AssemblyDomain::Syshealth => RuntimeDomain::Syshealth,
+                },
+                endpoint: placement.endpoint().map(|endpoint| runtime_inventory_endpoint(endpoint, RuntimeInventoryProjectionStage::PlacementEndpointHost, RuntimeInventoryProjectionStage::PlacementEndpointPort)).transpose()?,
+                mode: match placement.mode() {
+                    model::RuntimeInventoryPlacementMode::Local => RuntimePlacementMode::Local,
+                    model::RuntimeInventoryPlacementMode::Remote => RuntimePlacementMode::Remote,
+                },
+                readiness: match placement.readiness() {
+                    model::RuntimeInventoryPlacementReadiness::Ready => RuntimePlacementReadiness::Ready,
+                    model::RuntimeInventoryPlacementReadiness::MtlsSourceUnavailable => RuntimePlacementReadiness::MtlsSourceUnavailable,
+                },
+                spiffe_identity: placement.spiffe_identity().map(|identity| runtime_inventory_parse(identity, RuntimeInventoryProjectionStage::PlacementSpiffeIdentity)).transpose()?,
+                workload: runtime_inventory_parse(placement.workload(), RuntimeInventoryProjectionStage::PlacementWorkload)?,
+            })
+        }).collect::<Result<Vec<_>, RuntimeInventoryProjectionError>>()?;
+        Ok(Self {
+            data: RuntimeInventoryData {
+                activated_workflows,
+                assembly_fingerprint: runtime_inventory_parse(observation.assembly_fingerprint().as_str(), RuntimeInventoryProjectionStage::AssemblyFingerprint)?,
+                build_metadata: observation.build_metadata().map(|metadata| {
+                    Ok(RuntimeBuildMetadata {
+                        image_digest: runtime_inventory_parse(metadata.image_digest().as_str(), RuntimeInventoryProjectionStage::BuildImageDigest)?,
+                        source_revision: runtime_inventory_parse(metadata.source_revision(), RuntimeInventoryProjectionStage::BuildSourceRevision)?,
+                    })
+                }).transpose()?,
+                domains: observation.domains().iter().copied().map(|domain| match domain {
+                    ::assembly_schema::AssemblyDomain::Identity => RuntimeDomain::Identity,
+                    ::assembly_schema::AssemblyDomain::Settings => RuntimeDomain::Settings,
+                    ::assembly_schema::AssemblyDomain::Audit => RuntimeDomain::Audit,
+                    ::assembly_schema::AssemblyDomain::Contractreg => RuntimeDomain::Contractreg,
+                    ::assembly_schema::AssemblyDomain::Syshealth => RuntimeDomain::Syshealth,
+                }).collect(),
+                listeners,
+                placements,
+                provider_posture,
+                runtime_plan_fingerprint: runtime_inventory_parse(observation.runtime_plan_fingerprint().as_str(), RuntimeInventoryProjectionStage::RuntimePlanFingerprint)?,
+                schema_version: __RUNTIME_INVENTORY_SCHEMA_VERSION__,
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Closed failure classes produced by runtime inventory read and projection.
+pub enum RuntimeInventoryProjectionFailure {
+    /// The live inventory has not published all required evidence yet.
+    ProviderUnavailable,
+    /// The reader rejected published facts at one closed invariant category.
+    ObservationInvariant(::assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind),
+    /// A reader-minted observation failed at one closed wire projection stage.
+    Projection(RuntimeInventoryProjectionStage),
+}
+
+impl RuntimeInventoryProjectionFailure {
+    /// Return the canonical core error classification used for logging policy.
+    pub fn core_error(self) -> ::vocab::CoreError {
+        match self {
+            Self::ProviderUnavailable => ::vocab::CoreError::new(::vocab::CoreErrorKind::ProviderUnavailable),
+            Self::ObservationInvariant(_) | Self::Projection(_) => {
+                ::vocab::CoreError::new(::vocab::CoreErrorKind::Internal)
+            }
+        }
+    }
+
+    /// Return a stable, non-sensitive stage for structured internal diagnostics.
+    pub const fn diagnostic_stage(self) -> Option<&'static str> {
+        match self {
+            Self::ProviderUnavailable => None,
+            Self::ObservationInvariant(kind) => Some(kind.diagnostic_stage()),
+            Self::Projection(stage) => Some(stage.diagnostic_stage()),
+        }
+    }
+
+    /// Consume the failure into the contract-declared fixed error response.
+    pub fn into_response_error(
+        self,
+        request_id: ::requestidmint::WireRequestId,
+    ) -> RuntimeInventoryResponseError {
+        match self {
+            Self::ProviderUnavailable => RuntimeInventoryResponseError::status_503(request_id),
+            Self::ObservationInvariant(_) | Self::Projection(_) => {
+                RuntimeInventoryResponseError::status_500(request_id)
+            }
+        }
+    }
+}
+
+/// Project one live read into the only success carrier accepted by the declared route seam.
+pub fn project_read_result(
+    result: Result<
+        ::assembly_schema::runtime_inventory::RuntimeInventoryObservation,
+        ::assembly_schema::runtime_inventory::RuntimeInventoryReadFailure,
+    >,
+) -> Result<RuntimeInventoryProjectedSuccess, RuntimeInventoryProjectionFailure> {
+    match result {
+        Ok(observation) => RuntimeInventoryResponse::try_from(observation)
+            .map(RuntimeInventoryProjectedSuccess)
+            .map_err(|error| RuntimeInventoryProjectionFailure::Projection(error.stage())),
+        Err(::assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::Unavailable) => {
+            Err(RuntimeInventoryProjectionFailure::ProviderUnavailable)
+        }
+        Err(::assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::Invariant(kind)) => {
+            Err(RuntimeInventoryProjectionFailure::ObservationInvariant(kind))
+        }
+    }
+}
+"#
+    .replace(
+        "__RUNTIME_INVENTORY_SCHEMA_VERSION__",
+        &schema_version.to_string(),
+    ))
 }
 
 fn render_projection_glue(c: &GovernedContract) -> Result<String> {
@@ -1744,6 +2059,25 @@ fn render_http_response_aggregates(
     }
     let error_ty = format!("{success_ty}Error");
     let envelope_ty = format!("{success_ty}Envelope");
+    let (success_carrier_ty, success_carrier_definition) = if is_runtime_inventory_v1(c) {
+        (
+            "RuntimeInventoryProjectedSuccess".to_owned(),
+            format!(
+                r#"
+/// Opaque server-success carrier constructible only by the canonical inventory projection.
+pub struct RuntimeInventoryProjectedSuccess({success_ty});
+
+impl ::axum::response::IntoResponse for RuntimeInventoryProjectedSuccess {{
+    fn into_response(self) -> ::axum::response::Response {{
+        self.0.into_response()
+    }}
+}}
+"#,
+            ),
+        )
+    } else {
+        (success_ty.clone(), String::new())
+    };
     let handler_result_ty = format!(
         "{}HandlerResult",
         success_ty.strip_suffix("Response").unwrap_or(success_ty)
@@ -1840,9 +2174,10 @@ impl ::axum::response::IntoResponse for {error_ty} {{
     }}
 }}
 
+{success_carrier_definition}
 /// Complete declared response envelope. Outer `Err` is reserved for framework failures.
 pub enum {envelope_ty} {{
-    Success({success_ty}),
+    Success({success_carrier_ty}),
     Error({error_ty}),
 }}
 
@@ -6335,6 +6670,41 @@ mod tests {
             render_http_mount_key(&contract)?,
             "_seed_v1::filesystem_slug"
         );
+        let _ = std::fs::remove_dir_all(root);
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_inventory_projection_derives_schema_version_from_schema_const() -> anyhow::Result<()>
+    {
+        let root = unique_tmp("codegen-runtime-inventory-schema-version");
+        seed_http(&root)?;
+        let dir = root.join("contracts/http/_seed/v1");
+        let manifest = std::fs::read_to_string(dir.join("contract.toml"))?
+            .replace("id = \"seed.echo\"", "id = \"runtime.inventory\"")
+            .replace("domain = \"_seed\"", "domain = \"runtime\"");
+        std::fs::write(dir.join("contract.toml"), manifest)?;
+        std::fs::write(
+            dir.join("response.schema.json"),
+            r#"{"$schema":"http://json-schema.org/draft-07/schema#","title":"RuntimeInventoryResponse","type":"object","required":["data"],"properties":{"data":{"type":"object","required":["schemaVersion"],"properties":{"schemaVersion":{"type":"integer","const":7}},"additionalProperties":false}},"additionalProperties":false}"#,
+        )?;
+        let contract = load_contract_fixtures(&root.join("contracts"))?
+            .pop()
+            .context("runtime inventory contract missing")?;
+        let rendered = render_runtime_inventory_projection(&contract)?;
+        assert!(rendered.contains("schema_version: 7"));
+
+        let schema_path = dir.join("response.schema.json");
+        let schema = std::fs::read_to_string(&schema_path)?.replace("\"const\":7", "\"minimum\":1");
+        std::fs::write(schema_path, schema)?;
+        let contract = load_contract_fixtures(&root.join("contracts"))?
+            .pop()
+            .context("runtime inventory contract missing")?;
+        let error = match render_runtime_inventory_projection(&contract) {
+            Ok(_) => anyhow::bail!("missing schemaVersion const must fail closed"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("schemaVersion.const"));
         let _ = std::fs::remove_dir_all(root);
         Ok(())
     }

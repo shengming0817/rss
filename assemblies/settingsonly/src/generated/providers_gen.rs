@@ -604,10 +604,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "auth-audit-sink",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "auth-audit-sink",
+                probe_names,
+            )?,
+        );
         let DistributedCasStoreReceipt {
             probes,
             resources,
@@ -617,10 +619,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "distributed-cas-store",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "distributed-cas-store",
+                probe_names,
+            )?,
+        );
         let DistributedLockStoreReceipt {
             probes,
             resources,
@@ -630,10 +634,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "distributed-lock-store",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "distributed-lock-store",
+                probe_names,
+            )?,
+        );
         let DlxArchiveKeyProviderReceipt {
             probes,
             resources,
@@ -643,10 +649,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "dlx-archive-key-provider",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "dlx-archive-key-provider",
+                probe_names,
+            )?,
+        );
         let DlxArchiveStoreReceipt {
             probes,
             resources,
@@ -656,10 +664,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "dlx-archive-store",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "dlx-archive-store",
+                probe_names,
+            )?,
+        );
         let DlxHotKeyProviderReceipt {
             probes,
             resources,
@@ -669,10 +679,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "dlx-hot-key-provider",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "dlx-hot-key-provider",
+                probe_names,
+            )?,
+        );
         let DlxLifecycleRepositoryReceipt {
             probes,
             resources,
@@ -682,10 +694,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "dlx-lifecycle-repository",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "dlx-lifecycle-repository",
+                probe_names,
+            )?,
+        );
         let EventPublisherReceipt {
             probes,
             resources,
@@ -695,10 +709,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "event-publisher",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "event-publisher",
+                probe_names,
+            )?,
+        );
         let EventSubscriberReceipt {
             probes,
             resources,
@@ -708,10 +724,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "event-subscriber",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "event-subscriber",
+                probe_names,
+            )?,
+        );
         let ListenerPdpReceipt {
             probes,
             resources,
@@ -721,10 +739,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "listener-pdp",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "listener-pdp",
+                probe_names,
+            )?,
+        );
         let ListenerRateLimiterReceipt {
             probes,
             resources,
@@ -734,10 +754,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "listener-rate-limiter",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "listener-rate-limiter",
+                probe_names,
+            )?,
+        );
         let SettingsKeyProviderReceipt {
             probes,
             resources,
@@ -747,10 +769,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "settings-key-provider",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "settings-key-provider",
+                probe_names,
+            )?,
+        );
         let SettingsSecretResolverReceipt {
             probes,
             resources,
@@ -760,10 +784,12 @@ impl ProviderRoleBatches {
         staged[0] += probes;
         staged[1] += resources;
         staged[2] += workers;
-        probe_bindings.push(runtimeexec::inventory::ProviderProbeBinding::new(
-            "settings-secret-resolver",
-            probe_names,
-        )?);
+        probe_bindings.push(
+            runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(
+                "settings-secret-resolver",
+                probe_names,
+            )?,
+        );
         if self.auth_audit_sink.is_some()
             || self.distributed_cas_store.is_some()
             || self.distributed_lock_store.is_some()

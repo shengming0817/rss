@@ -55,6 +55,8 @@
 //! INVARIANT: AUTHMINT-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::authmint_wrapper_widened_to_bin_red|tests::authmint_wrapper_missing_consumer_red", anti_vacuity = "tests::authmint_wrapper_exact_green" }——
 //!   `authmint` target wrapper 必须恰为 httpserve + runtime/settingsonly/identityaudit；域 / journeys 不得持有
 //!   Authenticated production mint capability（AUTH-EVIDENCE-MINT-01 Hard 的 deny.toml 半段）。
+//! INVARIANT: RUNTIME-INVENTORY-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private token + exact wrapper allowlist", synthetic_red = "tests::runtimeinventorymint_wrapper_widened_to_assembly_red", anti_vacuity = "tests::runtimeinventorymint_wrapper_exact_green|tests::real_workspace_green" }——
+//!   inventory mint token 只准 assembly-schema 声明签名、runtimeexec 实际持有；assembly roots 不得依赖。
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
 //!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/eventexec/primitives/secure 与外部
 //!   anyhow/serde/serde_json/thiserror/tokio/tokio-util/tracing/zeroize；
@@ -476,6 +478,8 @@ const SAGAAUTHMINT_CRATE: &str = "sagaauthmint";
 const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
 const REQUESTIDMINT_CRATE: &str = "requestidmint";
 const REQUESTIDMINT_ALLOWED_WRAPPERS: &[&str] = &["httpserve", "generated"];
+const RUNTIMEINVENTORYMINT_CRATE: &str = "runtimeinventorymint";
+const RUNTIMEINVENTORYMINT_ALLOWED_WRAPPERS: &[&str] = &["assembly-schema", "runtimeexec"];
 const WORKSPACEFACTS_CRATE: &str = "workspacefacts";
 const WORKSPACEFACTS_CONSUMER: &str = "xtask";
 const GUPPY_CRATE: &str = "guppy";
@@ -486,6 +490,7 @@ const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "diport",
     "eventexec",
     "primitives",
+    "runtimeinventorymint",
     "secure",
 ];
 const RUNTIMEEXEC_EXTERNAL_SHIPPED_DEPS: &[&str] = &[
@@ -608,6 +613,7 @@ pub(crate) fn check_wrappers(
     findings.extend(check_authmint_wrapper_coverage(members, bans));
     findings.extend(check_sagaauthmint_wrapper_coverage(members, bans));
     findings.extend(check_requestidmint_wrapper_coverage(members, bans));
+    findings.extend(check_runtimeinventorymint_wrapper_coverage(members, bans));
     findings.extend(check_postgres_migration_operator_confinement(
         members, bans, edges,
     ));
@@ -653,6 +659,7 @@ pub(crate) fn check_wrappers(
             || b.crate_name == AUTHMINT_CRATE
             || b.crate_name == SAGAAUTHMINT_CRATE
             || b.crate_name == REQUESTIDMINT_CRATE
+            || b.crate_name == RUNTIMEINVENTORYMINT_CRATE
             || b.crate_name == WORKSPACEFACTS_CRATE
             || b.crate_name == GUPPY_CRATE
         {
@@ -1063,6 +1070,74 @@ pub(crate) fn check_requestidmint_wrapper_coverage(
                     REQUESTIDMINT_CRATE,
                     format!(
                         "requestidmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    findings
+}
+
+/// Runtime inventory observations require an opaque mint token that assembly roots cannot name.
+pub(crate) fn check_runtimeinventorymint_wrapper_coverage(
+    members: &[Member],
+    bans: &[BanEntry],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let target = members
+        .iter()
+        .find(|member| member.name == RUNTIMEINVENTORYMINT_CRATE);
+    let ban = bans
+        .iter()
+        .find(|entry| entry.crate_name == RUNTIMEINVENTORYMINT_CRATE);
+    if target.is_none() && ban.is_none() {
+        return findings;
+    }
+    if !matches!(target.map(|member| member.layer), Some(Some(Layer::Basis)))
+        || target.is_some_and(|member| member.path != "crates/runtimeinventorymint")
+    {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            RUNTIMEINVENTORYMINT_CRATE,
+            "runtimeinventorymint 必须是 `crates/runtimeinventorymint` 的 Basis workspace member",
+        ));
+        return findings;
+    }
+    for (name, path, layer) in [
+        ("assembly-schema", "crates/assembly-schema", Layer::Basis),
+        ("runtimeexec", "crates/runtimeexec", Layer::RuntimeExec),
+    ] {
+        if !members
+            .iter()
+            .any(|member| member.name == name && member.path == path && member.layer == Some(layer))
+        {
+            findings.push(finding(
+                Rule::WrapperCoverage,
+                RUNTIMEINVENTORYMINT_CRATE,
+                format!("runtimeinventorymint 批准消费者 `{name}` 的 path/layer 不精确"),
+            ));
+        }
+    }
+    match ban {
+        None => findings.push(finding(
+            Rule::WrapperCoverage,
+            RUNTIMEINVENTORYMINT_CRATE,
+            "deny.toml 缺 runtimeinventorymint target wrapper",
+        )),
+        Some(ban) => {
+            let have: BTreeSet<&str> = ban.wrappers.iter().map(String::as_str).collect();
+            let want: BTreeSet<&str> = RUNTIMEINVENTORYMINT_ALLOWED_WRAPPERS
+                .iter()
+                .copied()
+                .collect();
+            if have != want {
+                let extra: Vec<&str> = have.difference(&want).copied().collect();
+                let missing: Vec<&str> = want.difference(&have).copied().collect();
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    RUNTIMEINVENTORYMINT_CRATE,
+                    format!(
+                        "runtimeinventorymint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
                     ),
                 ));
             }
@@ -3346,6 +3421,56 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         assert_eq!(findings[0].subject, "requestidmint");
     }
 
+    fn runtimeinventorymint_fixture_members() -> Vec<Member> {
+        vec![
+            m(
+                "runtimeinventorymint",
+                "crates/runtimeinventorymint",
+                Some(Layer::Basis),
+            ),
+            m(
+                "assembly-schema",
+                "crates/assembly-schema",
+                Some(Layer::Basis),
+            ),
+            m(
+                "runtimeexec",
+                "crates/runtimeexec",
+                Some(Layer::RuntimeExec),
+            ),
+            m("runtime", "assemblies/runtime", Some(Layer::Root)),
+        ]
+    }
+
+    #[test]
+    fn runtimeinventorymint_wrapper_exact_green() {
+        let bans = vec![ban(
+            "runtimeinventorymint",
+            &["assembly-schema", "runtimeexec"],
+        )];
+        assert!(
+            check_runtimeinventorymint_wrapper_coverage(
+                &runtimeinventorymint_fixture_members(),
+                &bans,
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn runtimeinventorymint_wrapper_widened_to_assembly_red() {
+        let bans = vec![ban(
+            "runtimeinventorymint",
+            &["assembly-schema", "runtimeexec", "runtime"],
+        )];
+        let findings = check_runtimeinventorymint_wrapper_coverage(
+            &runtimeinventorymint_fixture_members(),
+            &bans,
+        );
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].subject, "runtimeinventorymint");
+    }
+
     fn runtime_dep(key: &str, is_workspace_internal: bool) -> ShippedDep {
         ShippedDep {
             from: "runtimeexec".to_string(),
@@ -3367,6 +3492,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             e("runtimeexec", "diport"),
             e("runtimeexec", "eventexec"),
             e("runtimeexec", "primitives"),
+            e("runtimeexec", "runtimeinventorymint"),
             e("runtimeexec", "secure"),
         ];
         let deps = [
@@ -3376,6 +3502,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             runtime_dep("diport", true),
             runtime_dep("eventexec", true),
             runtime_dep("primitives", true),
+            runtime_dep("runtimeinventorymint", true),
             runtime_dep("secure", true),
             runtime_dep("anyhow", false),
             runtime_dep("serde", false),

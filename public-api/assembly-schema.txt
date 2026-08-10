@@ -1,4 +1,363 @@
 pub mod assembly_schema
+pub mod assembly_schema::runtime_inventory
+pub use assembly_schema::runtime_inventory::CanonicalSha256Digest
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+pub assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::Http
+pub assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::Https
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::ActivatedWorkflows
+pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::BuildMetadata
+pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::Domains
+pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::Listeners
+pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::Placements
+pub assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::ProviderPosture
+impl assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::diagnostic_stage(self) -> &'static str
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+pub assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode::Local
+pub assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode::Remote
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+pub assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness::MtlsSourceUnavailable
+pub assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness::Ready
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+pub assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation::Active
+pub assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation::CaptureOnly
+pub assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation::Shadow
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+pub assembly_schema::runtime_inventory::RuntimeInventoryProviderState::Degraded
+pub assembly_schema::runtime_inventory::RuntimeInventoryProviderState::Ready
+pub assembly_schema::runtime_inventory::RuntimeInventoryProviderState::Unavailable
+pub assembly_schema::runtime_inventory::RuntimeInventoryProviderState::Unobserved
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProviderState::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProviderState::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryProviderState) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProviderState::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+pub assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::Invariant(assembly_schema::runtime_inventory::RuntimeInventoryInvariantKind)
+pub assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::Unavailable
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryReadFailure) -> bool
+impl core::error::Error for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryReadFailure
+pub enum assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+pub assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation::Projection(assembly_schema::runtime_inventory::RuntimeInventoryProjectionActivation)
+pub assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation::SagaActive
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow::activation(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow::definition_schema_digest(&self) -> &vocab::digest::CanonicalSha256Digest
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow::definition_version(&self) -> &str
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow::id(&self) -> &str
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow::new(alloc::string::String, alloc::string::String, vocab::digest::CanonicalSha256Digest, assembly_schema::runtime_inventory::RuntimeInventoryWorkflowActivation) -> Self
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata::image_digest(&self) -> &vocab::digest::CanonicalSha256Digest
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata::new(alloc::string::String, vocab::digest::CanonicalSha256Digest) -> Self
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata::source_revision(&self) -> &str
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryEndpoint::host(&self) -> &str
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryEndpoint::new(assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme, alloc::string::String, u16) -> Self
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryEndpoint::port(&self) -> u16
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryEndpoint::scheme(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryEndpointScheme
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryEndpoint::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryEndpoint::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryEndpoint) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::from_runtime_plan(&assembly_schema::RuntimePlan) -> Self
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::runtime_plan_fingerprint(&self) -> &assembly_schema::RuntimePlanFingerprint
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryIdentity) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryIdentity::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryIdentity
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl assembly_schema::runtime_inventory::RuntimeInventoryListener
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryListener::auth(&self) -> assembly_schema::ListenerAuth
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryListener::endpoint(&self) -> &assembly_schema::runtime_inventory::RuntimeInventoryEndpoint
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryListener::id(&self) -> &str
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryListener::kind(&self) -> assembly_schema::AssemblyListenerKind
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryListener::new(alloc::string::String, assembly_schema::AssemblyListenerKind, assembly_schema::ListenerAuth, assembly_schema::runtime_inventory::RuntimeInventoryEndpoint) -> Self
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryListener
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryListener::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryListener
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryListener::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryListener) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryListener
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryListener::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryListener
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryListener
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl assembly_schema::runtime_inventory::RuntimeInventoryObservation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::activated_workflows(&self) -> &[assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow]
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::build_metadata(&self) -> core::option::Option<&assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata>
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::domains(&self) -> &[assembly_schema::AssemblyDomain]
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::from_runtimeexec(assembly_schema::runtime_inventory::RuntimeInventoryParts, runtimeinventorymint::RuntimeInventoryMint) -> core::result::Result<Self, assembly_schema::runtime_inventory::RuntimeInventoryReadFailure>
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::listeners(&self) -> &[assembly_schema::runtime_inventory::RuntimeInventoryListener]
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::placements(&self) -> &[assembly_schema::runtime_inventory::RuntimeInventoryPlacement]
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::provider_posture(&self) -> &[assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture]
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::runtime_plan_fingerprint(&self) -> &assembly_schema::RuntimePlanFingerprint
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryObservation) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryObservation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryObservation
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl assembly_schema::runtime_inventory::RuntimeInventoryParts
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryParts::new(assembly_schema::runtime_inventory::RuntimeInventoryIdentity, core::option::Option<assembly_schema::runtime_inventory::RuntimeInventoryBuildMetadata>, alloc::vec::Vec<assembly_schema::AssemblyDomain>, alloc::vec::Vec<assembly_schema::runtime_inventory::RuntimeInventoryActivatedWorkflow>, alloc::vec::Vec<assembly_schema::runtime_inventory::RuntimeInventoryListener>, alloc::vec::Vec<assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture>, alloc::vec::Vec<assembly_schema::runtime_inventory::RuntimeInventoryPlacement>) -> Self
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryParts
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryParts::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryParts
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryParts::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryParts) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryParts
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryParts::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryParts
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryParts
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::domain(&self) -> assembly_schema::AssemblyDomain
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::endpoint(&self) -> core::option::Option<&assembly_schema::runtime_inventory::RuntimeInventoryEndpoint>
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::mode(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::new(assembly_schema::AssemblyDomain, alloc::string::String, assembly_schema::runtime_inventory::RuntimeInventoryPlacementMode, core::option::Option<assembly_schema::runtime_inventory::RuntimeInventoryEndpoint>, core::option::Option<alloc::string::String>, assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness) -> Self
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::readiness(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryPlacementReadiness
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::spiffe_identity(&self) -> core::option::Option<&str>
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::workload(&self) -> &str
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryPlacement) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryPlacement::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryPlacement
+pub struct assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture::id(&self) -> &str
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture::new(alloc::string::String, assembly_schema::runtime_inventory::RuntimeInventoryProviderState) -> Self
+pub const fn assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture::state(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryProviderState
+impl core::clone::Clone for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture::clone(&self) -> assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::cmp::Eq for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::cmp::PartialEq for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture::eq(&self, &assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture) -> bool
+impl core::fmt::Debug for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+pub fn assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::marker::Freeze for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::marker::Send for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::marker::Sync for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::marker::Unpin for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::marker::UnsafeUnpin for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::runtime_inventory::RuntimeInventoryProviderPosture
 pub enum assembly_schema::AssemblyDomain
 pub assembly_schema::AssemblyDomain::Audit
 pub assembly_schema::AssemblyDomain::Contractreg

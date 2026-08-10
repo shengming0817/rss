@@ -13,7 +13,7 @@
 //!   编码该节「允许 / 禁止依赖」。漂移由 `layerdeps` 真实工作区绿用例（anti-vacuity）暴露。
 
 /// 基础层（依赖 std + 外部 crate，不依赖上层）。**声明顺序即 intra-base DAG 低→高**
-/// （`diagctx（独立根）◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，ADR-002 §D3 / §D1-bis）——见
+/// （`diagctx（独立根）◁ runtimeinventorymint ◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，ADR-002 §D3 / §D1-bis）——见
 /// [`basis_intra_dag_allows`]。
 ///
 /// `securederive` 是 `secure` 的字段级脱敏 derive proc-macro（#[derive(Redact)]，#1360）：rank 低于
@@ -30,6 +30,7 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
     "authmint",
     "sagaauthmint",
     "requestidmint",
+    "runtimeinventorymint",
     "vocab",
     "assembly-schema",
     "ids",
@@ -237,7 +238,7 @@ pub(crate) fn allows(from: Layer, to: Layer) -> bool {
 }
 
 /// INVARIANT: BASE-INTRADAG-01 { level = "Medium", exec = "check", source = "code" } —— 基础层**内部** DAG 前向边放行。[`BASIS_CRATES`] 的声明顺序即 DAG
-/// 低→高（`diagctx（独立根）◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，ADR-002 §D3）；高 rank crate 可依赖低 rank crate
+/// 低→高（`diagctx（独立根）◁ runtimeinventorymint ◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`，ADR-002 §D3）；高 rank crate 可依赖低 rank crate
 /// （前向边，如 sanctioned `runctx → vocab`），反向 / 同 crate / 任一端非基础边一律 `false`。这是
 /// [`allows`]「基础同层横向一律禁」的**唯一**例外；`layerdeps::check_layers` 在 `!allows(Basis,Basis)`
 /// 时叠加本判定。fail-closed：只放行 DAG 严格前向边。
@@ -433,6 +434,10 @@ mod tests {
     #[case("vocab", "requestidmint", false)]
     #[case("requestidmint", "vocab", false)]
     #[case("requestidmint", "runctx", false)]
+    // runtimeinventorymint is a low-rank capability root consumed only by assembly-schema and
+    // runtimeexec; the exact consumer set is additionally closed by deny.toml wrappers.
+    #[case("assembly-schema", "runtimeinventorymint", true)]
+    #[case("runtimeinventorymint", "assembly-schema", false)]
     fn basis_intra_dag_allows_forward_only(
         #[case] from: &str,
         #[case] to: &str,
