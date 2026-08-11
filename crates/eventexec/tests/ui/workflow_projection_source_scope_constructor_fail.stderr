@@ -12,6 +12,12 @@ error[E0599]: no associated function or constant named `from_parts` found for st
   |
 8 |     let _parts = ProjectionSourceScope::from_parts(
   |                                         ^^^^^^^^^^ associated function or constant not found in `ProjectionSourceScope`
+  |
+help: there is an associated function `from_ref` with a similar name
+ --> $CARGO/axum-core-$VERSION/src/extract/from_ref.rs
+  |
+  |     fn from_ref(input: &T) -> Self;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 error[E0599]: no associated function or constant named `from_raw` found for struct `ProjectionSourceScope` in the current scope
   --> tests/ui/workflow_projection_source_scope_constructor_fail.rs:15:39

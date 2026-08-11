@@ -189,12 +189,9 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "crates/eventexec/src/dlq.rs",
-        purpose: "typed resolution request, closed resolution kind/outcome, and authorized operator receipt",
+        purpose: "typed resolution request, closed resolution kind/outcome, and action-bound operator authorization",
         anchors: &[
-            "pub struct AuthorizedDlqOperatorReceipt",
-            "pub const fn from_authenticated_and_authorized(",
-            "pub struct VerifiedOperatorSubject(vocab::ServiceCallerDomain)",
-            "pub const fn from_authorized_receipt(receipt: AuthorizedDlqOperatorReceipt)",
+            "authorization: DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox>",
             "pub struct OutboxExpiredResolutionRequest",
             "pub enum OutboxExpiredResolutionKind",
             "Self::AcceptedGap => \"accepted_gap\"",
@@ -205,13 +202,13 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "assemblies/runtime/src/operator/dlq.rs",
-        purpose: "operator CLI exposes terminal resolution only after authentication and exact grant mint a typed receipt",
+        purpose: "operator CLI exposes terminal resolution only after durable audit, authentication and exact grant mint an action proof",
         anchors: &[
             "\"resolve-expired-outbox\" =>",
-            "async fn dlq_operator_receipt(",
-            "AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(caller)",
-            "dlq_operator_receipt(session, parsed, resource_id, principal, self.operator).await?",
-            "VerifiedOperatorSubject::from_authorized_receipt(receipt)",
+            "fn issue_dlq_authorization<A: diport::DlqOperatorAction>(",
+            "DlqOperatorAuthorization::issue(",
+            "finish_audit_context::<dlq_operator_action::ResolveExpiredOutbox>",
+            "authorize_dlq_operator_principal(",
         ],
     },
     Carrier {
@@ -235,12 +232,12 @@ const CARRIERS: &[Carrier] = &[
     },
     Carrier {
         path: "lints/rss_operator_authorization_callsite/src/lib.rs",
-        purpose: "authorized operator receipt construction remains at the auth/PDP boundary",
+        purpose: "action authorization issuance remains at the exact runtime mint funnel",
         anchors: &[
-            "self_type: \"AuthorizedDlqOperatorReceipt\"",
-            "method: \"from_authenticated_and_authorized\"",
-            "module_path: \"operator::dlq\"",
-            "item_name: \"dlq_operator_receipt\"",
+            "source_crate: \"diport\"",
+            "self_type: \"DlqOperatorAuthorization\"",
+            "method: \"issue\"",
+            "item_name: \"issue_dlq_authorization\"",
             "caller_module_path(cx, parent)",
         ],
     },
@@ -248,9 +245,9 @@ const CARRIERS: &[Carrier] = &[
         path: "lints/rss_operator_authorization_callsite/ui/runtime.rs",
         purpose: "UI red/green locks the exact runtime wrapper and rejects direct or nested forgery",
         anchors: &[
-            "fn dlq_operator_receipt(",
-            "let _receipt = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(",
-            "vocab::ServiceCallerDomain::MaintenanceOperator",
+            "fn issue_dlq_authorization<A: diport::DlqOperatorAction>()",
+            "diport::DlqOperatorAuthorization::issue(",
+            "dlqauthmint::DlqOperatorMint::capability()",
             "mod nested_runtime_module",
         ],
     },
@@ -258,7 +255,7 @@ const CARRIERS: &[Carrier] = &[
         path: "lints/rss_operator_authorization_callsite/ui/runtime.stderr",
         purpose: "UI golden proves both direct and same-named nested runtime calls are rejected",
         anchors: &[
-            "operator authorization receipt `AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized`",
+            "operator capability `DlqOperatorAuthorization::issue`",
             "不要直接调用或保存 constructor 函数项",
         ],
     },

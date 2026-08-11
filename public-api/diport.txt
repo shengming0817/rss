@@ -766,6 +766,72 @@ pub async fn diport::dead_letter_store::DeadLetterStoreLocal::write_dead_letter(
 impl<TraitVariantBlanketType: diport::dead_letter_store::DeadLetterStore> diport::dead_letter_store::DeadLetterStoreLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>
 pub async fn TraitVariantBlanketType::write_dead_letter(&self, diport::dead_letter_store::DeadLetterRecord) -> core::result::Result<(), diport::dead_letter_store::DeadLetterStoreError>
+pub mod diport::dlq_operator_action
+pub struct diport::dlq_operator_action::Inspect
+impl core::fmt::Debug for diport::dlq_operator_action::Inspect
+pub fn diport::dlq_operator_action::Inspect::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl diport::DlqOperatorAction for diport::dlq_operator_action::Inspect
+pub const diport::dlq_operator_action::Inspect::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::Inspect::LABEL: &'static str
+impl core::marker::Freeze for diport::dlq_operator_action::Inspect
+impl core::marker::Send for diport::dlq_operator_action::Inspect
+impl core::marker::Sync for diport::dlq_operator_action::Inspect
+impl core::marker::Unpin for diport::dlq_operator_action::Inspect
+impl core::marker::UnsafeUnpin for diport::dlq_operator_action::Inspect
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlq_operator_action::Inspect
+impl core::panic::unwind_safe::UnwindSafe for diport::dlq_operator_action::Inspect
+pub struct diport::dlq_operator_action::List
+impl core::fmt::Debug for diport::dlq_operator_action::List
+pub fn diport::dlq_operator_action::List::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl diport::DlqOperatorAction for diport::dlq_operator_action::List
+pub const diport::dlq_operator_action::List::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::List::LABEL: &'static str
+impl core::marker::Freeze for diport::dlq_operator_action::List
+impl core::marker::Send for diport::dlq_operator_action::List
+impl core::marker::Sync for diport::dlq_operator_action::List
+impl core::marker::Unpin for diport::dlq_operator_action::List
+impl core::marker::UnsafeUnpin for diport::dlq_operator_action::List
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlq_operator_action::List
+impl core::panic::unwind_safe::UnwindSafe for diport::dlq_operator_action::List
+pub struct diport::dlq_operator_action::RedriveOutbox
+impl core::fmt::Debug for diport::dlq_operator_action::RedriveOutbox
+pub fn diport::dlq_operator_action::RedriveOutbox::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl diport::DlqOperatorAction for diport::dlq_operator_action::RedriveOutbox
+pub const diport::dlq_operator_action::RedriveOutbox::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::RedriveOutbox::LABEL: &'static str
+impl core::marker::Freeze for diport::dlq_operator_action::RedriveOutbox
+impl core::marker::Send for diport::dlq_operator_action::RedriveOutbox
+impl core::marker::Sync for diport::dlq_operator_action::RedriveOutbox
+impl core::marker::Unpin for diport::dlq_operator_action::RedriveOutbox
+impl core::marker::UnsafeUnpin for diport::dlq_operator_action::RedriveOutbox
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlq_operator_action::RedriveOutbox
+impl core::panic::unwind_safe::UnwindSafe for diport::dlq_operator_action::RedriveOutbox
+pub struct diport::dlq_operator_action::ReplayDeadLetter
+impl core::fmt::Debug for diport::dlq_operator_action::ReplayDeadLetter
+pub fn diport::dlq_operator_action::ReplayDeadLetter::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl diport::DlqOperatorAction for diport::dlq_operator_action::ReplayDeadLetter
+pub const diport::dlq_operator_action::ReplayDeadLetter::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::ReplayDeadLetter::LABEL: &'static str
+impl core::marker::Freeze for diport::dlq_operator_action::ReplayDeadLetter
+impl core::marker::Send for diport::dlq_operator_action::ReplayDeadLetter
+impl core::marker::Sync for diport::dlq_operator_action::ReplayDeadLetter
+impl core::marker::Unpin for diport::dlq_operator_action::ReplayDeadLetter
+impl core::marker::UnsafeUnpin for diport::dlq_operator_action::ReplayDeadLetter
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlq_operator_action::ReplayDeadLetter
+impl core::panic::unwind_safe::UnwindSafe for diport::dlq_operator_action::ReplayDeadLetter
+pub struct diport::dlq_operator_action::ResolveExpiredOutbox
+impl core::fmt::Debug for diport::dlq_operator_action::ResolveExpiredOutbox
+pub fn diport::dlq_operator_action::ResolveExpiredOutbox::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl diport::DlqOperatorAction for diport::dlq_operator_action::ResolveExpiredOutbox
+pub const diport::dlq_operator_action::ResolveExpiredOutbox::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::ResolveExpiredOutbox::LABEL: &'static str
+impl core::marker::Freeze for diport::dlq_operator_action::ResolveExpiredOutbox
+impl core::marker::Send for diport::dlq_operator_action::ResolveExpiredOutbox
+impl core::marker::Sync for diport::dlq_operator_action::ResolveExpiredOutbox
+impl core::marker::Unpin for diport::dlq_operator_action::ResolveExpiredOutbox
+impl core::marker::UnsafeUnpin for diport::dlq_operator_action::ResolveExpiredOutbox
+impl core::panic::unwind_safe::RefUnwindSafe for diport::dlq_operator_action::ResolveExpiredOutbox
+impl core::panic::unwind_safe::UnwindSafe for diport::dlq_operator_action::ResolveExpiredOutbox
 pub mod diport::dlx_lifecycle
 pub enum diport::dlx_lifecycle::ArchiveClaimSettleOutcome
 pub diport::dlx_lifecycle::ArchiveClaimSettleOutcome::Applied
@@ -5587,6 +5653,52 @@ impl core::marker::Unpin for diport::dead_letter_store::DeadLetterSource
 impl core::marker::UnsafeUnpin for diport::dead_letter_store::DeadLetterSource
 impl core::panic::unwind_safe::RefUnwindSafe for diport::dead_letter_store::DeadLetterSource
 impl core::panic::unwind_safe::UnwindSafe for diport::dead_letter_store::DeadLetterSource
+pub enum diport::DlqOperatorActionKind
+pub diport::DlqOperatorActionKind::Inspect
+pub diport::DlqOperatorActionKind::List
+pub diport::DlqOperatorActionKind::RedriveOutbox
+pub diport::DlqOperatorActionKind::ReplayDeadLetter
+pub diport::DlqOperatorActionKind::ResolveExpiredOutbox
+impl diport::DlqOperatorActionKind
+pub const fn diport::DlqOperatorActionKind::as_str(self) -> &'static str
+pub fn diport::DlqOperatorActionKind::parse(&str) -> core::option::Option<Self>
+impl core::clone::Clone for diport::DlqOperatorActionKind
+pub fn diport::DlqOperatorActionKind::clone(&self) -> diport::DlqOperatorActionKind
+impl core::cmp::Eq for diport::DlqOperatorActionKind
+impl core::cmp::PartialEq for diport::DlqOperatorActionKind
+pub fn diport::DlqOperatorActionKind::eq(&self, &diport::DlqOperatorActionKind) -> bool
+impl core::fmt::Debug for diport::DlqOperatorActionKind
+pub fn diport::DlqOperatorActionKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::DlqOperatorActionKind
+impl core::marker::StructuralPartialEq for diport::DlqOperatorActionKind
+impl core::marker::Freeze for diport::DlqOperatorActionKind
+impl core::marker::Send for diport::DlqOperatorActionKind
+impl core::marker::Sync for diport::DlqOperatorActionKind
+impl core::marker::Unpin for diport::DlqOperatorActionKind
+impl core::marker::UnsafeUnpin for diport::DlqOperatorActionKind
+impl core::panic::unwind_safe::RefUnwindSafe for diport::DlqOperatorActionKind
+impl core::panic::unwind_safe::UnwindSafe for diport::DlqOperatorActionKind
+#[non_exhaustive] pub enum diport::DlqOperatorStartAuditIdError
+pub diport::DlqOperatorStartAuditIdError::Invalid
+impl core::clone::Clone for diport::DlqOperatorStartAuditIdError
+pub fn diport::DlqOperatorStartAuditIdError::clone(&self) -> diport::DlqOperatorStartAuditIdError
+impl core::cmp::Eq for diport::DlqOperatorStartAuditIdError
+impl core::cmp::PartialEq for diport::DlqOperatorStartAuditIdError
+pub fn diport::DlqOperatorStartAuditIdError::eq(&self, &diport::DlqOperatorStartAuditIdError) -> bool
+impl core::error::Error for diport::DlqOperatorStartAuditIdError
+impl core::fmt::Debug for diport::DlqOperatorStartAuditIdError
+pub fn diport::DlqOperatorStartAuditIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for diport::DlqOperatorStartAuditIdError
+pub fn diport::DlqOperatorStartAuditIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for diport::DlqOperatorStartAuditIdError
+impl core::marker::StructuralPartialEq for diport::DlqOperatorStartAuditIdError
+impl core::marker::Freeze for diport::DlqOperatorStartAuditIdError
+impl core::marker::Send for diport::DlqOperatorStartAuditIdError
+impl core::marker::Sync for diport::DlqOperatorStartAuditIdError
+impl core::marker::Unpin for diport::DlqOperatorStartAuditIdError
+impl core::marker::UnsafeUnpin for diport::DlqOperatorStartAuditIdError
+impl core::panic::unwind_safe::RefUnwindSafe for diport::DlqOperatorStartAuditIdError
+impl core::panic::unwind_safe::UnwindSafe for diport::DlqOperatorStartAuditIdError
 pub enum diport::DlxArchiveHeadOutcome
 pub diport::DlxArchiveHeadOutcome::Missing
 pub diport::DlxArchiveHeadOutcome::Present(diport::dlx_lifecycle::DlxArchiveObjectMetadata)
@@ -7316,6 +7428,41 @@ impl core::marker::Unpin for diport::acker::Delivery
 impl core::marker::UnsafeUnpin for diport::acker::Delivery
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::acker::Delivery
 impl !core::panic::unwind_safe::UnwindSafe for diport::acker::Delivery
+pub struct diport::DlqOperatorAuthorization<A: diport::DlqOperatorAction>
+impl<A: diport::DlqOperatorAction> diport::DlqOperatorAuthorization<A>
+pub const fn diport::DlqOperatorAuthorization<A>::caller(&self) -> vocab::service::ServiceCallerDomain
+pub fn diport::DlqOperatorAuthorization<A>::issue(dlqauthmint::DlqOperatorMint, vocab::service::ServiceCallerDomain, alloc::string::String, vocab::tenant::TenantId, diport::DlqOperatorStartAuditId) -> Self
+pub fn diport::DlqOperatorAuthorization<A>::operator_subject(&self) -> &str
+pub const fn diport::DlqOperatorAuthorization<A>::start_audit_id(&self) -> &diport::DlqOperatorStartAuditId
+pub const fn diport::DlqOperatorAuthorization<A>::tenant(&self) -> vocab::tenant::TenantId
+impl<A: diport::DlqOperatorAction> core::fmt::Debug for diport::DlqOperatorAuthorization<A>
+pub fn diport::DlqOperatorAuthorization<A>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<A> core::marker::Freeze for diport::DlqOperatorAuthorization<A>
+impl<A> core::marker::Send for diport::DlqOperatorAuthorization<A> where A: core::marker::Send
+impl<A> core::marker::Sync for diport::DlqOperatorAuthorization<A> where A: core::marker::Sync
+impl<A> core::marker::Unpin for diport::DlqOperatorAuthorization<A> where A: core::marker::Unpin
+impl<A> core::marker::UnsafeUnpin for diport::DlqOperatorAuthorization<A>
+impl<A> core::panic::unwind_safe::RefUnwindSafe for diport::DlqOperatorAuthorization<A> where A: core::panic::unwind_safe::RefUnwindSafe
+impl<A> core::panic::unwind_safe::UnwindSafe for diport::DlqOperatorAuthorization<A> where A: core::panic::unwind_safe::UnwindSafe
+pub struct diport::DlqOperatorStartAuditId(_)
+impl diport::DlqOperatorStartAuditId
+pub fn diport::DlqOperatorStartAuditId::as_str(&self) -> &str
+pub fn diport::DlqOperatorStartAuditId::parse(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, diport::DlqOperatorStartAuditIdError>
+impl core::clone::Clone for diport::DlqOperatorStartAuditId
+pub fn diport::DlqOperatorStartAuditId::clone(&self) -> diport::DlqOperatorStartAuditId
+impl core::cmp::Eq for diport::DlqOperatorStartAuditId
+impl core::cmp::PartialEq for diport::DlqOperatorStartAuditId
+pub fn diport::DlqOperatorStartAuditId::eq(&self, &diport::DlqOperatorStartAuditId) -> bool
+impl core::fmt::Debug for diport::DlqOperatorStartAuditId
+pub fn diport::DlqOperatorStartAuditId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for diport::DlqOperatorStartAuditId
+impl core::marker::Freeze for diport::DlqOperatorStartAuditId
+impl core::marker::Send for diport::DlqOperatorStartAuditId
+impl core::marker::Sync for diport::DlqOperatorStartAuditId
+impl core::marker::Unpin for diport::DlqOperatorStartAuditId
+impl core::marker::UnsafeUnpin for diport::DlqOperatorStartAuditId
+impl core::panic::unwind_safe::RefUnwindSafe for diport::DlqOperatorStartAuditId
+impl core::panic::unwind_safe::UnwindSafe for diport::DlqOperatorStartAuditId
 pub struct diport::DlxArchiveBacklog
 impl diport::dlx_lifecycle::DlxArchiveBacklog
 pub const fn diport::dlx_lifecycle::DlxArchiveBacklog::depth(self) -> u64
@@ -10338,6 +10485,24 @@ pub type alloc::boxed::Box<T>::Privilege = <T as diport::DiPortEffect>::Privileg
 impl<T: ?core::marker::Sized + diport::DiPortEffect> diport::DiPortEffect for alloc::sync::Arc<T>
 pub type alloc::sync::Arc<T>::Effect = <T as diport::DiPortEffect>::Effect
 pub type alloc::sync::Arc<T>::Privilege = <T as diport::DiPortEffect>::Privilege
+pub trait diport::DlqOperatorAction: diport::dlq_operator::sealed::Sealed + core::fmt::Debug
+pub const diport::DlqOperatorAction::KIND: diport::DlqOperatorActionKind
+pub const diport::DlqOperatorAction::LABEL: &'static str
+impl diport::DlqOperatorAction for diport::dlq_operator_action::Inspect
+pub const diport::dlq_operator_action::Inspect::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::Inspect::LABEL: &'static str
+impl diport::DlqOperatorAction for diport::dlq_operator_action::List
+pub const diport::dlq_operator_action::List::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::List::LABEL: &'static str
+impl diport::DlqOperatorAction for diport::dlq_operator_action::RedriveOutbox
+pub const diport::dlq_operator_action::RedriveOutbox::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::RedriveOutbox::LABEL: &'static str
+impl diport::DlqOperatorAction for diport::dlq_operator_action::ReplayDeadLetter
+pub const diport::dlq_operator_action::ReplayDeadLetter::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::ReplayDeadLetter::LABEL: &'static str
+impl diport::DlqOperatorAction for diport::dlq_operator_action::ResolveExpiredOutbox
+pub const diport::dlq_operator_action::ResolveExpiredOutbox::KIND: diport::DlqOperatorActionKind
+pub const diport::dlq_operator_action::ResolveExpiredOutbox::LABEL: &'static str
 pub trait diport::DlxArchiveStore: core::marker::Send + core::marker::Sync + core::marker::Send
 pub type diport::DlxArchiveStore::ObjectKey: core::clone::Clone + core::marker::Send + core::marker::Sync + 'static
 pub fn diport::DlxArchiveStore::get_ciphertext(&self, &Self::ObjectKey, &diport::dlx_lifecycle::ArchiveVersionId) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<diport::dlx_lifecycle::DlxArchiveCiphertext>, diport::dlx_lifecycle::DlxLifecycleError>> + core::marker::Send

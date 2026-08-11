@@ -112,6 +112,8 @@ deny = [
   # SAGA-OPERATOR-MINT-01：高权限 Saga operator mint 仅 DI proof owner 与 production runtime 可持有；
   # 依赖普通 authmint 的 httpserve/settingsonly/identityaudit 不能因此获得 operator authority。
   { crate = "sagaauthmint", wrappers = ["diport", "runtime"] },
+  # DLQ-OPERATOR-MINT-01：DLQ operator mint 仅 DI proof owner 与 production runtime 可持有。
+  { crate = "dlqauthmint", wrappers = ["diport", "runtime"] },
   # HTTP-REQUEST-ID-AUTHORITY-01：只有 HTTP middleware mint；generated 仅消费 opaque carrier。
   { crate = "requestidmint", wrappers = ["httpserve", "generated"] },
   # RUNTIME-INVENTORY-MINT-01：assembly-schema only names the token in the private-field receipt

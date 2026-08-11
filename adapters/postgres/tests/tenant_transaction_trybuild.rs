@@ -26,6 +26,7 @@ fn tenant_transaction_ui() {
     t.compile_fail("tests/ui/localtx_attempt_external_mint_fail.rs");
     t.compile_fail("tests/ui/localtx_attempt_sibling_path_mint_fail.rs");
     t.compile_fail("tests/ui/pg_store_private_fail.rs");
+    t.compile_fail("tests/ui/pg_dlq_mint_dependency_absent_fail.rs");
     t.compile_fail("tests/ui/pg_maintenance_infra_absent_fail.rs");
     if cfg!(feature = "domain-identity") {
         t.compile_fail("tests/ui/pg_device_latent_operator_clone_fail.rs");

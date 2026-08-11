@@ -20,7 +20,7 @@
 /// `secure` ⇒ sanctioned 前向边 `secure → securederive`（proc-macro 是编译期纯工具，出边全是外部 crate
 /// syn/quote/proc-macro2，无内部边可违 [`allows`]）。
 ///
-/// `diagctx`、`authmint`、`sagaauthmint` 与 `requestidmint` capability crates 是**独立根**
+/// `diagctx`、`authmint`、`sagaauthmint`、`dlqauthmint` 与 `requestidmint` capability crates 是**独立根**
 /// （[`ISOLATED_BASIS_CRATES`]）：任何涉及这些 crate 的 base 内边
 /// （双向）均不 sanction，由 `cargo xtask layer-deps`（Medium，BASE-INTRADAG-01）守；Hard 化（dylint 禁 authz
 /// crate import diagctx）见 follow-up #1400。
@@ -29,6 +29,7 @@ pub(crate) const BASIS_CRATES: &[&str] = &[
     "rss-diag-context",
     "authmint",
     "sagaauthmint",
+    "dlqauthmint",
     "requestidmint",
     "runtimeinventorymint",
     "vocab",
@@ -47,6 +48,7 @@ pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &[
     "rss-diag-context",
     "authmint",
     "sagaauthmint",
+    "dlqauthmint",
     "requestidmint",
 ];
 /// 引擎 / 原语层（依赖基础）。

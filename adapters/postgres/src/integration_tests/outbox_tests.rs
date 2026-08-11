@@ -7,6 +7,29 @@ use crate::outbox_routine::{
     OUTBOX_ROUTINES, OutboxRoutineOwnerPolicy, OutboxRoutineRole, OutboxRoutineSpec,
 };
 
+const DLQ_TEST_OPERATOR: &str = "postgres-dlq-operator";
+
+fn dlq_authorization<A: diport::DlqOperatorAction>(
+    tenant: vocab::TenantId,
+) -> diport::DlqOperatorAuthorization<A> {
+    dlq_authorization_with_audit_id(
+        tenant,
+        diport::DlqOperatorStartAuditId::parse("postgres-dlq-integration").unwrap(),
+    )
+}
+
+fn dlq_authorization_with_audit_id<A: diport::DlqOperatorAction>(
+    tenant: vocab::TenantId,
+    start_audit_id: diport::DlqOperatorStartAuditId,
+) -> diport::DlqOperatorAuthorization<A> {
+    diport::test_support::dlq_operator_authorization(
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        DLQ_TEST_OPERATOR,
+        tenant,
+        start_audit_id,
+    )
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
 struct OutboxRoutineObservation {
     signature: String,
@@ -2271,9 +2294,7 @@ async fn seed_consumer_replay_dead_letter(
 #[allow(clippy::unwrap_used)]
 // reason: integration test fixtures use known-valid ids; assertions should fail loud.
 async fn t_dead_letter_replay_wrong_domain_writes_outbox_without_projection_mirror() -> TestResult {
-    use eventexec::{
-        DeadLetterId, DlqReplayOutcome, DlqReplayRequest, DlqStore as _, OperatorDlqCapability,
-    };
+    use eventexec::{DeadLetterId, DlqReplayOutcome, DlqReplayRequest, DlqStore as _};
 
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -2298,13 +2319,12 @@ async fn t_dead_letter_replay_wrong_domain_writes_outbox_without_projection_mirr
 
     let outcome = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&dead_letter_id)?,
             replay_id.clone(),
-            OperatorDlqCapability::issue_for_authorized_operator(),
         ))
         .await?;
-    assert_eq!(outcome, DlqReplayOutcome::Inserted);
+    assert_eq!(outcome.outcome(), &DlqReplayOutcome::Inserted);
     let outbox_domain: String = sqlx::query_scalar("SELECT domain FROM outbox WHERE event_id = $1")
         .bind(replay_id.as_str())
         .fetch_one(&store.pool)
@@ -2336,10 +2356,7 @@ async fn t_dead_letter_replay_wrong_domain_writes_outbox_without_projection_mirr
 #[allow(clippy::unwrap_used)]
 // reason: integration test fixtures use known-valid ids; assertions should fail loud.
 async fn t_dead_letter_replay_projection_catalog_drift_rolls_back_atomically() -> TestResult {
-    use eventexec::{
-        DeadLetterId, DlqError, DlqReplayRequest, DlqReplayStoreStage, DlqStore as _,
-        OperatorDlqCapability,
-    };
+    use eventexec::{DeadLetterId, DlqError, DlqReplayRequest, DlqReplayStoreStage, DlqStore as _};
 
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -2371,10 +2388,9 @@ async fn t_dead_letter_replay_projection_catalog_drift_rolls_back_atomically() -
 
     let replay = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&dead_letter_id)?,
             replay_id.clone(),
-            OperatorDlqCapability::issue_for_authorized_operator(),
         ))
         .await;
     assert!(matches!(
@@ -2411,9 +2427,7 @@ async fn t_dead_letter_replay_projection_catalog_drift_rolls_back_atomically() -
 #[allow(clippy::unwrap_used)]
 // reason: integration test fixtures use known-valid ids; assertions should fail loud.
 async fn t_dead_letter_replay_aad_tamper_is_invalid_without_writes() -> TestResult {
-    use eventexec::{
-        DeadLetterId, DlqError, DlqReplayRequest, DlqStore as _, OperatorDlqCapability,
-    };
+    use eventexec::{DeadLetterId, DlqError, DlqReplayRequest, DlqStore as _};
 
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
@@ -2433,7 +2447,6 @@ async fn t_dead_letter_replay_aad_tamper_is_invalid_without_writes() -> TestResu
     )
     .await?;
     let dlq = maintenance.dlq_store(test_dlx_payload_protector(), plan.projection_capture());
-    let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let contract_replay_id = IdemKey::parse(&unique_event_id("replay-contract-tampered")).unwrap();
     let group_replay_id = IdemKey::parse(&unique_event_id("replay-group-tampered")).unwrap();
 
@@ -2444,10 +2457,9 @@ async fn t_dead_letter_replay_aad_tamper_is_invalid_without_writes() -> TestResu
         .await?;
     let contract_result = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&dead_letter_id)?,
             contract_replay_id.clone(),
-            cap,
         ))
         .await;
     assert!(matches!(contract_result, Err(DlqError::InvalidPayload)));
@@ -2464,10 +2476,9 @@ async fn t_dead_letter_replay_aad_tamper_is_invalid_without_writes() -> TestResu
         .await?;
     let group_result = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&dead_letter_id)?,
             group_replay_id.clone(),
-            cap,
         ))
         .await;
     assert!(matches!(group_result, Err(DlqError::InvalidPayload)));
@@ -2502,7 +2513,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     };
     use eventexec::{
         DeadLetterId, DlqCursor, DlqEntryKind, DlqError, DlqListQuery, DlqReplayOutcome,
-        DlqReplayRequest, DlqStore as _, OperatorDlqCapability,
+        DlqReplayRequest, DlqStore as _,
     };
 
     let (pg, store) = connect_pg().await?;
@@ -2551,17 +2562,15 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     tx.commit().await?;
 
     let replay_id = IdemKey::parse(&unique_event_id("replay")).unwrap();
-    let cap = OperatorDlqCapability::issue_for_authorized_operator();
 
     let outcome = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&dead_letter_id)?,
             replay_id.clone(),
-            cap,
         ))
         .await?;
-    assert_eq!(outcome, DlqReplayOutcome::Inserted);
+    assert_eq!(outcome.outcome(), &DlqReplayOutcome::Inserted);
 
     let row: (
         String,
@@ -2621,13 +2630,12 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
 
     let duplicate = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&dead_letter_id)?,
             replay_id.clone(),
-            cap,
         ))
         .await?;
-    assert_eq!(duplicate, DlqReplayOutcome::AlreadyExists);
+    assert_eq!(duplicate.outcome(), &DlqReplayOutcome::AlreadyExists);
     let projection_count: (i64,) =
         sqlx::query_as("SELECT count(*) FROM projection_events WHERE event_id = $1")
             .bind(replay_id.as_str())
@@ -2642,10 +2650,9 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let seed = seed_conflicting_outbox_fact(&store, tenant, conflict_replay_id.as_str()).await?;
     let conflict = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&dead_letter_id)?,
             conflict_replay_id.clone(),
-            cap,
         ))
         .await;
     assert!(
@@ -2667,10 +2674,9 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let missing_replay_id = IdemKey::parse(&unique_event_id("missing-replay")).unwrap();
     let missing = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&missing_id)?,
             missing_replay_id,
-            cap,
         ))
         .await;
     assert!(
@@ -2705,10 +2711,9 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     tx.commit().await?;
     let saga_replay = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&saga_dead_letter_id)?,
             saga_replay_id.clone(),
-            cap,
         ))
         .await;
     assert!(
@@ -2765,10 +2770,9 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     );
     let projection_replay = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&projection_dead_letter_id)?,
             projection_replay_id.clone(),
-            cap,
         ))
         .await;
     assert!(
@@ -2786,7 +2790,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     );
     let projection_list = dlq
         .list_dlq(
-            DlqListQuery::new(tenant)
+            DlqListQuery::new(dlq_authorization(tenant))
                 .with_producer_domain(domain.as_str())
                 .with_source(DeadLetterSource::Projection),
         )
@@ -2837,10 +2841,9 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     tx.commit().await?;
     let invalid_payload = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&invalid_dead_letter_id)?,
             IdemKey::parse(&unique_event_id("invalid-payload-replay")).unwrap(),
-            cap,
         ))
         .await;
     assert!(
@@ -2850,7 +2853,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
 
     let first_page = dlq
         .list_dlq(
-            DlqListQuery::new(tenant)
+            DlqListQuery::new(dlq_authorization(tenant))
                 .with_producer_domain(domain.as_str())
                 .with_source(DeadLetterSource::Consumer)
                 .with_limit(1),
@@ -2863,7 +2866,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let cursor = first_page.next_cursor().unwrap();
     let second_page = dlq
         .list_dlq(
-            DlqListQuery::new(tenant)
+            DlqListQuery::new(dlq_authorization(tenant))
                 .with_producer_domain(domain.as_str())
                 .with_source(DeadLetterSource::Consumer)
                 .with_limit(1)
@@ -2899,7 +2902,6 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     use eventexec::{
         DeadLetterId, DlqCursor, DlqEntryKind, DlqError, DlqInspectRequest, DlqInspectTarget,
         DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest, DlqStore as _,
-        OperatorDlqCapability,
     };
 
     let (pg, store) = connect_pg().await?;
@@ -2966,16 +2968,14 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         .await?;
 
     let dlq = maintenance.dlq_store(test_dlx_payload_protector(), plan.projection_capture());
-    let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics_handle = recorder.handle();
     let replay_id = IdemKey::parse(&unique_event_id("bad-replay")).unwrap();
     let replay = dlq
         .replay_dead_letter(DlqReplayRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DeadLetterId::parse(&row.0)?,
             replay_id,
-            cap,
         ))
         .await;
     assert!(matches!(replay, Err(DlqError::NotReplayable)));
@@ -3015,7 +3015,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
 
     let listed = dlq
         .list_dlq(
-            DlqListQuery::new(tenant)
+            DlqListQuery::new(dlq_authorization(tenant))
                 .with_source(diport::DeadLetterSource::OutboxRelay)
                 .with_producer_domain(domain.as_str())
                 .with_limit(1),
@@ -3042,7 +3042,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert!(listed.has_more(), "two DLX rows with limit=1 must paginate");
     let continuation = dlq
         .list_dlq(
-            DlqListQuery::new(tenant)
+            DlqListQuery::new(dlq_authorization(tenant))
                 .with_source(diport::DeadLetterSource::OutboxRelay)
                 .with_producer_domain(domain.as_str())
                 .with_limit(1)
@@ -3060,7 +3060,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     let event_key = IdemKey::parse(&event_id).unwrap();
     let inspected = dlq
         .inspect_dlq(DlqInspectRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             DlqInspectTarget::OutboxDlx(event_key.clone()),
         ))
         .await?;
@@ -3099,15 +3099,15 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
         "fixture must prove DLQ reads do not alias updated_at"
     );
 
-    let wrong_tenant =
-        metrics::with_local_recorder(&recorder, || {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(
-                    dlq.redrive_outbox(DlqRedriveRequest::new(tenant_b, event_key.clone(), cap)),
-                )
-            })
-        })?;
-    assert_eq!(wrong_tenant, DlqRedriveOutcome::NotFound);
+    let wrong_tenant = metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(dlq.redrive_outbox(DlqRedriveRequest::new(
+                dlq_authorization(tenant_b),
+                event_key.clone(),
+            )))
+        })
+    })?;
+    assert_eq!(wrong_tenant.outcome(), &DlqRedriveOutcome::NotFound);
 
     let status_after_wrong: (String, bool, bool) = sqlx::query_as(
         "SELECT status, published_at IS NULL, dlx_at IS NOT NULL FROM outbox WHERE event_id = $1",
@@ -3119,15 +3119,15 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     assert!(status_after_wrong.1);
     assert!(status_after_wrong.2);
 
-    let redriven =
-        metrics::with_local_recorder(&recorder, || {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(
-                    dlq.redrive_outbox(DlqRedriveRequest::new(tenant, event_key.clone(), cap)),
-                )
-            })
-        })?;
-    assert_eq!(redriven, DlqRedriveOutcome::Redriven);
+    let redriven = metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(dlq.redrive_outbox(DlqRedriveRequest::new(
+                dlq_authorization(tenant),
+                event_key.clone(),
+            )))
+        })
+    })?;
+    assert_eq!(redriven.outcome(), &DlqRedriveOutcome::Redriven);
     type RedrivenOutboxState = (
         String,
         i32,
@@ -3165,13 +3165,14 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
 
     let pending_redrive = metrics::with_local_recorder(&recorder, || {
         tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current()
-                .block_on(dlq.redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap)))
+            tokio::runtime::Handle::current().block_on(
+                dlq.redrive_outbox(DlqRedriveRequest::new(dlq_authorization(tenant), event_key)),
+            )
         })
     })?;
     assert_eq!(
-        pending_redrive,
-        DlqRedriveOutcome::NotFound,
+        pending_redrive.outcome(),
+        &DlqRedriveOutcome::NotFound,
         "redrive must only mutate current dlx rows"
     );
     let rendered = metrics_handle.render();
@@ -3182,7 +3183,7 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
 
     let listed_after_redrive = dlq
         .list_dlq(
-            DlqListQuery::new(tenant)
+            DlqListQuery::new(dlq_authorization(tenant))
                 .with_source(diport::DeadLetterSource::OutboxRelay)
                 .with_producer_domain(domain.as_str()),
         )
@@ -3312,10 +3313,143 @@ async fn same_id_automatic_deadline_is_frozen_and_expiry_never_calls_broker() ->
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn dlq_maintenance_audit_binds_tenant_and_start_id() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let maintenance = connect_pg_maintenance(&pg).await?;
+    let tenant = test_tenant();
+    let audit_id = diport::DlqOperatorStartAuditId::parse(format!(
+        "postgres-dlq-audit-{}",
+        uuid::Uuid::new_v4()
+    ))?;
+    let resource_id = "operation=list tenant=test";
+
+    maintenance
+        .record_dlq_maintenance_audit(
+            "unauthenticated-dlq-attempt",
+            tenant,
+            &audit_id,
+            "dlq.list.start",
+            crate::MaintenanceAuditOutcome::Success,
+            resource_id,
+        )
+        .await?;
+    maintenance
+        .record_dlq_maintenance_audit(
+            "rss-maintenance-operator",
+            tenant,
+            &audit_id,
+            "dlq.list.finish",
+            crate::MaintenanceAuditOutcome::Success,
+            resource_id,
+        )
+        .await?;
+
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT action, principal_id, tenant_context::text, request_id FROM auth_audit_events \
+         WHERE request_id = $1 ORDER BY action",
+    )
+    .bind(audit_id.as_str())
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(rows.len(), 2);
+    let expected_tenant = tenant.as_uuid().to_string();
+    for (action, principal_id, tenant_context, request_id) in rows {
+        assert!(matches!(
+            action.as_str(),
+            "dlq.list.start" | "dlq.list.finish"
+        ));
+        assert_eq!(tenant_context.as_deref(), Some(expected_tenant.as_str()));
+        assert_eq!(request_id.as_deref(), Some(audit_id.as_str()));
+        if action.ends_with(".start") {
+            assert_eq!(principal_id, "unauthenticated-dlq-attempt");
+        } else {
+            assert_eq!(principal_id, "rss-maintenance-operator");
+        }
+    }
+
+    maintenance.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::unwrap_used)]
+// reason: integration fixtures use known-valid typed identifiers.
+async fn dlq_mutation_rolls_back_when_atomic_finish_audit_fails() -> TestResult {
+    use eventexec::{DlqRedriveRequest, DlqStore as _};
+
+    let (pg, store) = connect_pg().await?;
+    setup_outbox(&store).await?;
+    let maintenance = connect_pg_maintenance(&pg).await?;
+    let tenant = test_tenant();
+    let domain = unique_domain("atomic-audit-rollback");
+    let event_id = unique_event_id("atomic-audit-rollback");
+    seed_outbox_dlx(&store, &domain, &event_id).await?;
+    let audit_id = diport::DlqOperatorStartAuditId::parse(format!(
+        "postgres-audit-failure-{}",
+        uuid::Uuid::new_v4()
+    ))?;
+
+    sqlx::query(
+        r#"
+        CREATE FUNCTION test_reject_dlq_finish_audit() RETURNS trigger
+        LANGUAGE plpgsql AS $$
+        BEGIN
+            IF NEW.request_id LIKE 'postgres-audit-failure-%' THEN
+                RAISE EXCEPTION 'injected DLQ finish audit failure';
+            END IF;
+            RETURN NEW;
+        END
+        $$
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+    sqlx::query(
+        r#"
+        CREATE TRIGGER test_reject_dlq_finish_audit
+        BEFORE INSERT ON auth_audit_events
+        FOR EACH ROW EXECUTE FUNCTION test_reject_dlq_finish_audit()
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let dlq = maintenance.dlq_store_without_payload_replay();
+    let result = dlq
+        .redrive_outbox(DlqRedriveRequest::new(
+            dlq_authorization_with_audit_id(tenant, audit_id.clone()),
+            IdemKey::parse(&event_id).unwrap(),
+        ))
+        .await;
+    assert!(
+        result.is_err(),
+        "injected finish audit failure must surface"
+    );
+    let status: String = sqlx::query_scalar("SELECT status FROM outbox WHERE event_id = $1")
+        .bind(&event_id)
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(status, "dlx", "the mutation must roll back with its audit");
+    let audit_count: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM auth_audit_events WHERE request_id = $1")
+            .bind(audit_id.as_str())
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(audit_count, 0);
+
+    drop(dlq);
+    maintenance.shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: integration fixtures use known-valid typed identifiers and inspect a test-only mutex.
 async fn same_id_redrive_preflight_expiry_never_calls_broker() -> TestResult {
-    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _, OperatorDlqCapability};
+    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _};
 
     let (pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
@@ -3324,16 +3458,30 @@ async fn same_id_redrive_preflight_expiry_never_calls_broker() -> TestResult {
     let domain = unique_domain("same-id-redrive-preflight");
     let event_id = unique_event_id("same-id-redrive-preflight");
     seed_outbox_dlx(&store, &domain, &event_id).await?;
+    let finish_audit_id = diport::DlqOperatorStartAuditId::parse(format!(
+        "postgres-redrive-finish-{}",
+        uuid::Uuid::new_v4()
+    ))?;
 
     let dlq = maintenance.dlq_store_without_payload_replay();
     let redriven = dlq
         .redrive_outbox(DlqRedriveRequest::new(
-            tenant,
+            dlq_authorization_with_audit_id(tenant, finish_audit_id.clone()),
             IdemKey::parse(&event_id).unwrap(),
-            OperatorDlqCapability::issue_for_authorized_operator(),
         ))
         .await?;
-    assert_eq!(redriven, DlqRedriveOutcome::Redriven);
+    assert_eq!(redriven.outcome(), &DlqRedriveOutcome::Redriven);
+    let finish_audit: (String, String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT action, outcome, tenant_context::text, request_id \
+         FROM auth_audit_events WHERE request_id = $1",
+    )
+    .bind(finish_audit_id.as_str())
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(finish_audit.0, "dlq.redrive-outbox.finish");
+    assert_eq!(finish_audit.1, "success");
+    assert_eq!(finish_audit.2.as_deref(), Some(tenant.to_string().as_str()));
+    assert_eq!(finish_audit.3.as_deref(), Some(finish_audit_id.as_str()));
 
     let (publisher, calls) = RecordingPublisher::always_ok();
     let relay = make_pg_outbox_for_domain(&store, &domain, publisher);
@@ -3389,13 +3537,12 @@ async fn same_id_redrive_preflight_expiry_never_calls_broker() -> TestResult {
 // reason: integration fixtures use known-valid typed identifiers.
 async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_is_atomic()
 -> TestResult {
-    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _, OperatorDlqCapability};
+    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _};
 
     let (pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
     let maintenance = connect_pg_maintenance(&pg).await?;
     let tenant = test_tenant();
-    let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let dlq = Arc::new(maintenance.dlq_store_without_payload_replay());
 
     let domain = unique_domain("same-id-manual");
@@ -3408,12 +3555,11 @@ async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_i
             .await?;
     let redriven = dlq
         .redrive_outbox(DlqRedriveRequest::new(
-            tenant,
+            dlq_authorization(tenant),
             IdemKey::parse(&event_id).unwrap(),
-            cap,
         ))
         .await?;
-    assert_eq!(redriven, DlqRedriveOutcome::Redriven);
+    assert_eq!(redriven.outcome(), &DlqRedriveOutcome::Redriven);
     let claim = claimed_entry_for_event(&store, &event_id).await?;
     let remark: String = sqlx::query_scalar(
         "SELECT settlement_outcome::text FROM rss_outbox_mark_dlx($1, $2::uuid, $3)",
@@ -3446,15 +3592,15 @@ async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_i
             .await?;
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let metrics_handle = recorder.handle();
-    let expired =
-        metrics::with_local_recorder(&recorder, || {
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current().block_on(dlq.redrive_outbox(
-                    DlqRedriveRequest::new(tenant, IdemKey::parse(&event_id).unwrap(), cap),
-                ))
-            })
-        })?;
-    assert_eq!(expired, DlqRedriveOutcome::Expired);
+    let expired = metrics::with_local_recorder(&recorder, || {
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(dlq.redrive_outbox(DlqRedriveRequest::new(
+                dlq_authorization(tenant),
+                IdemKey::parse(&event_id).unwrap(),
+            )))
+        })
+    })?;
+    assert_eq!(expired.outcome(), &DlqRedriveOutcome::Expired);
     let after: (String, String) =
         sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
             .bind(&event_id)
@@ -3472,7 +3618,7 @@ async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_i
         let dlq = Arc::clone(&dlq);
         let event_key = IdemKey::parse(&concurrent_id).unwrap();
         async move {
-            dlq.redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap))
+            dlq.redrive_outbox(DlqRedriveRequest::new(dlq_authorization(tenant), event_key))
                 .await
         }
     });
@@ -3480,14 +3626,14 @@ async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_i
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == DlqRedriveOutcome::Redriven)
+            .filter(|outcome| outcome.outcome() == &DlqRedriveOutcome::Redriven)
             .count(),
         1
     );
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == DlqRedriveOutcome::NotFound)
+            .filter(|outcome| outcome.outcome() == &DlqRedriveOutcome::NotFound)
             .count(),
         7
     );
@@ -3504,7 +3650,7 @@ async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_i
         let dlq = Arc::clone(&dlq);
         let event_key = IdemKey::parse(&expired_concurrent_id).unwrap();
         async move {
-            dlq.redrive_outbox(DlqRedriveRequest::new(tenant, event_key, cap))
+            dlq.redrive_outbox(DlqRedriveRequest::new(dlq_authorization(tenant), event_key))
                 .await
         }
     });
@@ -3512,7 +3658,7 @@ async fn same_id_redrive_deadline_is_preserved_expired_is_noop_and_concurrency_i
     assert!(
         outcomes
             .iter()
-            .all(|outcome| *outcome == DlqRedriveOutcome::Expired)
+            .all(|outcome| outcome.outcome() == &DlqRedriveOutcome::Expired)
     );
 
     drop(dlq);
@@ -3596,9 +3742,8 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
 -> TestResult {
     use consistency::PartitionKey;
     use eventexec::{
-        AuthorizedDlqOperatorReceipt, DlqStore as _, OperatorDlqCapability,
-        OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
-        OutboxResolutionChangeTicket, VerifiedOperatorSubject,
+        DlqStore as _, OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
+        OutboxResolutionChangeTicket,
     };
 
     let (pg, store) = connect_pg().await?;
@@ -3654,13 +3799,7 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
     );
 
     let dlq = maintenance.dlq_store_without_payload_replay();
-    let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let ticket = OutboxResolutionChangeTicket::parse("CHG-1742")?;
-    let subject = VerifiedOperatorSubject::from_authorized_receipt(
-        AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
-            vocab::ServiceCallerDomain::MaintenanceOperator,
-        ),
-    );
     let unexpired_before: (String, String) =
         sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
             .bind(&head_id)
@@ -3668,14 +3807,15 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
             .await?;
     let unexpired = dlq
         .resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
-            tenant,
+            dlq_authorization(tenant),
             IdemKey::parse(&head_id).unwrap(),
             ticket.clone(),
-            subject.clone(),
-            cap,
         ))
         .await?;
-    assert_eq!(unexpired, OutboxExpiredResolutionOutcome::NotExpired);
+    assert_eq!(
+        unexpired.outcome(),
+        &OutboxExpiredResolutionOutcome::NotExpired
+    );
     let unexpired_after: (String, String) =
         sqlx::query_as("SELECT to_jsonb(o)::text, xmin::text FROM outbox AS o WHERE event_id = $1")
             .bind(&head_id)
@@ -3691,14 +3831,15 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
     .await?;
     let wrong_tenant = dlq
         .resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
-            other_tenant,
+            dlq_authorization(other_tenant),
             IdemKey::parse(&head_id).unwrap(),
             ticket.clone(),
-            subject.clone(),
-            cap,
         ))
         .await?;
-    assert_eq!(wrong_tenant, OutboxExpiredResolutionOutcome::NotFound);
+    assert_eq!(
+        wrong_tenant.outcome(),
+        &OutboxExpiredResolutionOutcome::NotFound
+    );
 
     let mut direct = store.pool.begin().await?;
     crate::cotx::set_local_tenant(&mut direct, tenant).await?;
@@ -3718,14 +3859,15 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
 
     let resolved = dlq
         .resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
-            tenant,
+            dlq_authorization(tenant),
             IdemKey::parse(&head_id).unwrap(),
             ticket,
-            subject,
-            cap,
         ))
         .await?;
-    assert_eq!(resolved, OutboxExpiredResolutionOutcome::Resolved);
+    assert_eq!(
+        resolved.outcome(),
+        &OutboxExpiredResolutionOutcome::Resolved
+    );
     let terminal: (String, bool, bool, bool) = sqlx::query_as(
         "SELECT status, abandoned_at IS NOT NULL, dlx_at IS NULL, published_at IS NULL \
          FROM outbox WHERE event_id = $1",
@@ -3747,7 +3889,7 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
         (
             "accepted_gap".to_owned(),
             "CHG-1742".to_owned(),
-            "rss-maintenance-operator".to_owned(),
+            DLQ_TEST_OPERATOR.to_owned(),
             None,
             true,
         )
@@ -3778,16 +3920,14 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
 -> TestResult {
     use diport::EnvelopeCausationId;
     use eventexec::{
-        AuthorizedDlqOperatorReceipt, DlqStore as _, OperatorDlqCapability,
-        OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
-        OutboxResolutionChangeTicket, VerifiedOperatorSubject,
+        DlqStore as _, OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
+        OutboxResolutionChangeTicket,
     };
 
     let (pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
     let maintenance = connect_pg_maintenance(&pg).await?;
     let tenant = test_tenant();
-    let cap = OperatorDlqCapability::issue_for_authorized_operator();
     let domain = unique_domain("expired-resolution-compensated");
     let head_id = unique_event_id("expired-compensated-head");
     let bad_evidence_id = unique_event_id("expired-compensated-bad-evidence");
@@ -3838,34 +3978,31 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
 
     let dlq = Arc::new(maintenance.dlq_store_without_payload_replay());
     let ticket = OutboxResolutionChangeTicket::parse("CHG-1742-COMP")?;
-    let subject = VerifiedOperatorSubject::from_authorized_receipt(
-        AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
-            vocab::ServiceCallerDomain::MaintenanceOperator,
-        ),
-    );
     let rejected = dlq
         .resolve_expired_outbox(OutboxExpiredResolutionRequest::compensated(
-            tenant,
+            dlq_authorization(tenant),
             IdemKey::parse(&head_id).unwrap(),
             IdemKey::parse(&bad_evidence_id).unwrap(),
             ticket.clone(),
-            subject.clone(),
-            cap,
         ))
         .await?;
-    assert_eq!(rejected, OutboxExpiredResolutionOutcome::EvidenceRejected);
+    assert_eq!(
+        rejected.outcome(),
+        &OutboxExpiredResolutionOutcome::EvidenceRejected
+    );
 
     let resolved = dlq
         .resolve_expired_outbox(OutboxExpiredResolutionRequest::compensated(
-            tenant,
+            dlq_authorization(tenant),
             IdemKey::parse(&head_id).unwrap(),
             IdemKey::parse(&evidence_id).unwrap(),
             ticket,
-            subject,
-            cap,
         ))
         .await?;
-    assert_eq!(resolved, OutboxExpiredResolutionOutcome::Resolved);
+    assert_eq!(
+        resolved.outcome(),
+        &OutboxExpiredResolutionOutcome::Resolved
+    );
     let durable: (String, String) = sqlx::query_as(
         "SELECT resolution_kind, evidence_event_id FROM outbox_expired_resolutions \
          WHERE blocked_event_id = $1",
@@ -3887,14 +4024,11 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
         let dlq = Arc::clone(&dlq);
         let event_id = IdemKey::parse(&concurrent_id).unwrap();
         let ticket = OutboxResolutionChangeTicket::parse("CHG-1742-CONCURRENT").unwrap();
-        let subject = VerifiedOperatorSubject::from_authorized_receipt(
-            AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
-                vocab::ServiceCallerDomain::MaintenanceOperator,
-            ),
-        );
         async move {
             dlq.resolve_expired_outbox(OutboxExpiredResolutionRequest::accepted_gap(
-                tenant, event_id, ticket, subject, cap,
+                dlq_authorization(tenant),
+                event_id,
+                ticket,
             ))
             .await
         }
@@ -3903,14 +4037,14 @@ async fn expired_outbox_compensation_requires_published_causation_and_resolution
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == OutboxExpiredResolutionOutcome::Resolved)
+            .filter(|outcome| { outcome.outcome() == &OutboxExpiredResolutionOutcome::Resolved })
             .count(),
         1
     );
     assert_eq!(
         outcomes
             .iter()
-            .filter(|outcome| **outcome == OutboxExpiredResolutionOutcome::NotFound)
+            .filter(|outcome| { outcome.outcome() == &OutboxExpiredResolutionOutcome::NotFound })
             .count(),
         7
     );
@@ -5510,7 +5644,7 @@ async fn t26_cross_partition_and_null_parallel() -> TestResult {
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
 async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     use consistency::PartitionKey;
-    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _, OperatorDlqCapability};
+    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _};
 
     let (pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
@@ -5589,12 +5723,11 @@ async fn t27_dlx_head_blocks_then_unblocks() -> TestResult {
     let dlq = maintenance.dlq_store_without_payload_replay();
     let redrive = dlq
         .redrive_outbox(DlqRedriveRequest::new(
-            test_tenant(),
+            dlq_authorization(test_tenant()),
             IdemKey::parse(&h_id).unwrap(),
-            OperatorDlqCapability::issue_for_authorized_operator(),
         ))
         .await?;
-    assert_eq!(redrive, DlqRedriveOutcome::Redriven);
+    assert_eq!(redrive.outcome(), &DlqRedriveOutcome::Redriven);
 
     // relay H → published。
     let redriven = outbox.claim_batch(10).await?;
@@ -6626,7 +6759,7 @@ async fn t28_crash_recovery_preserves_partition_order() -> TestResult {
 // reason: 集成测试 happy-path 构造已知合法值；item-level carve-out。
 async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
     use consistency::PartitionKey;
-    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _, OperatorDlqCapability};
+    use eventexec::{DlqRedriveOutcome, DlqRedriveRequest, DlqStore as _};
 
     let (pg, store) = connect_pg().await?;
     setup_outbox(&store).await?;
@@ -6753,12 +6886,11 @@ async fn t29_sample_backlog_counts_gated_successors() -> TestResult {
     let dlq = maintenance.dlq_store_without_payload_replay();
     let redrive = dlq
         .redrive_outbox(DlqRedriveRequest::new(
-            test_tenant(),
+            dlq_authorization(test_tenant()),
             IdemKey::parse(&dlx_ids[0]).unwrap(),
-            OperatorDlqCapability::issue_for_authorized_operator(),
         ))
         .await?;
-    assert_eq!(redrive, DlqRedriveOutcome::Redriven);
+    assert_eq!(redrive.outcome(), &DlqRedriveOutcome::Redriven);
 
     let redriven_head = dlx_outbox.claim_batch(10).await?;
     assert_eq!(redriven_head.len(), 1, "t29: redrive 后仅队头可投递");

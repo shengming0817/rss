@@ -8,6 +8,7 @@ publish = false
 [features]
 default = []
 test-support = []
+dlq-test-support = []
 
 # diport 与其它 crate 一致继承 workspace lints（含 `unsafe_code = "forbid"`）。
 # 实测（PR-diport spike）：dynosaur 0.3 宏生成的 `unsafe transmute` 经 def-site hygiene
@@ -21,6 +22,7 @@ workspace = true
 [dependencies]
 authmint = { path = "../authmint" }
 sagaauthmint = { path = "../sagaauthmint" }
+dlqauthmint = { path = "../dlqauthmint" }
 # DI port 的 async dyn 派发：native AFIT + dynosaur 宏生成 dyn-compatible wrapper（ADR-003）。
 dynosaur = { workspace = true }
 # Send-bounded async DI port：trait_variant 生成 Send 变体，dynosaur bridge(dyn) 据此生成

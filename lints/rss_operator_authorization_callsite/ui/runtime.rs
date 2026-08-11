@@ -2,10 +2,9 @@
 #![allow(unused)]
 
 fn main() {
-    let _cap = operator::dlq::issue_authorized_dlq_capability();
+    let _auth = operator::dlq::issue_dlq_authorization::<diport::dlq_operator_action::List>();
     let _reconcile = operator::reconcile::issue_authorized_reconcile_capability();
     let _l2 = operator::dr_recovery::issue_authorized_l2_dr_recovery_capability();
-    let _receipt = operator::dlq::dlq_operator_receipt();
     nested_runtime_module::call_same_named_non_boundary();
     non_boundary_runtime_call();
 }
@@ -19,13 +18,14 @@ mod operator {
     }
 
     pub(super) mod dlq {
-        pub(crate) fn issue_authorized_dlq_capability() -> eventexec::OperatorDlqCapability {
-            eventexec::OperatorDlqCapability::issue_for_authorized_operator()
-        }
-
-        pub(crate) fn dlq_operator_receipt() -> eventexec::AuthorizedDlqOperatorReceipt {
-            eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+        pub(crate) fn issue_dlq_authorization<A: diport::DlqOperatorAction>()
+        -> diport::DlqOperatorAuthorization<A> {
+            diport::DlqOperatorAuthorization::issue(
+                dlqauthmint::DlqOperatorMint::capability(),
                 vocab::ServiceCallerDomain::MaintenanceOperator,
+                "operator".to_owned(),
+                super::super::tenant(),
+                super::super::audit_id(),
             )
         }
     }
@@ -49,14 +49,13 @@ mod operator {
 }
 
 fn non_boundary_runtime_call() {
-    let _cap = eventexec::OperatorDlqCapability::issue_for_authorized_operator();
-    let _receipt = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+    let _auth = diport::DlqOperatorAuthorization::<diport::dlq_operator_action::List>::issue(
+        dlqauthmint::DlqOperatorMint::capability(),
         vocab::ServiceCallerDomain::MaintenanceOperator,
+        "operator".to_owned(),
+        tenant(),
+        audit_id(),
     );
-    let issue = eventexec::OperatorDlqCapability::issue_for_authorized_operator;
-    let _cap2 = issue();
-    let authorize = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized;
-    let _receipt2 = authorize(vocab::ServiceCallerDomain::MaintenanceOperator);
     let _l2 = eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
 }
 
@@ -81,22 +80,18 @@ fn l2_recovery_plan_function_item(
 
 mod nested_runtime_module {
     pub fn call_same_named_non_boundary() {
-        let _cap = issue_authorized_dlq_capability();
-        let _receipt = dlq_operator_receipt();
-        let issue = eventexec::OperatorDlqCapability::issue_for_authorized_operator;
-        let _cap2 = issue();
-        let authorize = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized;
-        let _receipt2 = authorize(vocab::ServiceCallerDomain::MaintenanceOperator);
+        let _auth = issue_dlq_authorization::<diport::dlq_operator_action::List>();
         let _l2 = issue_authorized_l2_dr_recovery_capability();
     }
 
-    fn issue_authorized_dlq_capability() -> eventexec::OperatorDlqCapability {
-        eventexec::OperatorDlqCapability::issue_for_authorized_operator()
-    }
-
-    fn dlq_operator_receipt() -> eventexec::AuthorizedDlqOperatorReceipt {
-        eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
+    fn issue_dlq_authorization<A: diport::DlqOperatorAction>() -> diport::DlqOperatorAuthorization<A>
+    {
+        diport::DlqOperatorAuthorization::issue(
+            dlqauthmint::DlqOperatorMint::capability(),
             vocab::ServiceCallerDomain::MaintenanceOperator,
+            "operator".to_owned(),
+            super::tenant(),
+            super::audit_id(),
         )
     }
 
@@ -113,4 +108,12 @@ mod nested_runtime_module {
             plan, proof, capability,
         )
     }
+}
+
+fn tenant() -> vocab::TenantId {
+    vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap()
+}
+
+fn audit_id() -> diport::DlqOperatorStartAuditId {
+    diport::DlqOperatorStartAuditId::parse("ui-audit").unwrap()
 }

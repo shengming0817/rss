@@ -366,8 +366,19 @@ AMQP broker quarantine 规则：
   operator tenant 与目标 tenant；授权由 PDP 验证 +
   typed maintenance caller + 精确 grant 共同决定，caller 不得由 grant 字符串选择。
   service token 的重放防护由 Postgres 单语句原子消费保证，raw 标识不落库，存储失败 fail-closed。
+- list、inspect、replay-dead-letter、redrive-outbox、resolve-expired-outbox 分别消费
+  `DlqOperatorAuthorization<List|Inspect|ReplayDeadLetter|RedriveOutbox|ResolveExpiredOutbox>`；proof
+  不可 Clone/Copy，且把 caller、已验证 operator subject、目标 tenant、action 与 durable start audit ID 一次绑定。请求不再接受独立
+  tenant/subject，也不暴露通用 capability。跨 crate 铸造权由 `dlqauthmint` exact dependency wrapper 与私有字段
+  Hard 封闭；runtime 必须在 start audit、认证、角色和精确 grant 全部成功后经唯一 funnel 铸造，时序由 Dylint
+  Medium fail-closed 守卫。
+- start/finish audit 必须复用同一 typed audit ID，并持久化相同的 `tenant_context` 与 `request_id`；start audit
+  是认证前的 identity-neutral attempt（不得从未验 token 提取或信任 subject），finish audit 才记录 verified
+  operator subject；二者以 typed ID、tenant 与 action family 形成同一生命周期，而非把未认证 actor 冒充为已验证
+  operator。CLI 必须向 operator 输出非敏感的 `audit_id` correlation。start audit 失败、认证失败、角色失败或 grant
+  失败均不得构造授权或访问 DLQ store。
 - 审计 kind 与 action 是固定闭值；v1 不提供 destructive `skip` 或旧命令别名。
-- replay 必须传 operator capability、typed id 与调用方提供的新幂等键；不得删除原 `dead_letter` 行、
+- replay 必须传 action-specific authorization、typed id 与调用方提供的新幂等键；不得删除原 `dead_letter` 行、
   不得重置 inbox done、不得直接 broker replay。replay 从同一 capsule 恢复 schema header，缺失或非法 fail-closed。
 - replay 只能由 maintenance provider 经 sealed `ProjectionCaptureView` 构造；serving provider 不具备 replay
   capability，也不存在 raw binding/test-only 注入入口。是否镜像 projection 必须唯一委托同一

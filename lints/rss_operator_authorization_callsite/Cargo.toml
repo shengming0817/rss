@@ -3,7 +3,7 @@ name = "rss_operator_authorization_callsite"
 version = "0.0.0"
 edition = "2024"
 publish = false
-description = "RSS operator authorization 治理：按 eventexec 类型/方法与精确 runtime wrapper 限定构造入口（INVARIANT OPERATOR-AUTHORIZATION-CALLSITE-01）"
+description = "RSS operator authorization 治理：按 diport/eventexec 类型与精确 runtime wrapper 限定构造入口（INVARIANT OPERATOR-AUTHORIZATION-CALLSITE-01）"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -31,6 +31,8 @@ dylint_linting = "6.0.1"
 [dev-dependencies]
 dylint_testing = "6.0.1"
 eventexec = { path = "../../crates/eventexec" }
+diport = { path = "../../crates/diport" }
+dlqauthmint = { path = "../../crates/dlqauthmint" }
 vocab = { path = "../../crates/vocab" }
 uuid = "1"
 

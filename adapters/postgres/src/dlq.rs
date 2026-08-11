@@ -1,8 +1,8 @@
 //! PostgreSQL DLQ inspection/replay adapter (#1214).
 
 use crate::cotx::eventing::{
-    DeadLetterRow, DlqExpiredResolution, DlqListFilter, DlqReplayProjection, OutboxDlxRow,
-    ReplayedOutboxWriteError,
+    DeadLetterRow, DlqExpiredResolution, DlqFinishAudit, DlqListFilter, DlqReplayProjection,
+    OutboxDlxRow, ReplayedOutboxWriteError,
 };
 use crate::cotx::{MaintenanceReadLane, MaintenanceWriteLane, TenantDb, TenantScopeHandle};
 use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector, SensitiveJson};
@@ -17,9 +17,9 @@ use diport::{
 use eventexec::{
     DlqEntryKind, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
     DlqListResult, DlqMutationKind, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayOutcome,
-    DlqReplayRequest, DlqReplayStoreStage, DlqStore, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, record_dlq_mutation_error, record_dlq_outbox_redrive,
-    record_dlq_replay, record_outbox_expired_resolution,
+    DlqReplayRequest, DlqReplayStoreStage, DlqStore, DurablyAuditedDlqMutation,
+    OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest, record_dlq_mutation_error,
+    record_dlq_outbox_redrive, record_dlq_replay, record_outbox_expired_resolution,
 };
 
 /// DLQ-private tenant authority. Its private constructor keeps replay and maintenance access tied
@@ -46,11 +46,24 @@ fn dlq_tenant_scope(tenant: vocab::TenantId) -> DlqTenantScope {
     DlqTenantScope::new(tenant)
 }
 
+fn audit_timestamp(clock: &dyn diport::Clock) -> (i64, i32) {
+    let now = clock
+        .now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    (
+        i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
+        i32::try_from(now.subsec_nanos()).unwrap_or(0),
+    )
+}
+
 async fn replay_dead_letter_on_pool(
     pool: &TenantDb<MaintenanceWriteLane>,
     request: DlqReplayRequest,
     payload_protector: &DlxPayloadProtector,
     projection: DlqReplayProjection,
+    occurred_at_secs: i64,
+    occurred_at_nanos: i32,
 ) -> Result<DlqReplayOutcome, DlqError> {
     let payload_protector = payload_protector.clone();
     pool.dlq_write(
@@ -125,10 +138,29 @@ async fn replay_dead_letter_on_pool(
                     .await
                     .map_err(replayed_outbox_error)?;
 
-                match outcome {
-                    OutboxAppendOutcome::Inserted => Ok(DlqReplayOutcome::Inserted),
-                    OutboxAppendOutcome::SameFact => Ok(DlqReplayOutcome::AlreadyExists),
-                }
+                let outcome = match outcome {
+                    OutboxAppendOutcome::Inserted => DlqReplayOutcome::Inserted,
+                    OutboxAppendOutcome::SameFact => DlqReplayOutcome::AlreadyExists,
+                };
+                let resource_id = format!(
+                    "operation=replay-dead-letter tenant={} dead_letter_id={} replay_id={}",
+                    request.tenant(),
+                    request.dead_letter_id(),
+                    request.replay_id().as_str()
+                );
+                conn.dlq_record_finish_audit(DlqFinishAudit {
+                    occurred_at_secs,
+                    occurred_at_nanos,
+                    operator_subject: request.operator_subject(),
+                    action: "dlq.replay-dead-letter.finish",
+                    outcome: "success",
+                    failure_reason: None,
+                    resource_id: &resource_id,
+                    request_id: request.start_audit_id().as_str(),
+                })
+                .await
+                .map_err(replay_db_error(DlqReplayStoreStage::Transaction))?;
+                Ok(outcome)
             })
         },
         replay_db_error(DlqReplayStoreStage::Transaction),
@@ -141,6 +173,7 @@ pub struct PgDlqStore {
     read: TenantDb<MaintenanceReadLane>,
     write: TenantDb<MaintenanceWriteLane>,
     replay: MaintenanceReplayCapability,
+    clock: std::sync::Arc<dyn diport::Clock>,
 }
 
 struct DlqListOwned {
@@ -182,6 +215,7 @@ impl PgDlqStore {
         store: &VerifiedPgMaintenanceStore,
         payload_protector: DlxPayloadProtector,
         projection: DlqReplayProjection,
+        clock: std::sync::Arc<dyn diport::Clock>,
     ) -> Self {
         Self {
             read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
@@ -190,14 +224,19 @@ impl PgDlqStore {
                 payload_protector,
                 projection,
             },
+            clock,
         }
     }
 
-    pub(crate) fn without_payload_replay_maintenance(store: &VerifiedPgMaintenanceStore) -> Self {
+    pub(crate) fn without_payload_replay_maintenance(
+        store: &VerifiedPgMaintenanceStore,
+        clock: std::sync::Arc<dyn diport::Clock>,
+    ) -> Self {
         Self {
             read: TenantDb::<MaintenanceReadLane>::new_maintenance(store),
             write: TenantDb::<MaintenanceWriteLane>::new_maintenance(store),
             replay: MaintenanceReplayCapability::Disabled,
+            clock,
         }
     }
 }
@@ -225,8 +264,9 @@ impl DlqStore for PgDlqStore {
     async fn replay_dead_letter(
         &self,
         request: DlqReplayRequest,
-    ) -> Result<DlqReplayOutcome, DlqError> {
+    ) -> Result<DurablyAuditedDlqMutation<DlqReplayOutcome>, DlqError> {
         let tenant = request.tenant();
+        let (occurred_at_secs, occurred_at_nanos) = audit_timestamp(self.clock.as_ref());
         let result = match &self.replay {
             MaintenanceReplayCapability::Enabled {
                 payload_protector,
@@ -237,6 +277,8 @@ impl DlqStore for PgDlqStore {
                     request,
                     payload_protector,
                     projection.clone(),
+                    occurred_at_secs,
+                    occurred_at_nanos,
                 )
                 .await
             }
@@ -252,50 +294,68 @@ impl DlqStore for PgDlqStore {
                 record_dlq_mutation_error(tenant, DlqMutationKind::DeadLetterReplay, err);
             }
         }
-        result
+        result.map(DurablyAuditedDlqMutation::committed)
     }
 
     async fn redrive_outbox(
         &self,
         request: DlqRedriveRequest,
-    ) -> Result<DlqRedriveOutcome, DlqError> {
+    ) -> Result<DurablyAuditedDlqMutation<DlqRedriveOutcome>, DlqError> {
         let event_id = request.event_id().as_str().to_string();
         let tenant = request.tenant();
+        let operator_subject = request.operator_subject().to_owned();
+        let start_audit_id = request.start_audit_id().as_str().to_owned();
+        let resource_id = format!("operation=redrive-outbox tenant={tenant} event_id={event_id}");
+        let (occurred_at_secs, occurred_at_nanos) = audit_timestamp(self.clock.as_ref());
         let result = self
             .write
             .dlq_write(
                 dlq_tenant_scope(tenant),
                 move |mut conn| {
                     Box::pin(async move {
-                        conn.dlq_redrive_outbox(&event_id)
+                        let affected = conn
+                            .dlq_redrive_outbox(&event_id)
                             .await
-                            .map_err(db_error("redrive.update_outbox"))
+                            .map_err(db_error("redrive.update_outbox"))?;
+                        let (outcome, audit_outcome, failure_reason) = match affected {
+                            1 => (DlqRedriveOutcome::Redriven, "success", None),
+                            -1 => (DlqRedriveOutcome::Expired, "failure", Some("expired")),
+                            0 => (DlqRedriveOutcome::NotFound, "failure", Some("not_found")),
+                            _ => return Err(DlqError::Store),
+                        };
+                        conn.dlq_record_finish_audit(DlqFinishAudit {
+                            occurred_at_secs,
+                            occurred_at_nanos,
+                            operator_subject: &operator_subject,
+                            action: "dlq.redrive-outbox.finish",
+                            outcome: audit_outcome,
+                            failure_reason,
+                            resource_id: &resource_id,
+                            request_id: &start_audit_id,
+                        })
+                        .await
+                        .map_err(db_error("redrive.finish_audit"))?;
+                        Ok(outcome)
                     })
                 },
                 db_error("redrive.tx"),
             )
             .await;
 
-        let outcome = match result {
-            Ok(1) => Ok(DlqRedriveOutcome::Redriven),
-            Ok(-1) => Ok(DlqRedriveOutcome::Expired),
-            Ok(0) => Ok(DlqRedriveOutcome::NotFound),
-            Ok(_) => Err(DlqError::Store),
-            Err(err) => Err(err),
-        };
+        let outcome = result;
         match &outcome {
             Ok(outcome) => record_dlq_outbox_redrive(tenant, *outcome),
             Err(err) => {
                 record_dlq_mutation_error(tenant, DlqMutationKind::OutboxDlxRedrive, err);
             }
         }
-        outcome
+        outcome.map(DurablyAuditedDlqMutation::committed)
     }
 
     async fn resolve_expired_outbox(
         &self,
         request: OutboxExpiredResolutionRequest,
-    ) -> Result<OutboxExpiredResolutionOutcome, DlqError> {
+    ) -> Result<DurablyAuditedDlqMutation<OutboxExpiredResolutionOutcome>, DlqError> {
         let tenant = request.tenant();
         let event_id = request.event_id().as_str().to_owned();
         let kind = request.kind().as_label();
@@ -303,43 +363,74 @@ impl DlqStore for PgDlqStore {
             .evidence_event_id()
             .map(|value| value.as_str().to_owned());
         let change_ticket = request.change_ticket().as_str().to_owned();
-        let operator_subject = request.operator_subject().as_str().to_owned();
+        let operator_subject = request.operator_subject().to_owned();
+        let start_audit_id = request.start_audit_id().as_str().to_owned();
+        let resource_id = format!(
+            "operation=resolve-expired-outbox tenant={tenant} event_id={event_id} resolution_kind={kind}"
+        );
+        let (occurred_at_secs, occurred_at_nanos) = audit_timestamp(self.clock.as_ref());
         let result = self
             .write
             .dlq_write(
                 dlq_tenant_scope(tenant),
                 move |mut conn| {
                     Box::pin(async move {
-                        conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
-                            event_id: &event_id,
-                            kind,
-                            change_ticket: &change_ticket,
+                        let affected = conn
+                            .dlq_resolve_expired_outbox(DlqExpiredResolution {
+                                event_id: &event_id,
+                                kind,
+                                change_ticket: &change_ticket,
+                                operator_subject: &operator_subject,
+                                evidence_event_id: evidence_event_id.as_deref(),
+                            })
+                            .await
+                            .map_err(db_error("resolve_expired.update_outbox"))?;
+                        let (outcome, audit_outcome, failure_reason) = match affected {
+                            1 => (OutboxExpiredResolutionOutcome::Resolved, "success", None),
+                            0 => (
+                                OutboxExpiredResolutionOutcome::NotFound,
+                                "failure",
+                                Some("not_found"),
+                            ),
+                            -1 => (
+                                OutboxExpiredResolutionOutcome::NotExpired,
+                                "failure",
+                                Some("not_expired"),
+                            ),
+                            -2 => (
+                                OutboxExpiredResolutionOutcome::EvidenceRejected,
+                                "failure",
+                                Some("evidence_rejected"),
+                            ),
+                            _ => return Err(DlqError::Store),
+                        };
+                        conn.dlq_record_finish_audit(DlqFinishAudit {
+                            occurred_at_secs,
+                            occurred_at_nanos,
                             operator_subject: &operator_subject,
-                            evidence_event_id: evidence_event_id.as_deref(),
+                            action: "dlq.resolve-expired-outbox.finish",
+                            outcome: audit_outcome,
+                            failure_reason,
+                            resource_id: &resource_id,
+                            request_id: &start_audit_id,
                         })
                         .await
-                        .map_err(db_error("resolve_expired.update_outbox"))
+                        .map_err(db_error("resolve_expired.finish_audit"))?;
+                        Ok(outcome)
                     })
                 },
                 db_error("resolve_expired.tx"),
             )
             .await;
 
-        let outcome = match result {
-            Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved),
-            Ok(0) => Ok(OutboxExpiredResolutionOutcome::NotFound),
-            Ok(-1) => Ok(OutboxExpiredResolutionOutcome::NotExpired),
-            Ok(-2) => Ok(OutboxExpiredResolutionOutcome::EvidenceRejected),
-            Ok(_) => Err(DlqError::Store),
-            Err(error) => Err(error),
-        };
+        let outcome = result;
         match &outcome {
             Ok(outcome) => record_outbox_expired_resolution(tenant, *outcome),
             Err(error) => {
                 record_dlq_mutation_error(tenant, DlqMutationKind::OutboxDlxResolveExpired, error)
             }
         }
-        outcome
+        outcome.map(DurablyAuditedDlqMutation::committed)
     }
 }
 

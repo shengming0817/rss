@@ -1859,6 +1859,8 @@ impl PgMaintenanceDeps {
     pub async fn record_dlq_maintenance_audit(
         &self,
         operator_subject: &str,
+        tenant: vocab::TenantId,
+        start_audit_id: &diport::DlqOperatorStartAuditId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
@@ -1866,11 +1868,11 @@ impl PgMaintenanceDeps {
         self.record_maintenance_audit(
             "dlq.maintenance",
             operator_subject,
-            None,
+            Some(tenant),
             action,
             outcome,
             resource_id,
-            None,
+            Some(start_audit_id.as_str()),
         )
         .await
     }
@@ -1973,13 +1975,14 @@ impl PgMaintenanceDeps {
             &self.store,
             payload_protector,
             DlqReplayProjection::from_capture(projection_capture),
+            Arc::clone(&self.clock),
         )
     }
 
     /// 不允许 consumer payload replay 的 inspection/outbox-redrive store。
     #[must_use]
     pub fn dlq_store_without_payload_replay(&self) -> PgDlqStore {
-        PgDlqStore::without_payload_replay_maintenance(&self.store)
+        PgDlqStore::without_payload_replay_maintenance(&self.store, Arc::clone(&self.clock))
     }
 
     /// 关闭维护连接池。

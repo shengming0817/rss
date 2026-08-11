@@ -169,7 +169,7 @@ name = "migration_0087_device_command_fencing_contract"
 path = "tests/migration_0087_device_command_fencing_contract.rs"
 
 [dev-dependencies]
-diport = { path = "../../crates/diport", features = ["test-support"] }
+diport = { path = "../../crates/diport", features = ["test-support", "dlq-test-support"] }
 generated = { path = "../../generated" }
 toml = { workspace = true }
 httpserve = { path = "../../crates/httpserve", features = ["test-util"] }

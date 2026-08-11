@@ -6,27 +6,7 @@
 //! - redriving outbox relay `dlx` rows back to `pending`.
 
 use consistency::IdemKey;
-use diport::DeadLetterSource;
-
-/// Operator authorization witness for DLQ mutation APIs.
-///
-/// Listing is read-only and tenant-scoped. Replay/redrive mutate durable state, so callers must
-/// pass this capability after an admin/PDP layer has authorized the operator action.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct OperatorDlqCapability {
-    _seal: (),
-}
-
-impl OperatorDlqCapability {
-    /// Issue the DLQ mutation capability after the caller has verified operator authorization.
-    ///
-    /// This mirrors `vocab::CrossTenantCapability`: the type makes replay/redrive signatures carry
-    /// an explicit authorization witness. Production callsites are restricted by the
-    /// `rss_operator_authorization_callsite` dylint allowlist to the admin/PDP boundary.
-    pub fn issue_for_authorized_operator() -> Self {
-        Self { _seal: () }
-    }
-}
+use diport::{DeadLetterSource, DlqOperatorAuthorization, dlq_operator_action};
 
 /// Which backing queue row a summary represents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -270,9 +250,9 @@ impl DlqCursor {
 
 /// DLQ list filter. Tenant is mandatory; producer domain, consumer domain, source, and contract
 /// are optional.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DlqListQuery {
-    tenant: vocab::TenantId,
+    authorization: DlqOperatorAuthorization<dlq_operator_action::List>,
     producer_domain: Option<String>,
     consumer_domain: Option<String>,
     contract_id: Option<String>,
@@ -282,19 +262,25 @@ pub struct DlqListQuery {
 }
 
 /// Exact payload-free DLQ inspection query. Tenant is mandatory.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct DlqInspectRequest {
-    tenant: vocab::TenantId,
+    authorization: DlqOperatorAuthorization<dlq_operator_action::Inspect>,
     target: DlqInspectTarget,
 }
 
 impl DlqInspectRequest {
-    pub fn new(tenant: vocab::TenantId, target: DlqInspectTarget) -> Self {
-        Self { tenant, target }
+    pub fn new(
+        authorization: DlqOperatorAuthorization<dlq_operator_action::Inspect>,
+        target: DlqInspectTarget,
+    ) -> Self {
+        Self {
+            authorization,
+            target,
+        }
     }
 
     pub fn tenant(&self) -> vocab::TenantId {
-        self.tenant
+        self.authorization.tenant()
     }
 
     pub fn target(&self) -> &DlqInspectTarget {
@@ -303,9 +289,9 @@ impl DlqInspectRequest {
 }
 
 impl DlqListQuery {
-    pub fn new(tenant: vocab::TenantId) -> Self {
+    pub fn new(authorization: DlqOperatorAuthorization<dlq_operator_action::List>) -> Self {
         Self {
-            tenant,
+            authorization,
             producer_domain: None,
             consumer_domain: None,
             contract_id: None,
@@ -346,7 +332,7 @@ impl DlqListQuery {
     }
 
     pub fn tenant(&self) -> vocab::TenantId {
-        self.tenant
+        self.authorization.tenant()
     }
 
     pub fn producer_domain(&self) -> Option<&str> {
@@ -443,31 +429,28 @@ impl DlqListResult {
 }
 
 /// Replay a consumer dead_letter row by inserting a new outbox event id.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DlqReplayRequest {
-    tenant: vocab::TenantId,
+    authorization: DlqOperatorAuthorization<dlq_operator_action::ReplayDeadLetter>,
     dead_letter_id: DeadLetterId,
     replay_id: IdemKey,
-    capability: OperatorDlqCapability,
 }
 
 impl DlqReplayRequest {
     pub fn new(
-        tenant: vocab::TenantId,
+        authorization: DlqOperatorAuthorization<dlq_operator_action::ReplayDeadLetter>,
         dead_letter_id: DeadLetterId,
         replay_id: IdemKey,
-        capability: OperatorDlqCapability,
     ) -> Self {
         Self {
-            tenant,
+            authorization,
             dead_letter_id,
             replay_id,
-            capability,
         }
     }
 
     pub fn tenant(&self) -> vocab::TenantId {
-        self.tenant
+        self.authorization.tenant()
     }
 
     pub fn dead_letter_id(&self) -> &DeadLetterId {
@@ -478,17 +461,20 @@ impl DlqReplayRequest {
         &self.replay_id
     }
 
-    pub fn capability(&self) -> OperatorDlqCapability {
-        self.capability
+    pub fn operator_subject(&self) -> &str {
+        self.authorization.operator_subject()
+    }
+
+    pub fn start_audit_id(&self) -> &diport::DlqOperatorStartAuditId {
+        self.authorization.start_audit_id()
     }
 }
 
 /// Redrive an outbox relay DLX row back to pending.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct DlqRedriveRequest {
-    tenant: vocab::TenantId,
+    authorization: DlqOperatorAuthorization<dlq_operator_action::RedriveOutbox>,
     event_id: IdemKey,
-    capability: OperatorDlqCapability,
 }
 
 /// Audited change ticket authorizing an expired outbox terminal resolution.
@@ -502,34 +488,6 @@ impl OutboxResolutionChangeTicket {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-/// Private-field typed receipt that a service caller passed authentication and the exact DLQ
-/// action/tenant grant check. Its public constructor is exact-callsite-gated by the
-/// `rss_operator_authorization_callsite` Medium dylint at the runtime trust boundary.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuthorizedDlqOperatorReceipt {
-    caller: vocab::ServiceCallerDomain,
-}
-
-impl AuthorizedDlqOperatorReceipt {
-    pub const fn from_authenticated_and_authorized(caller: vocab::ServiceCallerDomain) -> Self {
-        Self { caller }
-    }
-}
-
-/// Operator subject derived only by consuming an authorized receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VerifiedOperatorSubject(vocab::ServiceCallerDomain);
-
-impl VerifiedOperatorSubject {
-    pub const fn from_authorized_receipt(receipt: AuthorizedDlqOperatorReceipt) -> Self {
-        Self(receipt.caller)
-    }
-
-    pub fn as_str(&self) -> &str {
-        self.0.as_str()
     }
 }
 
@@ -570,57 +528,47 @@ impl OutboxExpiredResolutionKind {
 }
 
 /// Typed, capability-bearing request for resolving an expired outbox DLX head.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct OutboxExpiredResolutionRequest {
-    tenant: vocab::TenantId,
+    authorization: DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox>,
     event_id: IdemKey,
     kind: OutboxExpiredResolutionKind,
     evidence_event_id: Option<IdemKey>,
     change_ticket: OutboxResolutionChangeTicket,
-    operator_subject: VerifiedOperatorSubject,
-    capability: OperatorDlqCapability,
 }
 
 impl OutboxExpiredResolutionRequest {
     pub fn accepted_gap(
-        tenant: vocab::TenantId,
+        authorization: DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox>,
         event_id: IdemKey,
         change_ticket: OutboxResolutionChangeTicket,
-        operator_subject: VerifiedOperatorSubject,
-        capability: OperatorDlqCapability,
     ) -> Self {
         Self {
-            tenant,
+            authorization,
             event_id,
             kind: OutboxExpiredResolutionKind::AcceptedGap,
             evidence_event_id: None,
             change_ticket,
-            operator_subject,
-            capability,
         }
     }
 
     pub fn compensated(
-        tenant: vocab::TenantId,
+        authorization: DlqOperatorAuthorization<dlq_operator_action::ResolveExpiredOutbox>,
         event_id: IdemKey,
         evidence_event_id: IdemKey,
         change_ticket: OutboxResolutionChangeTicket,
-        operator_subject: VerifiedOperatorSubject,
-        capability: OperatorDlqCapability,
     ) -> Self {
         Self {
-            tenant,
+            authorization,
             event_id,
             kind: OutboxExpiredResolutionKind::Compensated,
             evidence_event_id: Some(evidence_event_id),
             change_ticket,
-            operator_subject,
-            capability,
         }
     }
 
     pub fn tenant(&self) -> vocab::TenantId {
-        self.tenant
+        self.authorization.tenant()
     }
 
     pub fn event_id(&self) -> &IdemKey {
@@ -639,38 +587,40 @@ impl OutboxExpiredResolutionRequest {
         &self.change_ticket
     }
 
-    pub fn operator_subject(&self) -> &VerifiedOperatorSubject {
-        &self.operator_subject
+    pub fn operator_subject(&self) -> &str {
+        self.authorization.operator_subject()
     }
 
-    pub fn capability(&self) -> OperatorDlqCapability {
-        self.capability
+    pub fn start_audit_id(&self) -> &diport::DlqOperatorStartAuditId {
+        self.authorization.start_audit_id()
     }
 }
 
 impl DlqRedriveRequest {
     pub fn new(
-        tenant: vocab::TenantId,
+        authorization: DlqOperatorAuthorization<dlq_operator_action::RedriveOutbox>,
         event_id: IdemKey,
-        capability: OperatorDlqCapability,
     ) -> Self {
         Self {
-            tenant,
+            authorization,
             event_id,
-            capability,
         }
     }
 
     pub fn tenant(&self) -> vocab::TenantId {
-        self.tenant
+        self.authorization.tenant()
     }
 
     pub fn event_id(&self) -> &IdemKey {
         &self.event_id
     }
 
-    pub fn capability(&self) -> OperatorDlqCapability {
-        self.capability
+    pub fn operator_subject(&self) -> &str {
+        self.authorization.operator_subject()
+    }
+
+    pub fn start_audit_id(&self) -> &diport::DlqOperatorStartAuditId {
+        self.authorization.start_audit_id()
     }
 }
 
@@ -702,6 +652,32 @@ pub enum OutboxExpiredResolutionOutcome {
     NotFound,
     NotExpired,
     EvidenceRejected,
+}
+
+/// Mutation outcome whose finish audit was committed in the same tenant transaction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DurablyAuditedDlqMutation<O> {
+    outcome: O,
+}
+
+impl<O> DurablyAuditedDlqMutation<O> {
+    /// Constructs the receipt only after mutation outcome and finish audit commit together.
+    ///
+    /// Implementations of [`DlqStore`] must not return this value before the shared transaction is
+    /// durably acknowledged.
+    pub fn committed(outcome: O) -> Self {
+        Self { outcome }
+    }
+
+    /// Consumes the durable receipt and returns its mutation outcome.
+    pub fn into_outcome(self) -> O {
+        self.outcome
+    }
+
+    /// Borrows the committed mutation outcome without discarding the durable-audit receipt.
+    pub const fn outcome(&self) -> &O {
+        &self.outcome
+    }
 }
 
 impl OutboxExpiredResolutionOutcome {
@@ -914,15 +890,15 @@ pub trait DlqStore: Send + Sync {
     async fn replay_dead_letter(
         &self,
         request: DlqReplayRequest,
-    ) -> Result<DlqReplayOutcome, DlqError>;
+    ) -> Result<DurablyAuditedDlqMutation<DlqReplayOutcome>, DlqError>;
     async fn redrive_outbox(
         &self,
         request: DlqRedriveRequest,
-    ) -> Result<DlqRedriveOutcome, DlqError>;
+    ) -> Result<DurablyAuditedDlqMutation<DlqRedriveOutcome>, DlqError>;
     async fn resolve_expired_outbox(
         &self,
         request: OutboxExpiredResolutionRequest,
-    ) -> Result<OutboxExpiredResolutionOutcome, DlqError>;
+    ) -> Result<DurablyAuditedDlqMutation<OutboxExpiredResolutionOutcome>, DlqError>;
 }
 
 fn compare_summary(a: &DlqEntrySummary, b: &DlqEntrySummary) -> std::cmp::Ordering {
@@ -942,6 +918,18 @@ fn compare_summary_to_cursor(a: &DlqEntrySummary, b: &DlqCursor) -> std::cmp::Or
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[allow(clippy::expect_used)]
+    fn authorization<A: diport::DlqOperatorAction>(
+        tenant: vocab::TenantId,
+    ) -> diport::DlqOperatorAuthorization<A> {
+        diport::test_support::dlq_operator_authorization(
+            vocab::ServiceCallerDomain::MaintenanceOperator,
+            "test-dlq-operator",
+            tenant,
+            diport::DlqOperatorStartAuditId::parse("dlq-test-audit").expect("valid audit id"),
+        )
+    }
 
     #[test]
     fn fact_conflict_has_closed_safe_label() {
@@ -985,8 +973,18 @@ mod tests {
     fn query_limit_is_bounded() {
         let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
-        assert_eq!(DlqListQuery::new(tenant).with_limit(0).limit(), 1);
-        assert_eq!(DlqListQuery::new(tenant).with_limit(999).limit(), 500);
+        assert_eq!(
+            DlqListQuery::new(authorization(tenant))
+                .with_limit(0)
+                .limit(),
+            1
+        );
+        assert_eq!(
+            DlqListQuery::new(authorization(tenant))
+                .with_limit(999)
+                .limit(),
+            500
+        );
     }
 
     #[test]
@@ -1016,7 +1014,7 @@ mod tests {
             })
             .collect();
 
-        let query = DlqListQuery::new(tenant).with_limit(2);
+        let query = DlqListQuery::new(authorization(tenant)).with_limit(2);
         let result = DlqListResult::from_sorted_rows(&query, rows);
         assert!(result.has_more());
         assert_eq!(result.data().len(), 2);
@@ -1065,7 +1063,7 @@ mod tests {
         ];
 
         let result = DlqListResult::from_sorted_rows(
-            &DlqListQuery::new(tenant)
+            &DlqListQuery::new(authorization(tenant))
                 .with_contract_id("identity.session-created")
                 .with_limit(1),
             rows,
@@ -1108,7 +1106,7 @@ mod tests {
             .collect();
 
         let result = DlqListResult::from_sorted_rows(
-            &DlqListQuery::new(tenant)
+            &DlqListQuery::new(authorization(tenant))
                 .with_producer_domain("identity")
                 .with_consumer_domain("audit"),
             rows,
@@ -1146,7 +1144,10 @@ mod tests {
             })
             .collect();
 
-        let first = DlqListResult::from_sorted_rows(&DlqListQuery::new(tenant).with_limit(2), rows);
+        let first = DlqListResult::from_sorted_rows(
+            &DlqListQuery::new(authorization(tenant)).with_limit(2),
+            rows,
+        );
         let cursor = DlqCursor::parse(first.next_cursor().expect("cursor")).expect("valid cursor");
         let mut changed_rows = first.into_data();
         changed_rows.push(DlqEntrySummary::new(
@@ -1183,7 +1184,9 @@ mod tests {
         ));
 
         let second = DlqListResult::from_sorted_rows(
-            &DlqListQuery::new(tenant).with_limit(10).with_cursor(cursor),
+            &DlqListQuery::new(authorization(tenant))
+                .with_limit(10)
+                .with_cursor(cursor),
             changed_rows,
         );
         assert_eq!(second.data()[0].id(), "row-tail");
@@ -1220,8 +1223,10 @@ mod tests {
             })
             .collect();
 
-        let first =
-            DlqListResult::from_sorted_rows(&DlqListQuery::new(tenant).with_limit(2), rows.clone());
+        let first = DlqListResult::from_sorted_rows(
+            &DlqListQuery::new(authorization(tenant)).with_limit(2),
+            rows.clone(),
+        );
         assert_eq!(
             first
                 .data()
@@ -1232,7 +1237,9 @@ mod tests {
         );
         let cursor = DlqCursor::parse(first.next_cursor().expect("cursor")).expect("valid cursor");
         let second = DlqListResult::from_sorted_rows(
-            &DlqListQuery::new(tenant).with_limit(2).with_cursor(cursor),
+            &DlqListQuery::new(authorization(tenant))
+                .with_limit(2)
+                .with_cursor(cursor),
             rows,
         );
         assert_eq!(
@@ -1254,17 +1261,16 @@ mod tests {
     }
 
     #[test]
-    fn replay_and_redrive_require_operator_capability() {
-        let _issue: fn() -> OperatorDlqCapability =
-            OperatorDlqCapability::issue_for_authorized_operator;
+    fn every_request_requires_an_exact_operator_authorization() {
         let _replay: fn(
-            vocab::TenantId,
+            diport::DlqOperatorAuthorization<dlq_operator_action::ReplayDeadLetter>,
             DeadLetterId,
             IdemKey,
-            OperatorDlqCapability,
         ) -> DlqReplayRequest = DlqReplayRequest::new;
-        let _redrive: fn(vocab::TenantId, IdemKey, OperatorDlqCapability) -> DlqRedriveRequest =
-            DlqRedriveRequest::new;
+        let _redrive: fn(
+            diport::DlqOperatorAuthorization<dlq_operator_action::RedriveOutbox>,
+            IdemKey,
+        ) -> DlqRedriveRequest = DlqRedriveRequest::new;
     }
 
     #[test]
@@ -1276,30 +1282,19 @@ mod tests {
         let event_id = IdemKey::parse("evt-blocked").expect("canonical event id");
         let evidence = IdemKey::parse("evt-compensation").expect("canonical evidence id");
         let ticket = OutboxResolutionChangeTicket::parse("CHG-1742").expect("valid ticket");
-        let subject = VerifiedOperatorSubject::from_authorized_receipt(
-            AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
-                vocab::ServiceCallerDomain::MaintenanceOperator,
-            ),
-        );
-        let capability = OperatorDlqCapability::issue_for_authorized_operator();
-
         let accepted = OutboxExpiredResolutionRequest::accepted_gap(
-            tenant,
+            authorization(tenant),
             event_id.clone(),
             ticket.clone(),
-            subject.clone(),
-            capability,
         );
         assert_eq!(accepted.kind(), OutboxExpiredResolutionKind::AcceptedGap);
         assert!(accepted.evidence_event_id().is_none());
 
         let compensated = OutboxExpiredResolutionRequest::compensated(
-            tenant,
+            authorization(tenant),
             event_id,
             evidence.clone(),
             ticket,
-            subject,
-            capability,
         );
         assert_eq!(compensated.kind(), OutboxExpiredResolutionKind::Compensated);
         assert_eq!(compensated.evidence_event_id(), Some(&evidence));

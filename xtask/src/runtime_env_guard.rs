@@ -79,7 +79,7 @@ const GRANTS: &[GrantException] = &[
     GrantException {
         path: "assemblies/runtime/src/operator/dlq.rs",
         owner: "load_dlq_operator_grants_from_command_env",
-        caller: "dlq_operator_receipt",
+        caller: "authorize_dlq_operator_principal",
         constant: "DLQ_OPERATOR_GRANTS_ENV",
         source: GrantSource::AmbientEnvironment,
     },

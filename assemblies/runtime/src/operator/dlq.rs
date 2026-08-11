@@ -5,12 +5,12 @@
 
 use anyhow::Context as _;
 use consistency::IdemKey;
+use diport::{DlqOperatorAuthorization, DlqOperatorStartAuditId, dlq_operator_action};
 use eventexec::{
-    AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntrySummary, DlqInspectRequest,
-    DlqInspectTarget, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest,
-    DlqStore, OperatorDlqCapability, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket, ProjectionCaptureView,
-    VerifiedOperatorSubject,
+    DeadLetterId, DlqCursor, DlqEntrySummary, DlqInspectRequest, DlqInspectTarget, DlqListQuery,
+    DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest, DlqStore, OutboxExpiredResolutionKind,
+    OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest, OutboxResolutionChangeTicket,
+    ProjectionCaptureView,
 };
 use postgres::{MaintenanceAuditOutcome, PgDlqStore, PgMaintenanceDeps, PgRuntimeDeps};
 
@@ -35,7 +35,8 @@ pub fn is_dlq_command(args: &[String]) -> bool {
 }
 
 pub(super) const DLQ_OPERATOR_GRANTS_ENV: &str = "RSS_DLQ_OPERATOR_GRANTS";
-pub(super) const UNVERIFIED_DLQ_OPERATOR: &str = "unverified-service-token";
+/// Identity-neutral actor used for the durable attempt record created before token verification.
+pub(super) const UNAUTHENTICATED_DLQ_ATTEMPT: &str = "unauthenticated-dlq-attempt";
 
 #[derive(Debug)]
 pub(super) struct DlqCliArgs {
@@ -86,39 +87,7 @@ pub enum DlqCommandPreparation {
     Execute(PreparedDlqCommand),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum DlqMaintenanceAction {
-    List,
-    Inspect,
-    ReplayDeadLetter,
-    RedriveOutbox,
-    ResolveExpiredOutbox,
-}
-
-impl DlqMaintenanceAction {
-    pub(super) fn parse(raw: &str) -> anyhow::Result<Self> {
-        match raw {
-            "list" => Ok(Self::List),
-            "inspect" => Ok(Self::Inspect),
-            "replay-dead-letter" => Ok(Self::ReplayDeadLetter),
-            "redrive-outbox" => Ok(Self::RedriveOutbox),
-            "resolve-expired-outbox" => Ok(Self::ResolveExpiredOutbox),
-            other => anyhow::bail!(
-                "unknown DLQ maintenance action in {DLQ_OPERATOR_GRANTS_ENV}: {other}"
-            ),
-        }
-    }
-
-    pub(super) fn as_str(self) -> &'static str {
-        match self {
-            Self::List => "list",
-            Self::Inspect => "inspect",
-            Self::ReplayDeadLetter => "replay-dead-letter",
-            Self::RedriveOutbox => "redrive-outbox",
-            Self::ResolveExpiredOutbox => "resolve-expired-outbox",
-        }
-    }
-}
+pub(super) use diport::DlqOperatorActionKind as DlqMaintenanceAction;
 
 impl DlqCliCommand {
     pub(super) fn action(&self) -> DlqMaintenanceAction {
@@ -506,7 +475,11 @@ pub(super) fn parse_dlq_operator_grants(raw: &str) -> anyhow::Result<Vec<DlqMain
             unreachable!("len checked");
         };
         grants.push(DlqMaintenanceGrant {
-            action: DlqMaintenanceAction::parse(action)?,
+            action: DlqMaintenanceAction::parse(action).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "unknown DLQ maintenance action in {DLQ_OPERATOR_GRANTS_ENV}: {action}"
+                )
+            })?,
             tenant: vocab::TenantId::parse(tenant).with_context(|| {
                 format!("{DLQ_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
             })?,
@@ -617,13 +590,22 @@ pub(super) async fn authenticate_dlq_operator_principal(
 pub(super) async fn record_dlq_maintenance_finish_audit(
     pg: &PgMaintenanceDeps,
     operator_subject: &str,
+    tenant: vocab::TenantId,
+    start_audit_id: &DlqOperatorStartAuditId,
     action: &str,
     resource_id: &str,
     outcome: MaintenanceAuditOutcome<'_>,
 ) -> anyhow::Result<()> {
-    pg.record_dlq_maintenance_audit(operator_subject, action, outcome, resource_id)
-        .await
-        .context("record DLQ maintenance finish audit")
+    pg.record_dlq_maintenance_audit(
+        operator_subject,
+        tenant,
+        start_audit_id,
+        action,
+        outcome,
+        resource_id,
+    )
+    .await
+    .context("record DLQ maintenance finish audit")
 }
 
 pub(super) async fn authenticate_dlq_operator(
@@ -631,6 +613,7 @@ pub(super) async fn authenticate_dlq_operator(
     operator_pdp: &diport::DynPdp<'_>,
     parsed: &DlqCliArgs,
     resource_id: &str,
+    start_audit_id: &DlqOperatorStartAuditId,
 ) -> anyhow::Result<authn::Principal> {
     let principal = match authenticate_dlq_operator_principal(
         parsed.operator_service_token.as_str(),
@@ -643,7 +626,9 @@ pub(super) async fn authenticate_dlq_operator(
         Err(err) => {
             record_dlq_maintenance_finish_audit(
                 pg,
-                UNVERIFIED_DLQ_OPERATOR,
+                UNAUTHENTICATED_DLQ_ATTEMPT,
+                parsed.tenant,
+                start_audit_id,
                 &format!("dlq.{}.finish", parsed.command.action().as_str()),
                 resource_id,
                 MaintenanceAuditOutcome::Failure {
@@ -657,13 +642,14 @@ pub(super) async fn authenticate_dlq_operator(
     Ok(principal)
 }
 
-pub(super) async fn dlq_operator_receipt(
+pub(super) async fn authorize_dlq_operator_principal(
     pg: &PgMaintenanceDeps,
     parsed: &DlqCliArgs,
     resource_id: &str,
     principal: authn::Principal,
     operator: OperatorRuntimeCapability<'_>,
-) -> anyhow::Result<AuthorizedDlqOperatorReceipt> {
+    start_audit_id: &DlqOperatorStartAuditId,
+) -> anyhow::Result<AuthorizedDlqOperator> {
     let subject = principal.audit_subject().to_owned();
     let grants = match load_dlq_operator_grants_from_command_env(operator) {
         Ok(grants) => grants,
@@ -671,6 +657,8 @@ pub(super) async fn dlq_operator_receipt(
             record_dlq_maintenance_finish_audit(
                 pg,
                 &subject,
+                parsed.tenant,
+                start_audit_id,
                 &format!("dlq.{}.finish", parsed.command.action().as_str()),
                 resource_id,
                 MaintenanceAuditOutcome::Failure {
@@ -685,6 +673,8 @@ pub(super) async fn dlq_operator_receipt(
         record_dlq_maintenance_finish_audit(
             pg,
             &subject,
+            parsed.tenant,
+            start_audit_id,
             &format!("dlq.{}.finish", parsed.command.action().as_str()),
             resource_id,
             MaintenanceAuditOutcome::Failure {
@@ -698,7 +688,7 @@ pub(super) async fn dlq_operator_receipt(
         .service_caller_domain()
         .filter(|caller| *caller == vocab::ServiceCallerDomain::MaintenanceOperator)
         .ok_or_else(|| anyhow::anyhow!("DLQ operator caller binding lost"))?;
-    Ok(AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(caller))
+    Ok(AuthorizedDlqOperator { caller, subject })
 }
 
 pub(super) fn dlq_summary_json_line(summary: &DlqEntrySummary) -> anyhow::Result<String> {
@@ -733,6 +723,27 @@ pub(super) enum DlqCommandOutcome {
     Rejected(&'static str),
 }
 
+struct DlqCommandExecution {
+    outcome: DlqCommandOutcome,
+    finish_audit_durable: bool,
+}
+
+impl DlqCommandExecution {
+    const fn runtime_audited(outcome: DlqCommandOutcome) -> Self {
+        Self {
+            outcome,
+            finish_audit_durable: false,
+        }
+    }
+
+    const fn mutation_audited(outcome: DlqCommandOutcome) -> Self {
+        Self {
+            outcome,
+            finish_audit_durable: true,
+        }
+    }
+}
+
 pub(super) fn dlq_redrive_result_line(
     tenant: vocab::TenantId,
     event_id: &IdemKey,
@@ -745,41 +756,18 @@ pub(super) fn dlq_redrive_result_line(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-// reason: the helper receives one closed CLI command's typed fields plus its authorized witnesses.
+pub(super) fn dlq_audit_correlation_line(start_audit_id: &DlqOperatorStartAuditId) -> String {
+    format!("audit_id={}", start_audit_id.as_str())
+}
+
 pub(super) async fn run_expired_outbox_resolution<S: DlqStore>(
     store: &S,
-    tenant: vocab::TenantId,
-    event_id: &IdemKey,
-    change_ticket: &OutboxResolutionChangeTicket,
-    resolution_kind: OutboxExpiredResolutionKind,
-    evidence_event_id: Option<&IdemKey>,
-    capability: OperatorDlqCapability,
-    operator_subject: &VerifiedOperatorSubject,
+    request: OutboxExpiredResolutionRequest,
 ) -> anyhow::Result<DlqCommandOutcome> {
-    let request = match resolution_kind {
-        OutboxExpiredResolutionKind::AcceptedGap => OutboxExpiredResolutionRequest::accepted_gap(
-            tenant,
-            event_id.clone(),
-            change_ticket.clone(),
-            operator_subject.clone(),
-            capability,
-        ),
-        OutboxExpiredResolutionKind::Compensated => {
-            let evidence_event_id = evidence_event_id
-                .cloned()
-                .ok_or_else(|| anyhow::anyhow!("compensated evidence invariant"))?;
-            OutboxExpiredResolutionRequest::compensated(
-                tenant,
-                event_id.clone(),
-                evidence_event_id,
-                change_ticket.clone(),
-                operator_subject.clone(),
-                capability,
-            )
-        }
-    };
-    let outcome = store.resolve_expired_outbox(request).await?;
+    let tenant = request.tenant();
+    let event_id = request.event_id().clone();
+    let resolution_kind = request.kind();
+    let outcome = store.resolve_expired_outbox(request).await?.into_outcome();
     println!(
         "operation=resolve-expired-outbox tenant={} event_id={} resolution_kind={} outcome={}",
         tenant,
@@ -788,9 +776,8 @@ pub(super) async fn run_expired_outbox_resolution<S: DlqStore>(
         outcome.as_label()
     );
     match outcome {
-        OutboxExpiredResolutionOutcome::Resolved | OutboxExpiredResolutionOutcome::NotFound => {
-            Ok(DlqCommandOutcome::Completed)
-        }
+        OutboxExpiredResolutionOutcome::Resolved => Ok(DlqCommandOutcome::Completed),
+        OutboxExpiredResolutionOutcome::NotFound => Ok(DlqCommandOutcome::Rejected("not_found")),
         OutboxExpiredResolutionOutcome::NotExpired => {
             Ok(DlqCommandOutcome::Rejected("not_expired"))
         }
@@ -800,13 +787,64 @@ pub(super) async fn run_expired_outbox_resolution<S: DlqStore>(
     }
 }
 
-pub(super) async fn run_dlq_command_inner<S: DlqStore>(
-    store: &S,
-    parsed: &DlqCliArgs,
-    capability: OperatorDlqCapability,
-    operator_subject: &VerifiedOperatorSubject,
-) -> anyhow::Result<DlqCommandOutcome> {
-    match &parsed.command {
+enum AuthorizedDlqRequest {
+    List(DlqListQuery),
+    Inspect(DlqInspectRequest),
+    Replay(DlqReplayRequest),
+    Redrive(DlqRedriveRequest),
+    Resolve(OutboxExpiredResolutionRequest),
+}
+
+pub(super) struct DlqFinishAuditContext {
+    operator_subject: String,
+    tenant: vocab::TenantId,
+    start_audit_id: DlqOperatorStartAuditId,
+    action: String,
+    resource_id: String,
+}
+
+pub(super) struct AuthorizedDlqCommand {
+    request: AuthorizedDlqRequest,
+    finish_audit: DlqFinishAuditContext,
+}
+
+pub(super) struct AuthorizedDlqOperator {
+    caller: vocab::ServiceCallerDomain,
+    subject: String,
+}
+
+#[cfg(test)]
+pub(super) fn authorized_dlq_operator_for_test(
+    subject: impl Into<String>,
+) -> AuthorizedDlqOperator {
+    AuthorizedDlqOperator {
+        caller: vocab::ServiceCallerDomain::MaintenanceOperator,
+        subject: subject.into(),
+    }
+}
+
+fn issue_dlq_authorization<A: diport::DlqOperatorAction>(
+    operator: &AuthorizedDlqOperator,
+    tenant: vocab::TenantId,
+    start_audit_id: DlqOperatorStartAuditId,
+) -> DlqOperatorAuthorization<A> {
+    DlqOperatorAuthorization::issue(
+        dlqauthmint::DlqOperatorMint::capability(),
+        operator.caller,
+        operator.subject.clone(),
+        tenant,
+        start_audit_id,
+    )
+}
+
+fn authorize_dlq_command(
+    parsed: DlqCliArgs,
+    operator: &AuthorizedDlqOperator,
+    start_audit_id: DlqOperatorStartAuditId,
+    resource_id: String,
+) -> AuthorizedDlqCommand {
+    let tenant = parsed.tenant;
+    let (request, finish_audit) = match parsed.command {
         DlqCliCommand::List {
             source,
             producer_domain,
@@ -815,92 +853,80 @@ pub(super) async fn run_dlq_command_inner<S: DlqStore>(
             limit,
             cursor,
         } => {
-            let mut query = DlqListQuery::new(parsed.tenant).with_limit(*limit);
+            let authorization = issue_dlq_authorization::<dlq_operator_action::List>(
+                operator,
+                tenant,
+                start_audit_id.clone(),
+            );
+            let finish_audit =
+                finish_audit_context::<dlq_operator_action::List>(&authorization, resource_id);
+            let mut query = DlqListQuery::new(authorization).with_limit(limit);
             if let Some(source) = source {
-                query = query.with_source(*source);
+                query = query.with_source(source);
             }
             if let Some(domain) = producer_domain {
-                query = query.with_producer_domain(domain.clone());
+                query = query.with_producer_domain(domain);
             }
             if let Some(domain) = consumer_domain {
-                query = query.with_consumer_domain(domain.clone());
+                query = query.with_consumer_domain(domain);
             }
             if let Some(contract_id) = contract_id {
-                query = query.with_contract_id(contract_id.clone());
+                query = query.with_contract_id(contract_id);
             }
             if let Some(cursor) = cursor {
-                query = query.with_cursor(cursor.clone());
+                query = query.with_cursor(cursor);
             }
-            let result = store.list_dlq(query).await?;
-            for summary in result.data() {
-                print_dlq_summary(summary)?;
-            }
-            println!(
-                "operation=list tenant={} count={} has_more={} next_cursor={}",
-                parsed.tenant,
-                result.data().len(),
-                result.has_more(),
-                result.next_cursor().unwrap_or("none")
-            );
-            Ok(DlqCommandOutcome::Completed)
+            (AuthorizedDlqRequest::List(query), finish_audit)
         }
         DlqCliCommand::Inspect { target } => {
-            let summary = store
-                .inspect_dlq(DlqInspectRequest::new(parsed.tenant, target.clone()))
-                .await?;
-            print_dlq_summary(&summary)?;
-            match target {
-                DlqInspectTarget::DeadLetter(dead_letter_id) => println!(
-                    "operation=inspect tenant={} kind=dead_letter dead_letter_id={}",
-                    parsed.tenant, dead_letter_id
-                ),
-                DlqInspectTarget::OutboxDlx(event_id) => println!(
-                    "operation=inspect tenant={} kind=outbox_dlx event_id={}",
-                    parsed.tenant,
-                    event_id.as_str()
-                ),
-            }
-            Ok(DlqCommandOutcome::Completed)
+            let authorization = issue_dlq_authorization::<dlq_operator_action::Inspect>(
+                operator,
+                tenant,
+                start_audit_id,
+            );
+            let finish_audit =
+                finish_audit_context::<dlq_operator_action::Inspect>(&authorization, resource_id);
+            (
+                AuthorizedDlqRequest::Inspect(DlqInspectRequest::new(authorization, target)),
+                finish_audit,
+            )
         }
         DlqCliCommand::ReplayDeadLetter {
             dead_letter_id,
             replay_id,
         } => {
-            let outcome = store
-                .replay_dead_letter(DlqReplayRequest::new(
-                    parsed.tenant,
-                    dead_letter_id.clone(),
-                    replay_id.clone(),
-                    capability,
-                ))
-                .await?;
-            println!(
-                "operation=replay-dead-letter tenant={} dead_letter_id={} replay_id={} outcome={}",
-                parsed.tenant,
-                dead_letter_id,
-                replay_id.as_str(),
-                outcome.as_label()
+            let authorization = issue_dlq_authorization::<dlq_operator_action::ReplayDeadLetter>(
+                operator,
+                tenant,
+                start_audit_id,
             );
-            Ok(DlqCommandOutcome::Completed)
+            let finish_audit = finish_audit_context::<dlq_operator_action::ReplayDeadLetter>(
+                &authorization,
+                resource_id,
+            );
+            (
+                AuthorizedDlqRequest::Replay(DlqReplayRequest::new(
+                    authorization,
+                    dead_letter_id,
+                    replay_id,
+                )),
+                finish_audit,
+            )
         }
         DlqCliCommand::RedriveOutbox { event_id } => {
-            let outcome = store
-                .redrive_outbox(DlqRedriveRequest::new(
-                    parsed.tenant,
-                    event_id.clone(),
-                    capability,
-                ))
-                .await?;
-            println!(
-                "{}",
-                dlq_redrive_result_line(parsed.tenant, event_id, outcome)
+            let authorization = issue_dlq_authorization::<dlq_operator_action::RedriveOutbox>(
+                operator,
+                tenant,
+                start_audit_id,
             );
-            match outcome {
-                DlqRedriveOutcome::Expired => Ok(DlqCommandOutcome::Expired),
-                DlqRedriveOutcome::Redriven | DlqRedriveOutcome::NotFound => {
-                    Ok(DlqCommandOutcome::Completed)
-                }
-            }
+            let finish_audit = finish_audit_context::<dlq_operator_action::RedriveOutbox>(
+                &authorization,
+                resource_id,
+            );
+            (
+                AuthorizedDlqRequest::Redrive(DlqRedriveRequest::new(authorization, event_id)),
+                finish_audit,
+            )
         }
         DlqCliCommand::ResolveExpiredOutbox {
             event_id,
@@ -908,18 +934,130 @@ pub(super) async fn run_dlq_command_inner<S: DlqStore>(
             resolution_kind,
             evidence_event_id,
         } => {
-            run_expired_outbox_resolution(
-                store,
-                parsed.tenant,
-                event_id,
-                change_ticket,
-                *resolution_kind,
-                evidence_event_id.as_ref(),
-                capability,
-                operator_subject,
-            )
-            .await
+            let authorization = issue_dlq_authorization::<dlq_operator_action::ResolveExpiredOutbox>(
+                operator,
+                tenant,
+                start_audit_id,
+            );
+            let finish_audit = finish_audit_context::<dlq_operator_action::ResolveExpiredOutbox>(
+                &authorization,
+                resource_id,
+            );
+            let request = match resolution_kind {
+                OutboxExpiredResolutionKind::AcceptedGap => {
+                    OutboxExpiredResolutionRequest::accepted_gap(
+                        authorization,
+                        event_id,
+                        change_ticket,
+                    )
+                }
+                OutboxExpiredResolutionKind::Compensated => {
+                    let Some(evidence_event_id) = evidence_event_id else {
+                        unreachable!("DLQ parser requires compensated evidence")
+                    };
+                    OutboxExpiredResolutionRequest::compensated(
+                        authorization,
+                        event_id,
+                        evidence_event_id,
+                        change_ticket,
+                    )
+                }
+            };
+            (AuthorizedDlqRequest::Resolve(request), finish_audit)
         }
+    };
+    AuthorizedDlqCommand {
+        request,
+        finish_audit,
+    }
+}
+
+fn finish_audit_context<A: diport::DlqOperatorAction>(
+    authorization: &DlqOperatorAuthorization<A>,
+    resource_id: String,
+) -> DlqFinishAuditContext {
+    DlqFinishAuditContext {
+        operator_subject: authorization.operator_subject().to_owned(),
+        tenant: authorization.tenant(),
+        start_audit_id: authorization.start_audit_id().clone(),
+        action: format!("dlq.{}.finish", A::LABEL),
+        resource_id,
+    }
+}
+
+async fn run_dlq_command_inner<S: DlqStore>(
+    store: &S,
+    command: AuthorizedDlqRequest,
+) -> anyhow::Result<DlqCommandExecution> {
+    match command {
+        AuthorizedDlqRequest::List(query) => {
+            let tenant = query.tenant();
+            let result = store.list_dlq(query).await?;
+            for summary in result.data() {
+                print_dlq_summary(summary)?;
+            }
+            println!(
+                "operation=list tenant={} count={} has_more={} next_cursor={}",
+                tenant,
+                result.data().len(),
+                result.has_more(),
+                result.next_cursor().unwrap_or("none")
+            );
+            Ok(DlqCommandExecution::runtime_audited(
+                DlqCommandOutcome::Completed,
+            ))
+        }
+        AuthorizedDlqRequest::Inspect(request) => {
+            let tenant = request.tenant();
+            let target = request.target().clone();
+            let summary = store.inspect_dlq(request).await?;
+            print_dlq_summary(&summary)?;
+            match target {
+                DlqInspectTarget::DeadLetter(dead_letter_id) => println!(
+                    "operation=inspect tenant={} kind=dead_letter dead_letter_id={}",
+                    tenant, dead_letter_id
+                ),
+                DlqInspectTarget::OutboxDlx(event_id) => println!(
+                    "operation=inspect tenant={} kind=outbox_dlx event_id={}",
+                    tenant,
+                    event_id.as_str()
+                ),
+            }
+            Ok(DlqCommandExecution::runtime_audited(
+                DlqCommandOutcome::Completed,
+            ))
+        }
+        AuthorizedDlqRequest::Replay(request) => {
+            let tenant = request.tenant();
+            let dead_letter_id = request.dead_letter_id().clone();
+            let replay_id = request.replay_id().clone();
+            let outcome = store.replay_dead_letter(request).await?.into_outcome();
+            println!(
+                "operation=replay-dead-letter tenant={} dead_letter_id={} replay_id={} outcome={}",
+                tenant,
+                dead_letter_id,
+                replay_id.as_str(),
+                outcome.as_label()
+            );
+            Ok(DlqCommandExecution::mutation_audited(
+                DlqCommandOutcome::Completed,
+            ))
+        }
+        AuthorizedDlqRequest::Redrive(request) => {
+            let tenant = request.tenant();
+            let event_id = request.event_id().clone();
+            let outcome = store.redrive_outbox(request).await?.into_outcome();
+            println!("{}", dlq_redrive_result_line(tenant, &event_id, outcome));
+            let command_outcome = match outcome {
+                DlqRedriveOutcome::Expired => DlqCommandOutcome::Expired,
+                DlqRedriveOutcome::Redriven => DlqCommandOutcome::Completed,
+                DlqRedriveOutcome::NotFound => DlqCommandOutcome::Rejected("not_found"),
+            };
+            Ok(DlqCommandExecution::mutation_audited(command_outcome))
+        }
+        AuthorizedDlqRequest::Resolve(request) => run_expired_outbox_resolution(store, request)
+            .await
+            .map(DlqCommandExecution::mutation_audited),
     }
 }
 
@@ -934,17 +1072,38 @@ pub(super) trait DlqControlRuntime {
         &self,
         session: &Self::Session,
         operator_subject: &str,
+        tenant: vocab::TenantId,
+        start_audit_id: &DlqOperatorStartAuditId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
     ) -> anyhow::Result<()>;
 
-    async fn operator_subject(
+    async fn record_dlq_finish_audit(
+        &self,
+        session: &Self::Session,
+        context: &DlqFinishAuditContext,
+        outcome: MaintenanceAuditOutcome<'_>,
+    ) -> anyhow::Result<()> {
+        self.record_dlq_maintenance_audit(
+            session,
+            &context.operator_subject,
+            context.tenant,
+            &context.start_audit_id,
+            &context.action,
+            outcome,
+            &context.resource_id,
+        )
+        .await
+    }
+
+    async fn authorized_operator(
         &self,
         session: &Self::Session,
         parsed: &DlqCliArgs,
         resource_id: &str,
-    ) -> anyhow::Result<VerifiedOperatorSubject>;
+        start_audit_id: &DlqOperatorStartAuditId,
+    ) -> anyhow::Result<AuthorizedDlqOperator>;
 
     fn dlq_store(
         &self,
@@ -975,29 +1134,41 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
         &self,
         session: &Self::Session,
         operator_subject: &str,
+        tenant: vocab::TenantId,
+        start_audit_id: &DlqOperatorStartAuditId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
     ) -> anyhow::Result<()> {
         session
-            .record_dlq_maintenance_audit(operator_subject, action, outcome, resource_id)
+            .record_dlq_maintenance_audit(
+                operator_subject,
+                tenant,
+                start_audit_id,
+                action,
+                outcome,
+                resource_id,
+            )
             .await
             .context("record DLQ maintenance audit")
     }
 
-    async fn operator_subject(
+    async fn authorized_operator(
         &self,
         session: &Self::Session,
         parsed: &DlqCliArgs,
         resource_id: &str,
-    ) -> anyhow::Result<VerifiedOperatorSubject> {
+        start_audit_id: &DlqOperatorStartAuditId,
+    ) -> anyhow::Result<AuthorizedDlqOperator> {
         let provider =
             match build_operator_service_token_provider(self.config, self.operator, session) {
                 Ok(provider) => provider,
                 Err(err) => {
                     record_dlq_maintenance_finish_audit(
                         session,
-                        UNVERIFIED_DLQ_OPERATOR,
+                        UNAUTHENTICATED_DLQ_ATTEMPT,
+                        parsed.tenant,
+                        start_audit_id,
                         &format!("dlq.{}.finish", parsed.command.action().as_str()),
                         resource_id,
                         MaintenanceAuditOutcome::Failure {
@@ -1013,11 +1184,18 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
             diport::DynPdp::from_ref(provider.as_ref()),
             parsed,
             resource_id,
+            start_audit_id,
         )
         .await?;
-        let receipt =
-            dlq_operator_receipt(session, parsed, resource_id, principal, self.operator).await?;
-        Ok(VerifiedOperatorSubject::from_authorized_receipt(receipt))
+        authorize_dlq_operator_principal(
+            session,
+            parsed,
+            resource_id,
+            principal,
+            self.operator,
+            start_audit_id,
+        )
+        .await
     }
 
     fn dlq_store(
@@ -1047,12 +1225,18 @@ where
     R: DlqControlRuntime,
 {
     let resource_id = dlq_command_resource_id(&parsed);
+    let tenant = parsed.tenant;
+    let start_audit_id =
+        DlqOperatorStartAuditId::parse(format!("dlq-operator-{}", uuid::Uuid::new_v4()))
+            .context("build DLQ operator start audit id")?;
     let session = runtime.connect_maintenance().await?;
     let start_action = format!("dlq.{}.start", parsed.command.action().as_str());
     if let Err(err) = runtime
         .record_dlq_maintenance_audit(
             &session,
-            UNVERIFIED_DLQ_OPERATOR,
+            UNAUTHENTICATED_DLQ_ATTEMPT,
+            tenant,
+            &start_audit_id,
             &start_action,
             MaintenanceAuditOutcome::Success,
             &resource_id,
@@ -1063,10 +1247,10 @@ where
         runtime.shutdown(session).await;
         return Err(err);
     }
+    eprintln!("{}", dlq_audit_correlation_line(&start_audit_id));
 
-    let finish_action = format!("dlq.{}.finish", parsed.command.action().as_str());
-    let operator_subject = match runtime
-        .operator_subject(&session, &parsed, &resource_id)
+    let operator = match runtime
+        .authorized_operator(&session, &parsed, &resource_id, &start_audit_id)
         .await
     {
         Ok(subject) => subject,
@@ -1075,32 +1259,55 @@ where
             return Err(err);
         }
     };
-    let capability = issue_authorized_dlq_capability();
-    let command_result = match runtime.dlq_store(&session, &parsed.command) {
-        Ok(store) => run_dlq_command_inner(&store, &parsed, capability, &operator_subject).await,
+    let command_kind = parsed.command.clone();
+    let authorized = authorize_dlq_command(
+        parsed,
+        &operator,
+        start_audit_id.clone(),
+        resource_id.clone(),
+    );
+    let AuthorizedDlqCommand {
+        request,
+        finish_audit,
+    } = authorized;
+    let command_result = match runtime.dlq_store(&session, &command_kind) {
+        Ok(store) => run_dlq_command_inner(&store, request).await,
         Err(err) => Err(err),
     };
     let finish_outcome = match &command_result {
-        Ok(DlqCommandOutcome::Completed) => MaintenanceAuditOutcome::Success,
-        Ok(DlqCommandOutcome::Expired) => MaintenanceAuditOutcome::Failure { reason: "expired" },
-        Ok(DlqCommandOutcome::Rejected(reason)) => MaintenanceAuditOutcome::Failure { reason },
+        Ok(DlqCommandExecution {
+            outcome: DlqCommandOutcome::Completed,
+            ..
+        }) => MaintenanceAuditOutcome::Success,
+        Ok(DlqCommandExecution {
+            outcome: DlqCommandOutcome::Expired,
+            ..
+        }) => MaintenanceAuditOutcome::Failure { reason: "expired" },
+        Ok(DlqCommandExecution {
+            outcome: DlqCommandOutcome::Rejected(reason),
+            ..
+        }) => MaintenanceAuditOutcome::Failure { reason },
         Err(_) => MaintenanceAuditOutcome::Failure {
             reason: "run_error",
         },
     };
-    let audit_result = runtime
-        .record_dlq_maintenance_audit(
-            &session,
-            operator_subject.as_str(),
-            &finish_action,
-            finish_outcome,
-            &resource_id,
-        )
-        .await
-        .context("record DLQ maintenance finish audit");
+    let audit_result = if command_result
+        .as_ref()
+        .is_ok_and(|execution| execution.finish_audit_durable)
+    {
+        Ok(())
+    } else {
+        runtime
+            .record_dlq_finish_audit(&session, &finish_audit, finish_outcome)
+            .await
+            .context("record DLQ maintenance finish audit")
+    };
     runtime.shutdown(session).await;
     audit_result?;
-    match command_result.with_context(|| format!("DLQ command failed: {resource_id}"))? {
+    match command_result
+        .with_context(|| format!("DLQ command failed: {resource_id}"))?
+        .outcome
+    {
         DlqCommandOutcome::Completed => Ok(()),
         DlqCommandOutcome::Expired => {
             anyhow::bail!("DLQ command failed: {resource_id}: redrive horizon expired")
@@ -1109,10 +1316,6 @@ where
             anyhow::bail!("DLQ command failed: {resource_id}: {reason}")
         }
     }
-}
-
-pub(super) fn issue_authorized_dlq_capability() -> OperatorDlqCapability {
-    OperatorDlqCapability::issue_for_authorized_operator()
 }
 
 /// Execute an authenticated, audited DLQ operator command.

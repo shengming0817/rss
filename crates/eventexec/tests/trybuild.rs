@@ -35,6 +35,17 @@ fn reconcile_ui() {
 }
 
 #[test]
+fn dlq_operator_authorization_ui() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/dlq_old_capability_removed_fail.rs");
+    t.compile_fail("tests/ui/dlq_authorization_forge_fail.rs");
+    t.compile_fail("tests/ui/dlq_authorization_clone_fail.rs");
+    t.compile_fail("tests/ui/dlq_authorization_consume_twice_fail.rs");
+    t.compile_fail("tests/ui/dlq_authorization_cross_action_fail.rs");
+    t.compile_fail("tests/ui/dlq_request_separate_tenant_fail.rs");
+}
+
+#[test]
 fn projection_ui() {
     let t = trybuild::TestCases::new();
     // 五参齐全（含 SerialInOrderGuarantor witness）→ 编译通过。

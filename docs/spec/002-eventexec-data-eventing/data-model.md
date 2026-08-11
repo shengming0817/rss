@@ -119,10 +119,14 @@ durable 拓扑的 postgres 表 + 引擎类型 + 状态机。demo 拓扑以 `adap
   `RSS_DLX_PAYLOAD_KEY_NAME`；`tenantAuthority` 永不持久化。
 - 内部 DLQ API 区分分页 `DlqListResult { data, has_more, next_cursor }`、`DlqReplayRequest`
   （consumer/saga dead_letter → 新 outbox id）与 `DlqRedriveRequest`（outbox dlx → 原 outbox 行恢复
-  pending）。replay/redrive 均必须携带 `OperatorDlqCapability`；replay 的 dead_letter id 先经 typed
+  pending）。list、inspect、replay、redrive、resolve 分别消费精确 action 的 move-only
+  `DlqOperatorAuthorization<A>`；授权封装 caller、已验证 operator subject、tenant 与 durable start audit ID，请求不再接收第二份
+  tenant/subject。replay 的 dead_letter id 先经 typed
   `DeadLetterId` UUID parse，非法输入不进入 SQL cast。只有 replay 使用同一 `KeyProvider` 解密；
   `redrive-outbox` 是 payload-free 原 outbox 状态转换。plaintext replay row/shape 必须失败；consumer replay
-  不删除原死信、不重置 `inbox_receipts done`。outbox redrive deadline 到期返回 typed `Expired`，不修改行。
+  不删除原死信、不重置 `inbox_receipts done`。replay、redrive、resolve 的 mutation 与 verified finish audit
+  在同一个 tenant transaction 提交，并以 `DurablyAuditedDlqMutation<O>` 作为提交证明；finish audit 写入失败时
+  mutation 必须一并回滚，runtime 不得重复补写成功 audit。outbox redrive deadline 到期返回 typed `Expired`，不修改行。
 - 生命周期清理：worker 经 `rss_dlx_archiver` claim/retry、`rss_dlx_verifier` 写 verified receipt、
   `rss_dlx_purger` purge/reconcile，尽快把 hot row 归档为 verified S3 Object Lock
   `COMPLIANCE` 对象并 CAS 写 receipt；只有 `last_attempt_at ≤ now()-30d`、receipt 已验证且

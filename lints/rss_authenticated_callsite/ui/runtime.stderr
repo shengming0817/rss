@@ -64,3 +64,4 @@ LL |         let _ = authn::Principal::service_caller_domain;
    = help: 仅在列明的 runtime verification wrapper 中读取 Principal 身份；其它 runtime 代码同样不得把 verified Principal 降维为可转传值
 
 warning: 8 warnings emitted
+

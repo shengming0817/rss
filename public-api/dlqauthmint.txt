@@ -1,0 +1,16 @@
+pub mod dlqauthmint
+pub struct dlqauthmint::DlqOperatorMint(_)
+impl dlqauthmint::DlqOperatorMint
+pub const fn dlqauthmint::DlqOperatorMint::capability() -> Self
+impl core::clone::Clone for dlqauthmint::DlqOperatorMint
+pub fn dlqauthmint::DlqOperatorMint::clone(&self) -> dlqauthmint::DlqOperatorMint
+impl core::fmt::Debug for dlqauthmint::DlqOperatorMint
+pub fn dlqauthmint::DlqOperatorMint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for dlqauthmint::DlqOperatorMint
+impl core::marker::Freeze for dlqauthmint::DlqOperatorMint
+impl core::marker::Send for dlqauthmint::DlqOperatorMint
+impl core::marker::Sync for dlqauthmint::DlqOperatorMint
+impl core::marker::Unpin for dlqauthmint::DlqOperatorMint
+impl core::marker::UnsafeUnpin for dlqauthmint::DlqOperatorMint
+impl core::panic::unwind_safe::RefUnwindSafe for dlqauthmint::DlqOperatorMint
+impl core::panic::unwind_safe::UnwindSafe for dlqauthmint::DlqOperatorMint

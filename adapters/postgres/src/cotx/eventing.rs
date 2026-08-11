@@ -1409,6 +1409,17 @@ pub(crate) struct DlqExpiredResolution<'a> {
     pub(crate) evidence_event_id: Option<&'a str>,
 }
 
+pub(crate) struct DlqFinishAudit<'a> {
+    pub(crate) occurred_at_secs: i64,
+    pub(crate) occurred_at_nanos: i32,
+    pub(crate) operator_subject: &'a str,
+    pub(crate) action: &'a str,
+    pub(crate) outcome: &'a str,
+    pub(crate) failure_reason: Option<&'a str>,
+    pub(crate) resource_id: &'a str,
+    pub(crate) request_id: &'a str,
+}
+
 pub(crate) struct DlqListFilter<'a> {
     pub(crate) producer_domain: Option<&'a str>,
     pub(crate) consumer_domain: Option<&'a str>,
@@ -1457,6 +1468,34 @@ macro_rules! impl_dlq_write {
 impl_dlq_write!(MaintenanceWriteLane);
 
 impl EventingTx<'_, MaintenanceWriteLane, DlqConcern> {
+    pub(crate) async fn dlq_record_finish_audit(
+        &mut self,
+        input: DlqFinishAudit<'_>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query(
+            r#"
+            INSERT INTO auth_audit_events (
+                occurred_at_secs, occurred_at_nanos, principal_id, principal_kind, tenant_context,
+                resource_kind, resource_id, action, outcome, failure_reason, request_id,
+                correlation_id
+            )
+            VALUES ($1, $2, $3, 'service', $4::uuid, 'dlq.maintenance', $5, $6, $7, $8, $9, NULL)
+            "#,
+        )
+        .bind(input.occurred_at_secs)
+        .bind(input.occurred_at_nanos)
+        .bind(input.operator_subject)
+        .bind(self.tenant.to_string())
+        .bind(input.resource_id)
+        .bind(input.action)
+        .bind(input.outcome)
+        .bind(input.failure_reason)
+        .bind(input.request_id)
+        .execute(&mut *self.conn)
+        .await?;
+        Ok(())
+    }
+
     pub(crate) async fn dlq_load_replay_dead_letter(
         &mut self,
         dead_letter_id: &str,

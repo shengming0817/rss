@@ -124,6 +124,7 @@ pub mod rate_limiter;
 mod redacted;
 // DTO 字节 payload 脱敏 newtype（`Debug`/`Display` 恒 `<redacted>`，经 `as_bytes`/`into_bytes` 受控访问）。
 // `pub`（经下方 re-export 进跨 crate 导出面）：pub struct DTO 的 pub 字节字段须持 public 类型避免 privacy leak。
+mod dlq_operator;
 mod redacted_bytes;
 pub mod revocation_store;
 pub mod saga_durable_store;
@@ -148,6 +149,10 @@ pub use clock::Clock;
 pub use dead_letter_store::{
     DeadLetterProvenance, DeadLetterRecord, DeadLetterSource, DeadLetterStore,
     DeadLetterStoreError, DeadLetterSummary, DynDeadLetterStore,
+};
+pub use dlq_operator::{
+    DlqOperatorAction, DlqOperatorActionKind, DlqOperatorAuthorization, DlqOperatorStartAuditId,
+    DlqOperatorStartAuditIdError, dlq_operator_action,
 };
 pub use dlx_lifecycle::{
     ArchiveChecksum, ArchiveClaimSettleOutcome, ArchiveVersionId, ClaimedArchiveCandidate,
@@ -250,12 +255,31 @@ pub use subscriber::{
 };
 
 /// Test-only constructors for production-sealed DI values.
-#[cfg(feature = "test-support")]
+#[cfg(any(feature = "test-support", feature = "dlq-test-support"))]
 pub mod test_support {
     use super::{
         SagaOperatorAction, SagaOperatorAuthorization, SagaOperatorStartAuditId, SagaStartAuditId,
         SagaStartAuthorization, SagaWorkerIdentity,
     };
+
+    #[cfg(feature = "dlq-test-support")]
+    use super::{DlqOperatorAction, DlqOperatorAuthorization, DlqOperatorStartAuditId};
+
+    #[cfg(feature = "dlq-test-support")]
+    pub fn dlq_operator_authorization<A: DlqOperatorAction>(
+        caller: vocab::ServiceCallerDomain,
+        operator_subject: impl Into<String>,
+        tenant: vocab::TenantId,
+        start_audit_id: DlqOperatorStartAuditId,
+    ) -> DlqOperatorAuthorization<A> {
+        DlqOperatorAuthorization::issue(
+            dlqauthmint::DlqOperatorMint::capability(),
+            caller,
+            operator_subject.into(),
+            tenant,
+            start_audit_id,
+        )
+    }
 
     /// Mint provider acceptance for adapter behavior tests without opening a production mint site.
     #[must_use]

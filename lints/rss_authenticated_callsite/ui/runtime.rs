@@ -17,7 +17,7 @@ fn main() {
     operator::projection::projection_maintenance_operator_receipt();
     operator::projection::service_maintenance_operator_audit_subject();
     operator::dlq::authenticate_dlq_operator_principal();
-    operator::dlq::dlq_operator_receipt();
+    operator::dlq::authorize_dlq_operator_principal();
     // R：runtime 非 verification wrapper 不能降维 Principal。
     let _direct_subject = authn::Principal::audit_subject;
     let _direct_caller = authn::Principal::service_caller_domain;
@@ -86,7 +86,7 @@ mod operator {
             let _ = authn::Principal::service_caller_domain;
         }
 
-        pub(crate) fn dlq_operator_receipt() {
+        pub(crate) fn authorize_dlq_operator_principal() {
             let _ = authn::Principal::audit_subject;
             let _ = authn::Principal::service_caller_domain;
         }

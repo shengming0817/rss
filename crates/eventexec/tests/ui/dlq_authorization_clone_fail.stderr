@@ -1,0 +1,5 @@
+error[E0599]: no method named `clone` found for struct `DlqOperatorAuthorization<A>` in the current scope
+ --> tests/ui/dlq_authorization_clone_fail.rs:4:27
+  |
+4 |     let _ = authorization.clone();
+  |                           ^^^^^ method not found in `DlqOperatorAuthorization<diport::dlq_operator_action::List>`

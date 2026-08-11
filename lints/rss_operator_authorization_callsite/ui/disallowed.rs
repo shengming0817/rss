@@ -2,10 +2,13 @@
 #![allow(unused, unknown_lints)]
 
 fn main() {
-    let _cap = eventexec::OperatorDlqCapability::issue_for_authorized_operator();
-
-    let issue = eventexec::OperatorDlqCapability::issue_for_authorized_operator;
-    let _cap2 = issue();
+    let _auth = diport::DlqOperatorAuthorization::<diport::dlq_operator_action::List>::issue(
+        dlqauthmint::DlqOperatorMint::capability(),
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        "operator".to_owned(),
+        tenant(),
+        audit_id(),
+    );
 
     let _reconcile = eventexec::OperatorReconcileCapability::issue_for_authorized_operator();
     let issue_reconcile = eventexec::OperatorReconcileCapability::issue_for_authorized_operator;
@@ -14,12 +17,6 @@ fn main() {
     let _l2 = eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
     let issue_l2 = eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator;
     let _l2_2 = issue_l2();
-
-    let _receipt = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
-        vocab::ServiceCallerDomain::MaintenanceOperator,
-    );
-    let authorize = eventexec::AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized;
-    let _receipt2 = authorize(vocab::ServiceCallerDomain::MaintenanceOperator);
 
     let _harmless = HarmlessOperatorPlan::from_authenticated_and_authorized();
     let harmless = HarmlessOperatorPlan::from_authenticated_and_authorized;
@@ -50,5 +47,19 @@ impl HarmlessOperatorPlan {
 
 #[allow(rss_operator_authorization_callsite)] // reason: UI fixture 验证逃生门
 fn allowed_by_attr() {
-    let _cap = eventexec::OperatorDlqCapability::issue_for_authorized_operator();
+    let _auth = diport::DlqOperatorAuthorization::<diport::dlq_operator_action::List>::issue(
+        dlqauthmint::DlqOperatorMint::capability(),
+        vocab::ServiceCallerDomain::MaintenanceOperator,
+        "operator".to_owned(),
+        tenant(),
+        audit_id(),
+    );
+}
+
+fn tenant() -> vocab::TenantId {
+    vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap()
+}
+
+fn audit_id() -> diport::DlqOperatorStartAuditId {
+    diport::DlqOperatorStartAuditId::parse("ui-audit").unwrap()
 }

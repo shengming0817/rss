@@ -10,10 +10,10 @@ use consistency::{
     IdemKey, ProjectionApplyErrorKind, ProjectionApplyErrorReason, ProjectionBatchLimit,
 };
 use eventexec::{
-    AuthorizedDlqOperatorReceipt, DeadLetterId, DlqCursor, DlqEntrySummary, DlqError,
-    DlqInspectRequest, DlqInspectTarget, DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest,
-    DlqReplayRequest, DlqStore, OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome,
-    OutboxExpiredResolutionRequest, ProjectionRun, ProjectionStop, VerifiedOperatorSubject,
+    DeadLetterId, DlqCursor, DlqEntrySummary, DlqError, DlqInspectRequest, DlqInspectTarget,
+    DlqListQuery, DlqRedriveOutcome, DlqRedriveRequest, DlqReplayRequest, DlqStore,
+    OutboxExpiredResolutionKind, OutboxExpiredResolutionOutcome, OutboxExpiredResolutionRequest,
+    ProjectionRun, ProjectionStop,
 };
 use postgres::{MaintenanceAuditOutcome, ProjectionPointerPrecondition};
 
@@ -26,9 +26,10 @@ use super::audit_ledger::{
 };
 use super::cli_clap::{assert_operator_cli_err, assert_operator_cli_err_bucket};
 use super::dlq::{
-    DlqCliArgs, DlqCliCommand, DlqControlRuntime, DlqMaintenanceAction, UNVERIFIED_DLQ_OPERATOR,
-    authorize_dlq_operator, dlq_redrive_result_line, dlq_summary_json_line,
-    parse_dlq_args as parse_dlq_args_with_stdin, parse_dlq_operator_grants,
+    DlqCliArgs, DlqCliCommand, DlqControlRuntime, DlqMaintenanceAction,
+    UNAUTHENTICATED_DLQ_ATTEMPT, authorize_dlq_operator, dlq_audit_correlation_line,
+    dlq_redrive_result_line, dlq_summary_json_line, parse_dlq_args as parse_dlq_args_with_stdin,
+    parse_dlq_operator_grants,
     run_dlq_control_command_with_runtime as run_dlq_control_command_with_parsed,
 };
 use super::projection::{
@@ -2270,6 +2271,8 @@ enum FakeDlqAuditOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FakeDlqAuditRecord {
     subject: String,
+    tenant: vocab::TenantId,
+    start_audit_id: String,
     action: String,
     outcome: FakeDlqAuditOutcome,
     resource_id: String,
@@ -2312,6 +2315,7 @@ enum FakeDlqCommandRecord {
 enum FakeDlqOperator {
     Verified,
     AuthFailure,
+    RoleFailure,
     GrantFailure,
 }
 
@@ -2327,12 +2331,24 @@ enum FakeDlqStoreMode {
 #[derive(Clone)]
 struct FakeDlqStore {
     mode: FakeDlqStoreMode,
+    fail_atomic_finish_audit: bool,
     commands: Arc<Mutex<Vec<FakeDlqCommandRecord>>>,
+    audits: Arc<Mutex<Vec<FakeDlqAuditRecord>>>,
 }
 
 impl FakeDlqStore {
-    fn new(mode: FakeDlqStoreMode, commands: Arc<Mutex<Vec<FakeDlqCommandRecord>>>) -> Self {
-        Self { mode, commands }
+    fn new(
+        mode: FakeDlqStoreMode,
+        fail_atomic_finish_audit: bool,
+        commands: Arc<Mutex<Vec<FakeDlqCommandRecord>>>,
+        audits: Arc<Mutex<Vec<FakeDlqAuditRecord>>>,
+    ) -> Self {
+        Self {
+            mode,
+            fail_atomic_finish_audit,
+            commands,
+            audits,
+        }
     }
 
     fn push(&self, record: FakeDlqCommandRecord) {
@@ -2349,6 +2365,21 @@ impl FakeDlqStore {
             | FakeDlqStoreMode::Expired
             | FakeDlqStoreMode::EvidenceRejected => Ok(()),
             FakeDlqStoreMode::StoreFailure => Err(DlqError::Store),
+        }
+    }
+
+    fn push_audit(&self, record: FakeDlqAuditRecord) {
+        match self.audits.lock() {
+            Ok(mut records) => records.push(record),
+            Err(poisoned) => poisoned.into_inner().push(record),
+        }
+    }
+
+    fn ensure_atomic_finish_audit(&self) -> Result<(), DlqError> {
+        if self.fail_atomic_finish_audit {
+            Err(DlqError::Store)
+        } else {
+            Ok(())
         }
     }
 }
@@ -2384,65 +2415,143 @@ impl DlqStore for FakeDlqStore {
     async fn replay_dead_letter(
         &self,
         request: DlqReplayRequest,
-    ) -> Result<eventexec::DlqReplayOutcome, DlqError> {
-        self.push(FakeDlqCommandRecord::ReplayDeadLetter {
-            tenant: request.tenant(),
-            dead_letter_id: request.dead_letter_id().as_str().to_owned(),
-            replay_id: request.replay_id().as_str().to_owned(),
-        });
+    ) -> Result<eventexec::DurablyAuditedDlqMutation<eventexec::DlqReplayOutcome>, DlqError> {
+        let tenant = request.tenant();
+        let dead_letter_id = request.dead_letter_id().as_str().to_owned();
+        let replay_id = request.replay_id().as_str().to_owned();
         self.maybe_fail()?;
-        Ok(eventexec::DlqReplayOutcome::Inserted)
+        self.ensure_atomic_finish_audit()?;
+        self.push(FakeDlqCommandRecord::ReplayDeadLetter {
+            tenant,
+            dead_letter_id: dead_letter_id.clone(),
+            replay_id: replay_id.clone(),
+        });
+        self.push_audit(FakeDlqAuditRecord {
+            subject: request.operator_subject().to_owned(),
+            tenant,
+            start_audit_id: request.start_audit_id().as_str().to_owned(),
+            action: "dlq.replay-dead-letter.finish".to_owned(),
+            outcome: FakeDlqAuditOutcome::Success,
+            resource_id: format!(
+                "operation=replay-dead-letter tenant={tenant} dead_letter_id={dead_letter_id} replay_id={replay_id}"
+            ),
+        });
+        Ok(eventexec::DurablyAuditedDlqMutation::committed(
+            eventexec::DlqReplayOutcome::Inserted,
+        ))
     }
 
     async fn redrive_outbox(
         &self,
         request: DlqRedriveRequest,
-    ) -> Result<eventexec::DlqRedriveOutcome, DlqError> {
-        self.push(FakeDlqCommandRecord::RedriveOutbox {
-            tenant: request.tenant(),
-            event_id: request.event_id().as_str().to_owned(),
-        });
-        match self.mode {
-            FakeDlqStoreMode::Success => Ok(eventexec::DlqRedriveOutcome::Redriven),
-            FakeDlqStoreMode::NotFound => Ok(eventexec::DlqRedriveOutcome::NotFound),
-            FakeDlqStoreMode::Expired => Ok(eventexec::DlqRedriveOutcome::Expired),
+    ) -> Result<eventexec::DurablyAuditedDlqMutation<eventexec::DlqRedriveOutcome>, DlqError> {
+        let tenant = request.tenant();
+        let event_id = request.event_id().as_str().to_owned();
+        let (outcome, audit_outcome) = match self.mode {
+            FakeDlqStoreMode::Success => (
+                eventexec::DlqRedriveOutcome::Redriven,
+                FakeDlqAuditOutcome::Success,
+            ),
+            FakeDlqStoreMode::NotFound => (
+                eventexec::DlqRedriveOutcome::NotFound,
+                FakeDlqAuditOutcome::Failure {
+                    reason: "not_found".to_owned(),
+                },
+            ),
+            FakeDlqStoreMode::Expired => (
+                eventexec::DlqRedriveOutcome::Expired,
+                FakeDlqAuditOutcome::Failure {
+                    reason: "expired".to_owned(),
+                },
+            ),
             FakeDlqStoreMode::EvidenceRejected | FakeDlqStoreMode::StoreFailure => {
-                Err(DlqError::Store)
+                return Err(DlqError::Store);
             }
-        }
+        };
+        self.ensure_atomic_finish_audit()?;
+        self.push(FakeDlqCommandRecord::RedriveOutbox {
+            tenant,
+            event_id: event_id.clone(),
+        });
+        self.push_audit(FakeDlqAuditRecord {
+            subject: request.operator_subject().to_owned(),
+            tenant,
+            start_audit_id: request.start_audit_id().as_str().to_owned(),
+            action: "dlq.redrive-outbox.finish".to_owned(),
+            outcome: audit_outcome,
+            resource_id: format!("operation=redrive-outbox tenant={tenant} event_id={event_id}"),
+        });
+        Ok(eventexec::DurablyAuditedDlqMutation::committed(outcome))
     }
 
     async fn resolve_expired_outbox(
         &self,
         request: OutboxExpiredResolutionRequest,
-    ) -> Result<OutboxExpiredResolutionOutcome, DlqError> {
+    ) -> Result<eventexec::DurablyAuditedDlqMutation<OutboxExpiredResolutionOutcome>, DlqError>
+    {
+        let tenant = request.tenant();
+        let event_id = request.event_id().as_str().to_owned();
+        let resolution_kind = request.kind();
+        let (outcome, audit_outcome) = match self.mode {
+            FakeDlqStoreMode::Success => (
+                OutboxExpiredResolutionOutcome::Resolved,
+                FakeDlqAuditOutcome::Success,
+            ),
+            FakeDlqStoreMode::NotFound => (
+                OutboxExpiredResolutionOutcome::NotFound,
+                FakeDlqAuditOutcome::Failure {
+                    reason: "not_found".to_owned(),
+                },
+            ),
+            FakeDlqStoreMode::Expired => (
+                OutboxExpiredResolutionOutcome::NotExpired,
+                FakeDlqAuditOutcome::Failure {
+                    reason: "not_expired".to_owned(),
+                },
+            ),
+            FakeDlqStoreMode::EvidenceRejected => (
+                OutboxExpiredResolutionOutcome::EvidenceRejected,
+                FakeDlqAuditOutcome::Failure {
+                    reason: "evidence_rejected".to_owned(),
+                },
+            ),
+            FakeDlqStoreMode::StoreFailure => return Err(DlqError::Store),
+        };
+        self.ensure_atomic_finish_audit()?;
         self.push(FakeDlqCommandRecord::ResolveExpiredOutbox {
-            tenant: request.tenant(),
-            event_id: request.event_id().as_str().to_owned(),
-            resolution_kind: request.kind(),
+            tenant,
+            event_id: event_id.clone(),
+            resolution_kind,
             evidence_event_id: request
                 .evidence_event_id()
                 .map(|event_id| event_id.as_str().to_owned()),
-            operator_subject: request.operator_subject().as_str().to_owned(),
+            operator_subject: request.operator_subject().to_owned(),
         });
-        match self.mode {
-            FakeDlqStoreMode::Success => Ok(OutboxExpiredResolutionOutcome::Resolved),
-            FakeDlqStoreMode::NotFound => Ok(OutboxExpiredResolutionOutcome::NotFound),
-            FakeDlqStoreMode::Expired => Ok(OutboxExpiredResolutionOutcome::NotExpired),
-            FakeDlqStoreMode::EvidenceRejected => {
-                Ok(OutboxExpiredResolutionOutcome::EvidenceRejected)
-            }
-            FakeDlqStoreMode::StoreFailure => Err(DlqError::Store),
-        }
+        self.push_audit(FakeDlqAuditRecord {
+            subject: request.operator_subject().to_owned(),
+            tenant,
+            start_audit_id: request.start_audit_id().as_str().to_owned(),
+            action: "dlq.resolve-expired-outbox.finish".to_owned(),
+            outcome: audit_outcome,
+            resource_id: format!(
+                "operation=resolve-expired-outbox tenant={tenant} event_id={event_id} resolution_kind={}",
+                resolution_kind.as_label()
+            ),
+        });
+        Ok(eventexec::DurablyAuditedDlqMutation::committed(outcome))
     }
 }
 
 struct FakeDlqControlRuntime {
     operator: FakeDlqOperator,
     store_mode: FakeDlqStoreMode,
-    audits: Mutex<Vec<FakeDlqAuditRecord>>,
+    fail_start_audit: bool,
+    fail_finish_audit: bool,
+    fail_atomic_finish_audit: bool,
+    audits: Arc<Mutex<Vec<FakeDlqAuditRecord>>>,
     commands: Arc<Mutex<Vec<FakeDlqCommandRecord>>>,
     setup_count: AtomicUsize,
+    store_access_count: AtomicUsize,
     shutdown_count: AtomicUsize,
 }
 
@@ -2459,13 +2568,39 @@ impl FakeDlqControlRuntime {
         Self::new(FakeDlqOperator::GrantFailure, FakeDlqStoreMode::Success)
     }
 
+    fn role_failure() -> Self {
+        Self::new(FakeDlqOperator::RoleFailure, FakeDlqStoreMode::Success)
+    }
+
+    fn start_audit_failure() -> Self {
+        let mut runtime = Self::new(FakeDlqOperator::Verified, FakeDlqStoreMode::Success);
+        runtime.fail_start_audit = true;
+        runtime
+    }
+
+    fn finish_audit_failure(store_mode: FakeDlqStoreMode) -> Self {
+        let mut runtime = Self::verified(store_mode);
+        runtime.fail_finish_audit = true;
+        runtime
+    }
+
+    fn atomic_finish_audit_failure() -> Self {
+        let mut runtime = Self::verified(FakeDlqStoreMode::Success);
+        runtime.fail_atomic_finish_audit = true;
+        runtime
+    }
+
     fn new(operator: FakeDlqOperator, store_mode: FakeDlqStoreMode) -> Self {
         Self {
             operator,
             store_mode,
-            audits: Mutex::new(Vec::new()),
+            fail_start_audit: false,
+            fail_finish_audit: false,
+            fail_atomic_finish_audit: false,
+            audits: Arc::new(Mutex::new(Vec::new())),
             commands: Arc::new(Mutex::new(Vec::new())),
             setup_count: AtomicUsize::new(0),
+            store_access_count: AtomicUsize::new(0),
             shutdown_count: AtomicUsize::new(0),
         }
     }
@@ -2491,6 +2626,10 @@ impl FakeDlqControlRuntime {
     fn shutdown_count(&self) -> usize {
         self.shutdown_count.load(Ordering::Relaxed)
     }
+
+    fn store_access_count(&self) -> usize {
+        self.store_access_count.load(Ordering::Relaxed)
+    }
 }
 
 impl DlqControlRuntime for FakeDlqControlRuntime {
@@ -2506,10 +2645,18 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
         &self,
         _session: &Self::Session,
         operator_subject: &str,
+        tenant: vocab::TenantId,
+        start_audit_id: &diport::DlqOperatorStartAuditId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
     ) -> anyhow::Result<()> {
+        if self.fail_start_audit && action.ends_with(".start") {
+            anyhow::bail!("DLQ maintenance start audit failed");
+        }
+        if self.fail_finish_audit && action.ends_with(".finish") {
+            anyhow::bail!("DLQ maintenance finish audit failed");
+        }
         let outcome = match outcome {
             MaintenanceAuditOutcome::Success => FakeDlqAuditOutcome::Success,
             MaintenanceAuditOutcome::Failure { reason } => FakeDlqAuditOutcome::Failure {
@@ -2518,6 +2665,8 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
         };
         let record = FakeDlqAuditRecord {
             subject: operator_subject.to_owned(),
+            tenant,
+            start_audit_id: start_audit_id.as_str().to_owned(),
             action: action.to_owned(),
             outcome,
             resource_id: resource_id.to_owned(),
@@ -2529,22 +2678,23 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
         Ok(())
     }
 
-    async fn operator_subject(
+    async fn authorized_operator(
         &self,
         session: &Self::Session,
         parsed: &DlqCliArgs,
         resource_id: &str,
-    ) -> anyhow::Result<VerifiedOperatorSubject> {
+        start_audit_id: &diport::DlqOperatorStartAuditId,
+    ) -> anyhow::Result<super::dlq::AuthorizedDlqOperator> {
         match self.operator {
-            FakeDlqOperator::Verified => Ok(VerifiedOperatorSubject::from_authorized_receipt(
-                AuthorizedDlqOperatorReceipt::from_authenticated_and_authorized(
-                    vocab::ServiceCallerDomain::MaintenanceOperator,
-                ),
+            FakeDlqOperator::Verified => Ok(super::dlq::authorized_dlq_operator_for_test(
+                DLQ_FIXTURE_OPERATOR,
             )),
             FakeDlqOperator::AuthFailure => {
                 self.record_dlq_maintenance_audit(
                     session,
-                    UNVERIFIED_DLQ_OPERATOR,
+                    UNAUTHENTICATED_DLQ_ATTEMPT,
+                    parsed.tenant,
+                    start_audit_id,
                     &format!("dlq.{}.finish", parsed.command.action().as_str()),
                     MaintenanceAuditOutcome::Failure {
                         reason: "operator_auth",
@@ -2554,10 +2704,27 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
                 .await?;
                 anyhow::bail!("DLQ operator auth failed");
             }
+            FakeDlqOperator::RoleFailure => {
+                self.record_dlq_maintenance_audit(
+                    session,
+                    UNAUTHENTICATED_DLQ_ATTEMPT,
+                    parsed.tenant,
+                    start_audit_id,
+                    &format!("dlq.{}.finish", parsed.command.action().as_str()),
+                    MaintenanceAuditOutcome::Failure {
+                        reason: "operator_role",
+                    },
+                    resource_id,
+                )
+                .await?;
+                anyhow::bail!("DLQ operator role failed");
+            }
             FakeDlqOperator::GrantFailure => {
                 self.record_dlq_maintenance_audit(
                     session,
                     DLQ_FIXTURE_OPERATOR,
+                    parsed.tenant,
+                    start_audit_id,
                     &format!("dlq.{}.finish", parsed.command.action().as_str()),
                     MaintenanceAuditOutcome::Failure {
                         reason: "operator_authorization",
@@ -2575,9 +2742,12 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
         _session: &Self::Session,
         _command: &DlqCliCommand,
     ) -> anyhow::Result<Self::Store> {
+        self.store_access_count.fetch_add(1, Ordering::Relaxed);
         Ok(FakeDlqStore::new(
             self.store_mode,
+            self.fail_atomic_finish_audit,
             Arc::clone(&self.commands),
+            Arc::clone(&self.audits),
         ))
     }
 
@@ -2640,7 +2810,9 @@ fn assert_dlq_lifecycle_audit(
     assert_eq!(
         audits[0],
         FakeDlqAuditRecord {
-            subject: UNVERIFIED_DLQ_OPERATOR.to_owned(),
+            subject: UNAUTHENTICATED_DLQ_ATTEMPT.to_owned(),
+            tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT).expect("fixture tenant"),
+            start_audit_id: audits[0].start_audit_id.clone(),
             action: format!("dlq.{}.start", action.as_str()),
             outcome: FakeDlqAuditOutcome::Success,
             resource_id: resource_id.clone(),
@@ -2650,6 +2822,8 @@ fn assert_dlq_lifecycle_audit(
         audits[1],
         FakeDlqAuditRecord {
             subject: DLQ_FIXTURE_OPERATOR.to_owned(),
+            tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT).expect("fixture tenant"),
+            start_audit_id: audits[0].start_audit_id.clone(),
             action: format!("dlq.{}.finish", action.as_str()),
             outcome: expected_finish,
             resource_id,
@@ -3002,35 +3176,61 @@ fn dlq_args_SECRET_BAIT_too_many_values_is_redacted() {
 
 #[test]
 fn dlq_operator_grants_authorize_exact_action_and_tenant() -> anyhow::Result<()> {
-    let parsed = parse_dlq_args(&dlq_control_args(
-        "redrive-outbox",
-        &["--event-id", DLQ_FIXTURE_EVENT_ID],
-    ))?;
-    let grants = parse_dlq_operator_grants(&format!("redrive-outbox|{DLQ_FIXTURE_TENANT}"))?;
-    authorize_dlq_operator(&parsed, &grants)?;
+    let cases = [
+        ("list", dlq_control_args("list", &[])),
+        (
+            "inspect",
+            dlq_control_args(
+                "inspect",
+                &["--kind", "dead-letter", "--id", DLQ_FIXTURE_DEAD_LETTER_ID],
+            ),
+        ),
+        (
+            "replay-dead-letter",
+            dlq_control_args(
+                "replay-dead-letter",
+                &[
+                    "--dead-letter-id",
+                    DLQ_FIXTURE_DEAD_LETTER_ID,
+                    "--replay-id",
+                    DLQ_FIXTURE_REPLAY_ID,
+                ],
+            ),
+        ),
+        (
+            "redrive-outbox",
+            dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+        ),
+        (
+            "resolve-expired-outbox",
+            dlq_control_args(
+                "resolve-expired-outbox",
+                &[
+                    "--event-id",
+                    DLQ_FIXTURE_EVENT_ID,
+                    "--change-ticket",
+                    DLQ_FIXTURE_CHANGE_TICKET,
+                    "--resolution-kind",
+                    "accepted_gap",
+                ],
+            ),
+        ),
+    ];
 
-    let wrong_action = parse_dlq_operator_grants(&format!("list|{DLQ_FIXTURE_TENANT}"))?;
-    assert!(authorize_dlq_operator(&parsed, &wrong_action).is_err());
+    for (index, (action, command)) in cases.iter().enumerate() {
+        let parsed = parse_dlq_args(command)?;
+        let exact = parse_dlq_operator_grants(&format!("{action}|{DLQ_FIXTURE_TENANT}"))?;
+        authorize_dlq_operator(&parsed, &exact)?;
 
-    let wrong_tenant =
-        parse_dlq_operator_grants(&format!("redrive-outbox|{DLQ_FIXTURE_OTHER_TENANT}"))?;
-    assert!(authorize_dlq_operator(&parsed, &wrong_tenant).is_err());
+        let wrong_action = cases[(index + 1) % cases.len()].0;
+        let wrong_action =
+            parse_dlq_operator_grants(&format!("{wrong_action}|{DLQ_FIXTURE_TENANT}"))?;
+        assert!(authorize_dlq_operator(&parsed, &wrong_action).is_err());
 
-    let resolution = parse_dlq_args(&dlq_control_args(
-        "resolve-expired-outbox",
-        &[
-            "--event-id",
-            DLQ_FIXTURE_EVENT_ID,
-            "--change-ticket",
-            DLQ_FIXTURE_CHANGE_TICKET,
-            "--resolution-kind",
-            "accepted_gap",
-        ],
-    ))?;
-    let resolution_grant =
-        parse_dlq_operator_grants(&format!("resolve-expired-outbox|{DLQ_FIXTURE_TENANT}"))?;
-    authorize_dlq_operator(&resolution, &resolution_grant)?;
-    assert!(authorize_dlq_operator(&resolution, &grants).is_err());
+        let wrong_tenant =
+            parse_dlq_operator_grants(&format!("{action}|{DLQ_FIXTURE_OTHER_TENANT}"))?;
+        assert!(authorize_dlq_operator(&parsed, &wrong_tenant).is_err());
+    }
 
     assert!(parse_dlq_operator_grants("").is_err());
     assert!(parse_dlq_operator_grants("subject|skip|tenant").is_err());
@@ -3362,10 +3562,10 @@ async fn dlq_control_lifecycle_audits_command_failure() -> anyhow::Result<()> {
             reason: "run_error".to_owned(),
         },
     );
-    assert!(matches!(
-        runtime.command_records().as_slice(),
-        [FakeDlqCommandRecord::RedriveOutbox { .. }]
-    ));
+    assert!(
+        runtime.command_records().is_empty(),
+        "a store failure must not expose a committed mutation"
+    );
     Ok(())
 }
 
@@ -3441,6 +3641,7 @@ async fn dlq_verified_subject_is_injected_and_resolution_rejections_are_safely_a
         ],
     );
     for (mode, reason) in [
+        (FakeDlqStoreMode::NotFound, "not_found"),
         (FakeDlqStoreMode::Expired, "not_expired"),
         (FakeDlqStoreMode::EvidenceRejected, "evidence_rejected"),
     ] {
@@ -3480,13 +3681,15 @@ async fn dlq_verified_subject_is_injected_and_resolution_rejections_are_safely_a
 }
 
 #[tokio::test]
-async fn dlq_control_lifecycle_keeps_not_found_redrive_successful() -> anyhow::Result<()> {
+async fn dlq_control_lifecycle_rejects_not_found_redrive() -> anyhow::Result<()> {
     let runtime = FakeDlqControlRuntime::verified(FakeDlqStoreMode::NotFound);
-    run_dlq_control_command_with_runtime(
+    let error = run_dlq_control_command_with_runtime(
         &dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
         &runtime,
     )
-    .await?;
+    .await
+    .expect_err("not_found must not report a successful mutation");
+    assert!(error.to_string().contains("not_found"));
 
     assert_eq!(runtime.setup_count(), 1);
     assert_eq!(runtime.shutdown_count(), 1);
@@ -3494,7 +3697,9 @@ async fn dlq_control_lifecycle_keeps_not_found_redrive_successful() -> anyhow::R
         &runtime,
         DlqMaintenanceAction::RedriveOutbox,
         "event_id=evt-outbox-dlx",
-        FakeDlqAuditOutcome::Success,
+        FakeDlqAuditOutcome::Failure {
+            reason: "not_found".to_owned(),
+        },
     );
     assert!(matches!(
         runtime.command_records().as_slice(),
@@ -3508,6 +3713,7 @@ async fn dlq_control_lifecycle_does_not_call_store_before_auth_or_grant_success(
 -> anyhow::Result<()> {
     for runtime in [
         FakeDlqControlRuntime::auth_failure(),
+        FakeDlqControlRuntime::role_failure(),
         FakeDlqControlRuntime::grant_failure(),
     ] {
         let result = run_dlq_control_command_with_runtime(
@@ -3518,8 +3724,100 @@ async fn dlq_control_lifecycle_does_not_call_store_before_auth_or_grant_success(
         assert!(result.is_err());
         assert_eq!(runtime.setup_count(), 1);
         assert_eq!(runtime.shutdown_count(), 1);
+        assert_eq!(runtime.store_access_count(), 0);
         assert!(runtime.command_records().is_empty());
+        let audits = runtime.audit_records();
+        assert_eq!(audits.len(), 2);
+        assert_eq!(audits[0].start_audit_id, audits[1].start_audit_id);
+        assert_eq!(audits[0].tenant, audits[1].tenant);
+        assert!(audits[0].action.ends_with(".start"));
+        assert!(audits[1].action.ends_with(".finish"));
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn dlq_control_lifecycle_start_audit_failure_is_fail_closed() -> anyhow::Result<()> {
+    let runtime = FakeDlqControlRuntime::start_audit_failure();
+    let result = run_dlq_control_command_with_runtime(
+        &dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+        &runtime,
+    )
+    .await;
+
+    assert!(result.is_err());
+    assert_eq!(runtime.setup_count(), 1);
+    assert_eq!(runtime.shutdown_count(), 1);
+    assert!(runtime.audit_records().is_empty());
+    assert_eq!(runtime.store_access_count(), 0);
+    assert!(runtime.command_records().is_empty());
+    Ok(())
+}
+
+#[tokio::test]
+async fn dlq_control_lifecycle_finish_audit_failure_is_visible_and_closes_session()
+-> anyhow::Result<()> {
+    let cases = [
+        (
+            FakeDlqControlRuntime::finish_audit_failure(FakeDlqStoreMode::Success),
+            dlq_control_args("list", &[]),
+            1,
+        ),
+        (
+            FakeDlqControlRuntime::finish_audit_failure(FakeDlqStoreMode::StoreFailure),
+            dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+            0,
+        ),
+    ];
+    for (runtime, command, expected_committed_commands) in cases {
+        let result = run_dlq_control_command_with_runtime(&command, &runtime).await;
+        let error = result.expect_err("finish audit failure must fail the command");
+        assert!(format!("{error:#}").contains("finish audit"));
+        assert_eq!(runtime.setup_count(), 1);
+        assert_eq!(runtime.shutdown_count(), 1);
+        assert_eq!(runtime.command_records().len(), expected_committed_commands);
+        assert_eq!(runtime.audit_records().len(), 1);
+        assert_eq!(
+            runtime.audit_records()[0].tenant.to_string(),
+            DLQ_FIXTURE_TENANT
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn dlq_control_lifecycle_atomic_finish_audit_failure_rolls_back_mutation()
+-> anyhow::Result<()> {
+    let runtime = FakeDlqControlRuntime::atomic_finish_audit_failure();
+    let result = run_dlq_control_command_with_runtime(
+        &dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
+        &runtime,
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(runtime.setup_count(), 1);
+    assert_eq!(runtime.shutdown_count(), 1);
+    assert!(runtime.command_records().is_empty());
+    let audits = runtime.audit_records();
+    assert_eq!(audits.len(), 2);
+    assert_eq!(audits[0].start_audit_id, audits[1].start_audit_id);
+    assert_eq!(audits[0].tenant, audits[1].tenant);
+    assert_eq!(
+        audits[1].outcome,
+        FakeDlqAuditOutcome::Failure {
+            reason: "run_error".to_owned(),
+        }
+    );
+    Ok(())
+}
+
+#[test]
+fn dlq_audit_correlation_line_is_operator_actionable() -> anyhow::Result<()> {
+    let id = diport::DlqOperatorStartAuditId::parse("dlq-operator-correlation")?;
+    assert_eq!(
+        dlq_audit_correlation_line(&id),
+        "audit_id=dlq-operator-correlation"
+    );
     Ok(())
 }
 

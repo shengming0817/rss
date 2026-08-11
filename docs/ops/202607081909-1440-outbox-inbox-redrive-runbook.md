@@ -70,7 +70,7 @@ rss dlq list \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --source outbox_relay \
-  --domain identity \
+  --producer-domain identity \
   --contract-id identity.session-created \
   --limit 50 < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
@@ -161,7 +161,7 @@ rss dlq list \
   --operator-tenant "$OPERATOR_TENANT" \
   --tenant "$TENANT" \
   --source outbox_relay \
-  --domain "$DOMAIN" \
+  --producer-domain "$DOMAIN" \
   --contract-id "$CONTRACT_ID" \
   --limit 20 < "$OPERATOR_SERVICE_TOKEN_FILE"
 ```
@@ -215,14 +215,15 @@ rss dlq redrive-outbox \
 - `outbox_relay_envelope_validation_failure_total{reason}`：本地 envelope/schema header gate。
 - `consumer_lease_lost_total{domain}`：consumer inbox lease hard-fence。
 
-`dlq_redrive_total{outcome="not_found"}` 对 outbox redrive 表示未 mutation，常见原因是 wrong tenant、目标非 DLX 或已被其它 operator redrive。
+`dlq_redrive_total{outcome="not_found"}` 对 outbox redrive 表示未 mutation，命令以非零状态退出且 finish audit 记
+`failure/not_found`；常见原因是 wrong tenant、目标非 DLX 或已被其它 operator redrive。
 `dlq_redrive_total{outcome="expired"}` 表示目标仍在当前 tenant 的 DLX，但绝对 redrive deadline 已到；行未
 mutation，partition 不会被解锁。CLI 输出 `outcome=expired`、以非零状态结束，并写
 `dlq.redrive-outbox.finish` failure audit（reason=`expired`）。
 
 ## Failure Handling
 
-- `NotFound`：先核对 `--tenant` 与 id；wrong-tenant redrive 不泄漏存在性。
+- `NotFound`（非零退出）：先核对 `--tenant` 与 id；wrong-tenant redrive 不泄漏存在性。
 - `Expired`：不要重复 redrive；绝对 deadline 不可续期。只能在变更工单批准后执行
   `resolve-expired-outbox --resolution-kind accepted_gap|compensated`；不直接 broker publish、不创建同 id 兼容路径。
 - `InvalidEvidence`：`compensated` evidence 不是同 tenant published event，或 `causation_id`
@@ -240,7 +241,8 @@ mutation，partition 不会被解锁。CLI 输出 `outcome=expired`、以非零�
 - `Transaction`：检查 begin/commit/rollback 路径与数据库连接；在确认事务结局前不要改用直接 broker publish。
 
 replay 失败日志只提供闭值 stage、SQLSTATE、constraint 或 key-provider kind。payload、metadata、capsule、
-key ref 与原始 source chain 不属于诊断面；需要定位时使用审计 id 通过受控数据库路径核查。
+key ref 与原始 source chain 不属于诊断面；需要定位时使用命令在 stderr 输出的 `audit_id=<id>`，通过受控
+数据库路径核查同一 `request_id` 下的 identity-neutral start attempt 与 verified operator finish 记录。
 - `PayloadKeyUnavailable` / `PayloadKeyForbidden`：恢复 Vault/key provider 后重试。
 - `Store`：检查 Postgres、RLS、SECURITY DEFINER 函数权限和 migration 版本。
 

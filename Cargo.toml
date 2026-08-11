@@ -18,6 +18,7 @@ members = [
   # Authenticated production evidence mint capability（AUTH-EVIDENCE-MINT-01 Hard token）
   "crates/authmint",
   "crates/sagaauthmint",
+  "crates/dlqauthmint",
   "crates/requestidmint",
   # Runtime inventory live-evidence mint capability; only assembly-schema declares the receipt
   # signature and runtimeexec holds the mint token.

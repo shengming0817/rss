@@ -5,7 +5,7 @@
 //!
 //! Operator capability / authorization plan 的私有字段形成上游 Hard 构造门；“哪个 crate 的哪个精确
 //! callsite 可以调用 public constructor”是跨 crate callsite 约束，类型系统不能表达。本 lint 以
-//! `eventexec` 的 inherent self type + method 做类型感知匹配，再按 caller crate 或精确 crate/module/item
+//! `diport` / `eventexec` 的 inherent self type + method 做类型感知匹配，再按 caller crate 或精确 crate/module/item
 //! 放行。规则目录同时覆盖 DLQ/reconcile funnel、L2 DR move-only plan 与 durable start proof issuer。
 
 extern crate rustc_hir;
@@ -25,7 +25,6 @@ const NO_CALLER_CRATES: &[&str] = &[];
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FunnelKind {
     Capability,
-    AuthorizationReceipt,
     AuditedRecoveryPlan,
     DurableStartProof,
 }
@@ -40,6 +39,7 @@ struct ExactCallsite {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct GuardedFunnel {
+    source_crate: &'static str,
     self_type: &'static str,
     method: &'static str,
     kind: FunnelKind,
@@ -47,23 +47,17 @@ struct GuardedFunnel {
     exact_callsites: &'static [ExactCallsite],
 }
 
-const DLQ_CAPABILITY_WRAPPERS: &[ExactCallsite] = &[ExactCallsite {
+const DLQ_AUTHORIZATION_WRAPPERS: &[ExactCallsite] = &[ExactCallsite {
     crate_name: "runtime",
     module_path: "operator::dlq",
     self_type: None,
-    item_name: "issue_authorized_dlq_capability",
+    item_name: "issue_dlq_authorization",
 }];
 const RECONCILE_CAPABILITY_WRAPPERS: &[ExactCallsite] = &[ExactCallsite {
     crate_name: "runtime",
     module_path: "operator::reconcile",
     self_type: None,
     item_name: "issue_authorized_reconcile_capability",
-}];
-const DLQ_RECEIPT_WRAPPERS: &[ExactCallsite] = &[ExactCallsite {
-    crate_name: "runtime",
-    module_path: "operator::dlq",
-    self_type: None,
-    item_name: "dlq_operator_receipt",
 }];
 const L2_DR_CAPABILITY_WRAPPERS: &[ExactCallsite] = &[ExactCallsite {
     crate_name: "runtime",
@@ -86,13 +80,15 @@ const L2_DR_START_PROOF_ISSUERS: &[ExactCallsite] = &[ExactCallsite {
 
 const GUARDED_FUNNELS: &[GuardedFunnel] = &[
     GuardedFunnel {
-        self_type: "OperatorDlqCapability",
-        method: "issue_for_authorized_operator",
+        source_crate: "diport",
+        self_type: "DlqOperatorAuthorization",
+        method: "issue",
         kind: FunnelKind::Capability,
-        allowed_caller_crates: ADMIN_PDP_CALLER_CRATES,
-        exact_callsites: DLQ_CAPABILITY_WRAPPERS,
+        allowed_caller_crates: NO_CALLER_CRATES,
+        exact_callsites: DLQ_AUTHORIZATION_WRAPPERS,
     },
     GuardedFunnel {
+        source_crate: "eventexec",
         self_type: "OperatorReconcileCapability",
         method: "issue_for_authorized_operator",
         kind: FunnelKind::Capability,
@@ -100,6 +96,7 @@ const GUARDED_FUNNELS: &[GuardedFunnel] = &[
         exact_callsites: RECONCILE_CAPABILITY_WRAPPERS,
     },
     GuardedFunnel {
+        source_crate: "eventexec",
         self_type: "OperatorL2DrRecoveryCapability",
         method: "issue_for_authorized_operator",
         kind: FunnelKind::Capability,
@@ -107,13 +104,7 @@ const GUARDED_FUNNELS: &[GuardedFunnel] = &[
         exact_callsites: L2_DR_CAPABILITY_WRAPPERS,
     },
     GuardedFunnel {
-        self_type: "AuthorizedDlqOperatorReceipt",
-        method: "from_authenticated_and_authorized",
-        kind: FunnelKind::AuthorizationReceipt,
-        allowed_caller_crates: NO_CALLER_CRATES,
-        exact_callsites: DLQ_RECEIPT_WRAPPERS,
-    },
-    GuardedFunnel {
+        source_crate: "eventexec",
         self_type: "AuthorizedL2DrRecoveryPlan",
         method: "from_authenticated_and_authorized",
         kind: FunnelKind::AuditedRecoveryPlan,
@@ -121,6 +112,7 @@ const GUARDED_FUNNELS: &[GuardedFunnel] = &[
         exact_callsites: L2_DR_PLAN_WRAPPERS,
     },
     GuardedFunnel {
+        source_crate: "eventexec",
         self_type: "L2DrRecoveryDurableStartProof",
         method: "from_store",
         kind: FunnelKind::DurableStartProof,
@@ -165,16 +157,16 @@ impl<'tcx> LateLintPass<'tcx> for RssOperatorAuthorizationCallsite {
 }
 
 fn guarded_funnel(cx: &LateContext<'_>, did: DefId) -> Option<&'static GuardedFunnel> {
-    if cx.tcx.crate_name(did.krate).as_str() != "eventexec"
-        || !matches!(cx.tcx.def_kind(cx.tcx.parent(did)), DefKind::Impl { .. })
-    {
+    if !matches!(cx.tcx.def_kind(cx.tcx.parent(did)), DefKind::Impl { .. }) {
         return None;
     }
     let self_type = impl_self_type_name(cx, did)?;
     let method = cx.tcx.item_name(did);
-    GUARDED_FUNNELS
-        .iter()
-        .find(|funnel| funnel.self_type == self_type.as_str() && funnel.method == method.as_str())
+    GUARDED_FUNNELS.iter().find(|funnel| {
+        funnel.source_crate == cx.tcx.crate_name(did.krate).as_str()
+            && funnel.self_type == self_type.as_str()
+            && funnel.method == method.as_str()
+    })
 }
 
 fn impl_self_type_name(cx: &LateContext<'_>, did: DefId) -> Option<rustc_span::Symbol> {
@@ -223,9 +215,6 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, funnel: &GuardedFunnel)
         FunnelKind::Capability => format!(
             "operator capability `{constructor}` 仅可在受信 admin/PDP 或精确 runtime wrapper 签发"
         ),
-        FunnelKind::AuthorizationReceipt => format!(
-            "operator authorization receipt `{constructor}` 仅可在完成认证与精确授权的 runtime wrapper 构造"
-        ),
         FunnelKind::AuditedRecoveryPlan => format!(
             "operator recovery plan `{constructor}` 仅可在认证、精确授权且已消费 durable start proof 的生产执行函数构造"
         ),
@@ -245,7 +234,7 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, funnel: &GuardedFunnel)
         },
     );
     let help = match funnel.kind {
-        FunnelKind::Capability | FunnelKind::AuthorizationReceipt => {
+        FunnelKind::Capability => {
             format!("仅通过 `{expected}` 精确 wrapper 构造；不要直接调用或保存 constructor 函数项")
         }
         FunnelKind::AuditedRecoveryPlan | FunnelKind::DurableStartProof => format!(
@@ -266,19 +255,19 @@ fn emit(cx: &LateContext<'_>, hir_id: HirId, span: Span, funnel: &GuardedFunnel)
 
 #[test]
 fn guarded_funnel_catalog_is_unique_and_non_vacuous() {
-    assert_eq!(GUARDED_FUNNELS.len(), 6);
+    assert_eq!(GUARDED_FUNNELS.len(), 5);
     for (index, funnel) in GUARDED_FUNNELS.iter().enumerate() {
         assert!(!funnel.self_type.is_empty());
+        assert!(!funnel.source_crate.is_empty());
         assert!(!funnel.method.is_empty());
         assert_eq!(funnel.exact_callsites.len(), 1);
         assert!(!funnel.exact_callsites[0].crate_name.is_empty());
         assert!(!funnel.exact_callsites[0].module_path.is_empty());
         assert!(!funnel.exact_callsites[0].item_name.is_empty());
-        assert!(
-            GUARDED_FUNNELS[index + 1..].iter().all(|other| {
-                (funnel.self_type, funnel.method) != (other.self_type, other.method)
-            })
-        );
+        assert!(GUARDED_FUNNELS[index + 1..].iter().all(|other| {
+            (funnel.source_crate, funnel.self_type, funnel.method)
+                != (other.source_crate, other.self_type, other.method)
+        }));
     }
 }
 

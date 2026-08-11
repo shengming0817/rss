@@ -89,6 +89,7 @@ runtimeexec = { path = "../../crates/runtimeexec" }
 runtimeinventorymint = { path = "../../crates/runtimeinventorymint" }
 authmint = { path = "../../crates/authmint" }
 sagaauthmint = { path = "../../crates/sagaauthmint" }
+dlqauthmint = { path = "../../crates/dlqauthmint" }
 httpserve = { path = "../../crates/httpserve" }
 authn = { path = "../../crates/authn" }
 # 验签桥建 runctx::AppCtx + runctx::scope 绑定 ambient（tenant/principal），下游（enforce + handler +

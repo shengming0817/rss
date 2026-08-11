@@ -477,6 +477,8 @@ const AUTHMINT_ALLOWED_WRAPPERS: &[&str] = &[
 ];
 const SAGAAUTHMINT_CRATE: &str = "sagaauthmint";
 const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
+const DLQAUTHMINT_CRATE: &str = "dlqauthmint";
+const DLQAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
 const REQUESTIDMINT_CRATE: &str = "requestidmint";
 const REQUESTIDMINT_ALLOWED_WRAPPERS: &[&str] = &["httpserve", "generated"];
 const RUNTIMEINVENTORYMINT_CRATE: &str = "runtimeinventorymint";
@@ -614,6 +616,7 @@ pub(crate) fn check_wrappers(
     let mut findings = check_runtimeexec_wrapper_coverage(members, bans);
     findings.extend(check_authmint_wrapper_coverage(members, bans));
     findings.extend(check_sagaauthmint_wrapper_coverage(members, bans));
+    findings.extend(check_dlqauthmint_wrapper_coverage(members, bans));
     findings.extend(check_requestidmint_wrapper_coverage(members, bans));
     findings.extend(check_runtimeinventorymint_wrapper_coverage(members, bans));
     findings.extend(check_postgres_migration_operator_confinement(
@@ -660,6 +663,7 @@ pub(crate) fn check_wrappers(
             || b.crate_name == RUNTIMEEXEC_CRATE
             || b.crate_name == AUTHMINT_CRATE
             || b.crate_name == SAGAAUTHMINT_CRATE
+            || b.crate_name == DLQAUTHMINT_CRATE
             || b.crate_name == REQUESTIDMINT_CRATE
             || b.crate_name == RUNTIMEINVENTORYMINT_CRATE
             || b.crate_name == WORKSPACEFACTS_CRATE
@@ -1012,6 +1016,73 @@ pub(crate) fn check_sagaauthmint_wrapper_coverage(
     findings
 }
 
+/// The DLQ operator mint is an isolated high-authority Basis root with an exact consumer set.
+///
+/// INVARIANT: DLQ-OPERATOR-MINT-02 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::dlqauthmint_wrapper_widened_red|tests::dlqauthmint_wrapper_missing_consumer_red|tests::dlqauthmint_reverse_dependency_red", anti_vacuity = "tests::dlqauthmint_wrapper_exact_green" }
+pub(crate) fn check_dlqauthmint_wrapper_coverage(
+    members: &[Member],
+    bans: &[BanEntry],
+) -> Vec<Finding> {
+    let mut findings = Vec::new();
+    let target = members
+        .iter()
+        .find(|member| member.name == DLQAUTHMINT_CRATE);
+    let ban = bans
+        .iter()
+        .find(|entry| entry.crate_name == DLQAUTHMINT_CRATE);
+    if target.is_none() && ban.is_none() {
+        return findings;
+    }
+    if !matches!(target.map(|member| member.layer), Some(Some(Layer::Basis)))
+        || target.is_some_and(|member| member.path != "crates/dlqauthmint")
+    {
+        findings.push(finding(
+            Rule::WrapperCoverage,
+            DLQAUTHMINT_CRATE,
+            "dlqauthmint 必须是 `crates/dlqauthmint` 的 isolated Basis workspace member",
+        ));
+        return findings;
+    }
+    for (name, path, layer) in [
+        ("diport", "crates/diport", Layer::DiPort),
+        ("runtime", "assemblies/runtime", Layer::Root),
+    ] {
+        if !members
+            .iter()
+            .any(|member| member.name == name && member.path == path && member.layer == Some(layer))
+        {
+            findings.push(finding(
+                Rule::WrapperCoverage,
+                DLQAUTHMINT_CRATE,
+                format!("dlqauthmint 批准消费者 `{name}` 的 path/layer 不精确"),
+            ));
+        }
+    }
+    match ban {
+        None => findings.push(finding(
+            Rule::WrapperCoverage,
+            DLQAUTHMINT_CRATE,
+            "deny.toml 缺 dlqauthmint target wrapper",
+        )),
+        Some(ban) => {
+            let have: BTreeSet<&str> = ban.wrappers.iter().map(String::as_str).collect();
+            let want: BTreeSet<&str> = DLQAUTHMINT_ALLOWED_WRAPPERS.iter().copied().collect();
+            if have != want {
+                let extra: Vec<&str> = have.difference(&want).copied().collect();
+                let missing: Vec<&str> = want.difference(&have).copied().collect();
+                findings.push(finding(
+                    Rule::WrapperCoverage,
+                    DLQAUTHMINT_CRATE,
+                    format!(
+                        "dlqauthmint wrapper 必须与批准消费者集合相等：多列 {extra:?} / 欠列 {missing:?}"
+                    ),
+                ));
+            }
+        }
+    }
+    findings
+}
+
 /// The HTTP request-id mint is an isolated Basis capability. Only the transport owner may mint
 /// it, and generated response factories may consume it; domains and composition roots stay out.
 ///
@@ -1288,51 +1359,66 @@ pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Fi
 }
 
 /// shipped 依赖表禁止启用的 scoped-construction test feature（LAYER-DEPS-09 守卫常量）。
-const TEST_SUPPORT_FEATURE: &str = "test-support";
-const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str)] = &[
+const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str, &str)] = &[
     (
         "generated",
+        "test-support",
         "sealed test-only contract definitions and catalogs must stay outside every shipped feature closure",
     ),
     (
         "assembly-schema",
+        "test-support",
         "RepositoryContractTestBuilder bypasses manifest-backed contract owner provenance",
     ),
     (
         "runctx",
+        "test-support",
         "constructing AppCtx via runctx::test_support bypasses PrincipalFacet minting",
     ),
     (
         "identity",
+        "test-support",
         "identity::ports::TenantRepoScope::for_test bypasses authenticated tenant scope minting",
     ),
     (
         "settings",
+        "test-support",
         "settings::ports::TenantRepoScope::for_test bypasses authenticated tenant scope minting",
     ),
     (
         "audit",
+        "test-support",
         "audit::ports::TenantRepoScope::for_test bypasses authenticated tenant scope minting",
     ),
     (
         "bootstrap",
+        "test-support",
         "SubscriberBinding::forge_topology_for_test forges event topology; must stay [dev-dependencies]-only",
     ),
     (
         "eventexec",
+        "test-support",
         "Projection conformance fixtures mint source and operator authority outside the generated production registry",
     ),
     (
         "identity-composition",
+        "test-support",
         "pause_receipt_relay_for_test and pause_ingress_for_test expose pilot loop pause controls; must stay [dev-dependencies]-only",
     ),
     (
         "deviceidentity",
+        "test-support",
         "pause_receipt_relay_for_test and pause_ingress_for_test expose assembly pilot loop pause controls; must stay [dev-dependencies]-only",
     ),
     (
         "mqtt",
+        "test-support",
         "MqttSession::uplink_queue_is_saturated_for_test exposes adapter-private queue saturation; must stay [dev-dependencies]-only",
+    ),
+    (
+        "diport",
+        "dlq-test-support",
+        "DLQ authorization test mint bypasses the production runtime mint funnel",
     ),
 ];
 
@@ -1414,12 +1500,11 @@ struct FeatureGraph {
 }
 
 fn test_support_feature_ban(package_name: &str, feature: &str) -> Option<&'static str> {
-    if feature != TEST_SUPPORT_FEATURE {
-        return None;
-    }
     SHIPPED_TEST_SUPPORT_FEATURE_BANS
         .iter()
-        .find_map(|(banned, reason)| (*banned == package_name).then_some(*reason))
+        .find_map(|(banned, banned_feature, reason)| {
+            (*banned == package_name && *banned_feature == feature).then_some(*reason)
+        })
 }
 
 /// LAYER-DEPS-09 纯扫描：flag 任一 shipped 依赖表里 scoped-construction crate 启用 `test-support` feature 的条目。
@@ -2942,6 +3027,31 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         );
     }
 
+    /// 红：DLQ test mint 的精确 feature 不得进入 shipped graph。
+    #[test]
+    fn red_diport_dlq_testsupport_in_dependencies() {
+        let findings = scan_shipped_testsupport_features(&[sdep(
+            "postgres",
+            "[dependencies]",
+            "diport",
+            &["dlq-test-support"],
+        )]);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert!(findings[0].detail.contains("DLQ authorization test mint"));
+    }
+
+    /// 绿：普通 diport test-support 不隐式获得 DLQ mint 权限。
+    #[test]
+    fn green_diport_generic_testsupport_has_no_dlq_mint() {
+        let findings = scan_shipped_testsupport_features(&[sdep(
+            "postgres",
+            "[dependencies]",
+            "diport",
+            &["test-support"],
+        )]);
+        assert!(findings.is_empty(), "{findings:?}");
+    }
+
     /// 红：assembly-schema 的 synthetic repository/owner builder 不得进入 shipped graph。
     #[test]
     fn red_assembly_schema_repository_builder_in_dependencies() {
@@ -3397,6 +3507,53 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         let findings = check_sagaauthmint_wrapper_coverage(&sagaauthmint_fixture_members(), &bans);
         assert_eq!(findings.len(), 1, "{findings:?}");
         assert_eq!(findings[0].subject, "sagaauthmint");
+    }
+
+    fn dlqauthmint_fixture_members() -> Vec<Member> {
+        vec![
+            m("dlqauthmint", "crates/dlqauthmint", Some(Layer::Basis)),
+            m("diport", "crates/diport", Some(Layer::DiPort)),
+            m("runtime", "assemblies/runtime", Some(Layer::Root)),
+            m("postgres", "adapters/postgres", Some(Layer::Adapter)),
+        ]
+    }
+
+    #[test]
+    fn dlqauthmint_wrapper_exact_green() {
+        let bans = vec![ban("dlqauthmint", &["diport", "runtime"])];
+        assert!(
+            check_dlqauthmint_wrapper_coverage(&dlqauthmint_fixture_members(), &bans).is_empty()
+        );
+    }
+
+    #[test]
+    fn dlqauthmint_wrapper_widened_red() {
+        let bans = vec![ban("dlqauthmint", &["diport", "runtime", "postgres"])];
+        let findings = check_dlqauthmint_wrapper_coverage(&dlqauthmint_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].subject, "dlqauthmint");
+    }
+
+    #[test]
+    fn dlqauthmint_wrapper_missing_consumer_red() {
+        let bans = vec![ban("dlqauthmint", &["diport"])];
+        let findings = check_dlqauthmint_wrapper_coverage(&dlqauthmint_fixture_members(), &bans);
+        assert_eq!(findings.len(), 1, "{findings:?}");
+        assert_eq!(findings[0].subject, "dlqauthmint");
+    }
+
+    #[test]
+    fn dlqauthmint_reverse_dependency_red() {
+        let members = dlqauthmint_fixture_members();
+        let findings = check_layers(&members, &[e("dlqauthmint", "diport")]);
+        assert!(
+            findings
+                .iter()
+                .any(|finding| finding.subject == "dlqauthmint"
+                    && finding.rule == Rule::BackPath
+                    && finding.detail.contains("diport")),
+            "{findings:?}"
+        );
     }
 
     fn requestidmint_fixture_members() -> Vec<Member> {

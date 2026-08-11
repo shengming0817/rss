@@ -1,0 +1,5 @@
+error[E0433]: cannot find `OperatorDlqCapability` in `eventexec`
+ --> tests/ui/dlq_old_capability_removed_fail.rs:2:24
+  |
+2 |     let _ = eventexec::OperatorDlqCapability::issue_for_authorized_operator();
+  |                        ^^^^^^^^^^^^^^^^^^^^^ could not find `OperatorDlqCapability` in `eventexec`
