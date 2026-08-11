@@ -1378,10 +1378,9 @@ impl ConcurrentL2DrApplyObservation {
 }
 
 pub(in super::super) async fn tenant_reader_gate_verdict(
-    fixture: &testkit::OwnedPgFixture,
-    owner: &PgStore,
+    reader_config: &crate::PgTenantReadConfig,
 ) -> Result<Result<(), crate::PgError>, TestError> {
-    let reader = connect_pg_rss_app_read_role(fixture, owner).await?;
+    let reader = PgStore::connect(reader_config.as_pg_config()).await?;
     let verdict = reader.verify_tenant_read_capability().await;
     reader.shutdown().await?;
     Ok(verdict)

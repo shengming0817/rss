@@ -1105,6 +1105,7 @@ async fn tenant_reader_gate_rejects_wrong_direct_role() -> TestResult {
 async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
+    let reader_config = rss_app_read_config(&pg, &owner).await?;
     let tenant = test_tenant();
     let tenant_id = tenant.to_string();
     let role_id = unique_event_id("tenant-reader-column-acl-drift");
@@ -1117,7 +1118,7 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
     sqlx::query("GRANT UPDATE ON roles TO rss_app_read")
         .execute(&owner.pool)
         .await?;
-    let table_dml_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let table_dml_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query("REVOKE UPDATE ON roles FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
@@ -1132,7 +1133,7 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
     sqlx::query("GRANT UPDATE (name) ON roles TO rss_app_read")
         .execute(&owner.pool)
         .await?;
-    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let reader = PgStore::connect(reader_config.as_pg_config()).await?;
     let mut forced_read_write = reader.pool.begin_with("BEGIN READ WRITE").await?;
     crate::cotx::set_local_tenant(&mut forced_read_write, tenant).await?;
     let escalated = sqlx::query(
@@ -1149,7 +1150,7 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
     );
     forced_read_write.rollback().await?;
     reader.shutdown().await?;
-    let column_update_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let column_update_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query("REVOKE UPDATE (name) ON roles FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
@@ -1164,7 +1165,7 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
     sqlx::query("GRANT SELECT (name) ON roles TO rss_app_read WITH GRANT OPTION")
         .execute(&owner.pool)
         .await?;
-    let column_grant_option_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let column_grant_option_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query("REVOKE SELECT (name) ON roles FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
@@ -1180,7 +1181,7 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
     sqlx::query("GRANT SELECT ON roles TO rss_app_read WITH GRANT OPTION")
         .execute(&owner.pool)
         .await?;
-    let relation_grant_option_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let relation_grant_option_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query("REVOKE GRANT OPTION FOR SELECT ON roles FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
@@ -1203,12 +1204,13 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
 async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
+    let reader_config = rss_app_read_config(&pg, &owner).await?;
 
     sqlx::query("ALTER ROLE rss_app_read SET default_transaction_read_only = 'off'")
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadDefaultTransaction)
     ));
     sqlx::query("ALTER ROLE rss_app_read SET default_transaction_read_only = 'on'")
@@ -1219,7 +1221,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadSearchPath)
     ));
     sqlx::query("ALTER ROLE rss_app_read SET search_path = pg_catalog, public")
@@ -1229,8 +1231,24 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     sqlx::query("ALTER ROLE rss_app_read INHERIT")
         .execute(&owner.pool)
         .await?;
+    let inherit_before_probe: bool = sqlx::query_scalar(
+        "SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname = 'rss_app_read'",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(inherit_before_probe, "synthetic INHERIT drift must be real");
+    let inherit_verdict = tenant_reader_gate_verdict(&reader_config).await?;
+    let inherit_after_probe: bool = sqlx::query_scalar(
+        "SELECT rolinherit FROM pg_catalog.pg_roles WHERE rolname = 'rss_app_read'",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(
+        inherit_after_probe,
+        "reader probe must observe role drift without healing it"
+    );
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        inherit_verdict,
         Err(crate::PgError::TenantReadRoleAttributes)
     ));
     sqlx::query("ALTER ROLE rss_app_read NOINHERIT")
@@ -1244,7 +1262,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadMembership)
     ));
     sqlx::query("REVOKE tenant_reader_forbidden_parent FROM rss_app_read")
@@ -1261,7 +1279,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadOwnership)
     ));
     sqlx::query("DROP TABLE tenant_reader_forbidden_owned")
@@ -1274,7 +1292,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     );
     sqlx::query(&grant_temporary).execute(&owner.pool).await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadDatabasePrivileges)
     ));
     let revoke_temporary = format!(
@@ -1291,7 +1309,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadDatabasePrivileges)
     ));
     let revoke_connect_option = format!(
@@ -1306,7 +1324,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadSequencePrivileges)
     ));
     sqlx::query("REVOKE ALL ON SEQUENCE auth_audit_events_id_seq FROM rss_app_read")
@@ -1320,7 +1338,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadSchemaPrivileges)
     ));
     sqlx::query("DROP SCHEMA tenant_reader_forbidden_schema")
@@ -1331,7 +1349,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadSchemaPrivileges)
     ));
     sqlx::query("REVOKE GRANT OPTION FOR USAGE ON SCHEMA public FROM rss_app_read")
@@ -1344,7 +1362,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     )
     .execute(&owner.pool)
     .await?;
-    let public_function_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let public_function_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     assert!(matches!(
         public_function_verdict,
         Err(crate::PgError::TenantReadFunctionPrivileges { .. })
@@ -1356,7 +1374,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         .execute(&owner.pool)
         .await?;
     assert!(matches!(
-        tenant_reader_gate_verdict(&pg, &owner).await?,
+        tenant_reader_gate_verdict(&reader_config).await?,
         Err(crate::PgError::TenantReadFunctionPrivileges { .. })
     ));
     sqlx::query("DROP FUNCTION tenant_reader_forbidden_function()")
@@ -1366,7 +1384,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     sqlx::query("GRANT EXECUTE ON FUNCTION pg_catalog.lo_create(oid) TO rss_app_read")
         .execute(&owner.pool)
         .await?;
-    let lo_mutator_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let lo_mutator_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query("REVOKE EXECUTE ON FUNCTION pg_catalog.lo_create(oid) FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
@@ -1384,14 +1402,14 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     ))
     .execute(&owner.pool)
     .await?;
-    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let reader = PgStore::connect(reader_config.as_pg_config()).await?;
     let large_object_bytes: Vec<u8> =
         sqlx::query_scalar(&format!("SELECT lo_get({large_object_oid}::oid)"))
             .fetch_one(&reader.pool)
             .await?;
     assert_eq!(large_object_bytes, b"reader");
     reader.shutdown().await?;
-    let large_object_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let large_object_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query(&format!(
         "REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM rss_app_read"
     ))
@@ -1407,14 +1425,14 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     ))
     .execute(&owner.pool)
     .await?;
-    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let reader = PgStore::connect(reader_config.as_pg_config()).await?;
     let public_large_object_bytes: Vec<u8> =
         sqlx::query_scalar(&format!("SELECT lo_get({large_object_oid}::oid)"))
             .fetch_one(&reader.pool)
             .await?;
     assert_eq!(public_large_object_bytes, b"reader");
     reader.shutdown().await?;
-    let public_large_object_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let public_large_object_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query(&format!(
         "REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM PUBLIC"
     ))
@@ -1439,7 +1457,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     .fetch_one(&owner.pool)
     .await?;
     assert!(large_object_grantable);
-    let large_object_grant_option_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let large_object_grant_option_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query(&format!(
         "REVOKE ALL PRIVILEGES ON LARGE OBJECT {large_object_oid} FROM rss_app_read"
     ))
@@ -1456,7 +1474,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     sqlx::query("GRANT ALTER SYSTEM ON PARAMETER work_mem TO rss_app_read")
         .execute(&owner.pool)
         .await?;
-    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let reader = PgStore::connect(reader_config.as_pg_config()).await?;
     let can_alter_system: bool = sqlx::query_scalar(
         "SELECT has_parameter_privilege(current_user, 'work_mem', 'ALTER SYSTEM')",
     )
@@ -1467,7 +1485,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
         "synthetic parameter ACL drift must be effective"
     );
     reader.shutdown().await?;
-    let parameter_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let parameter_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query("REVOKE ALL PRIVILEGES ON PARAMETER work_mem FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
@@ -1479,14 +1497,14 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     sqlx::query("GRANT SET ON PARAMETER work_mem TO PUBLIC")
         .execute(&owner.pool)
         .await?;
-    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    let reader = PgStore::connect(reader_config.as_pg_config()).await?;
     let public_can_set: bool =
         sqlx::query_scalar("SELECT has_parameter_privilege(current_user, 'work_mem', 'SET')")
             .fetch_one(&reader.pool)
             .await?;
     assert!(public_can_set, "PUBLIC parameter drift must be effective");
     reader.shutdown().await?;
-    let public_parameter_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let public_parameter_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query("REVOKE ALL PRIVILEGES ON PARAMETER work_mem FROM PUBLIC")
         .execute(&owner.pool)
         .await?;
@@ -1507,7 +1525,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
     .fetch_one(&owner.pool)
     .await?;
     assert!(parameter_grantable);
-    let parameter_grant_option_verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let parameter_grant_option_verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query("REVOKE ALL PRIVILEGES ON PARAMETER work_mem FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
@@ -1524,6 +1542,7 @@ async fn tenant_reader_gate_rejects_role_and_non_relation_privilege_drift() -> T
 async fn tenant_reader_gate_rejects_active_resolver_body_drift() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
+    let reader_config = rss_app_read_config(&pg, &owner).await?;
     let original_definition: String = sqlx::query_scalar(
         "SELECT pg_catalog.pg_get_functiondef(\
              'public.rss_settings_projection_resolve_active()'::regprocedure\
@@ -1552,7 +1571,7 @@ async fn tenant_reader_gate_rejects_active_resolver_body_drift() -> TestResult {
     )
     .execute(&owner.pool)
     .await?;
-    let verdict = tenant_reader_gate_verdict(&pg, &owner).await?;
+    let verdict = tenant_reader_gate_verdict(&reader_config).await?;
     sqlx::query(&original_definition)
         .execute(&owner.pool)
         .await?;
@@ -1651,6 +1670,7 @@ async fn verify_rls_capability_rejects_permissive_policy() -> TestResult {
 async fn tenant_reader_gate_rejects_semantically_inverted_canonical_policies() -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
+    let reader_config = rss_app_read_config(&fixture, &owner).await?;
     for (table, predicate) in [
         (
             "_rls_probe_not_canonical",
@@ -1675,7 +1695,7 @@ async fn tenant_reader_gate_rejects_semantically_inverted_canonical_policies() -
         .execute(&owner.pool)
         .await?;
 
-        let verdict = tenant_reader_gate_verdict(&fixture, &owner).await?;
+        let verdict = tenant_reader_gate_verdict(&reader_config).await?;
         sqlx::query(&format!("DROP TABLE {table}"))
             .execute(&owner.pool)
             .await?;

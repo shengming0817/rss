@@ -113,6 +113,7 @@ mod audit_support;
 mod device;
 mod eventing;
 mod identity_support;
+mod migrations;
 mod runtime;
 mod settings_support;
 
@@ -120,5 +121,6 @@ pub(super) use audit_support::*;
 pub(super) use device::*;
 pub(super) use eventing::*;
 pub(super) use identity_support::*;
+pub(super) use migrations::*;
 pub(super) use runtime::*;
 pub(super) use settings_support::*;

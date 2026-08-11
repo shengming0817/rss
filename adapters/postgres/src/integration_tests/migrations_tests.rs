@@ -1999,7 +1999,11 @@ async fn migration_0066_upgrades_0065_without_mutating_claimed_rows() -> TestRes
 #[tokio::test(flavor = "multi_thread")]
 async fn migration_0062_rejects_nonempty_v2_without_destructive_escape() -> TestResult {
     let (_pg, store) = connect_pg().await?;
-    migrations_through(61).run(&store.pool).await?;
+    let migrator = sqlx::migrate!("./migrations");
+    let mut session = ExpectedMigrationFailureSession::acquire(&store).await?;
+    session
+        .run_success(&migrations_through(61), "bootstrap_0061")
+        .await?;
 
     let message_id = unique_event_id("0062-nonempty");
     sqlx::query(
@@ -2021,16 +2025,18 @@ async fn migration_0062_rejects_nonempty_v2_without_destructive_escape() -> Test
     .execute(&store.pool)
     .await?;
 
-    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
-    let Err(error) = result else {
-        return Err("0062 must reject nonempty dead_letter".into());
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("legacy dead_letter must be empty before DLX v3"),
-        "unexpected 0062 fail-fast error: {error}"
-    );
+    session
+        .expect_failure(
+            &migrator,
+            "nonempty_legacy_dead_letter",
+            "legacy dead_letter must be empty before DLX v3",
+        )
+        .await?;
+    let ledger: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(ledger, Some(61), "failed 0062 must not advance the ledger");
     let retained: i64 =
         sqlx::query_scalar("SELECT count(*) FROM dead_letter WHERE message_id = $1")
             .bind(&message_id)
@@ -2063,25 +2069,169 @@ async fn migration_0062_rejects_nonempty_v2_without_destructive_escape() -> Test
         .execute(&store.pool)
         .await?;
 
-    // sqlx 0.8 leaves its session advisory lock on the pooled connection when a migration body
-    // fails. All calls above are sequential and reuse that sole connection; explicitly release
-    // only test-owned session locks before proving the forward retry.
-    sqlx::query("SELECT pg_catalog.pg_advisory_unlock_all()")
-        .execute(&store.pool)
-        .await?;
-    sqlx::migrate!("./migrations").run(&store.pool).await?;
+    session.run_success(&migrator, "forward_retry").await?;
     let lifecycle_installed: bool = sqlx::query_scalar(
         "SELECT to_regprocedure('public.rss_dlx_claim_archive_candidates()') IS NOT NULL",
     )
     .fetch_one(&store.pool)
     .await?;
     assert!(lifecycle_installed);
+    drop(session);
     store.shutdown().await?;
     Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn migration_0063_rejects_bidirectional_and_owner_role_escalation() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    let migrator = sqlx::migrate!("./migrations");
+    let mut session = ExpectedMigrationFailureSession::acquire(&store).await?;
+    session
+        .run_success(&migrations_through(61), "bootstrap_0061")
+        .await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE ROLE rss_dlx_archiver NOLOGIN NOBYPASSRLS NOSUPERUSER
+            NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;
+        CREATE ROLE rss_dlx_forbidden_parent NOLOGIN NOSUPERUSER;
+        GRANT rss_dlx_forbidden_parent TO rss_dlx_archiver;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    session
+        .expect_failure(
+            &migrator,
+            "outgoing_membership",
+            "DLX workload roles must have no role memberships",
+        )
+        .await?;
+    assert_failed_0063_is_atomic(&store).await?;
+    sqlx::raw_sql(
+        r#"
+        REVOKE rss_dlx_forbidden_parent FROM rss_dlx_archiver;
+        DROP ROLE rss_dlx_forbidden_parent;
+        CREATE ROLE rss_dlx_forbidden_child NOLOGIN NOSUPERUSER;
+        GRANT rss_dlx_archiver TO rss_dlx_forbidden_child;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    session
+        .expect_failure(
+            &migrator,
+            "incoming_membership",
+            "DLX workload roles must have no role memberships",
+        )
+        .await?;
+    assert_failed_0063_is_atomic(&store).await?;
+    sqlx::raw_sql(
+        r#"
+        REVOKE rss_dlx_archiver FROM rss_dlx_forbidden_child;
+        DROP ROLE rss_dlx_forbidden_child;
+        DROP ROLE rss_dlx_archiver;
+        CREATE ROLE rss_dlx_lifecycle_owner LOGIN BYPASSRLS NOSUPERUSER;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    session
+        .expect_failure(
+            &migrator,
+            "unsafe_owner",
+            "pre-existing rss_dlx_lifecycle_owner has forbidden role attributes",
+        )
+        .await?;
+    assert_failed_0063_is_atomic(&store).await?;
+    sqlx::query("DROP ROLE rss_dlx_lifecycle_owner")
+        .execute(&store.pool)
+        .await?;
+    session
+        .run_success(&migrator, "valid_role_baseline")
+        .await?;
+    let lifecycle_installed: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('public.rss_dlx_claim_archive_candidates()') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(
+        lifecycle_installed,
+        "0063 must succeed after drift is removed"
+    );
+    drop(session);
+    store.shutdown().await?;
+    Ok(())
+}
+
+async fn assert_failed_0063_is_atomic(store: &PgStore) -> TestResult {
+    let ledger: Option<i64> =
+        sqlx::query_scalar("SELECT max(version) FROM public._sqlx_migrations")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(ledger, Some(62), "failed 0063 must not advance the ledger");
+    let lifecycle_installed: bool = sqlx::query_scalar(
+        "SELECT to_regprocedure('public.rss_dlx_claim_archive_candidates()') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(
+        !lifecycle_installed,
+        "failed 0063 must roll back every lifecycle artifact"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_migration_releases_the_exact_session_lock_before_retry() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    let migrator = sqlx::migrate!("./migrations");
+    let mut first = ExpectedMigrationFailureSession::acquire(&store).await?;
+    first
+        .run_success(&migrations_through(61), "bootstrap_0061")
+        .await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE ROLE rss_dlx_archiver NOLOGIN NOBYPASSRLS NOSUPERUSER
+            NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT;
+        CREATE ROLE rss_dlx_forbidden_parent NOLOGIN NOSUPERUSER;
+        GRANT rss_dlx_forbidden_parent TO rss_dlx_archiver;
+        "#,
+    )
+    .execute(&store.pool)
+    .await?;
+
+    first
+        .expect_failure(
+            &migrator,
+            "first_outgoing_membership",
+            "DLX workload roles must have no role memberships",
+        )
+        .await?;
+    let mut retry = ExpectedMigrationFailureSession::acquire(&store).await?;
+    assert_ne!(
+        first.backend_pid(),
+        retry.backend_pid(),
+        "the retry proof must use a distinct PostgreSQL backend"
+    );
+    retry
+        .expect_failure(
+            &migrator,
+            "retry_outgoing_membership",
+            "DLX workload roles must have no role memberships",
+        )
+        .await?;
+
+    drop(retry);
+    drop(first);
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_advisory_lock_timeout_reports_stage_and_blocker() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     migrations_through(61).run(&store.pool).await?;
     sqlx::raw_sql(
@@ -2095,67 +2245,44 @@ async fn migration_0063_rejects_bidirectional_and_owner_role_escalation() -> Tes
     .execute(&store.pool)
     .await?;
 
-    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
-    let Err(error) = result else {
-        return Err("0063 must reject archiver SET ROLE membership".into());
-    };
+    let migrator = sqlx::migrate!("./migrations");
+    let mut blocker = store.pool.acquire().await?;
+    migrator
+        .run_direct(&mut *blocker)
+        .await
+        .expect_err("0063 fixture must retain SQLx's session advisory lock");
+    let blocker_pid: i32 = sqlx::query_scalar("SELECT pg_catalog.pg_backend_pid()")
+        .fetch_one(&mut *blocker)
+        .await?;
+
+    let mut waiter = ExpectedMigrationFailureSession::acquire(&store).await?;
+    let diagnostic = waiter
+        .run_success(&migrator, "forced_cross_backend_wait")
+        .await
+        .expect_err("the canonical stage deadline must report the blocked migration")
+        .to_string();
     assert!(
-        error
-            .to_string()
-            .contains("DLX workload roles must have no role memberships"),
-        "unexpected 0063 role-membership error: {error}"
+        diagnostic.contains("stage=forced_cross_backend_wait"),
+        "timeout must identify its closed stage: {diagnostic}"
     );
-    sqlx::raw_sql(
-        r#"
-        REVOKE rss_dlx_forbidden_parent FROM rss_dlx_archiver;
-        DROP ROLE rss_dlx_forbidden_parent;
-        CREATE ROLE rss_dlx_forbidden_child NOLOGIN NOSUPERUSER;
-        GRANT rss_dlx_archiver TO rss_dlx_forbidden_child;
-        "#,
-    )
-    .execute(&store.pool)
-    .await?;
+    assert!(
+        diagnostic.contains("wait=Lock/advisory"),
+        "timeout must identify the advisory lock wait: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains("advisory:ExclusiveLock:waiting"),
+        "timeout must render the waiting lock: {diagnostic}"
+    );
+    assert!(
+        diagnostic.contains(&format!("blockers=[{blocker_pid}]")),
+        "timeout must identify the blocking backend: {diagnostic}"
+    );
 
     sqlx::query("SELECT pg_catalog.pg_advisory_unlock_all()")
-        .execute(&store.pool)
+        .execute(&mut *blocker)
         .await?;
-    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
-    let Err(error) = result else {
-        return Err("0063 must reject roles inheriting the archiver".into());
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("DLX workload roles must have no role memberships"),
-        "unexpected incoming role-membership error: {error}"
-    );
-    sqlx::raw_sql(
-        r#"
-        REVOKE rss_dlx_archiver FROM rss_dlx_forbidden_child;
-        DROP ROLE rss_dlx_forbidden_child;
-        DROP ROLE rss_dlx_archiver;
-        CREATE ROLE rss_dlx_lifecycle_owner LOGIN BYPASSRLS NOSUPERUSER;
-        "#,
-    )
-    .execute(&store.pool)
-    .await?;
-
-    sqlx::query("SELECT pg_catalog.pg_advisory_unlock_all()")
-        .execute(&store.pool)
-        .await?;
-    let result = sqlx::migrate!("./migrations").run(&store.pool).await;
-    let Err(error) = result else {
-        return Err("0063 must reject a pre-existing unsafe lifecycle owner".into());
-    };
-    assert!(
-        error
-            .to_string()
-            .contains("pre-existing rss_dlx_lifecycle_owner has forbidden role attributes"),
-        "unexpected lifecycle-owner error: {error}"
-    );
-    sqlx::query("DROP ROLE rss_dlx_lifecycle_owner")
-        .execute(&store.pool)
-        .await?;
+    blocker.close().await?;
+    drop(waiter);
     store.shutdown().await?;
     Ok(())
 }
