@@ -994,6 +994,7 @@ fn validate_amqp_base_url_table() {
 #[tokio::test]
 async fn real_redis_lifecycle_preserves_cross_scope_canary() {
     use std::process::{Command, Output};
+    use testcontainers_modules::redis::Redis;
 
     struct Canary(String);
     impl Drop for Canary {

@@ -273,7 +273,6 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
             == Some(&serde_json::Value::Array(Vec::new())),
         "identityaudit activated unexpected workflows: {inventory}"
     );
-
     runtime.send_sigterm()?;
     runtime.wait_for_drain().await?;
     pool.close().await;

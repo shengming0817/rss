@@ -946,6 +946,15 @@ fn docker_available() -> bool {
 
 const IDENTITYAUDIT_ACCEPTANCE_IMAGE_ENV: &str = "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE";
 const IDENTITYAUDIT_ACCEPTANCE_IMAGE: &str = "rss-identityaudit:artifact-acceptance";
+const IDENTITYAUDIT_SERVER_BUILD_ARGS: &[&str] = &[
+    "--locked",
+    "-p",
+    "identityaudit",
+    "--bin",
+    "identityaudit-server",
+    "--features",
+    "test-support",
+];
 const IDENTITYAUDIT_IMAGE_BUILD_ARGS: &[&str] = &[
     "build",
     "--target",
@@ -965,29 +974,60 @@ const INTEGRATION_ENV: &[(&str, &str)] = &[
     ),
 ];
 
-fn provision_integration_batch(batch: &integration_shards::ShardBatch, root: &Path) -> Result<()> {
-    if !batch_requires_identityaudit_image(batch) {
-        return Ok(());
-    }
-    let status = crate::cmd::external_cmd(
-        crate::cmd::ExternalProgram::Docker,
-        IDENTITYAUDIT_IMAGE_BUILD_ARGS,
-        &[],
-        Some(root),
-    )
-    .status()
-    .context("build identityaudit runtime acceptance image")?;
-    anyhow::ensure!(
-        status.success(),
-        "identityaudit runtime acceptance image build failed"
-    );
-    Ok(())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntegrationProvisioning {
+    IdentityAuditServerBinary,
+    IdentityAuditRuntimeImage,
 }
 
-fn batch_requires_identityaudit_image(batch: &integration_shards::ShardBatch) -> bool {
-    batch
+fn integration_provisioning(
+    batch: &integration_shards::ShardBatch,
+) -> Vec<IntegrationProvisioning> {
+    let mut plan = Vec::new();
+    if batch
+        .unit_ids
+        .contains(&integration_shards::IntegrationUnitId::IdentityAuditRuntimeJourney)
+    {
+        plan.push(IntegrationProvisioning::IdentityAuditServerBinary);
+    }
+    if batch
         .unit_ids
         .contains(&integration_shards::IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
+    {
+        plan.push(IntegrationProvisioning::IdentityAuditRuntimeImage);
+    }
+    plan
+}
+
+fn provision_integration_batch(batch: &integration_shards::ShardBatch, root: &Path) -> Result<()> {
+    for provisioning in integration_provisioning(batch) {
+        let (status, failure) = match provisioning {
+            IntegrationProvisioning::IdentityAuditServerBinary => (
+                crate::cmd::cargo_cmd(
+                    crate::cmd::CargoSubcommand::Build,
+                    IDENTITYAUDIT_SERVER_BUILD_ARGS,
+                    &[],
+                    Some(root),
+                )
+                .status()
+                .context("build identityaudit-server for runtime journey")?,
+                "identityaudit-server build failed",
+            ),
+            IntegrationProvisioning::IdentityAuditRuntimeImage => (
+                crate::cmd::external_cmd(
+                    crate::cmd::ExternalProgram::Docker,
+                    IDENTITYAUDIT_IMAGE_BUILD_ARGS,
+                    &[],
+                    Some(root),
+                )
+                .status()
+                .context("build identityaudit runtime acceptance image")?,
+                "identityaudit runtime acceptance image build failed",
+            ),
+        };
+        anyhow::ensure!(status.success(), failure);
+    }
+    Ok(())
 }
 
 fn run_integration_batch(
@@ -2125,7 +2165,11 @@ mod tests {
         let selection = IntegrationSelection::release_check();
         let batch = integration_shards::batches(&selection, IntegrationShard::RuntimeHttpAuth)
             .into_iter()
-            .find(batch_requires_identityaudit_image)
+            .find(|batch| {
+                batch
+                    .unit_ids
+                    .contains(&IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
+            })
             .expect("runtime image batch remains in the release-check plan");
 
         assert_eq!(batch.package, "identityaudit");
@@ -2146,6 +2190,61 @@ mod tests {
             "RSS_IDENTITYAUDIT_ACCEPTANCE_IMAGE",
             "rss-identityaudit:artifact-acceptance"
         )));
+    }
+
+    #[test]
+    fn identityaudit_provisioning_plan_is_exact_and_excludes_unrelated_batches() {
+        let selection = IntegrationSelection::release_check();
+        let journey = integration_shards::batches(&selection, IntegrationShard::EventTransport)
+            .into_iter()
+            .find(|batch| {
+                batch
+                    .unit_ids
+                    .contains(&IntegrationUnitId::IdentityAuditRuntimeJourney)
+            })
+            .expect("identityaudit runtime journey remains in the release-check plan");
+        assert_eq!(
+            integration_provisioning(&journey),
+            [IntegrationProvisioning::IdentityAuditServerBinary]
+        );
+        assert_eq!(journey.package, "journeys");
+        assert_eq!(journey.feature, "integration");
+        assert!(journey.targets.contains(&"identityaudit_runtime"));
+        assert_eq!(
+            IDENTITYAUDIT_SERVER_BUILD_ARGS,
+            [
+                "--locked",
+                "-p",
+                "identityaudit",
+                "--bin",
+                "identityaudit-server",
+                "--features",
+                "test-support"
+            ]
+        );
+
+        let image = integration_shards::batches(&selection, IntegrationShard::RuntimeHttpAuth)
+            .into_iter()
+            .find(|batch| {
+                batch
+                    .unit_ids
+                    .contains(&IntegrationUnitId::IdentityAuditRuntimeImageAcceptance)
+            })
+            .expect("identityaudit runtime image remains in the release-check plan");
+        assert_eq!(
+            integration_provisioning(&image),
+            [IntegrationProvisioning::IdentityAuditRuntimeImage]
+        );
+
+        let unrelated = integration_shards::batches(&selection, IntegrationShard::RuntimeHttpAuth)
+            .into_iter()
+            .find(|batch| {
+                batch
+                    .unit_ids
+                    .contains(&IntegrationUnitId::IdentityAuditLib)
+            })
+            .expect("identityaudit library batch remains in the release-check plan");
+        assert!(integration_provisioning(&unrelated).is_empty());
     }
 
     fn shell_executable_prefix(line: &str) -> &str {

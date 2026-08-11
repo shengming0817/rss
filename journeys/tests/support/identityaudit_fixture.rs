@@ -531,10 +531,14 @@ impl RuntimeFixture {
         let root = FixtureRoot::create()?;
         let logs = ChildLogs::new(&root);
         let (vault, jwks) = VaultFixture::start(&root).await?;
-        let primary = reserve_address().await?;
-        let admin = reserve_address().await?;
-        let health = reserve_address().await?;
-        ensure!(primary != admin && primary != health && admin != health);
+        let [
+            primary,
+            admin,
+            health,
+            frontend_primary,
+            frontend_admin,
+            frontend_health,
+        ] = reserve_runtime_addresses().await?;
 
         let jwks_path = root.join("oidc.jwks.json");
         let blocklist_path = root.join("password-blocklist.sha256");
@@ -570,11 +574,11 @@ impl RuntimeFixture {
                 config_path.to_str().context("config path is not UTF-8")?,
             ])
             .env(
-                "RSS_BUILD_SOURCE_SHA",
+                "RSS_BUILD_SOURCE_REVISION",
                 "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             )
             .env(
-                "RSS_BUILD_IMAGE_DIGEST",
+                "RSS_DECLARED_IMAGE_DIGEST",
                 "sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
             )
             .env(
@@ -582,9 +586,18 @@ impl RuntimeFixture {
                 &secret_bundle.path,
             )
             .env("RSS_DEPLOYMENT_POD_IP", "127.0.0.1")
-            .env("RSS_DEPLOYMENT_PRIMARY_PORT", "8080")
-            .env("RSS_DEPLOYMENT_ADMIN_PORT", "8081")
-            .env("RSS_DEPLOYMENT_HEALTH_PORT", "8083")
+            .env(
+                "RSS_DEPLOYMENT_PRIMARY_PORT",
+                frontend_primary.port().to_string(),
+            )
+            .env(
+                "RSS_DEPLOYMENT_ADMIN_PORT",
+                frontend_admin.port().to_string(),
+            )
+            .env(
+                "RSS_DEPLOYMENT_HEALTH_PORT",
+                frontend_health.port().to_string(),
+            )
             .env(
                 "RSS_DEPLOYMENT_MTLS_SPIFFE_ALLOW_SET",
                 "[\"spiffe://rss.local/ns/rss/sa/ingress-gateway\"]",
@@ -873,15 +886,21 @@ impl ServingSecretBundle {
     }
 }
 
-async fn reserve_address() -> anyhow::Result<SocketAddr> {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .context("reserve IdentityAudit listener address")?;
-    let address = listener
-        .local_addr()
-        .context("read reserved listener address")?;
-    drop(listener);
-    Ok(address)
+async fn reserve_runtime_addresses() -> anyhow::Result<[SocketAddr; 6]> {
+    let mut listeners = Vec::with_capacity(6);
+    for _ in 0..6 {
+        listeners.push(
+            tokio::net::TcpListener::bind("127.0.0.1:0")
+                .await
+                .context("reserve IdentityAudit listener address")?,
+        );
+    }
+    listeners
+        .iter()
+        .map(tokio::net::TcpListener::local_addr)
+        .collect::<Result<Vec<_>, _>>()?
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("IdentityAudit runtime address allocation is incomplete"))
 }
 
 fn identityaudit_binary() -> anyhow::Result<PathBuf> {
