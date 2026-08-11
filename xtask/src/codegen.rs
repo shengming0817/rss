@@ -286,14 +286,14 @@ fn render_platform_public_contracts(contracts: &[GovernedContract]) -> Result<St
         .and_then(|endpoints| endpoints.http.as_ref())
         .and_then(|http| http.auth.as_ref())
         .context("Platform Public runtime.inventory requires HTTP auth metadata")?;
-    let schema_hash = contract.schema_hash()?;
+    let schema_hash = contract.schema_hash();
     validate_platform_contract_identity(
         &manifest.id,
         &manifest.domain,
         &manifest.version,
         auth.mode,
         auth.permission.as_deref(),
-        &schema_hash,
+        schema_hash,
     )?;
     let provider_state_variants = render_platform_provider_state_variants(contract)?;
     render_platform_contract_template(
@@ -303,7 +303,7 @@ fn render_platform_public_contracts(contracts: &[GovernedContract]) -> Result<St
         auth.permission
             .as_deref()
             .context("Platform Public runtime.inventory permission is absent")?,
-        &schema_hash,
+        schema_hash,
         &provider_state_variants,
     )
 }
@@ -315,9 +315,9 @@ fn render_platform_provider_state_variants(contract: &GovernedContract) -> Resul
         .response(200)
         .context("Platform Public runtime.inventory must declare its 200 response schema")?;
     let schema = contract
-        .resolved_schema(response_schema)
+        .schema(response_schema)
         .with_context(|| format!("resolve Platform Public response schema {response_schema}"))?;
-    render_platform_provider_state_variants_from_schema(&schema)
+    render_platform_provider_state_variants_from_schema(schema)
 }
 
 fn render_platform_provider_state_variants_from_schema(
@@ -723,7 +723,12 @@ fn render_device_certificate_candidates(
             || manifest.lifecycle != expected.lifecycle
             || manifest.domain != "identity"
             || contract.owner().domain().map(|owner| owner.as_str()) != Some("identity")
-            || !contract.dir().ends_with(expected.source_dir)
+            || !contract.dir().ends_with(
+                expected
+                    .source_dir
+                    .strip_prefix("contracts/")
+                    .expect("candidate sourceDir is repository-relative"),
+            )
         {
             bail!(
                 "device-certificate candidate id={} metadata/source drifted from the typed catalog",
@@ -1014,35 +1019,35 @@ fn render_contract_body(
         // 防御性安全校验：schema 文件名须为纯文件名，防 `../` 路径逃逸（codegen 可独立于 validate 运行）。
         validate_schema_filename(schema_file)
             .with_context(|| format!("契约 {source} 的 schema 文件名不安全: {schema_file}"))?;
-        let path = c
-            .schema_path(schema_file)
-            .with_context(|| format!("契约 {source} 未捕获 schema 路径: {schema_file}"))?;
-        let value = c
-            .resolved_schema(schema_file)
-            .with_context(|| format!("解析 resolved schema {}", path.display()))?;
+        let schema = c
+            .declared_schema(schema_file)
+            .with_context(|| format!("契约 {source} 未捕获 promoted schema: {schema_file}"))?;
+        let schema_label = schema.file();
+        let value = schema.resolved();
         merge_deferred_string_lengths(
             &mut deferred_string_lengths,
-            collect_deferred_string_lengths(&value).with_context(|| {
-                format!("解析 schema {} 的 deferred string marker", path.display())
+            collect_deferred_string_lengths(value)
+                .with_context(|| format!("解析 schema {schema_label} 的 deferred string marker"))?,
+        );
+        utf8_byte_length_markers.extend(
+            collect_utf8_byte_length_markers(value).with_context(|| {
+                format!("解析 schema {schema_label} 的 UTF-8 byte length marker")
             })?,
         );
-        utf8_byte_length_markers.extend(collect_utf8_byte_length_markers(&value).with_context(
-            || format!("解析 schema {} 的 UTF-8 byte length marker", path.display()),
-        )?);
         if c.manifest().kind == ContractKind::Http
             && c.manifest().schemas.request.as_deref() == Some(schema_file)
-            && schema_declares_property(&value, "tenantId")
+            && schema_declares_property(value, "tenantId")
         {
             bail!(
                 "HTTP request schema {} 声明 tenantId；tenant scope 必须来自{}，不得来自 body",
-                path.display(),
+                schema_label,
                 TENANT_SCOPE_SOURCE_RULE
             );
         }
-        let schema_policies = redaction::collect_struct_policies(&value).map_err(|violations| {
+        let schema_policies = redaction::collect_struct_policies(value).map_err(|violations| {
             anyhow::anyhow!(
                 "redaction policy invalid in {}: {}",
-                path.display(),
+                schema_label,
                 violations
                     .iter()
                     .map(|v| format!("{}: {}", v.pointer, v.detail))
@@ -1052,10 +1057,10 @@ fn render_contract_body(
         })?;
         redaction_policies.extend(schema_policies);
         let schema_protection_policies =
-            protection::collect_struct_policies(&value).map_err(|violations| {
+            protection::collect_struct_policies(value).map_err(|violations| {
                 anyhow::anyhow!(
                     "protection policy invalid in {}: {}",
-                    path.display(),
+                    schema_label,
                     violations
                         .iter()
                         .map(|v| format!("{}: {}", v.pointer, v.detail))
@@ -1064,8 +1069,8 @@ fn render_contract_body(
                 )
             })?;
         protection_policies.extend(schema_protection_policies);
-        let mut root: RootSchema = serde_json::from_value(value.into_value())
-            .with_context(|| format!("解析 schema {}", path.display()))?;
+        let mut root: RootSchema = serde_json::from_value(value.value().clone())
+            .with_context(|| format!("解析 schema {schema_label}"))?;
         for (name, definition) in std::mem::take(&mut root.definitions) {
             if let Some(existing) = shared_definitions.get(&name) {
                 if existing != &definition {
@@ -1075,15 +1080,15 @@ fn render_contract_body(
                 shared_definitions.insert(name, definition);
             }
         }
-        roots.push((path.to_path_buf(), root));
+        roots.push((schema_label.to_owned(), root));
     }
     space
         .add_ref_types(shared_definitions)
         .map_err(|error| anyhow::anyhow!("typify 派生契约 {source} 的共享 definitions: {error}"))?;
-    for (path, root) in roots {
+    for (schema_label, root) in roots {
         space
             .add_root_schema(root)
-            .map_err(|error| anyhow::anyhow!("typify 派生 {}: {error}", path.display()))?;
+            .map_err(|error| anyhow::anyhow!("typify 派生 {schema_label}: {error}"))?;
     }
     let mut parsed =
         syn::parse2::<syn::File>(space.to_stream()).context("syn 解析 typify token 流")?;
@@ -1147,7 +1152,7 @@ fn render_runtime_inventory_projection(c: &GovernedContract) -> Result<String> {
         .response(200)
         .context("runtime.inventory@v1 must declare its 200 response schema")?;
     let schema = c
-        .resolved_schema(response_schema)
+        .schema(response_schema)
         .with_context(|| format!("resolve runtime inventory response schema {response_schema}"))?;
     let schema_version = schema
         .pointer("/properties/data/properties/schemaVersion/const")
@@ -1434,7 +1439,7 @@ fn render_projection_glue(c: &GovernedContract) -> Result<String> {
     let domain = &c.manifest().domain;
     let contract_id = &c.manifest().id;
     let version = &c.manifest().version;
-    let schema_hash = c.schema_hash()?;
+    let schema_hash = c.schema_hash();
     for (field, value) in [
         ("domain", domain.as_str()),
         ("id", contract_id.as_str()),
@@ -1449,7 +1454,7 @@ fn render_projection_glue(c: &GovernedContract) -> Result<String> {
             );
         }
     }
-    if !is_safe_codegen_string(&schema_hash) {
+    if !is_safe_codegen_string(schema_hash) {
         bail!(
             "projection 契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
             c.manifest().kind.as_dir(),
@@ -1478,7 +1483,7 @@ fn render_saga_glue(c: &GovernedContract, sup: &str) -> Result<String> {
     let domain = &c.manifest().domain;
     let contract_id = &c.manifest().id;
     let version = &c.manifest().version;
-    let schema_hash = c.schema_hash()?;
+    let schema_hash = c.schema_hash();
     let action_registry_generation = saga_action_registry_generation(saga);
     for (field, value) in [
         ("domain", domain.as_str()),
@@ -1494,7 +1499,7 @@ fn render_saga_glue(c: &GovernedContract, sup: &str) -> Result<String> {
             );
         }
     }
-    if !is_safe_codegen_string(&schema_hash) {
+    if !is_safe_codegen_string(schema_hash) {
         bail!(
             "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
             c.manifest().kind.as_dir(),
@@ -1713,7 +1718,7 @@ fn render_http_glue(
     };
     let contract_id = &c.manifest().id;
     let version = &c.manifest().version;
-    let schema_hash = c.schema_hash()?;
+    let schema_hash = c.schema_hash();
     for (field, value) in [
         ("domain", domain.as_str()),
         ("id", contract_id.as_str()),
@@ -1728,7 +1733,7 @@ fn render_http_glue(
             );
         }
     }
-    if !is_safe_codegen_string(&schema_hash) {
+    if !is_safe_codegen_string(schema_hash) {
         bail!(
             "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
             c.manifest().kind.as_dir(),
@@ -1973,7 +1978,7 @@ fn render_http_query_parameters(c: &GovernedContract, method: &str) -> Result<St
         return Ok(String::new());
     };
     let schema = c
-        .resolved_schema(schema_file)
+        .schema(schema_file)
         .with_context(|| format!("parse resolved HTTP request schema {schema_file}"))?;
     let properties = schema
         .get("properties")
@@ -2070,7 +2075,7 @@ fn fixed_http_error_envelope(
     schema_file: &str,
 ) -> Result<Option<FixedHttpErrorEnvelope>> {
     let schema = c
-        .resolved_schema(schema_file)
+        .schema(schema_file)
         .with_context(|| format!("parse declared HTTP error schema {schema_file}"))?;
     let exact_string_set = |value: Option<&serde_json::Value>, expected: &[&str]| {
         value
@@ -2100,7 +2105,7 @@ fn fixed_http_error_envelope(
         return Ok(None);
     };
     if !exact_object_keys(
-        &schema,
+        schema,
         &[
             "$schema",
             "title",
@@ -2731,7 +2736,7 @@ fn render_command_glue(c: &GovernedContract, sup: &str) -> Result<String> {
     let domain = &c.manifest().domain;
     let contract_id = &c.manifest().id;
     let version = &c.manifest().version;
-    let schema_hash = c.schema_hash()?;
+    let schema_hash = c.schema_hash();
     let topic = c
         .manifest()
         .topic
@@ -2752,7 +2757,7 @@ fn render_command_glue(c: &GovernedContract, sup: &str) -> Result<String> {
             );
         }
     }
-    if !is_safe_codegen_string(&schema_hash) {
+    if !is_safe_codegen_string(schema_hash) {
         bail!(
             "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
             c.manifest().kind.as_dir(),
@@ -2916,15 +2921,10 @@ fn validate_device_generation_epoch_v1_schema(c: &GovernedContract) -> Result<()
         .request
         .as_deref()
         .context("fenced command 契约缺 [schemas].request")?;
-    let path = c
-        .schema_path(schema_file)
+    let declared = c
+        .declared_schema(schema_file)
         .with_context(|| format!("fenced command request schema 未捕获: {schema_file}"))?;
-    let schema = c.resolved_schema(schema_file).with_context(|| {
-        format!(
-            "解析 resolved fenced command request schema {}",
-            path.display()
-        )
-    })?;
+    let schema = declared.resolved();
     if schema.get("type").and_then(serde_json::Value::as_str) != Some("object")
         || schema
             .get("additionalProperties")
@@ -2933,7 +2933,7 @@ fn validate_device_generation_epoch_v1_schema(c: &GovernedContract) -> Result<()
     {
         bail!(
             "fenced command request schema {} 必须是 additionalProperties=false 的 object",
-            path.display()
+            schema_file
         );
     }
     let required = schema
@@ -2986,7 +2986,7 @@ fn validate_device_generation_epoch_v1_schema(c: &GovernedContract) -> Result<()
         if !is_required || properties.get(field) != Some(&expected) {
             bail!(
                 "fenced command request schema {} 的 canonical 字段 {field} 类型/约束不准确",
-                path.display()
+                schema_file
             );
         }
     }
@@ -3018,21 +3018,14 @@ fn schema_root_type_name(
             c.manifest().version
         )
     })?;
-    let path = c
-        .schema_path(schema_file)
-        .with_context(|| format!("{label} 未捕获 schema 路径: {schema_file}"))?;
-    let value = c
-        .resolved_schema(schema_file)
-        .with_context(|| format!("解析 resolved {label} {}", path.display()))?;
+    let declared = c
+        .declared_schema(schema_file)
+        .with_context(|| format!("{label} 未捕获 promoted schema: {schema_file}"))?;
+    let value = declared.resolved();
     let title = value
         .get("title")
         .and_then(serde_json::Value::as_str)
-        .with_context(|| {
-            format!(
-                "{label} {} 缺 title（codegen 派生类型名所需）",
-                path.display()
-            )
-        })?;
+        .with_context(|| format!("{label} {schema_file} 缺 title（codegen 派生类型名所需）"))?;
     if title.starts_with("r#") || syn::parse_str::<syn::Ident>(title).is_err() {
         bail!("{label} title 非法 Rust 类型标识符（防注入生成代码）: {title:?}");
     }
@@ -3057,7 +3050,7 @@ fn render_event_glue(c: &GovernedContract, sup: &str) -> Result<String> {
     // domain 取自 manifest domain 字段（非 id 派生），schema_hash 取 declared schema canonical digest。
     let domain = &c.manifest().domain;
     let version = &c.manifest().version;
-    let schema_hash = c.schema_hash()?;
+    let schema_hash = c.schema_hash();
     // active event 必有 topic（R8）；draft 无 topic 则回退用 id，保持确定性（不出现 Option 条件代码分歧）。
     let topic = c
         .manifest()
@@ -3084,7 +3077,7 @@ fn render_event_glue(c: &GovernedContract, sup: &str) -> Result<String> {
             );
         }
     }
-    if !is_safe_codegen_string(&schema_hash) {
+    if !is_safe_codegen_string(schema_hash) {
         bail!(
             "契约 {}/{}/{} 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}",
             c.manifest().kind.as_dir(),
@@ -3586,7 +3579,7 @@ fn rewrite_utf8_byte_length_validation(
                 return;
             }
             let argument = self.argument;
-            node.left = Box::new(syn::parse_quote!(#argument.len()));
+            *node.left = syn::parse_quote!(#argument.len());
             self.comparisons += 1;
         }
 
@@ -4937,7 +4930,7 @@ fn projection_input_entries(
     {
         let projection_id = projection.manifest().id.as_str();
         let projection_definition_version = projection.manifest().version.as_str();
-        let projection_definition_schema_digest = projection.schema_hash()?;
+        let projection_definition_schema_digest = projection.schema_hash();
         for (field, value) in [
             ("projection_id", projection_id),
             (
@@ -4949,7 +4942,7 @@ fn projection_input_entries(
                 bail!("projection workflow {field} 含不安全字符（防注入生成字面量）: {value:?}");
             }
         }
-        if !is_safe_codegen_string(&projection_definition_schema_digest) {
+        if !is_safe_codegen_string(projection_definition_schema_digest) {
             bail!(
                 "projection definition schema digest 含不安全字符（防注入生成字面量）: {projection_definition_schema_digest:?}"
             );
@@ -4989,8 +4982,8 @@ fn projection_input_entries(
                     );
                 }
             }
-            let schema_hash = input.schema_hash()?;
-            if !is_safe_codegen_string(&schema_hash) {
+            let schema_hash = input.schema_hash();
+            if !is_safe_codegen_string(schema_hash) {
                 bail!(
                     "projection input binding 的 schema_hash 含不安全字符（防注入生成字面量）: {schema_hash:?}"
                 );
@@ -4998,21 +4991,21 @@ fn projection_input_entries(
             entries.push(ProjectionInputEntry {
                 projection_id: projection_id.to_owned(),
                 projection_definition_version: projection_definition_version.to_owned(),
-                projection_definition_schema_digest: projection_definition_schema_digest.clone(),
+                projection_definition_schema_digest: projection_definition_schema_digest.to_owned(),
                 domain: domain.to_owned(),
                 contract_id: contract_id.to_owned(),
                 version: version.to_owned(),
-                schema_hash: schema_hash.clone(),
+                schema_hash: schema_hash.to_owned(),
                 topic: topic.to_owned(),
             });
             generation_tuples.push([
                 projection_id.to_string(),
                 projection_definition_version.to_string(),
-                projection_definition_schema_digest.clone(),
+                projection_definition_schema_digest.to_owned(),
                 domain.to_string(),
                 contract_id.to_string(),
                 version.to_string(),
-                schema_hash,
+                schema_hash.to_owned(),
                 topic.to_string(),
             ]);
         }
@@ -5459,6 +5452,31 @@ mod tests {
             dir.join("response.schema.json"),
             schema.replace("\"T\"", "\"SeedEchoResponse\""),
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_schema_is_rejected_before_codegen_writes() -> anyhow::Result<()> {
+        let root = unique_tmp("codegen-malformed-schema");
+        seed_http(&root)?;
+        std::fs::write(
+            root.join("contracts/http/_seed/v1/request.schema.json"),
+            br#"{"title":"SeedEchoRequest""#,
+        )?;
+        let gen_src = root.join("generated/src");
+        std::fs::create_dir_all(&gen_src)?;
+        let sentinel = gen_src.join("sentinel.rs");
+        std::fs::write(&sentinel, "preserve\n")?;
+
+        let error = generate(&root.join("contracts"), &gen_src, false)
+            .expect_err("malformed schema must block typed governance promotion");
+        assert!(
+            error.to_string().contains("invalid schema source"),
+            "{error:#}"
+        );
+        assert_eq!(std::fs::read_to_string(&sentinel)?, "preserve\n");
+        assert_eq!(std::fs::read_dir(&gen_src)?.count(), 1);
+        std::fs::remove_dir_all(root)?;
         Ok(())
     }
 

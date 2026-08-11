@@ -1,8 +1,8 @@
 //! Contract repository source-funnel structural guard.
 //!
 //! The governance IR is the sole production owner of repository loading. This guard parses Rust
-//! source instead of matching text so test-only fixtures remain free to construct raw repository
-//! inputs while production code cannot grow a second loader or retain the deprecated wrapper.
+//! source instead of matching text. Test fixtures write repository sources and enter through the
+//! same inspection/promotion funnel; production code cannot grow a second repository loader.
 
 use anyhow::{Context, Result, bail};
 use std::collections::{BTreeMap, BTreeSet};
@@ -247,7 +247,7 @@ impl SourceAliases {
             if names.ends_with(&[
                 "assembly_schema",
                 "repository_contract",
-                "load_contract_repository",
+                "inspect_contract_repository",
             ]) {
                 self.repository_loaders.insert(alias.clone());
             } else if names.ends_with(&[
@@ -333,7 +333,7 @@ impl SourceVisitor<'_> {
         if identifiers.iter().any(|identifier| {
             matches!(
                 identifier.as_str(),
-                "load_contract_repository" | "RepositoryContractTestBuilder"
+                "inspect_contract_repository" | "RepositoryContractTestBuilder"
             ) || self.aliases.repository_loaders.contains(identifier)
                 || self.aliases.repository_test_builders.contains(identifier)
                 || self.aliases.contract_discoverers.contains(identifier)
@@ -423,9 +423,9 @@ fn is_repository_loader(segments: &[String], aliases: &SourceAliases) -> bool {
     let names = segments.iter().map(String::as_str).collect::<Vec<_>>();
     names
         .last()
-        .is_some_and(|name| name == &"load_contract_repository")
+        .is_some_and(|name| name == &"inspect_contract_repository")
         || matches!(names.as_slice(), [alias] if aliases.repository_loaders.contains(*alias))
-        || matches!(names.as_slice(), [module, "load_contract_repository"] if aliases.repository_modules.contains(*module))
+        || matches!(names.as_slice(), [module, "inspect_contract_repository"] if aliases.repository_modules.contains(*module))
 }
 
 fn is_contract_discover(segments: &[String], aliases: &SourceAliases) -> bool {
@@ -537,13 +537,13 @@ mod tests {
         let violations = source_violations(
             r#"
                 use assembly_schema::repository_contract::{
-                    load_contract_repository as raw_load,
+                    inspect_contract_repository as raw_load,
                     RepositoryContractTestBuilder as FixtureBuilder,
                 };
                 use crate::contract as contracts;
 
                 fn direct(root: &std::path::Path) {
-                    let _ = assembly_schema::repository_contract::load_contract_repository(root);
+                    let _ = assembly_schema::repository_contract::inspect_contract_repository(root);
                     let _ = raw_load(root);
                     let _ = crate::contract::discover(root);
                     let _ = contracts::discover(root);
@@ -553,7 +553,7 @@ mod tests {
                 #[cfg(test)]
                 mod fixtures {
                     fn allowed(root: &std::path::Path) {
-                        let _ = assembly_schema::repository_contract::load_contract_repository(root);
+                        let _ = assembly_schema::repository_contract::inspect_contract_repository(root);
                         let _ = crate::contract::discover(root);
                         let _ = assembly_schema::repository_contract::RepositoryContractTestBuilder::new(manifest, root.to_owned());
                     }
@@ -599,15 +599,15 @@ mod tests {
             r#"
                 use assembly_schema as schema;
                 use schema::repository_contract as repo;
-                use repo::load_contract_repository as raw;
+                use repo::inspect_contract_repository as raw;
 
                 fn transitive(root: &std::path::Path) { let _ = raw(root); }
 
                 macro_rules! hidden {
-                    ($root:expr) => { assembly_schema::repository_contract::load_contract_repository($root) };
+                    ($root:expr) => { assembly_schema::repository_contract::inspect_contract_repository($root) };
                 }
                 fn macro_call(root: &std::path::Path) {
-                    let _ = passthrough!(assembly_schema::repository_contract::load_contract_repository(root));
+                    let _ = passthrough!(assembly_schema::repository_contract::inspect_contract_repository(root));
                 }
             "#,
             false,
@@ -642,12 +642,12 @@ mod tests {
                 impl Loader {
                     #[cfg(all(test, unix))]
                     fn fixture() {
-                        let _ = load_contract_repository("fixture");
+                        let _ = inspect_contract_repository("fixture");
                     }
 
                     #[cfg(any(test, unix))]
                     fn may_compile_in_production() {
-                        let _ = load_contract_repository("production");
+                        let _ = inspect_contract_repository("production");
                     }
                 }
 

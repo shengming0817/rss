@@ -9,7 +9,7 @@ use crate::contract_manifest::{
 };
 use crate::repository_contract::{
     RepositoryContract, RepositoryContractSourceFile, capture_contract_repository_sources,
-    load_contract_repository, load_contract_repository_snapshot, schema_hash,
+    inspect_contract_repository, inspect_contract_repository_snapshot,
     validate_workflow_activations, verify_contract_repository_unchanged,
 };
 use crate::{
@@ -211,7 +211,8 @@ impl RepositoryAssemblySnapshotV2 {
         let current = manifest.rediscover_unchanged()?;
         let lock_path = current.assembly_dir.join("assembly.lock.json");
         verify_snapshot_file_unchanged(&lock_path, lock_bytes, "AssemblyLock")?;
-        let contracts = load_contract_repository(&current.repository_root.join("contracts"))
+        let contracts = inspect_contract_repository(&current.repository_root.join("contracts"))
+            .and_then(|inspection| inspection.promote())
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
         validate_workflow_activations(current.canonical(), &contracts)
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
@@ -368,7 +369,8 @@ impl RepositoryAssemblySnapshotV2 {
                 content: file.content.clone(),
             });
         }
-        let contracts = load_contract_repository_snapshot(&contract_sources)
+        let contracts = inspect_contract_repository_snapshot(&contract_sources)
+            .and_then(|inspection| inspection.promote())
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
         validate_workflow_activations(&canonical, &contracts)
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
@@ -445,7 +447,8 @@ impl RepositoryVerifiedAssemblyLock {
     pub fn compile_v2(manifest: &RepositoryAssemblyManifestV2) -> Result<Self, AssemblyLockError> {
         let current = manifest.rediscover_unchanged()?;
         let repository_root = &current.repository_root;
-        let contracts = load_contract_repository(&repository_root.join("contracts"))
+        let contracts = inspect_contract_repository(&repository_root.join("contracts"))
+            .and_then(|inspection| inspection.promote())
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
         validate_workflow_activations(current.canonical(), &contracts)
             .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
@@ -1156,11 +1159,8 @@ impl RepositoryContractCatalogV2 {
                 domain: manifest.domain.clone(),
                 id: manifest.id.clone(),
                 version: manifest.version.clone(),
-                schema_hash: CanonicalSha256Digest::parse(
-                    schema_hash(contract)
-                        .map_err(|error| AssemblyLockError::contract(error.to_string()))?,
-                )
-                .map_err(|_| AssemblyLockError::contract("contract schema hash is invalid"))?,
+                schema_hash: CanonicalSha256Digest::parse(contract.schema_hash())
+                    .map_err(|_| AssemblyLockError::contract("contract schema hash is invalid"))?,
                 semantics_hash: runtime_semantics_hash_v2(manifest)?,
             });
         }
@@ -1510,7 +1510,7 @@ mod tests {
         let vector = vectors();
         let manifest = canonical(vector_string(&vector["manifest"]["toml"]), "");
         same_vector(
-            &canonical_hex(&manifest.value),
+            canonical_hex(&manifest.value),
             &vector["manifest"]["canonicalHex"],
         );
         same_vector(manifest.manifest_digest(), &vector["manifest"]["digest"]);
@@ -1526,7 +1526,7 @@ mod tests {
         let generated = root.join("assemblies/runtime/src/generated");
         let entries = discover_generated_files_v2(&root, &generated).expect("entries");
         same_vector(
-            &canonical_hex(&entries),
+            canonical_hex(&entries),
             &vector["generated"]["canonicalHex"],
         );
         let generated_digest = generated_digest_v2(&root, &generated).expect("digest");
@@ -1534,7 +1534,7 @@ mod tests {
         let catalog = make_catalog(fixture_bindings(&vector["contracts"]["bindings"]));
         let selected = select_contracts(&manifest, &catalog).expect("selected");
         same_vector(
-            &canonical_hex(&selected),
+            canonical_hex(&selected),
             &vector["contracts"]["canonicalHex"],
         );
         let contract_digest = contracts_digest_v2(&manifest, &catalog).expect("digest");
@@ -1573,9 +1573,9 @@ mod tests {
             identity: &identity,
             digests: &digests,
         };
-        same_vector(&canonical_hex(&preimage), &vector["canonicalHex"]);
+        same_vector(canonical_hex(&preimage), &vector["canonicalHex"]);
         same_vector(
-            &fingerprint_for(&identity, &digests).expect("fingerprint"),
+            fingerprint_for(&identity, &digests).expect("fingerprint"),
             &vector["expected"],
         );
     }
@@ -2013,9 +2013,10 @@ payload = "payload.schema.json"
             )
             .expect("manifest");
         }
-        let before_contracts =
-            load_contract_repository(&root.join("contracts")).expect("discovery");
-        let before_schema_hash = schema_hash(&before_contracts[0]).expect("schema hash");
+        let before_contracts = inspect_contract_repository(&root.join("contracts"))
+            .and_then(|inspection| inspection.promote())
+            .expect("discovery");
+        let before_schema_hash = before_contracts[0].schema_hash().to_owned();
         assert_eq!(
             before_schema_hash,
             "sha256:1498b4f26f706d5bc45ff82b54c338d8a6ab3eba300acd906d420b48fbcaae61"
@@ -2063,9 +2064,10 @@ payload = "payload.schema.json"
             .expect("read identity manifest")
             .replace("lifecycle = \"active\"", "lifecycle = \"deprecated\"");
         fs::write(&identity_manifest, changed_source).expect("change runtime semantics");
-        let after_contracts =
-            load_contract_repository(&root.join("contracts")).expect("rediscovery");
-        let after_schema_hash = schema_hash(&after_contracts[0]).expect("schema hash");
+        let after_contracts = inspect_contract_repository(&root.join("contracts"))
+            .and_then(|inspection| inspection.promote())
+            .expect("rediscovery");
+        let after_schema_hash = after_contracts[0].schema_hash();
         assert_eq!(before_schema_hash, after_schema_hash);
 
         let changed =
@@ -2092,6 +2094,19 @@ payload = "payload.schema.json"
             &root,
             &mismatched,
         ));
+
+        fs::write(
+            root.join("contracts/event/identity/v1/payload.schema.json"),
+            br#"{"title":"IdentityEvent""#,
+        )
+        .expect("malformed schema fixture");
+        assert_eq!(
+            RepositoryVerifiedAssemblyLock::compile_v2(&source)
+                .err()
+                .expect("malformed contract schema must not mint AssemblyLock")
+                .stage(),
+            AssemblyLockErrorStage::ContractCatalog
+        );
 
         let synthetic = root.join("synthetic/runtime");
         fs::create_dir_all(&synthetic).expect("synthetic assembly directory");

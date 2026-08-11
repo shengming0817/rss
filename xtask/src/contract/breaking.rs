@@ -1800,14 +1800,10 @@ fn read_ref(root: &Path, git_ref: &str) -> GitRead<()> {
 
 /// Parse a schema from the immutable source snapshot captured by governance discovery.
 fn read_working_schema(contract: &super::GovernedContract, file: &str) -> Result<Value> {
-    let path = contract
-        .schema_path(file)
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| contract.dir().join(file));
-    contract
-        .resolved_schema(file)
-        .map(assembly_schema::repository_contract::ResolvedSchema::into_value)
-        .with_context(|| format!("解析 resolved schema {}", path.display()))
+    let schema = contract
+        .declared_schema(file)
+        .with_context(|| format!("缺少 promoted schema {file}"))?;
+    Ok(schema.resolved().value().clone())
 }
 
 /// manifest 的 logical schema slot → 文件名映射（DRY，base/working 两侧同源构造 [`ContractSide`]）。
@@ -2537,7 +2533,7 @@ fn working_sides(discovered: &[super::GovernedContract]) -> Result<Vec<ContractS
             label,
             lifecycle: c.manifest().lifecycle,
             kind: c.manifest().kind,
-            schema_hash: Some(c.schema_hash()?),
+            schema_hash: Some(c.schema_hash().to_owned()),
             slots,
             manifest: manifest_projection(c.manifest()).with_context(|| {
                 format!("project working contract {}", c.manifest_path().display())

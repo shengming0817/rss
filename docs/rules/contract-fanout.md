@@ -45,10 +45,19 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 - **MUST**：typed catalog 独占 validation/breaking 的 identity、handler、owner、source 与文档；production
   consumer 只在 `ContractGovernanceIr::read` / `commit` 内消费 `GovernedContract`，codegen 先规划全量输出再
   原子提交，测试专项输入只走显式 `load_test_fixture_root`。
+- **Schema source funnel**：repository discovery 先按规范化物理路径捕获并 parse-once schema/component，
+  只有 source 全部存在、安全、JSON 良构且引用可解析时才能 consuming promotion 为 `RepositoryContract`；
+  validation、breaking、schema hash、AssemblyLock 与 codegen 只接收 promoted contract。malformed source
+  由 R5 按物理路径产生一次 canonical finding，不新增平行 parser、registry 或独立规则。promoted
+  working-schema consumer 复用 captured `Value` / `ResolvedSchema` 与预计算 hash；HIR backstop 在既有
+  Dylint gate 中拒绝其 crate-local 调用闭包重新进入 JSON parser。该 Medium backstop 不承诺 filesystem
+  capability isolation，也不阻止刻意硬编码外部解析。
 - **失败语义**：完整仓为空、catalog/handler 漂移、manifest/schema/文件集合在快照期间变化均 fail-closed；
   写入或最终 closeout 失败须逆序恢复全批输出。仅 breaking working side 可显式为空，用于检测删除全部契约。
 - **INVARIANT 指针**：`CONTRACT-GOVERNANCE-IR-01` 与
-  `CONTRACT-GOVERNANCE-SOURCE-FUNNEL-01`（`xtask/src/contract/governance.rs`）。
+  `CONTRACT-GOVERNANCE-SOURCE-FUNNEL-01`（`xtask/src/contract/governance.rs`），以及
+  `CONTRACT-SCHEMA-PARSE-01`（`xtask/src/contract/validate.rs`）与
+  `CONTRACT-SCHEMA-PARSER-HIR-01`（`lints/rss_contract_schema_parse_funnel/src/lib.rs`）。
 
 ## DI provider 扇出（assembly.toml）
 

@@ -223,6 +223,30 @@ impl std::ops::Deref for ResolvedSchema {
     }
 }
 
+/// One declared schema promoted from a captured raw document and its resolved semantic view.
+#[derive(Debug, Clone, Copy)]
+pub struct DeclaredSchema<'a> {
+    file: &'a str,
+    raw: &'a Value,
+    resolved: &'a ResolvedSchema,
+}
+
+impl<'a> DeclaredSchema<'a> {
+    pub const fn file(self) -> &'a str {
+        self.file
+    }
+
+    pub const fn resolved(self) -> &'a ResolvedSchema {
+        self.resolved
+    }
+
+    pub fn property_references(self, property: &str) -> Vec<Option<String>> {
+        let mut references = Vec::new();
+        collect_property_references(self.raw, property, &mut references);
+        references
+    }
+}
+
 fn promote_contract_owner(
     raw: &RawContractOwner,
 ) -> Result<ContractOwner, RepositoryContractError> {
@@ -271,45 +295,169 @@ struct SourceFileSnapshot {
     identity: SourceFileIdentity,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaSourceIssueKind {
+    Missing,
+    UnsafeName,
+    Malformed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaJsonErrorCategory {
+    Io,
+    Syntax,
+    Data,
+    Eof,
+}
+
+impl SchemaJsonErrorCategory {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Io => "io",
+            Self::Syntax => "syntax",
+            Self::Data => "data",
+            Self::Eof => "eof",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaSourceIssue {
+    kind: SchemaSourceIssueKind,
+    file: String,
+    path: PathBuf,
+    line: usize,
+    column: usize,
+    category: Option<SchemaJsonErrorCategory>,
+    message: String,
+}
+
+impl SchemaSourceIssue {
+    pub const fn kind(&self) -> SchemaSourceIssueKind {
+        self.kind
+    }
+
+    pub fn file(&self) -> &str {
+        &self.file
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub const fn line(&self) -> usize {
+        self.line
+    }
+
+    pub const fn column(&self) -> usize {
+        self.column
+    }
+
+    pub const fn category(&self) -> Option<SchemaJsonErrorCategory> {
+        self.category
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedSourceFileSnapshot {
+    source: SourceFileSnapshot,
+    outcome: SchemaParseOutcome,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SchemaParseOutcome {
+    Parsed(Arc<Value>),
+    Malformed(SchemaSourceIssue),
+}
+
+impl ParsedSourceFileSnapshot {
+    fn value(&self) -> Option<&Arc<Value>> {
+        match &self.outcome {
+            SchemaParseOutcome::Parsed(value) => Some(value),
+            SchemaParseOutcome::Malformed(_) => None,
+        }
+    }
+
+    fn issue(&self) -> Option<&SchemaSourceIssue> {
+        match &self.outcome {
+            SchemaParseOutcome::Parsed(_) => None,
+            SchemaParseOutcome::Malformed(issue) => Some(issue),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum SchemaSourceSnapshot {
-    Present(SourceFileSnapshot),
+    Present(ParsedSourceFileSnapshot),
     Missing { path: PathBuf },
     UnsafeName,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ComponentSourceSnapshot {
+    Present(ParsedSourceFileSnapshot),
+    Missing { path: PathBuf },
+}
+
+impl ComponentSourceSnapshot {
+    fn parsed(&self) -> Option<&ParsedSourceFileSnapshot> {
+        match self {
+            Self::Present(source) => Some(source),
+            Self::Missing { .. } => None,
+        }
+    }
+}
+
 impl SchemaSourceSnapshot {
-    fn path(&self) -> Option<&Path> {
-        match self {
-            Self::Present(source) => Some(&source.path),
-            Self::Missing { path } => Some(path),
-            Self::UnsafeName => None,
-        }
-    }
-
-    fn bytes(&self) -> Option<&[u8]> {
-        match self {
-            Self::Present(source) => Some(&source.bytes),
-            Self::Missing { .. } | Self::UnsafeName => None,
-        }
-    }
-
     fn digest(&self) -> Option<&str> {
         match self {
-            Self::Present(source) => Some(&source.digest),
+            Self::Present(source) => Some(&source.source.digest),
             Self::Missing { .. } | Self::UnsafeName => None,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct ContractSourceSnapshot {
     contracts_root: PathBuf,
     manifest: SourceFileSnapshot,
     schemas: BTreeMap<String, SchemaSourceSnapshot>,
-    components: BTreeMap<String, SourceFileSnapshot>,
+    components: BTreeMap<String, ComponentSourceSnapshot>,
+    resolved_schemas: BTreeMap<String, ResolvedSchema>,
+    schema_hash: String,
     digest: String,
     repository_backed: bool,
+    #[cfg(feature = "test-support")]
+    fixture_owner: Option<Arc<FixtureRepositoryOwner>>,
+}
+
+#[cfg(feature = "test-support")]
+#[derive(Debug, PartialEq, Eq)]
+struct FixtureRepositoryOwner {
+    root: PathBuf,
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for FixtureRepositoryOwner {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+#[derive(Debug)]
+struct InspectedRepositoryContract {
+    dir: PathBuf,
+    path_kind: String,
+    path_domain: String,
+    path_version: String,
+    slug: Option<String>,
+    owner: ContractOwner,
+    manifest: ContractManifest,
+    source: Arc<ContractSourceSnapshot>,
 }
 
 /// A typed, immutable contract promoted from one real repository `contract.toml`.
@@ -372,27 +520,6 @@ impl RepositoryContract {
         &self.source.manifest.digest
     }
 
-    /// Safe repository-local path for a declared schema, including a currently missing schema.
-    pub fn schema_path(&self, file: &str) -> Option<&Path> {
-        self.source
-            .schemas
-            .get(file)
-            .and_then(SchemaSourceSnapshot::path)
-    }
-
-    /// Exact captured schema bytes, or `None` when the declared schema was missing or unsafe.
-    fn schema_bytes(&self, file: &str) -> Option<&[u8]> {
-        self.source
-            .schemas
-            .get(file)
-            .and_then(SchemaSourceSnapshot::bytes)
-    }
-
-    /// Whether a declared schema was captured as one safe regular file.
-    pub fn has_schema_source(&self, file: &str) -> bool {
-        self.schema_bytes(file).is_some()
-    }
-
     /// SHA-256 of exact captured schema bytes, if the declared schema existed.
     pub fn schema_source_digest(&self, file: &str) -> Option<&str> {
         self.source
@@ -401,68 +528,44 @@ impl RepositoryContract {
             .and_then(SchemaSourceSnapshot::digest)
     }
 
-    /// Self-contained schema used by validation, hashing, breaking checks and code generation.
-    /// Local RSS component references are rewritten to root definitions from the immutable source
-    /// snapshot; no filesystem or network access occurs here.
-    pub fn resolved_schema(&self, file: &str) -> Result<ResolvedSchema, RepositoryContractError> {
-        let path = self
-            .schema_path(file)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.dir.join(file));
-        let bytes = self.schema_bytes(file).ok_or_else(|| {
-            RepositoryContractError::io(
-                format!("failed to read schema {}", path.display()),
-                std::io::Error::new(std::io::ErrorKind::NotFound, "declared schema is missing"),
-            )
-        })?;
-        let schema = serde_json::from_slice(bytes).map_err(|source| {
-            RepositoryContractError::SchemaJson {
-                path: path.clone(),
-                source,
-            }
-        })?;
-        resolve_component_references(schema, |id| {
-            let source = self.source.components.get(id).ok_or_else(|| {
-                RepositoryContractError::Invalid(format!(
-                    "schema {} references uncaptured component {id:?}",
-                    path.display()
-                ))
-            })?;
-            serde_json::from_slice(&source.bytes).map_err(|source_error| {
-                RepositoryContractError::SchemaJson {
-                    path: source.path.clone(),
-                    source: source_error,
-                }
-            })
+    /// Self-contained schema promoted from the immutable parse-once source snapshot.
+    pub fn schema(&self, file: &str) -> Option<&ResolvedSchema> {
+        self.source.resolved_schemas.get(file)
+    }
+
+    /// Exact declared schema set. Every item has both captured raw semantics and a resolved view.
+    pub fn declared_schemas(&self) -> impl Iterator<Item = DeclaredSchema<'_>> {
+        self.source
+            .schemas
+            .iter()
+            .filter_map(|(file, source)| self.declared_schema_parts(file.as_str(), source))
+    }
+
+    /// Typed lookup into the promoted declared schema set.
+    pub fn declared_schema(&self, file: &str) -> Option<DeclaredSchema<'_>> {
+        let (file, source) = self.source.schemas.get_key_value(file)?;
+        self.declared_schema_parts(file.as_str(), source)
+    }
+
+    fn declared_schema_parts<'a>(
+        &'a self,
+        file: &'a str,
+        source: &'a SchemaSourceSnapshot,
+    ) -> Option<DeclaredSchema<'a>> {
+        let SchemaSourceSnapshot::Present(source) = source else {
+            return None;
+        };
+        let raw = source.value().map(Arc::as_ref)?;
+        let resolved = self.source.resolved_schemas.get(file)?;
+        Some(DeclaredSchema {
+            file,
+            raw,
+            resolved,
         })
     }
 
-    /// Direct `$ref` values used by every schema property with the requested name. `None` means
-    /// the property was inlined or otherwise failed to declare a direct reference.
-    pub fn schema_property_references(
-        &self,
-        file: &str,
-        property: &str,
-    ) -> Result<Vec<Option<String>>, RepositoryContractError> {
-        let path = self
-            .schema_path(file)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| self.dir.join(file));
-        let bytes = self.schema_bytes(file).ok_or_else(|| {
-            RepositoryContractError::io(
-                format!("failed to read schema {}", path.display()),
-                std::io::Error::new(std::io::ErrorKind::NotFound, "declared schema is missing"),
-            )
-        })?;
-        let value: Value = serde_json::from_slice(bytes).map_err(|source| {
-            RepositoryContractError::SchemaJson {
-                path: path.clone(),
-                source,
-            }
-        })?;
-        let mut references = Vec::new();
-        collect_property_references(&value, property, &mut references);
-        Ok(references)
+    pub fn schema_hash(&self) -> &str {
+        &self.source.schema_hash
     }
 
     /// Digest of the complete captured manifest/schema source state. This is provenance evidence,
@@ -478,25 +581,7 @@ impl RepositoryContract {
                 "synthetic test contract snapshots have no repository provenance".to_owned(),
             ));
         }
-        let current =
-            load_contract(&self.source.contracts_root, self.manifest_path()).map_err(|error| {
-                RepositoryContractError::stale(self.manifest_path(), error.to_string())
-            })?;
-        if current.dir != self.dir
-            || current.path_kind != self.path_kind
-            || current.path_domain != self.path_domain
-            || current.path_version != self.path_version
-            || current.slug != self.slug
-            || current.owner != self.owner
-            || current.manifest != self.manifest
-            || current.source.as_ref() != self.source.as_ref()
-        {
-            return Err(RepositoryContractError::stale(
-                self.manifest_path(),
-                "captured path, identity, or bytes differ",
-            ));
-        }
-        Ok(())
+        verify_source_snapshot(&self.source)
     }
 }
 
@@ -530,10 +615,7 @@ fn collect_property_references(
     }
 }
 
-/// Explicit, feature-gated construction seam for synthetic xtask tests.
-///
-/// This builder is absent from default/production builds. Its output deliberately has no real
-/// repository provenance, so [`RepositoryContract::verify_unchanged`] always rejects it.
+/// Feature-gated fixture writer that still enters through canonical inspection and promotion.
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub struct RepositoryContractTestBuilder {
@@ -543,7 +625,13 @@ pub struct RepositoryContractTestBuilder {
     path_domain: String,
     path_version: String,
     slug: Option<String>,
+    schemas: BTreeMap<String, Value>,
+    components: BTreeMap<String, Value>,
 }
+
+#[cfg(feature = "test-support")]
+static TEST_REPOSITORY_SEQUENCE: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(feature = "test-support")]
 impl RepositoryContractTestBuilder {
@@ -555,6 +643,8 @@ impl RepositoryContractTestBuilder {
             manifest,
             dir,
             slug: None,
+            schemas: BTreeMap::new(),
+            components: BTreeMap::new(),
         }
     }
 
@@ -578,37 +668,129 @@ impl RepositoryContractTestBuilder {
         self
     }
 
+    pub fn schema(mut self, file: impl Into<String>, value: Value) -> Self {
+        self.schemas.insert(file.into(), value);
+        self
+    }
+
+    pub fn component(mut self, id: impl Into<String>, value: Value) -> Self {
+        self.components.insert(id.into(), value);
+        self
+    }
+
     pub fn build(self) -> Result<RepositoryContract, RepositoryContractError> {
-        let owner = promote_contract_owner(&self.manifest.owner)?;
-        // Synthetic test snapshots do not claim repository/TOML provenance. Debug bytes keep
-        // their digest deterministic without imposing a TOML round-trip requirement on map-key
-        // newtypes such as `HttpStatusCode`.
-        let manifest_bytes = format!("{:#?}", self.manifest);
-        let manifest_source = synthetic_source_file(
-            self.dir.join("contract.toml"),
-            Arc::from(manifest_bytes.into_bytes()),
-        );
-        let schemas = capture_synthetic_schema_sources(&self.dir, &self.manifest)?;
-        let components = BTreeMap::new();
-        let digest = source_snapshot_digest(&manifest_source, &schemas, &components);
-        let source = Arc::new(ContractSourceSnapshot {
-            contracts_root: self.dir.clone(),
-            manifest: manifest_source,
-            schemas,
-            components,
-            digest,
-            repository_backed: false,
+        use std::sync::atomic::Ordering;
+
+        let contracts_root = std::env::temp_dir().join(format!(
+            "rss-contract-fixture-{}-{}",
+            std::process::id(),
+            TEST_REPOSITORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ));
+        let fixture_owner = Arc::new(FixtureRepositoryOwner {
+            root: contracts_root.clone(),
         });
-        Ok(RepositoryContract {
-            dir: self.dir,
-            path_kind: self.path_kind,
-            path_domain: self.path_domain,
-            path_version: self.path_version,
-            slug: self.slug,
-            owner,
-            manifest: self.manifest,
-            source,
-        })
+        let mut contract_dir = contracts_root
+            .join(&self.path_kind)
+            .join(&self.path_domain)
+            .join(&self.path_version);
+        if let Some(slug) = &self.slug {
+            contract_dir.push(slug);
+        }
+        std::fs::create_dir_all(&contract_dir).map_err(|source| {
+            RepositoryContractError::io(
+                format!("failed to create fixture {}", contract_dir.display()),
+                source,
+            )
+        })?;
+        let mut manifest_for_toml = self.manifest.clone();
+        let responses = std::mem::take(&mut manifest_for_toml.schemas.responses);
+        let mut manifest_source = toml::to_string(&manifest_for_toml).map_err(|source| {
+            RepositoryContractError::Invalid(format!("serialize fixture contract.toml: {source}"))
+        })?;
+        if !responses.is_empty() {
+            let mut response_entries = String::new();
+            for (status, file) in responses {
+                response_entries.push_str(&format!("\"{}\" = {file:?}\n", status.get()));
+            }
+            manifest_source = manifest_source.replacen(
+                "[schemas.responses]\n",
+                &format!("[schemas.responses]\n{response_entries}"),
+                1,
+            );
+        }
+        std::fs::write(contract_dir.join("contract.toml"), manifest_source).map_err(|source| {
+            RepositoryContractError::io("failed to write fixture contract.toml", source)
+        })?;
+        for file in self.manifest.declared_schema_files() {
+            if validate_schema_filename(file).is_err() {
+                continue;
+            }
+            let target = contract_dir.join(file);
+            if let Some(value) = self.schemas.get(file) {
+                let bytes = serde_json::to_vec(value).map_err(|source| {
+                    RepositoryContractError::Invalid(format!(
+                        "serialize fixture schema {file}: {source}"
+                    ))
+                })?;
+                std::fs::write(&target, bytes).map_err(|source| {
+                    RepositoryContractError::io(
+                        format!("failed to write fixture schema {}", target.display()),
+                        source,
+                    )
+                })?;
+            } else {
+                let source_path = self.dir.join(file);
+                if source_path.is_file() {
+                    std::fs::copy(&source_path, &target).map_err(|source| {
+                        RepositoryContractError::io(
+                            format!("failed to copy fixture schema {}", source_path.display()),
+                            source,
+                        )
+                    })?;
+                }
+            }
+        }
+        for (id, value) in self.components {
+            let path = contracts_root.join(component_relative_path(&id)?);
+            let parent = path.parent().ok_or_else(|| {
+                RepositoryContractError::Invalid(format!(
+                    "fixture component has no parent: {}",
+                    path.display()
+                ))
+            })?;
+            std::fs::create_dir_all(parent).map_err(|source| {
+                RepositoryContractError::io(
+                    format!(
+                        "failed to create fixture component parent {}",
+                        parent.display()
+                    ),
+                    source,
+                )
+            })?;
+            let bytes = serde_json::to_vec(&value).map_err(|source| {
+                RepositoryContractError::Invalid(format!(
+                    "serialize fixture component {id}: {source}"
+                ))
+            })?;
+            std::fs::write(&path, bytes).map_err(|source| {
+                RepositoryContractError::io(
+                    format!("failed to write fixture component {}", path.display()),
+                    source,
+                )
+            })?;
+        }
+        let mut contracts = inspect_contract_repository(&contracts_root)?.promote()?;
+        if contracts.len() != 1 {
+            return Err(RepositoryContractError::Invalid(format!(
+                "fixture promotion expected one contract, got {}",
+                contracts.len()
+            )));
+        }
+        let Some(mut contract) = contracts.pop() else {
+            unreachable!("fixture length checked above")
+        };
+        Arc::make_mut(&mut contract.source).fixture_owner = Some(fixture_owner);
+        Ok(contract)
     }
 }
 
@@ -655,19 +837,232 @@ impl RepositoryContractError {
     }
 }
 
-/// Recursively discover every real `contract.toml`, typed-parse it, and path-sort the result.
-pub fn load_contract_repository(
+/// Immutable repository discovery result. Invalid schema sources remain inspectable but cannot be
+/// promoted into the typed contract repository consumed by validation, codegen or AssemblyLock.
+pub struct ContractRepositoryInspection {
+    contracts_root: PathBuf,
+    contracts: Vec<InspectedRepositoryContract>,
+    issues: Vec<SchemaSourceIssue>,
+    snapshot_component_files: Option<BTreeSet<PathBuf>>,
+    #[cfg(test)]
+    parser_calls: BTreeMap<PathBuf, usize>,
+}
+
+#[derive(Default)]
+struct SchemaSourceParser {
+    cache: BTreeMap<PathBuf, ParsedSourceFileSnapshot>,
+    #[cfg(test)]
+    calls: BTreeMap<PathBuf, usize>,
+}
+
+impl SchemaSourceParser {
+    fn parse(
+        &mut self,
+        contracts_root: &Path,
+        path: &Path,
+        file: &str,
+    ) -> Result<ParsedSourceFileSnapshot, RepositoryContractError> {
+        if let Some(source) = self.cache.get(path) {
+            return Ok(source.clone());
+        }
+        let captured = read_source_file(contracts_root, path)?;
+        self.parse_captured(contracts_root, path, file, captured)
+    }
+
+    fn parse_captured(
+        &mut self,
+        contracts_root: &Path,
+        path: &Path,
+        file: &str,
+        captured: SourceFileSnapshot,
+    ) -> Result<ParsedSourceFileSnapshot, RepositoryContractError> {
+        if let Some(source) = self.cache.get(path) {
+            return Ok(source.clone());
+        }
+        let source = parse_source_file(
+            file,
+            repository_relative_path(contracts_root, path)?,
+            captured,
+        );
+        #[cfg(test)]
+        {
+            *self.calls.entry(path.to_path_buf()).or_default() += 1;
+        }
+        self.cache.insert(path.to_path_buf(), source.clone());
+        Ok(source)
+    }
+}
+
+impl ContractRepositoryInspection {
+    pub fn len(&self) -> usize {
+        self.contracts.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.contracts.is_empty()
+    }
+
+    pub fn issues(&self) -> &[SchemaSourceIssue] {
+        &self.issues
+    }
+
+    pub fn promote(self) -> Result<Vec<RepositoryContract>, RepositoryContractError> {
+        if !self.issues.is_empty() {
+            let details = self
+                .issues
+                .iter()
+                .map(render_schema_source_issue)
+                .collect::<Vec<_>>()
+                .join("\n- ");
+            return Err(RepositoryContractError::Invalid(format!(
+                "contract repository contains {} invalid schema source(s):\n- {details}",
+                self.issues.len(),
+            )));
+        }
+        let contracts = self
+            .contracts
+            .into_iter()
+            .map(promote_inspected_contract)
+            .collect::<Result<Vec<_>, _>>()?;
+        match self.snapshot_component_files {
+            Some(actual) => verify_component_universe_exact(&actual, contracts.iter())?,
+            None => verify_component_universe(&self.contracts_root, contracts.iter())?,
+        }
+        Ok(contracts)
+    }
+}
+
+fn render_schema_source_issue(issue: &SchemaSourceIssue) -> String {
+    let category = issue
+        .category
+        .map_or("none", SchemaJsonErrorCategory::as_str);
+    format!(
+        "{} file={} kind={:?} category={category} line={} column={}: {}",
+        issue.path.display(),
+        issue.file,
+        issue.kind,
+        issue.line,
+        issue.column,
+        issue.message
+    )
+}
+
+/// Recursively discover every real `contract.toml` and parse each physical JSON source once.
+pub fn inspect_contract_repository(
     contracts_root: &Path,
-) -> Result<Vec<RepositoryContract>, RepositoryContractError> {
+) -> Result<ContractRepositoryInspection, RepositoryContractError> {
     let mut toml_paths = Vec::new();
     collect_contract_tomls(contracts_root, &mut toml_paths)?;
     toml_paths.sort();
+    let mut parser = SchemaSourceParser::default();
     let contracts = toml_paths
         .into_iter()
-        .map(|path| load_contract(contracts_root, &path))
+        .map(|path| load_contract(contracts_root, &path, &mut parser))
         .collect::<Result<Vec<_>, _>>()?;
-    verify_component_universe(contracts_root, contracts.iter())?;
-    Ok(contracts)
+    let mut issues = Vec::new();
+    for contract in &contracts {
+        issues.extend(contract_source_issues(contract)?);
+    }
+    issues.sort_by(|left, right| left.path.cmp(&right.path));
+    issues.dedup_by(|left, right| left.path == right.path && left.file == right.file);
+    Ok(ContractRepositoryInspection {
+        contracts_root: contracts_root.to_path_buf(),
+        contracts,
+        issues,
+        snapshot_component_files: None,
+        #[cfg(test)]
+        parser_calls: parser.calls,
+    })
+}
+
+fn contract_source_issues(
+    contract: &InspectedRepositoryContract,
+) -> Result<Vec<SchemaSourceIssue>, RepositoryContractError> {
+    let mut issues = Vec::new();
+    for (file, schema) in &contract.source.schemas {
+        match schema {
+            SchemaSourceSnapshot::Present(source) => {
+                if let Some(issue) = source.issue() {
+                    issues.push(issue.clone());
+                }
+            }
+            SchemaSourceSnapshot::Missing { path } => issues.push(SchemaSourceIssue {
+                kind: SchemaSourceIssueKind::Missing,
+                file: file.clone(),
+                path: repository_relative_path(&contract.source.contracts_root, path)?,
+                line: 0,
+                column: 0,
+                category: None,
+                message: "declared schema is missing".to_owned(),
+            }),
+            SchemaSourceSnapshot::UnsafeName => issues.push(SchemaSourceIssue {
+                kind: SchemaSourceIssueKind::UnsafeName,
+                file: file.clone(),
+                // Bind an unsafe declaration to its owning contract without resolving or
+                // touching the attacker-controlled path. This also prevents cross-contract
+                // deduplication of identical unsafe strings.
+                path: repository_relative_path(&contract.source.contracts_root, &contract.dir)?,
+                line: 0,
+                column: 0,
+                category: None,
+                message: "schema filename is not a safe single path segment".to_owned(),
+            }),
+        }
+    }
+    for (id, component) in &contract.source.components {
+        match component {
+            ComponentSourceSnapshot::Present(source) => {
+                if let Some(issue) = source.issue() {
+                    issues.push(issue.clone());
+                }
+            }
+            ComponentSourceSnapshot::Missing { path } => issues.push(SchemaSourceIssue {
+                kind: SchemaSourceIssueKind::Missing,
+                file: id.clone(),
+                path: repository_relative_path(&contract.source.contracts_root, path)?,
+                line: 0,
+                column: 0,
+                category: None,
+                message: "referenced schema component is missing".to_owned(),
+            }),
+        }
+    }
+    Ok(issues)
+}
+
+fn promote_inspected_contract(
+    contract: InspectedRepositoryContract,
+) -> Result<RepositoryContract, RepositoryContractError> {
+    let complete_schemas = contract.source.schemas.iter().all(|(file, source)| {
+        matches!(source, SchemaSourceSnapshot::Present(source) if source.value().is_some())
+            && contract.source.resolved_schemas.contains_key(file)
+    });
+    let complete_components = contract
+        .source
+        .components
+        .values()
+        .all(|source| {
+            matches!(source, ComponentSourceSnapshot::Present(source) if source.value().is_some())
+        });
+    if !complete_schemas
+        || !complete_components
+        || contract.source.resolved_schemas.len() != contract.source.schemas.len()
+        || contract.source.schema_hash.is_empty()
+    {
+        return Err(RepositoryContractError::Invalid(
+            "incomplete schema inspection cannot promote RepositoryContract".to_owned(),
+        ));
+    }
+    Ok(RepositoryContract {
+        dir: contract.dir,
+        path_kind: contract.path_kind,
+        path_domain: contract.path_domain,
+        path_version: contract.path_version,
+        slug: contract.slug,
+        owner: contract.owner,
+        manifest: contract.manifest,
+        source: contract.source,
+    })
 }
 
 /// Exact UTF-8 source owned by the governed contract repository snapshot.
@@ -684,59 +1079,22 @@ pub(crate) fn capture_contract_repository_sources(
 ) -> Result<Vec<RepositoryContractSourceFile>, RepositoryContractError> {
     let mut files = BTreeMap::<String, String>::new();
     for contract in contracts {
-        let sources = std::iter::once(&contract.source.manifest)
-            .chain(
-                contract
-                    .source
-                    .schemas
-                    .values()
-                    .filter_map(|source| match source {
-                        SchemaSourceSnapshot::Present(source) => Some(source),
-                        SchemaSourceSnapshot::Missing { .. } | SchemaSourceSnapshot::UnsafeName => {
-                            None
-                        }
-                    }),
-            )
-            .chain(contract.source.components.values());
-        for source in sources {
-            let path = source.path.strip_prefix(repository_root).map_err(|_| {
-                RepositoryContractError::Invalid(format!(
-                    "contract snapshot path escapes repository root: {}",
-                    source.path.display()
-                ))
-            })?;
-            if path
-                .components()
-                .any(|component| !matches!(component, Component::Normal(_)))
-            {
-                return Err(RepositoryContractError::Invalid(format!(
-                    "contract snapshot path is not normalized: {}",
-                    path.display()
-                )));
-            }
-            let label = path
-                .to_str()
-                .ok_or_else(|| {
-                    RepositoryContractError::Invalid(format!(
-                        "contract snapshot path is not UTF-8: {}",
-                        path.display()
-                    ))
-                })?
-                .replace('\\', "/");
-            let content = std::str::from_utf8(&source.bytes).map_err(|error| {
-                RepositoryContractError::io(
-                    format!("failed to decode {} as UTF-8", source.path.display()),
-                    std::io::Error::new(std::io::ErrorKind::InvalidData, error),
-                )
-            })?;
-            match files.insert(label.clone(), content.to_owned()) {
-                Some(previous) if previous != content => {
-                    return Err(RepositoryContractError::Invalid(format!(
-                        "contract snapshot path has conflicting content: {label}"
-                    )));
-                }
-                _ => {}
-            }
+        insert_repository_contract_source(repository_root, &mut files, &contract.source.manifest)?;
+        for schema in contract.source.schemas.values() {
+            let SchemaSourceSnapshot::Present(source) = schema else {
+                return Err(RepositoryContractError::Invalid(
+                    "promoted repository contains an invalid schema source".to_owned(),
+                ));
+            };
+            insert_repository_contract_source(repository_root, &mut files, &source.source)?;
+        }
+        for component in contract.source.components.values() {
+            let ComponentSourceSnapshot::Present(source) = component else {
+                return Err(RepositoryContractError::Invalid(
+                    "promoted repository contains a missing component source".to_owned(),
+                ));
+            };
+            insert_repository_contract_source(repository_root, &mut files, &source.source)?;
         }
     }
     Ok(files
@@ -745,10 +1103,53 @@ pub(crate) fn capture_contract_repository_sources(
         .collect())
 }
 
-/// Replay complete contract discovery from an immutable repository-relative source universe.
-pub(crate) fn load_contract_repository_snapshot(
+fn insert_repository_contract_source(
+    repository_root: &Path,
+    files: &mut BTreeMap<String, String>,
+    source: &SourceFileSnapshot,
+) -> Result<(), RepositoryContractError> {
+    let path = source.path.strip_prefix(repository_root).map_err(|_| {
+        RepositoryContractError::Invalid(format!(
+            "contract snapshot path escapes repository root: {}",
+            source.path.display()
+        ))
+    })?;
+    if path
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(RepositoryContractError::Invalid(format!(
+            "contract snapshot path is not normalized: {}",
+            path.display()
+        )));
+    }
+    let label = path
+        .to_str()
+        .ok_or_else(|| {
+            RepositoryContractError::Invalid(format!(
+                "contract snapshot path is not UTF-8: {}",
+                path.display()
+            ))
+        })?
+        .replace('\\', "/");
+    let content = std::str::from_utf8(&source.bytes).map_err(|error| {
+        RepositoryContractError::io(
+            format!("failed to decode {} as UTF-8", source.path.display()),
+            std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+        )
+    })?;
+    match files.insert(label.clone(), content.to_owned()) {
+        Some(previous) if previous != content => Err(RepositoryContractError::Invalid(format!(
+            "contract snapshot path has conflicting content: {label}"
+        ))),
+        _ => Ok(()),
+    }
+}
+
+/// Inspect an immutable repository-relative source universe through the same typed funnel.
+pub(crate) fn inspect_contract_repository_snapshot(
     files: &[RepositoryContractSourceFile],
-) -> Result<Vec<RepositoryContract>, RepositoryContractError> {
+) -> Result<ContractRepositoryInspection, RepositoryContractError> {
     let contracts_root = Path::new("contracts");
     let mut sources = BTreeMap::<PathBuf, Arc<[u8]>>::new();
     for file in files {
@@ -786,9 +1187,12 @@ pub(crate) fn load_contract_repository_snapshot(
         ));
     }
     let mut consumed = BTreeSet::new();
+    let mut parser = SchemaSourceParser::default();
     let contracts = manifests
         .into_iter()
-        .map(|path| load_contract_snapshot(contracts_root, &path, &sources, &mut consumed))
+        .map(|path| {
+            load_contract_snapshot(contracts_root, &path, &sources, &mut consumed, &mut parser)
+        })
         .collect::<Result<Vec<_>, _>>()?;
     let actual = sources.keys().cloned().collect::<BTreeSet<_>>();
     if consumed != actual {
@@ -796,7 +1200,25 @@ pub(crate) fn load_contract_repository_snapshot(
             "contract snapshot universe differs: consumed={consumed:?} actual={actual:?}"
         )));
     }
-    Ok(contracts)
+    let mut issues = Vec::new();
+    for contract in &contracts {
+        issues.extend(contract_source_issues(contract)?);
+    }
+    issues.sort_by(|left, right| left.path.cmp(&right.path));
+    issues.dedup_by(|left, right| left.path == right.path && left.file == right.file);
+    Ok(ContractRepositoryInspection {
+        contracts_root: contracts_root.to_path_buf(),
+        contracts,
+        issues,
+        snapshot_component_files: Some(
+            actual
+                .into_iter()
+                .filter(|path| path.starts_with(contracts_root.join("components")))
+                .collect(),
+        ),
+        #[cfg(test)]
+        parser_calls: parser.calls,
+    })
 }
 
 /// Verify both the closed manifest universe and every captured contract source snapshot.
@@ -834,12 +1256,20 @@ fn verify_component_universe<'a>(
 ) -> Result<(), RepositoryContractError> {
     let mut actual = BTreeSet::new();
     collect_component_files(&contracts_root.join("components"), &mut actual)?;
+    verify_component_universe_exact(&actual, contracts)
+}
+
+fn verify_component_universe_exact<'a>(
+    actual: &BTreeSet<PathBuf>,
+    contracts: impl IntoIterator<Item = &'a RepositoryContract>,
+) -> Result<(), RepositoryContractError> {
     let expected = contracts
         .into_iter()
         .flat_map(|contract| contract.source.components.values())
-        .map(|source| source.path.clone())
+        .filter_map(ComponentSourceSnapshot::parsed)
+        .map(|source| source.source.path.clone())
         .collect::<BTreeSet<_>>();
-    if actual != expected {
+    if *actual != expected {
         return Err(RepositoryContractError::Invalid(format!(
             "component universe must equal the transitively referenced set: expected={expected:?} actual={actual:?}"
         )));
@@ -952,17 +1382,13 @@ pub fn validate_workflow_activations(
                 definition.version
             ));
         }
-        match schema_hash(contract) {
-            Ok(digest) if digest != activation.definition_schema_digest() => errors.push(format!(
+        match contract.schema_hash() {
+            digest if digest != activation.definition_schema_digest() => errors.push(format!(
                 "activation id=`{}` field=definitionSchemaDigest actual=`{}` expected=`{digest}`",
                 activation.id(),
                 activation.definition_schema_digest()
             )),
-            Err(error) => errors.push(format!(
-                "activation id=`{}` field=definitionSchemaDigest actual=<unavailable> expected=repository-schema-hash cause=`{error}`",
-                activation.id()
-            )),
-            Ok(_) => {}
+            _ => {}
         }
         match contract.owner().domain() {
             Some(owner) if owner.as_str() != definition.domain => errors.push(format!(
@@ -1054,7 +1480,8 @@ fn allowed_lifecycles(activation: &WorkflowActivation) -> &'static [Lifecycle] {
 fn load_contract(
     contracts_root: &Path,
     manifest_path: &Path,
-) -> Result<RepositoryContract, RepositoryContractError> {
+    parser: &mut SchemaSourceParser,
+) -> Result<InspectedRepositoryContract, RepositoryContractError> {
     let dir = manifest_path.parent().ok_or_else(|| {
         RepositoryContractError::Invalid(format!(
             "contract.toml has no parent: {}",
@@ -1082,19 +1509,25 @@ fn load_contract(
             ))
         })?;
     let owner = promote_contract_owner(&manifest.owner)?;
-    let schemas = capture_schema_sources(contracts_root, dir, &manifest)?;
-    let components = capture_component_sources(contracts_root, &schemas)?;
+    let schemas = capture_schema_sources(contracts_root, dir, &manifest, parser)?;
+    let components = capture_component_sources(contracts_root, &schemas, parser)?;
     let digest = source_snapshot_digest(&manifest_source, &schemas, &components);
+    let (resolved_schemas, schema_hash) =
+        finalize_schema_sources(&manifest, &schemas, &components)?;
     let source = Arc::new(ContractSourceSnapshot {
         contracts_root: contracts_root.to_path_buf(),
         manifest: manifest_source,
         schemas,
         components,
+        resolved_schemas,
+        schema_hash,
         digest,
         repository_backed: true,
+        #[cfg(feature = "test-support")]
+        fixture_owner: None,
     });
     verify_source_snapshot(source.as_ref())?;
-    Ok(RepositoryContract {
+    Ok(InspectedRepositoryContract {
         dir: dir.to_path_buf(),
         path_kind,
         path_domain,
@@ -1111,7 +1544,8 @@ fn load_contract_snapshot(
     manifest_path: &Path,
     files: &BTreeMap<PathBuf, Arc<[u8]>>,
     consumed: &mut BTreeSet<PathBuf>,
-) -> Result<RepositoryContract, RepositoryContractError> {
+    parser: &mut SchemaSourceParser,
+) -> Result<InspectedRepositoryContract, RepositoryContractError> {
     let dir = manifest_path.parent().ok_or_else(|| {
         RepositoryContractError::Invalid(format!(
             "contract.toml has no parent: {}",
@@ -1125,8 +1559,7 @@ fn load_contract_snapshot(
         ))
     })?;
     consumed.insert(manifest_path.to_path_buf());
-    let manifest_source =
-        synthetic_source_file(manifest_path.to_path_buf(), manifest_bytes.clone());
+    let manifest_source = snapshot_source_file(manifest_path.to_path_buf(), manifest_bytes.clone());
     let text = std::str::from_utf8(manifest_bytes).map_err(|source| {
         RepositoryContractError::io(
             format!("failed to decode {} as UTF-8", manifest_path.display()),
@@ -1152,31 +1585,43 @@ fn load_contract_snapshot(
         if schemas.contains_key(file) {
             continue;
         }
-        validate_schema_filename(file)?;
-        let path = dir.join(file);
-        let bytes = files.get(&path).ok_or_else(|| {
-            RepositoryContractError::Invalid(format!(
-                "contract snapshot omits declared schema {}",
-                path.display()
-            ))
-        })?;
-        consumed.insert(path.clone());
-        schemas.insert(
-            file.to_owned(),
-            SchemaSourceSnapshot::Present(synthetic_source_file(path, bytes.clone())),
-        );
+        let source = if validate_schema_filename(file).is_err() {
+            SchemaSourceSnapshot::UnsafeName
+        } else {
+            let path = dir.join(file);
+            match files.get(&path) {
+                Some(bytes) => {
+                    consumed.insert(path.clone());
+                    SchemaSourceSnapshot::Present(parser.parse_captured(
+                        contracts_root,
+                        &path,
+                        file,
+                        snapshot_source_file(path.clone(), bytes.clone()),
+                    )?)
+                }
+                None => SchemaSourceSnapshot::Missing { path },
+            }
+        };
+        schemas.insert(file.to_owned(), source);
     }
-    let components = capture_component_snapshot_sources(contracts_root, &schemas, files, consumed)?;
+    let components =
+        capture_component_snapshot_sources(contracts_root, &schemas, files, consumed, parser)?;
     let digest = source_snapshot_digest(&manifest_source, &schemas, &components);
+    let (resolved_schemas, schema_hash) =
+        finalize_schema_sources(&manifest, &schemas, &components)?;
     let source = Arc::new(ContractSourceSnapshot {
         contracts_root: contracts_root.to_path_buf(),
         manifest: manifest_source,
         schemas,
         components,
+        resolved_schemas,
+        schema_hash,
         digest,
         repository_backed: false,
+        #[cfg(feature = "test-support")]
+        fixture_owner: None,
     });
-    Ok(RepositoryContract {
+    Ok(InspectedRepositoryContract {
         dir: dir.to_path_buf(),
         path_kind,
         path_domain,
@@ -1193,19 +1638,16 @@ fn capture_component_snapshot_sources(
     schemas: &BTreeMap<String, SchemaSourceSnapshot>,
     files: &BTreeMap<PathBuf, Arc<[u8]>>,
     consumed: &mut BTreeSet<PathBuf>,
-) -> Result<BTreeMap<String, SourceFileSnapshot>, RepositoryContractError> {
+    parser: &mut SchemaSourceParser,
+) -> Result<BTreeMap<String, ComponentSourceSnapshot>, RepositoryContractError> {
     let mut pending = BTreeSet::new();
     for schema in schemas.values() {
         let SchemaSourceSnapshot::Present(source) = schema else {
             continue;
         };
-        let value: Value = serde_json::from_slice(&source.bytes).map_err(|source_error| {
-            RepositoryContractError::SchemaJson {
-                path: source.path.clone(),
-                source: source_error,
-            }
-        })?;
-        collect_component_refs(&value, &mut pending)?;
+        if let Some(value) = source.value() {
+            collect_component_refs(value, &mut pending)?;
+        }
     }
     let mut captured = BTreeMap::new();
     while let Some(id) = pending.pop_first() {
@@ -1213,28 +1655,29 @@ fn capture_component_snapshot_sources(
             continue;
         }
         let path = contracts_root.join(id.relative_path()?);
-        let bytes = files.get(&path).ok_or_else(|| {
-            RepositoryContractError::Invalid(format!(
-                "contract snapshot omits component {}",
-                path.display()
-            ))
-        })?;
+        let Some(bytes) = files.get(&path) else {
+            captured.insert(id.to_string(), ComponentSourceSnapshot::Missing { path });
+            continue;
+        };
         consumed.insert(path.clone());
-        let source = synthetic_source_file(path.clone(), bytes.clone());
-        let value: Value = serde_json::from_slice(bytes).map_err(|source_error| {
-            RepositoryContractError::SchemaJson {
-                path: path.clone(),
-                source: source_error,
-            }
-        })?;
+        let source = parser.parse_captured(
+            contracts_root,
+            &path,
+            id.as_str(),
+            snapshot_source_file(path.clone(), bytes.clone()),
+        )?;
+        let Some(value) = source.value() else {
+            captured.insert(id.to_string(), ComponentSourceSnapshot::Present(source));
+            continue;
+        };
         if value.get("$id").and_then(Value::as_str) != Some(id.as_str()) {
             return Err(RepositoryContractError::Invalid(format!(
                 "component {} must declare exact $id {id:?}",
                 path.display()
             )));
         }
-        collect_component_refs(&value, &mut pending)?;
-        captured.insert(id.to_string(), source);
+        collect_component_refs(value, &mut pending)?;
+        captured.insert(id.to_string(), ComponentSourceSnapshot::Present(source));
     }
     Ok(captured)
 }
@@ -1243,6 +1686,7 @@ fn capture_schema_sources(
     contracts_root: &Path,
     dir: &Path,
     manifest: &ContractManifest,
+    parser: &mut SchemaSourceParser,
 ) -> Result<BTreeMap<String, SchemaSourceSnapshot>, RepositoryContractError> {
     let mut schemas = BTreeMap::new();
     for file in manifest.declared_schema_files() {
@@ -1254,7 +1698,9 @@ fn capture_schema_sources(
         } else {
             let path = dir.join(file);
             match std::fs::symlink_metadata(&path) {
-                Ok(_) => SchemaSourceSnapshot::Present(read_source_file(contracts_root, &path)?),
+                Ok(_) => {
+                    SchemaSourceSnapshot::Present(parser.parse(contracts_root, &path, file)?)
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     ensure_safe_source_parent(contracts_root, &path)?;
                     SchemaSourceSnapshot::Missing { path }
@@ -1275,19 +1721,16 @@ fn capture_schema_sources(
 fn capture_component_sources(
     contracts_root: &Path,
     schemas: &BTreeMap<String, SchemaSourceSnapshot>,
-) -> Result<BTreeMap<String, SourceFileSnapshot>, RepositoryContractError> {
+    parser: &mut SchemaSourceParser,
+) -> Result<BTreeMap<String, ComponentSourceSnapshot>, RepositoryContractError> {
     let mut pending = BTreeSet::new();
     for schema in schemas.values() {
         let SchemaSourceSnapshot::Present(source) = schema else {
             continue;
         };
-        let value: Value = serde_json::from_slice(&source.bytes).map_err(|parse_error| {
-            RepositoryContractError::SchemaJson {
-                path: source.path.clone(),
-                source: parse_error,
-            }
-        })?;
-        collect_component_refs(&value, &mut pending)?;
+        if let Some(value) = source.value() {
+            collect_component_refs(value, &mut pending)?;
+        }
     }
 
     let mut captured = BTreeMap::new();
@@ -1296,23 +1739,140 @@ fn capture_component_sources(
             continue;
         }
         let path = contracts_root.join(id.relative_path()?);
-        let source = read_source_file(contracts_root, &path)?;
-        let value: Value = serde_json::from_slice(&source.bytes).map_err(|parse_error| {
-            RepositoryContractError::SchemaJson {
-                path: source.path.clone(),
-                source: parse_error,
+        let source = match std::fs::symlink_metadata(&path) {
+            Ok(_) => parser.parse(contracts_root, &path, id.as_str())?,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ensure_safe_source_parent(contracts_root, &path)?;
+                captured.insert(id.to_string(), ComponentSourceSnapshot::Missing { path });
+                continue;
             }
-        })?;
+            Err(source) => {
+                return Err(RepositoryContractError::io(
+                    format!("failed to inspect component {}", path.display()),
+                    source,
+                ));
+            }
+        };
+        let Some(value) = source.value() else {
+            captured.insert(id.to_string(), ComponentSourceSnapshot::Present(source));
+            continue;
+        };
         if value.get("$id").and_then(Value::as_str) != Some(id.as_str()) {
             return Err(RepositoryContractError::Invalid(format!(
                 "component {} must declare exact $id {id:?}",
                 path.display()
             )));
         }
-        collect_component_refs(&value, &mut pending)?;
-        captured.insert(id.to_string(), source);
+        collect_component_refs(value, &mut pending)?;
+        captured.insert(id.to_string(), ComponentSourceSnapshot::Present(source));
     }
     Ok(captured)
+}
+
+fn repository_relative_path(
+    contracts_root: &Path,
+    path: &Path,
+) -> Result<PathBuf, RepositoryContractError> {
+    path.strip_prefix(contracts_root)
+        .map(Path::to_path_buf)
+        .map_err(|_| {
+            RepositoryContractError::Invalid(format!(
+                "contract source escapes contracts root: {}",
+                path.display()
+            ))
+        })
+}
+
+fn parse_source_file(
+    file: &str,
+    relative_path: PathBuf,
+    source: SourceFileSnapshot,
+) -> ParsedSourceFileSnapshot {
+    match serde_json::from_slice::<Value>(&source.bytes) {
+        Ok(value) => ParsedSourceFileSnapshot {
+            source,
+            outcome: SchemaParseOutcome::Parsed(Arc::new(value)),
+        },
+        Err(error) => ParsedSourceFileSnapshot {
+            outcome: SchemaParseOutcome::Malformed(SchemaSourceIssue {
+                kind: SchemaSourceIssueKind::Malformed,
+                file: file.to_owned(),
+                path: relative_path,
+                line: error.line(),
+                column: error.column(),
+                category: Some(match error.classify() {
+                    serde_json::error::Category::Io => SchemaJsonErrorCategory::Io,
+                    serde_json::error::Category::Syntax => SchemaJsonErrorCategory::Syntax,
+                    serde_json::error::Category::Data => SchemaJsonErrorCategory::Data,
+                    serde_json::error::Category::Eof => SchemaJsonErrorCategory::Eof,
+                }),
+                message: error.to_string(),
+            }),
+            source,
+        },
+    }
+}
+
+fn finalize_schema_sources(
+    manifest: &ContractManifest,
+    schemas: &BTreeMap<String, SchemaSourceSnapshot>,
+    components: &BTreeMap<String, ComponentSourceSnapshot>,
+) -> Result<(BTreeMap<String, ResolvedSchema>, String), RepositoryContractError> {
+    let incomplete = schemas.values().any(|schema| match schema {
+        SchemaSourceSnapshot::Present(source) => source.value().is_none(),
+        SchemaSourceSnapshot::Missing { .. } | SchemaSourceSnapshot::UnsafeName => true,
+    }) || components.values().any(|component| match component {
+        ComponentSourceSnapshot::Present(source) => source.value().is_none(),
+        ComponentSourceSnapshot::Missing { .. } => true,
+    });
+    if incomplete {
+        return Ok((BTreeMap::new(), String::new()));
+    }
+    let resolved = resolve_schema_sources(schemas, components)?;
+    let hash = schema_hash_from_resolved(manifest, &resolved)?;
+    Ok((resolved, hash))
+}
+
+fn resolve_schema_sources(
+    schemas: &BTreeMap<String, SchemaSourceSnapshot>,
+    components: &BTreeMap<String, ComponentSourceSnapshot>,
+) -> Result<BTreeMap<String, ResolvedSchema>, RepositoryContractError> {
+    schemas
+        .iter()
+        .map(|(file, source)| {
+            let SchemaSourceSnapshot::Present(source) = source else {
+                return Err(RepositoryContractError::Invalid(
+                    "invalid schema source reached typed promotion".to_owned(),
+                ));
+            };
+            let value = source.value().ok_or_else(|| {
+                RepositoryContractError::Invalid(
+                    "malformed schema source reached typed promotion".to_owned(),
+                )
+            })?;
+            let resolved = resolve_component_references((**value).clone(), |id| {
+                let component = components
+                    .get(id)
+                    .and_then(ComponentSourceSnapshot::parsed)
+                    .ok_or_else(|| {
+                        RepositoryContractError::Invalid(format!(
+                            "schema {} references uncaptured component {id:?}",
+                            source.source.path.display()
+                        ))
+                    })?;
+                component
+                    .value()
+                    .map(|value| (**value).clone())
+                    .ok_or_else(|| {
+                        RepositoryContractError::Invalid(format!(
+                            "malformed component reached typed promotion: {}",
+                            component.source.path.display()
+                        ))
+                    })
+            })?;
+            Ok((file.clone(), resolved))
+        })
+        .collect()
 }
 
 fn collect_component_refs(
@@ -1544,70 +2104,7 @@ where
     })
 }
 
-#[cfg(feature = "test-support")]
-fn capture_synthetic_schema_sources(
-    dir: &Path,
-    manifest: &ContractManifest,
-) -> Result<BTreeMap<String, SchemaSourceSnapshot>, RepositoryContractError> {
-    let mut schemas = BTreeMap::new();
-    for file in manifest.declared_schema_files() {
-        if schemas.contains_key(file) {
-            continue;
-        }
-        let source = if validate_schema_filename(file).is_err() {
-            SchemaSourceSnapshot::UnsafeName
-        } else {
-            let path = dir.join(file);
-            match std::fs::symlink_metadata(&path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-                    return Err(RepositoryContractError::Invalid(format!(
-                        "synthetic schema source must be a non-symlink regular file: {}",
-                        path.display()
-                    )));
-                }
-                Ok(metadata) => {
-                    let before = SourceFileIdentity::from_metadata(&metadata);
-                    let bytes = std::fs::read(&path).map_err(|source| {
-                        RepositoryContractError::io(
-                            format!("failed to read synthetic schema {}", path.display()),
-                            source,
-                        )
-                    })?;
-                    let after = std::fs::symlink_metadata(&path).map_err(|source| {
-                        RepositoryContractError::io(
-                            format!("failed to re-inspect synthetic schema {}", path.display()),
-                            source,
-                        )
-                    })?;
-                    if after.file_type().is_symlink()
-                        || !after.is_file()
-                        || SourceFileIdentity::from_metadata(&after) != before
-                        || before.len != bytes.len() as u64
-                    {
-                        return Err(RepositoryContractError::stale(
-                            &path,
-                            "synthetic schema changed while reading",
-                        ));
-                    }
-                    SchemaSourceSnapshot::Present(synthetic_source_file(path, Arc::from(bytes)))
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    SchemaSourceSnapshot::Missing { path }
-                }
-                Err(source) => {
-                    return Err(RepositoryContractError::io(
-                        format!("failed to inspect synthetic schema {}", path.display()),
-                        source,
-                    ));
-                }
-            }
-        };
-        schemas.insert(file.to_owned(), source);
-    }
-    Ok(schemas)
-}
-
-fn synthetic_source_file(path: PathBuf, bytes: Arc<[u8]>) -> SourceFileSnapshot {
+fn snapshot_source_file(path: PathBuf, bytes: Arc<[u8]>) -> SourceFileSnapshot {
     let len = bytes.len() as u64;
     SourceFileSnapshot {
         path,
@@ -1780,7 +2277,7 @@ fn verify_source_snapshot(
     for schema in snapshot.schemas.values() {
         match schema {
             SchemaSourceSnapshot::Present(source) => {
-                verify_file_snapshot(&snapshot.contracts_root, source)?;
+                verify_file_snapshot(&snapshot.contracts_root, &source.source)?;
             }
             SchemaSourceSnapshot::Missing { path } => {
                 ensure_safe_source_parent(&snapshot.contracts_root, path)?;
@@ -1804,7 +2301,29 @@ fn verify_source_snapshot(
         }
     }
     for component in snapshot.components.values() {
-        verify_file_snapshot(&snapshot.contracts_root, component)?;
+        match component {
+            ComponentSourceSnapshot::Present(component) => {
+                verify_file_snapshot(&snapshot.contracts_root, &component.source)?;
+            }
+            ComponentSourceSnapshot::Missing { path } => {
+                ensure_safe_source_parent(&snapshot.contracts_root, path)?;
+                match std::fs::symlink_metadata(path) {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                    Ok(_) => {
+                        return Err(RepositoryContractError::stale(
+                            path,
+                            "referenced component appeared while snapshotting",
+                        ));
+                    }
+                    Err(source) => {
+                        return Err(RepositoryContractError::io(
+                            format!("failed to re-inspect missing component {}", path.display()),
+                            source,
+                        ));
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1826,7 +2345,7 @@ fn verify_file_snapshot(
 fn source_snapshot_digest(
     manifest: &SourceFileSnapshot,
     schemas: &BTreeMap<String, SchemaSourceSnapshot>,
-    components: &BTreeMap<String, SourceFileSnapshot>,
+    components: &BTreeMap<String, ComponentSourceSnapshot>,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(SOURCE_SNAPSHOT_TAG);
@@ -1837,7 +2356,7 @@ fn source_snapshot_digest(
         match schema {
             SchemaSourceSnapshot::Present(source) => {
                 hash_snapshot_component(&mut hasher, b"present");
-                hash_snapshot_component(&mut hasher, &source.bytes);
+                hash_snapshot_component(&mut hasher, &source.source.bytes);
             }
             SchemaSourceSnapshot::Missing { .. } => {
                 hash_snapshot_component(&mut hasher, b"missing");
@@ -1849,7 +2368,15 @@ fn source_snapshot_digest(
     }
     for (id, component) in components {
         hash_snapshot_component(&mut hasher, id.as_bytes());
-        hash_snapshot_component(&mut hasher, &component.bytes);
+        match component {
+            ComponentSourceSnapshot::Present(component) => {
+                hash_snapshot_component(&mut hasher, b"present");
+                hash_snapshot_component(&mut hasher, &component.source.bytes);
+            }
+            ComponentSourceSnapshot::Missing { .. } => {
+                hash_snapshot_component(&mut hasher, b"missing");
+            }
+        }
     }
     format!("sha256:{:x}", hasher.finalize())
 }
@@ -1948,15 +2475,21 @@ pub fn path_segments(
     }
 }
 
-/// Preserve the existing schemaHash protocol while sharing it with AssemblyLock discovery.
-pub fn schema_hash(contract: &RepositoryContract) -> Result<String, RepositoryContractError> {
-    let mut schemas = Vec::new();
-    for file in contract.manifest().declared_schema_files() {
+fn schema_hash_from_resolved(
+    manifest: &ContractManifest,
+    schemas: &BTreeMap<String, ResolvedSchema>,
+) -> Result<String, RepositoryContractError> {
+    let mut ordered = Vec::new();
+    for file in manifest.declared_schema_files() {
         validate_schema_filename(file)?;
-        let value = contract.resolved_schema(file)?.into_value();
-        schemas.push((file, value));
+        let value = schemas.get(file).ok_or_else(|| {
+            RepositoryContractError::Invalid(format!(
+                "promoted repository is missing declared schema {file:?}"
+            ))
+        })?;
+        ordered.push((file, value.value()));
     }
-    resolved_schema_hash(schemas.iter().map(|(file, value)| (*file, value)))
+    resolved_schema_hash(ordered)
 }
 
 /// Hash an already-resolved ordered schema set with the canonical contract binding protocol.
@@ -2021,6 +2554,12 @@ mod tests {
     #![allow(clippy::panic)]
 
     use super::*;
+
+    fn promoted_repository(
+        contracts_root: &Path,
+    ) -> Result<Vec<RepositoryContract>, RepositoryContractError> {
+        inspect_contract_repository(contracts_root)?.promote()
+    }
     use crate::{AssemblyManifest, CanonicalAssemblyManifestV2};
     use anyhow::Context as _;
     use std::collections::BTreeSet;
@@ -2068,15 +2607,14 @@ mod tests {
             contract_dir.join("contract.toml"),
             source.replace("owner = \"settings\"", &format!("owner = {owner:?}")),
         )?;
-        for schema in ["projection.schema.json"] {
-            fs::copy(workspace_contract.join(schema), contract_dir.join(schema))?;
-        }
+        let schema = "projection.schema.json";
+        fs::copy(workspace_contract.join(schema), contract_dir.join(schema))?;
         Ok(repository)
     }
 
     fn contracts() -> Vec<RepositoryContract> {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
-        let Ok(contracts) = load_contract_repository(&root) else {
+        let Ok(contracts) = promoted_repository(&root) else {
             panic!("repository contracts must be discoverable");
         };
         contracts
@@ -2320,7 +2858,7 @@ outputs = ["probes", "resources"]
     #[test]
     fn workflow_activation_diagnostics_aggregate_all_field_failures() -> anyhow::Result<()> {
         let repository = fixture_repository(FRAMEWORK_OWNER)?;
-        let mut catalog = load_contract_repository(&repository.contracts_root())?;
+        let mut catalog = promoted_repository(&repository.contracts_root())?;
         catalog[0].manifest.version = "v4".to_owned();
         catalog[0].manifest.consistency_level = ConsistencyLevel::LocalOnly;
         catalog[0].manifest.lifecycle = Lifecycle::Deprecated;
@@ -2397,7 +2935,7 @@ outputs = ["probes", "resources"]
             (FRAMEWORK_OWNER, None, true),
         ] {
             let repository = fixture_repository(raw)?;
-            let contracts = load_contract_repository(&repository.contracts_root())?;
+            let contracts = promoted_repository(&repository.contracts_root())?;
             let [contract] = contracts.as_slice() else {
                 panic!("fixture must contain one contract");
             };
@@ -2411,7 +2949,7 @@ outputs = ["probes", "resources"]
         }
 
         let repository = fixture_repository("Settings")?;
-        let Err(error) = load_contract_repository(&repository.contracts_root()) else {
+        let Err(error) = promoted_repository(&repository.contracts_root()) else {
             panic!("non-canonical owner must fail promotion");
         };
         assert!(error.to_string().contains("canonical domain name"));
@@ -2419,9 +2957,9 @@ outputs = ["probes", "resources"]
     }
 
     #[test]
-    fn source_snapshot_exposes_immutable_manifest_schema_and_path_views() -> anyhow::Result<()> {
+    fn source_snapshot_exposes_immutable_manifest_and_schema_digest_views() -> anyhow::Result<()> {
         let repository = fixture_repository("settings")?;
-        let contracts = load_contract_repository(&repository.contracts_root())?;
+        let contracts = promoted_repository(&repository.contracts_root())?;
         let [contract] = contracts.as_slice() else {
             panic!("fixture must contain one contract");
         };
@@ -2438,19 +2976,18 @@ outputs = ["probes", "resources"]
         );
         assert!(contract.manifest_source_digest().starts_with("sha256:"));
         assert!(contract.source_snapshot_digest().starts_with("sha256:"));
-        for schema in ["projection.schema.json"] {
-            let Some(schema_path) = contract.schema_path(schema) else {
-                panic!("declared schema path must be captured");
-            };
-            let expected = fs::read(schema_path)?;
-            assert_eq!(contract.schema_bytes(schema), Some(expected.as_slice()));
-            assert!(
-                contract
-                    .schema_source_digest(schema)
-                    .is_some_and(|digest| digest.starts_with("sha256:"))
-            );
-        }
-        assert_eq!(schema_hash(contract)?, SETTINGS_DIGEST);
+        let schema = "projection.schema.json";
+        let Some(SchemaSourceSnapshot::Present(source)) = contract.source.schemas.get(schema)
+        else {
+            panic!("declared schema source must be captured");
+        };
+        let expected = fs::read(&source.source.path)?;
+        let expected_digest = sha256_digest(&expected);
+        assert_eq!(
+            contract.schema_source_digest(schema),
+            Some(expected_digest.as_str())
+        );
+        assert_eq!(contract.schema_hash(), SETTINGS_DIGEST);
         contract.verify_unchanged()?;
         Ok(())
     }
@@ -2459,7 +2996,7 @@ outputs = ["probes", "resources"]
     fn source_snapshot_rejects_stale_manifest_and_schema_mutations() -> anyhow::Result<()> {
         for target in ["contract.toml", "projection.schema.json"] {
             let repository = fixture_repository("settings")?;
-            let contracts = load_contract_repository(&repository.contracts_root())?;
+            let contracts = promoted_repository(&repository.contracts_root())?;
             let [contract] = contracts.as_slice() else {
                 panic!("fixture must contain one contract");
             };
@@ -2507,11 +3044,13 @@ outputs = ["probes", "resources"]
 }"#,
         )?;
 
-        let contracts = load_contract_repository(&repository.contracts_root())?;
+        let contracts = promoted_repository(&repository.contracts_root())?;
         let [contract] = contracts.as_slice() else {
             panic!("fixture must contain one contract");
         };
-        let resolved = contract.resolved_schema("projection.schema.json")?;
+        let Some(resolved) = contract.schema("projection.schema.json") else {
+            panic!("promoted schema");
+        };
         assert_eq!(
             resolved["properties"]["row"]["$ref"],
             "#/definitions/SettingsProjectionRow"
@@ -2525,7 +3064,7 @@ outputs = ["probes", "resources"]
             &["rss://component/settings/v3/projection-row".to_string()]
         );
         assert!(contract.source_snapshot_digest().starts_with("sha256:"));
-        let hash_before = schema_hash(contract)?;
+        let hash_before = contract.schema_hash().to_owned();
 
         fs::write(
             &component_path,
@@ -2540,17 +3079,17 @@ outputs = ["probes", "resources"]
 }"#,
         )?;
         assert!(contract.verify_unchanged().is_err());
-        let refreshed = load_contract_repository(&repository.contracts_root())?;
+        let refreshed = promoted_repository(&repository.contracts_root())?;
         let [refreshed] = refreshed.as_slice() else {
             panic!("fixture must contain one refreshed contract");
         };
-        let hash_after = schema_hash(refreshed)?;
+        let hash_after = refreshed.schema_hash();
         assert_ne!(
             hash_before, hash_after,
             "component semantics must affect hash"
         );
-        let deterministic = load_contract_repository(&repository.contracts_root())?;
-        assert_eq!(hash_after, schema_hash(&deterministic[0])?);
+        let deterministic = promoted_repository(&repository.contracts_root())?;
+        assert_eq!(hash_after, deterministic[0].schema_hash());
         Ok(())
     }
 
@@ -2567,7 +3106,7 @@ outputs = ["probes", "resources"]
         }
 
         let schema = serde_json::json!({"$ref": "rss://component/identity/v1/a"});
-        let error = resolve_component_references(schema, |id| match id {
+        let Err(error) = resolve_component_references(schema, |id| match id {
             "rss://component/identity/v1/a" => Ok(serde_json::json!({
                 "$id": id,
                 "title": "A",
@@ -2579,18 +3118,20 @@ outputs = ["probes", "resources"]
                 "$ref": "rss://component/identity/v1/a"
             })),
             _ => unreachable!(),
-        })
-        .expect_err("cycle must fail closed");
+        }) else {
+            panic!("cycle must fail closed");
+        };
         assert!(error.to_string().contains("cycle"));
 
         let schema = serde_json::json!({
             "$ref": "rss://component/identity/v1/a",
             "definitions": {"A": {"title": "A", "type": "string"}}
         });
-        let error = resolve_component_references(schema, |id| {
+        let Err(error) = resolve_component_references(schema, |id| {
             Ok(serde_json::json!({"$id": id, "title": "A", "type": "string"}))
-        })
-        .expect_err("an identical author definition must not impersonate component provenance");
+        }) else {
+            panic!("an identical author definition must not impersonate component provenance");
+        };
         assert!(
             error
                 .to_string()
@@ -2645,7 +3186,7 @@ outputs = ["probes", "resources"]
         let component_dir = repository.contracts_root().join("components/settings/v3");
         fs::create_dir_all(&component_dir)?;
         fs::write(component_dir.join("orphan.schema.json"), b"{}")?;
-        assert!(load_contract_repository(&repository.contracts_root()).is_err());
+        assert!(promoted_repository(&repository.contracts_root()).is_err());
 
         #[cfg(unix)]
         {
@@ -2656,8 +3197,9 @@ outputs = ["probes", "resources"]
                 repository.contract_dir().join("projection.schema.json"),
                 component_dir.join("linked.schema.json"),
             )?;
-            let error = load_contract_repository(&repository.contracts_root())
-                .expect_err("component symlink must fail closed");
+            let Err(error) = promoted_repository(&repository.contracts_root()) else {
+                panic!("component symlink must fail closed");
+            };
             assert!(error.to_string().contains("symlink"));
         }
         Ok(())
@@ -2666,12 +3208,14 @@ outputs = ["probes", "resources"]
     #[test]
     fn common_abac_component_resolves_to_self_contained_definitions() -> anyhow::Result<()> {
         let contracts_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
-        let contracts = load_contract_repository(&contracts_root)?;
+        let contracts = promoted_repository(&contracts_root)?;
         let contract = contracts
             .iter()
             .find(|contract| contract.manifest().id == "identity.policies-create")
             .context("identity policies-create contract")?;
-        let schema = contract.resolved_schema("request.schema.json")?;
+        let Some(schema) = contract.schema("request.schema.json") else {
+            panic!("promoted schema");
+        };
         assert_eq!(
             schema.pointer("/properties/rules/items/properties/condition/properties/operator/$ref"),
             Some(&serde_json::json!("#/definitions/IdentityPolicyOperator"))
@@ -2690,10 +3234,146 @@ outputs = ["probes", "resources"]
     }
 
     #[test]
+    fn schema_consumers_share_one_parsed_document_per_physical_path() -> anyhow::Result<()> {
+        let contracts_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../contracts");
+        let inspection = inspect_contract_repository(&contracts_root)?;
+        assert!(
+            !inspection.parser_calls.is_empty(),
+            "parser audit is vacuous"
+        );
+        assert!(
+            inspection.parser_calls.values().all(|calls| *calls == 1),
+            "every physical JSON source must be parsed exactly once: {:?}",
+            inspection.parser_calls
+        );
+        let contracts = inspection.promote()?;
+        let mut by_path: BTreeMap<PathBuf, Arc<Value>> = BTreeMap::new();
+        let mut shared_references = 0usize;
+        for contract in &contracts {
+            assert!(!contract.schema_hash().is_empty());
+            assert_eq!(contract.schema_hash(), contract.schema_hash());
+            for schema in contract.declared_schemas() {
+                assert_eq!(contract.schema(schema.file()), Some(schema.resolved()));
+                let _ = schema.property_references("operator");
+                let _ = schema.file();
+            }
+            for component in contract.source.components.values() {
+                let ComponentSourceSnapshot::Present(component) = component else {
+                    panic!("promoted repository cannot contain a missing component")
+                };
+                let parsed = component.value().context("promoted component value")?;
+                if let Some(existing) = by_path.get(&component.source.path) {
+                    shared_references += 1;
+                    assert!(Arc::ptr_eq(existing, parsed));
+                } else {
+                    by_path.insert(component.source.path.clone(), Arc::clone(parsed));
+                }
+            }
+        }
+        assert!(
+            shared_references > 0,
+            "anti-vacuity: no shared component references"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn shared_malformed_component_is_reported_once_and_cannot_promote() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "rss-shared-malformed-component-{}-{}",
+            std::process::id(),
+            TEMP_REPOSITORY_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        for (slug, id) in [("one", "identity.one"), ("two", "identity.two")] {
+            let dir = root.join(format!("event/identity/v1/{slug}"));
+            fs::create_dir_all(&dir)?;
+            fs::write(
+                dir.join("contract.toml"),
+                format!(
+                    "id = {id:?}\nkind = \"event\"\ndomain = \"identity\"\nversion = \"v1\"\nowner = \"identity\"\nconsistencyLevel = \"OutboxFact\"\nlifecycle = \"draft\"\ntopic = {id:?}\ndelivery = \"at-least-once\"\n[schemas]\npayload = \"payload.schema.json\"\n[capabilities.outbox]\nrole = \"fact\"\n"
+                ),
+            )?;
+            fs::write(
+                dir.join("payload.schema.json"),
+                r#"{"title":"Payload","$ref":"rss://component/identity/v1/shared"}"#,
+            )?;
+        }
+        let component = root.join("components/identity/v1/shared.schema.json");
+        let Some(component_parent) = component.parent() else {
+            panic!("component parent");
+        };
+        fs::create_dir_all(component_parent)?;
+
+        let missing = inspect_contract_repository(&root)?;
+        assert_eq!(missing.issues().len(), 1, "{:?}", missing.issues());
+        assert_eq!(missing.issues()[0].kind(), SchemaSourceIssueKind::Missing);
+        assert_eq!(
+            missing.issues()[0].path(),
+            Path::new("components/identity/v1/shared.schema.json")
+        );
+        assert_eq!(missing.issues()[0].category(), None);
+        assert!(missing.promote().is_err());
+
+        fs::write(
+            &component,
+            br#"{"$id":"rss://component/identity/v1/shared""#,
+        )?;
+
+        let inspection = inspect_contract_repository(&root)?;
+        assert_eq!(inspection.issues().len(), 1, "{:?}", inspection.issues());
+        assert_eq!(
+            inspection.parser_calls,
+            BTreeMap::from([
+                (root.join("event/identity/v1/one/payload.schema.json"), 1),
+                (root.join("event/identity/v1/two/payload.schema.json"), 1),
+                (component.clone(), 1),
+            ]),
+            "parser audit must contain each physical JSON source exactly once"
+        );
+        assert_eq!(
+            inspection.issues()[0].kind(),
+            SchemaSourceIssueKind::Malformed
+        );
+        assert_eq!(
+            inspection.issues()[0].path(),
+            Path::new("components/identity/v1/shared.schema.json")
+        );
+        assert_eq!(
+            inspection.issues()[0].category(),
+            Some(SchemaJsonErrorCategory::Eof)
+        );
+        let Err(promotion_error) = inspection.promote() else {
+            panic!("malformed source cannot promote");
+        };
+        let promotion_detail = promotion_error.to_string();
+        assert!(
+            promotion_detail.contains("components/identity/v1/shared.schema.json"),
+            "promotion diagnostic must preserve source path: {promotion_detail}"
+        );
+        assert!(
+            promotion_detail.contains("category=eof")
+                && promotion_detail.contains("line=1")
+                && promotion_detail.contains("column="),
+            "promotion diagnostic must preserve JSON location and category: {promotion_detail}"
+        );
+        fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn schema_parse_outcome_is_a_closed_state() {
+        let outcome = SchemaParseOutcome::Parsed(Arc::new(serde_json::json!({})));
+        let SchemaParseOutcome::Parsed(value) = outcome else {
+            panic!("parsed outcome must carry exactly one parsed value")
+        };
+        assert!(value.is_object());
+    }
+
+    #[test]
     fn repository_snapshot_rejects_manifest_universe_additions() -> anyhow::Result<()> {
         let repository = fixture_repository("settings")?;
         let contracts_root = repository.contracts_root();
-        let contracts = load_contract_repository(&contracts_root)?;
+        let contracts = promoted_repository(&contracts_root)?;
         verify_contract_repository_unchanged(&contracts_root, &contracts)?;
 
         let added = contracts_root.join("event/settings/v99/contract.toml");
@@ -2710,25 +3390,23 @@ outputs = ["probes", "resources"]
     }
 
     #[test]
-    fn missing_schema_remains_a_validation_fact_and_appearance_is_stale() -> anyhow::Result<()> {
+    fn missing_schema_is_inspectable_but_cannot_be_promoted() -> anyhow::Result<()> {
         let repository = fixture_repository("settings")?;
         let missing = repository.contract_dir().join("projection.schema.json");
         fs::remove_file(&missing)?;
 
-        let contracts = load_contract_repository(&repository.contracts_root())?;
-        let [contract] = contracts.as_slice() else {
-            panic!("fixture must contain one contract");
-        };
+        let inspection = inspect_contract_repository(&repository.contracts_root())?;
+        assert_eq!(inspection.len(), 1);
+        assert_eq!(inspection.issues().len(), 1);
         assert_eq!(
-            contract.schema_path("projection.schema.json"),
-            Some(missing.as_path())
+            inspection.issues()[0].kind(),
+            SchemaSourceIssueKind::Missing
         );
-        assert_eq!(contract.schema_bytes("projection.schema.json"), None);
-        assert!(schema_hash(contract).is_err());
-        contract.verify_unchanged()?;
+        assert!(inspection.promote().is_err());
 
         fs::write(&missing, b"{}")?;
-        assert!(contract.verify_unchanged().is_err());
+        let repaired = inspect_contract_repository(&repository.contracts_root())?;
+        assert!(repaired.issues().is_empty());
         Ok(())
     }
 
@@ -2830,7 +3508,7 @@ outputs = ["probes", "resources"]
         use std::os::unix::fs::symlink;
 
         let repository = fixture_repository("settings")?;
-        let contracts = load_contract_repository(&repository.contracts_root())?;
+        let contracts = promoted_repository(&repository.contracts_root())?;
         let [contract] = contracts.as_slice() else {
             panic!("fixture must contain one contract");
         };
@@ -2838,13 +3516,13 @@ outputs = ["probes", "resources"]
         fs::remove_file(&projection)?;
         symlink("contract.toml", &projection)?;
         assert!(contract.verify_unchanged().is_err());
-        assert!(load_contract_repository(&repository.contracts_root()).is_err());
+        assert!(promoted_repository(&repository.contracts_root()).is_err());
         Ok(())
     }
 
     #[cfg(feature = "test-support")]
     #[test]
-    fn test_support_builder_is_explicitly_synthetic_and_immutable() -> anyhow::Result<()> {
+    fn test_support_builder_uses_canonical_inspection_and_promotion() -> anyhow::Result<()> {
         let repository = fixture_repository("settings")?;
         let mut manifest = ContractManifest::from_toml_str(&fs::read_to_string(
             repository.contract_dir().join("contract.toml"),
@@ -2862,16 +3540,33 @@ outputs = ["probes", "resources"]
         assert_eq!(contract.path_domain(), "identity");
         assert_eq!(contract.path_version(), "v9");
         assert_eq!(contract.slug(), Some("fixture"));
-        assert!(contract.schema_bytes("projection.schema.json").is_some());
-        let Err(error) = contract.verify_unchanged() else {
-            panic!("synthetic contract must not acquire repository provenance");
-        };
-        assert!(error.to_string().contains("no repository provenance"));
+        assert!(contract.declared_schema("projection.schema.json").is_some());
+        contract.verify_unchanged()?;
+        let mut framework_manifest = contract.manifest().clone();
+        let framework_schema = contract
+            .schema("projection.schema.json")
+            .context("fixture projection schema")?
+            .value()
+            .clone();
+        let fixture_root = contract.source.contracts_root.clone();
+        assert!(fixture_root.is_dir());
+        let retained = contract.clone();
+        drop(contract);
+        assert!(
+            fixture_root.is_dir(),
+            "a clone must retain fixture repository ownership"
+        );
+        drop(retained);
+        assert!(
+            !fixture_root.exists(),
+            "the final promoted contract clone must clean its fixture repository"
+        );
 
-        let mut manifest = contract.manifest().clone();
-        manifest.test_set_framework_owner();
+        framework_manifest.test_set_framework_owner();
         let framework =
-            RepositoryContractTestBuilder::new(manifest, PathBuf::from("/missing")).build()?;
+            RepositoryContractTestBuilder::new(framework_manifest, PathBuf::from("/missing"))
+                .schema("projection.schema.json", framework_schema)
+                .build()?;
         assert!(framework.owner().is_framework_owned());
         Ok(())
     }

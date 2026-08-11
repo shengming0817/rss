@@ -8321,7 +8321,7 @@ fn mtls_config_from_env() {
             .iter()
             .find(|contract| contract.manifest().id == "settings.config-projection")
             .ok_or_else(|| anyhow::anyhow!("settings projection fixture missing"))?
-            .schema_hash()?;
+            .schema_hash();
         let activation = format!(
             r#"workflowActivations = [{{ mode = "projection", id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "{settings_digest}", targetGeneration = "v3", activation = "disabled" }}]"#
         );
@@ -8365,7 +8365,7 @@ fn mtls_config_from_env() {
             .iter()
             .find(|contract| contract.manifest().id == "audit.session-projection")
             .ok_or_else(|| anyhow::anyhow!("audit projection fixture missing"))?
-            .schema_hash()?;
+            .schema_hash();
         let invalid_audit = shadow.replace(
             &format!(
                 r#"id = "settings.config-projection", definitionVersion = "v3", definitionSchemaDigest = "{settings_digest}""#

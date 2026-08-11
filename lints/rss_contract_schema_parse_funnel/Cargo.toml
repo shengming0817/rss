@@ -1,0 +1,19 @@
+[package]
+name = "rss_contract_schema_parse_funnel"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "RSS contract schema parse-once funnel: compiler-resolved governed consumer call graph"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+clippy_utils = { git = "https://github.com/rust-lang/rust-clippy", rev = "f6d310692116e9a527ce6d0b3526c965d9c5d7b9" }
+dylint_linting = "6.0.1"
+
+[dev-dependencies]
+dylint_testing = "6.0.1"
+
+[package.metadata.rust-analyzer]
+rustc_private = true

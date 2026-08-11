@@ -2056,6 +2056,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss_contract_schema_parse_funnel"
+version = "0.0.0"
+dependencies = [
+ "clippy_utils",
+ "dylint_linting",
+ "dylint_testing",
+]
+
+[[package]]
 name = "rss_crosstenant_callsite"
 version = "0.0.0"
 dependencies = [

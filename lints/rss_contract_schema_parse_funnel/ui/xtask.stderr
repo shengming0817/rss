@@ -1,0 +1,27 @@
+warning: promoted contract/schema consumer 的调用闭包禁止重新解析 working repository JSON
+  --> $DIR/auxiliary/parser_helper.rs:5:18
+   |
+LL |     let parser = parse_json::<_, crate::serde_json::Value>;
+   |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 消费 DeclaredSchema/ResolvedSchema；working repository bytes 只能由私有 inspection parser 读取一次
+   = note: `#[warn(rss_contract_schema_parse_funnel)]` on by default
+
+warning: promoted contract/schema consumer 的调用闭包禁止重新解析 working repository JSON
+  --> $DIR/auxiliary/parser_helper.rs:7:13
+   |
+LL |     let _ = JsonDeserializer::from_slice(bytes);
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 消费 DeclaredSchema/ResolvedSchema；working repository bytes 只能由私有 inspection parser 读取一次
+
+warning: promoted contract/schema consumer 的调用闭包禁止重新解析 working repository JSON
+  --> $DIR/auxiliary/parser_helper.rs:9:22
+   |
+LL |     let closure = || crate::serde_json::from_slice::<crate::serde_json::Value>(bytes);
+   |                      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: 消费 DeclaredSchema/ResolvedSchema；working repository bytes 只能由私有 inspection parser 读取一次
+
+warning: 3 warnings emitted
+

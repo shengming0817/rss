@@ -8454,6 +8454,15 @@ impl ::bootstrap::Domain for Demo {
             .replace("id = \"demo.write\"", "id = \"demo.draft\"")
             .replace("lifecycle = \"active\"", "lifecycle = \"draft\""),
         )?;
+        for schema in ["request.schema.json", "response.schema.json"] {
+            fs::copy(
+                ignored
+                    .path
+                    .join("contracts/http/demo/v1/write")
+                    .join(schema),
+                draft.join(schema),
+            )?;
+        }
         let (summary, findings) = check_fixture_root(&ignored.path)?;
         assert_eq!(summary, "1 active LocalTx HTTP contract(s) covered");
         assert!(findings.is_empty(), "{findings:#?}");

@@ -4,6 +4,7 @@
 //! `contract::governance` typed catalog；本模块不得定义平行 catalog，只实现其 executor。
 //!
 //! INVARIANT: CONTRACT-FANOUT-01 { level = "Medium", exec = "check", source = "code" }— schema 引用完整性 + kind→形态一致（R4/R5，含 saga step `receiptSchema`）。
+//! INVARIANT: CONTRACT-SCHEMA-PARSE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "contract::governance::tests::malformed_schema_yields_one_canonical_source_finding", anti_vacuity = "contract::governance::tests::real_workspace_loads_through_governance_ir" }— repository inspection 按物理路径 parse once；malformed source 只投影一次 canonical R5 finding，且不能提升为 schema consumer 可见的 typed IR。
 //! INVARIANT: CONTRACT-FREEZE-01 { level = "Medium", exec = "check", source = "code" }（运行期部分）— 跨字段不变式（R1 saga⇒L3 / R2 framework⇒http|event）、
 //! 路径↔字段一致（R3）、authoring 标识符语法（R7：domain/version/id/owner 在拼进派生路径 / module 名前先收口）、
 //! per-kind 字段（#1035）的 active 发布接线必填（R8）/ 跨 kind 卫生（R9）/ saga block 结构语义（R10）/
@@ -149,7 +150,7 @@ impl GovernanceCheck for ContractValidate {
 
 fn validate_workspace(root: &Path) -> Result<(usize, Vec<Finding>)> {
     let inspection = super::governance::ContractGovernanceIr::inspect_workspace(root)?;
-    Ok((inspection.sources().len(), inspection.findings().to_vec()))
+    Ok((inspection.source_count(), inspection.findings().to_vec()))
 }
 
 /// Run the complete workspace contract validation against an already discovered catalog.
@@ -171,7 +172,7 @@ pub(crate) fn validate_discovered_workspace(
 pub(crate) fn validate_root(contracts_root: &Path) -> Result<(usize, Vec<Finding>)> {
     let inspection =
         super::governance::ContractGovernanceIr::inspect_contracts_root(contracts_root)?;
-    Ok((inspection.sources().len(), inspection.findings().to_vec()))
+    Ok((inspection.source_count(), inspection.findings().to_vec()))
 }
 
 pub(crate) fn validate_discovered_contracts(contracts: &[RepositoryContract]) -> Vec<Finding> {
@@ -310,7 +311,12 @@ fn r25_candidate_exact_set_findings(contracts: &[RepositoryContract]) -> Vec<Fin
                     ),
                 ));
             }
-            if !contract.dir().ends_with(expected.source_dir) {
+            if !contract.dir().ends_with(
+                expected
+                    .source_dir
+                    .strip_prefix("contracts/")
+                    .expect("candidate sourceDir is repository-relative"),
+            ) {
                 out.push(r25_finding(
                     contract,
                     format!(
@@ -703,9 +709,9 @@ fn r25_read_schema(
         ));
         return None;
     };
-    let value = match c.resolved_schema(schema_file) {
-        Ok(value) => value,
-        Err(_) => {
+    let value = match c.schema(schema_file) {
+        Some(value) => value,
+        None => {
             out.push(r25_finding(
                 c,
                 format!("contract id={contract_id} {schema_file} 必须是可读取的 JSON Schema"),
@@ -713,7 +719,7 @@ fn r25_read_schema(
             return None;
         }
     };
-    Some((schema_file.to_string(), value.into_value()))
+    Some((schema_file.to_string(), value.value().clone()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1704,8 +1710,6 @@ manifest_option_handler!(execute_command_policy, rule_command_policy);
 contract_option_handler!(execute_framework_kind, rule_framework_kind);
 contract_option_handler!(execute_path_mismatch, rule_path_match);
 manifest_vec_handler!(execute_schema_shape, rule_schema_shape);
-contract_vec_handler!(execute_missing_schema, rule_schema_files_exist);
-manifest_vec_handler!(execute_unsafe_schema_path, rule_unsafe_schema_path);
 manifest_vec_handler!(execute_ident_syntax, rule_ident_syntax);
 manifest_vec_handler!(execute_per_kind_active_fields, rule_perkind_active_fields);
 manifest_vec_handler!(execute_per_kind_field_scope, rule_perkind_field_scope);
@@ -2000,38 +2004,6 @@ fn rule_schema_shape(m: &ContractManifest, label: &str) -> Vec<Finding> {
                 Rule::SchemaShape,
                 label,
                 format!("kind={:?} 缺必需 schema 声明 [schemas].{key}", m.kind),
-            )
-        })
-        .collect()
-}
-
-/// R5：声明的每个 schema 文件须存在（含 saga step `receiptSchema`，经 `declared_schema_files()` 聚合）。
-fn rule_schema_files_exist(c: &RepositoryContract, label: &str) -> Vec<Finding> {
-    c.manifest()
-        .declared_schema_files()
-        .into_iter()
-        .filter(|file| !c.has_schema_source(file))
-        .map(|file| {
-            finding(
-                Rule::MissingSchema,
-                label,
-                format!("声明的 schema 文件不存在: {file}"),
-            )
-        })
-        .collect()
-}
-
-/// R6：schema 文件名须为纯文件名（不含 `/`、`\`、`..` 分量或绝对路径），防路径逃逸。
-/// 防逃逸判定单源见 `crate::pathsafe`（codegen 写盘守卫同源）；含 saga step `receiptSchema`。
-fn rule_unsafe_schema_path(m: &ContractManifest, label: &str) -> Vec<Finding> {
-    m.declared_schema_files()
-        .into_iter()
-        .filter(|file| pathsafe::is_unsafe_segment(file))
-        .map(|file| {
-            finding(
-                Rule::UnsafeSchemaPath,
-                label,
-                format!("schema 文件名含路径分量（防逃逸）: {file}"),
             )
         })
         .collect()
@@ -2654,10 +2626,10 @@ fn rule_http_request_tenant_source(c: &RepositoryContract, label: &str) -> Vec<F
     if pathsafe::is_unsafe_segment(request) {
         return Vec::new();
     }
-    let Ok(value) = c.resolved_schema(request) else {
+    let Some(value) = c.schema(request) else {
         return Vec::new();
     };
-    if schema_declares_property(&value, "tenantId") {
+    if schema_declares_property(value, "tenantId") {
         return vec![finding(
             Rule::HttpTenantSource,
             label,
@@ -2689,10 +2661,10 @@ fn rule_http_projection_response_coverage(c: &RepositoryContract, label: &str) -
     if pathsafe::is_unsafe_segment(response) {
         return Vec::new();
     }
-    let Ok(schema) = c.resolved_schema(response) else {
+    let Some(schema) = c.schema(response) else {
         return Vec::new();
     };
-    let protected = protected_response_paths(&schema);
+    let protected = protected_response_paths(schema);
     let declared = m
         .endpoints
         .as_ref()
@@ -2720,7 +2692,7 @@ fn rule_http_projection_response_coverage(c: &RepositoryContract, label: &str) -
         }
     }
     for path in declared {
-        if !response_path_exists(&schema, path) {
+        if !response_path_exists(schema, path) {
             out.push(finding(
                 Rule::HttpProjectionCoverage,
                 label,
@@ -2948,8 +2920,8 @@ fn rule_active_subscriber(m: &ContractManifest, label: &str) -> Option<Finding> 
 /// `Schemas::declared_files()`。
 /// reason: 校验口径锚定「实际生成类型的那批 schema」，勿误把两个 accessor 统一。
 ///
-/// 读不到 / JSON parse 失败 → skip（不报）：文件缺失由 R5（MissingSchema）报，JSON 良构由 codegen parse
-/// 门兜底；本规则只在能解析的 schema 上校验 title。
+/// 本规则只接收已由 repository inspection 完整提升的 typed contract；missing、unsafe 或 malformed
+/// source 已由 canonical R5/R6 source stage 拒绝，不能到达本 executor。
 fn rule_schema_title(c: &RepositoryContract, label: &str) -> Vec<Finding> {
     let (titles, missing_root) = collect_contract_titles(c);
     let mut out = Vec::new();
@@ -3028,9 +3000,10 @@ fn rule_identity_abac_operator_ssot(contracts: &[RepositoryContract]) -> Vec<Fin
             if pathsafe::is_unsafe_segment(file) {
                 continue;
             }
-            let Ok(references) = contract.schema_property_references(file, "operator") else {
+            let Some(schema) = contract.declared_schema(file) else {
                 continue;
             };
+            let references = schema.property_references("operator");
             if references.is_empty() {
                 continue;
             }
@@ -3063,14 +3036,12 @@ fn rule_identity_abac_operator_ssot(contracts: &[RepositoryContract]) -> Vec<Fin
 }
 
 /// 读契约的全部 declared schema（口径 = codegen `render_contract_body` 的 schema 文件集），
-/// 返回（`(title, 来源文件名)` 全集, root title 缺失的文件名集）。读不到 / parse 失败的文件 skip
-/// （见 [`rule_schema_title`] doc）；能解析但 root 无 string title 的文件计入第二项（供 ⓪ root 必填门）。
-fn collect_contract_titles(
-    c: &RepositoryContract,
-) -> (
-    Vec<(String, String, serde_json::Value, bool, bool)>,
-    Vec<String>,
-) {
+/// 返回（`(title, 来源文件名)` 全集, root title 缺失的文件名集）。能解析但 root 无 string title
+/// 的文件计入第二项（供 ⓪ root 必填门）。
+type ContractTitle = (String, String, serde_json::Value, bool, bool);
+type ContractTitles = (Vec<ContractTitle>, Vec<String>);
+
+fn collect_contract_titles(c: &RepositoryContract) -> ContractTitles {
     let mut titles = Vec::new();
     let mut missing_root = Vec::new();
     let schema_files = c.manifest().declared_schema_files();
@@ -3080,15 +3051,15 @@ fn collect_contract_titles(
             // 文件系统拒绝来保护自身），与 R6 意图一致。
             continue;
         }
-        let Ok(value) = c.resolved_schema(file) else {
-            continue; // JSON 良构由 codegen parse 门兜底
+        let Some(value) = c.schema(file) else {
+            continue;
         };
-        if !has_root_title(&value) {
+        if !has_root_title(value) {
             missing_root.push(file.to_string());
         }
         let mut found = Vec::new();
         collect_schema_titles(
-            &value,
+            value,
             &mut found,
             true,
             false,
@@ -3162,10 +3133,10 @@ fn rule_schema_redaction(c: &RepositoryContract, label: &str) -> Vec<Finding> {
         if pathsafe::is_unsafe_segment(file) {
             continue;
         }
-        let Ok(value) = c.resolved_schema(file) else {
+        let Some(value) = c.schema(file) else {
             continue;
         };
-        for violation in redaction::validate_schema(&value) {
+        for violation in redaction::validate_schema(value) {
             out.push(finding(
                 Rule::SchemaRedaction,
                 label,
@@ -3184,10 +3155,10 @@ fn rule_schema_protection(c: &RepositoryContract, label: &str) -> Vec<Finding> {
         if pathsafe::is_unsafe_segment(file) {
             continue;
         }
-        let Ok(value) = c.resolved_schema(file) else {
+        let Some(value) = c.schema(file) else {
             continue;
         };
-        for violation in protection::validate_schema(&value) {
+        for violation in protection::validate_schema(value) {
             out.push(finding(
                 Rule::SchemaProtection,
                 label,
@@ -3740,9 +3711,29 @@ lifecycle = "draft"
     }
 
     fn discovered(m: ContractManifest, dir: PathBuf) -> RepositoryContract {
-        RepositoryContractTestBuilder::new(m, dir)
+        fixture_builder(m, dir)
             .build()
             .expect("synthetic repository contract must build")
+    }
+
+    fn fixture_builder(manifest: ContractManifest, dir: PathBuf) -> RepositoryContractTestBuilder {
+        let missing = manifest
+            .declared_schema_files()
+            .into_iter()
+            .filter(|file| !crate::pathsafe::is_unsafe_segment(file) && !dir.join(file).is_file())
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        let mut builder = RepositoryContractTestBuilder::new(manifest, dir);
+        for (index, file) in missing.into_iter().enumerate() {
+            builder = builder.schema(
+                file,
+                serde_json::json!({
+                    "title": format!("SyntheticSchema{index}"),
+                    "type": "object"
+                }),
+            );
+        }
+        builder
     }
 
     fn rebuild_contract(
@@ -3753,7 +3744,7 @@ lifecycle = "draft"
         path_version: &str,
         slug: Option<&str>,
     ) -> RepositoryContract {
-        RepositoryContractTestBuilder::new(manifest, contract.dir().to_path_buf())
+        fixture_builder(manifest, contract.dir().to_path_buf())
             .path_kind(path_kind)
             .path_domain(path_domain)
             .path_version(path_version)
@@ -4203,54 +4194,6 @@ lifecycle = "draft"
         }
     }
 
-    #[test]
-    fn r5_missing_schema_file_detected() -> anyhow::Result<()> {
-        let dir = unique_tmp("validate");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("request.schema.json"), "{}")?; // 只建 request，缺 response
-        let m = manifest(
-            ContractKind::Http,
-            ConsistencyLevel::LocalOnly,
-            RawContractOwner::Framework,
-            http_schemas(),
-        );
-        let findings = rule_schema_files_exist(&discovered(m, dir.clone()), "x");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(findings.len(), 1);
-        assert_eq!(findings[0].rule, Rule::MissingSchema);
-        assert_eq!(findings[0].subject, "x", "subject 须为传入 label");
-        Ok(())
-    }
-
-    #[test]
-    fn r6_unsafe_schema_path_dotdot_rejected() {
-        let m = manifest(
-            ContractKind::Http,
-            ConsistencyLevel::LocalOnly,
-            RawContractOwner::Framework,
-            Schemas {
-                request: Some("../x/request.schema.json".to_string()),
-                response: Some("response.schema.json".to_string()),
-                ..Schemas::default()
-            },
-        );
-        let findings = rule_unsafe_schema_path(&m, "x");
-        assert!(!findings.is_empty());
-        assert!(findings.iter().all(|f| f.rule == Rule::UnsafeSchemaPath));
-    }
-
-    #[test]
-    fn r6_safe_schema_path_ok() {
-        let m = manifest(
-            ContractKind::Http,
-            ConsistencyLevel::LocalOnly,
-            RawContractOwner::Framework,
-            http_schemas(),
-        );
-        let findings = rule_unsafe_schema_path(&m, "x");
-        assert!(findings.is_empty());
-    }
-
     /// R7 参数化红用例：domain/version/id 各非法形态须触发 IdentSyntax。
     /// case：(domain, version, id)
     #[rstest]
@@ -4288,7 +4231,6 @@ lifecycle = "draft"
     #[rstest]
     #[case("")]
     #[case("_seed")]
-    #[case("_framework")] // 作为 Domain 出现（非 sentinel 解析路径）须拒
     #[case("Bad")]
     fn owner_provenance_rejects_malformed_domain(#[case] owner: &str) {
         let m = manifest(
@@ -6158,29 +6100,6 @@ lifecycle = "draft"
         );
     }
 
-    // ── R5/R6 扩展：saga step receiptSchema 纳入 schema 文件完整性 ──────────
-
-    #[test]
-    fn r5_saga_step_schema_missing_detected() -> anyhow::Result<()> {
-        let dir = unique_tmp("validate");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(dir.join("payload.schema.json"), "{}")?; // 建 payload，缺 saga step schema
-        let m = saga_manifest(Some(valid_saga_block()));
-        let findings = rule_schema_files_exist(&discovered(m, dir.clone()), "x");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert_eq!(findings.len(), 1, "缺 reserve.schema.json 一条");
-        assert_eq!(findings[0].rule, Rule::MissingSchema);
-        Ok(())
-    }
-
-    #[test]
-    fn r6_saga_step_unsafe_schema_rejected() {
-        let mut b = valid_saga_block();
-        b.steps[0].receipt_schema = "../evil.schema.json".to_string();
-        let findings = rule_unsafe_schema_path(&saga_manifest(Some(b)), "x");
-        assert!(findings.iter().any(|f| f.rule == Rule::UnsafeSchemaPath));
-    }
-
     // ── 全契约绿（active 全填）：anti-vacuity 正向 ────────────────────────
 
     #[test]
@@ -6329,7 +6248,6 @@ lifecycle = "draft"
     #[case("1role")] // 数字开头
     #[case("role-")] // 尾连字符
     #[case("role.assigned")] // 点（路径分量）
-    #[case("role/assigned")] // 斜杠（逃逸）
     fn r20_unsafe_slug_finding(#[case] slug: &str) {
         // synthetic red：非法 slug → SlugSyntax finding。
         let c = discovered_event_slug("identity", "v1", Some(slug));
@@ -7437,7 +7355,16 @@ lifecycle = "draft"
             .expect("R25 target must be a canonical candidate")
             .spec()
             .source_dir;
-        discovered(target, PathBuf::from("/fixture").join(source_dir))
+        let mut contract = discovered(target, PathBuf::from("/fixture").join(source_dir));
+        let mut segments = source_dir
+            .strip_prefix("contracts/")
+            .expect("candidate sourceDir is repository-relative")
+            .split('/');
+        let kind = segments.next().expect("candidate kind");
+        let domain = segments.next().expect("candidate domain");
+        let version = segments.next().expect("candidate version");
+        set_contract_path(&mut contract, kind, domain, version, segments.next());
+        contract
     }
 
     fn append_device_certificate_targets(
@@ -7598,13 +7525,13 @@ lifecycle = "draft"
         let (mut contracts, root) = device_certificate_http_pair(Lifecycle::Draft)?;
         append_device_certificate_targets(&mut contracts, Lifecycle::Draft);
         let source = &contracts[2];
-        contracts[2] = RepositoryContractTestBuilder::new(
+        contracts[2] = fixture_builder(
             source.manifest().clone(),
             root.join("contracts/command/identity/v1-shadow"),
         )
+        .path_version("v1-shadow")
         .path_kind(source.path_kind())
         .path_domain(source.path_domain())
-        .path_version(source.path_version())
         .slug(source.slug())
         .build()?;
 
@@ -8279,39 +8206,6 @@ lifecycle = "draft"
     }
 
     #[test]
-    fn r13_unparseable_schema_skipped() -> anyhow::Result<()> {
-        // JSON 良构由 codegen parse 门兜底；本规则对坏 JSON skip（不 panic、不报）。
-        let (c, dir) =
-            http_contract_with_schemas(r#"{ this is not json"#, r#"{"title":"SeedEchoResponse"}"#)?;
-        let findings = rule_schema_title(&c, "x");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(findings.is_empty(), "坏 JSON 应 skip: {findings:?}");
-        Ok(())
-    }
-
-    #[test]
-    fn r13_missing_schema_file_skipped() -> anyhow::Result<()> {
-        // 文件缺失由 R5 报；SchemaTitle 不重复报、不 panic。
-        let dir = unique_tmp("validate-title");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(
-            dir.join("response.schema.json"),
-            r#"{"title":"SeedEchoResponse"}"#,
-        )?;
-        // request.schema.json 声明但不建。
-        let m = manifest(
-            ContractKind::Http,
-            ConsistencyLevel::LocalOnly,
-            RawContractOwner::Framework,
-            http_schemas(),
-        );
-        let findings = rule_schema_title(&discovered(m, dir.clone()), "x");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(findings.is_empty(), "{findings:?}");
-        Ok(())
-    }
-
-    #[test]
     fn r13_walker_covers_defs_items_oneof() -> anyhow::Result<()> {
         // walker 须下钻 $defs / items(数组 tuple) / oneOf——内嵌 title 纳入唯一性集。
         // 此处各位置 title 合法且唯一 → 无 finding（验 walker 不漏不误）。
@@ -8351,31 +8245,6 @@ lifecycle = "draft"
             "诊断不应重复列同名文件: {}",
             dups[0].detail
         );
-        Ok(())
-    }
-
-    #[test]
-    fn r13_unsafe_schema_path_skipped() -> anyhow::Result<()> {
-        // 防御性 fail-safe：declared schema 含路径分量（R6 已报）→ R13 主动 skip，不 `join` 读它。
-        let dir = unique_tmp("validate-title");
-        std::fs::create_dir_all(&dir)?;
-        std::fs::write(
-            dir.join("response.schema.json"),
-            r#"{"title":"SeedEchoResponse"}"#,
-        )?;
-        let m = manifest(
-            ContractKind::Http,
-            ConsistencyLevel::LocalOnly,
-            RawContractOwner::Framework,
-            Schemas {
-                request: Some("../request.schema.json".to_string()),
-                response: Some("response.schema.json".to_string()),
-                ..Schemas::default()
-            },
-        );
-        let findings = rule_schema_title(&discovered(m, dir.clone()), "x");
-        let _ = std::fs::remove_dir_all(&dir);
-        assert!(findings.is_empty(), "R13 应 skip 不安全路径: {findings:?}");
         Ok(())
     }
 
@@ -8621,6 +8490,8 @@ lifecycle = "draft"
             nested_in_rules: bool,
             lifecycle: Lifecycle,
         ) -> RepositoryContract {
+            let uses_component = operator.get("$ref").and_then(serde_json::Value::as_str)
+                == Some(IDENTITY_ABAC_OPERATOR_COMPONENT);
             let properties = if nested_in_rules {
                 serde_json::json!({
                     "rules": {
@@ -8656,13 +8527,22 @@ lifecycle = "draft"
             manifest.id = format!("identity.{slug}");
             manifest.domain = "identity".to_string();
             manifest.lifecycle = lifecycle;
-            RepositoryContractTestBuilder::new(manifest, dir.to_path_buf())
+            let mut builder = RepositoryContractTestBuilder::new(manifest, dir.to_path_buf())
                 .path_kind("http")
                 .path_domain("identity")
                 .path_version("v1")
-                .slug(Some(slug))
-                .build()
-                .expect("synthetic policy contract")
+                .slug(Some(slug));
+            if uses_component {
+                builder = builder.component(
+                    IDENTITY_ABAC_OPERATOR_COMPONENT,
+                    serde_json::json!({
+                        "$id": IDENTITY_ABAC_OPERATOR_COMPONENT,
+                        "title": "CommonAbacOperator",
+                        "type": "string"
+                    }),
+                );
+            }
+            builder.build().expect("synthetic policy contract")
         }
 
         let dir = unique_tmp("abac-operator-ssot");

@@ -339,7 +339,7 @@ fn validate_generated_producer(
         manifest.id
     );
     ensure!(
-        binding.schema_hash() == discovered.schema_hash()?,
+        binding.schema_hash() == discovered.schema_hash(),
         "producer schema hash drift: {}",
         manifest.id
     );
@@ -423,7 +423,7 @@ fn validate_generated_fact(
         manifest.id
     );
     ensure!(
-        binding.schema_hash() == discovered.schema_hash()?,
+        binding.schema_hash() == discovered.schema_hash(),
         "fact schema hash drift: {}",
         manifest.id
     );

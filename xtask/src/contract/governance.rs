@@ -5,7 +5,8 @@
 
 use anyhow::{Context, Result, bail};
 use assembly_schema::repository_contract::{
-    RepositoryContract, load_contract_repository, verify_contract_repository_unchanged,
+    RepositoryContract, SchemaJsonErrorCategory, SchemaSourceIssueKind,
+    inspect_contract_repository, verify_contract_repository_unchanged,
 };
 use assembly_schema::{ContractOwner, contract_manifest::ContractManifest};
 use std::collections::BTreeSet;
@@ -42,6 +43,7 @@ pub(crate) enum RuleStage {
 /// Closed execution step shape used to derive validation plans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RuleStep {
+    SourceInspection,
     PerContract,
     Catalog,
     BreakingSchema,
@@ -53,9 +55,12 @@ pub(crate) type PerContractValidationHandler =
     fn(&RepositoryContract, &str) -> Vec<super::validate::Finding>;
 pub(crate) type CatalogValidationHandler =
     fn(&[RepositoryContract]) -> Vec<super::validate::Finding>;
+type SourceInspectionHandler =
+    fn(&assembly_schema::repository_contract::SchemaSourceIssue, &Path) -> super::validate::Finding;
 
 #[derive(Debug, Clone, Copy)]
 enum RuleExecution {
+    ValidationSource(SourceInspectionHandler),
     ValidationPerContract(PerContractValidationHandler),
     ValidationCatalog(CatalogValidationHandler),
     Breaking(BreakingDetector),
@@ -64,6 +69,7 @@ enum RuleExecution {
 impl RuleExecution {
     const fn step(self) -> RuleStep {
         match self {
+            Self::ValidationSource(_) => RuleStep::SourceInspection,
             Self::ValidationPerContract(_) => RuleStep::PerContract,
             Self::ValidationCatalog(_) => RuleStep::Catalog,
             Self::Breaking(BreakingDetector::Schema) => RuleStep::BreakingSchema,
@@ -270,8 +276,8 @@ contract_governance_catalog! {
         FrameworkKind => ("R2", Contract, ValidationPerContract(super::validate::execute_framework_kind), Manifest, Medium, "owner=_framework 仅可用于 framework 允许的契约 kind"),
         PathMismatch => ("R3", Contract, ValidationPerContract(super::validate::execute_path_mismatch), Repository, Medium, "磁盘 kind/domain/version/slug 必须与 manifest 身份精确一致"),
         SchemaShape => ("R4", Contract, ValidationPerContract(super::validate::execute_schema_shape), Manifest, Medium, "每种 contract kind 只能声明其闭合 schema slot 形状"),
-        MissingSchema => ("R5", Contract, ValidationPerContract(super::validate::execute_missing_schema), Schema, Medium, "每个已声明 schema 文件必须存在于同一真实契约目录"),
-        UnsafeSchemaPath => ("R6", Contract, ValidationPerContract(super::validate::execute_unsafe_schema_path), Schema, Medium, "schema 文件名必须是安全的单路径段且不得逃逸契约目录"),
+        MissingSchema => ("R5", Contract, ValidationSource(project_r5_source_issue), Schema, Medium, "每个已声明 schema source 必须存在且 JSON 良构；source inspection 按物理路径只投影一次 canonical finding"),
+        UnsafeSchemaPath => ("R6", Contract, ValidationSource(project_r6_source_issue), Schema, Medium, "schema 文件名必须是安全的单路径段且不得逃逸契约目录"),
         IdentSyntax => ("R7", Contract, ValidationPerContract(super::validate::execute_ident_syntax), Manifest, Medium, "domain/id/version/topic 等 authoring 标识必须符合各自 canonical grammar"),
         PerKindActiveFields => ("R8", Contract, ValidationPerContract(super::validate::execute_per_kind_active_fields), Manifest, Medium, "期望 active HTTP 有 path+method、active Event 有 topic+delivery、active Command 有 topic；拒绝任一 active 契约缺其发布接线字段"),
         PerKindFieldScope => ("R9", Contract, ValidationPerContract(super::validate::execute_per_kind_field_scope), Manifest, Medium, "kind 专属字段只能出现在对应 kind，禁止跨 kind 残留"),
@@ -345,13 +351,26 @@ pub(crate) fn rule_specs() -> impl Iterator<Item = &'static ContractRuleSpec> {
     ContractRuleId::ALL.iter().map(|id| id.spec())
 }
 
+fn source_inspection_plan() -> impl Iterator<Item = (ContractRuleId, SourceInspectionHandler)> {
+    ContractRuleId::ALL
+        .iter()
+        .filter_map(|rule| match rule.spec().execution {
+            RuleExecution::ValidationSource(handler) => Some((*rule, handler)),
+            RuleExecution::ValidationPerContract(_)
+            | RuleExecution::ValidationCatalog(_)
+            | RuleExecution::Breaking(_) => None,
+        })
+}
+
 pub(crate) fn per_contract_validation_plan()
 -> impl Iterator<Item = (ContractRuleId, PerContractValidationHandler)> {
     ContractRuleId::ALL
         .iter()
         .filter_map(|rule| match rule.spec().execution {
             RuleExecution::ValidationPerContract(handler) => Some((*rule, handler)),
-            RuleExecution::ValidationCatalog(_) | RuleExecution::Breaking(_) => None,
+            RuleExecution::ValidationSource(_)
+            | RuleExecution::ValidationCatalog(_)
+            | RuleExecution::Breaking(_) => None,
         })
 }
 
@@ -361,7 +380,9 @@ pub(crate) fn catalog_validation_plan()
         .iter()
         .filter_map(|rule| match rule.spec().execution {
             RuleExecution::ValidationCatalog(handler) => Some((*rule, handler)),
-            RuleExecution::ValidationPerContract(_) | RuleExecution::Breaking(_) => None,
+            RuleExecution::ValidationSource(_)
+            | RuleExecution::ValidationPerContract(_)
+            | RuleExecution::Breaking(_) => None,
         })
 }
 
@@ -382,7 +403,9 @@ pub(crate) fn breaking_execution_plan() -> Vec<BreakingDetector> {
     let mut detectors = breaking_rule_specs()
         .filter_map(|spec| match spec.execution {
             RuleExecution::Breaking(detector) => Some(detector),
-            RuleExecution::ValidationPerContract(_) | RuleExecution::ValidationCatalog(_) => None,
+            RuleExecution::ValidationSource(_)
+            | RuleExecution::ValidationPerContract(_)
+            | RuleExecution::ValidationCatalog(_) => None,
         })
         .collect::<BTreeSet<_>>()
         .into_iter()
@@ -421,13 +444,19 @@ pub(crate) fn render_rule_docs() -> String {
 #[derive(Debug, Clone)]
 pub(crate) struct ContractGovernanceInspection {
     contracts_root: PathBuf,
+    source_count: usize,
     repository: Vec<RepositoryContract>,
     findings: Vec<super::validate::Finding>,
 }
 
 impl ContractGovernanceInspection {
+    #[cfg(test)]
     pub(crate) fn sources(&self) -> &[RepositoryContract] {
         &self.repository
+    }
+
+    pub(crate) const fn source_count(&self) -> usize {
+        self.source_count
     }
 
     pub(crate) fn findings(&self) -> &[super::validate::Finding] {
@@ -488,21 +517,22 @@ impl GovernedContract {
         self.source.manifest_bytes()
     }
 
-    pub(crate) fn schema_path(&self, file: &str) -> Option<&Path> {
-        self.source.schema_path(file)
-    }
-
-    pub(crate) fn resolved_schema(
+    pub(crate) fn schema(
         &self,
         file: &str,
-    ) -> Result<assembly_schema::repository_contract::ResolvedSchema> {
-        self.source
-            .resolved_schema(file)
-            .map_err(anyhow::Error::new)
+    ) -> Option<&assembly_schema::repository_contract::ResolvedSchema> {
+        self.source.schema(file)
     }
 
-    pub(crate) fn schema_hash(&self) -> Result<String> {
-        assembly_schema::repository_contract::schema_hash(&self.source).map_err(anyhow::Error::new)
+    pub(crate) fn declared_schema(
+        &self,
+        file: &str,
+    ) -> Option<assembly_schema::repository_contract::DeclaredSchema<'_>> {
+        self.source.declared_schema(file)
+    }
+
+    pub(crate) fn schema_hash(&self) -> &str {
+        self.source.schema_hash()
     }
 }
 
@@ -603,6 +633,7 @@ impl ContractGovernanceIr {
         Self::from_inspection(
             ContractGovernanceInspection {
                 contracts_root: contracts_root.to_path_buf(),
+                source_count: repository.len(),
                 repository,
                 findings,
             },
@@ -614,7 +645,8 @@ impl ContractGovernanceIr {
     /// corpus validation visible at every call site; production APIs never change under cfg(test).
     #[cfg(test)]
     pub(crate) fn load_test_fixture_root(contracts_root: &Path) -> Result<Self> {
-        let repository = load_repository(contracts_root)?;
+        let inspection = inspect_contract_repository(contracts_root).map_err(anyhow::Error::new)?;
+        let repository = inspection.promote().map_err(anyhow::Error::new)?;
         Self::from_repository(contracts_root.to_path_buf(), repository, false)
     }
 
@@ -622,10 +654,20 @@ impl ContractGovernanceIr {
     /// validation produces findings.
     pub(crate) fn inspect_workspace(root: &Path) -> Result<ContractGovernanceInspection> {
         let contracts_root = root.join("contracts");
-        let repository = load_nonempty_repository(&contracts_root)?;
+        let (source_count, repository, source_findings) =
+            inspect_repository(&contracts_root, true)?;
+        if !source_findings.is_empty() {
+            return Ok(ContractGovernanceInspection {
+                contracts_root,
+                source_count,
+                repository,
+                findings: source_findings,
+            });
+        }
         let (_, findings) = super::validate::validate_discovered_workspace(root, &repository)?;
         Ok(ContractGovernanceInspection {
             contracts_root,
+            source_count,
             repository,
             findings,
         })
@@ -642,15 +684,16 @@ impl ContractGovernanceIr {
         contracts_root: &Path,
         require_nonempty: bool,
     ) -> Result<ContractGovernanceInspection> {
-        let repository = if require_nonempty {
-            load_nonempty_repository(contracts_root)?
+        let (source_count, repository, source_findings) =
+            inspect_repository(contracts_root, require_nonempty)?;
+        let findings = if source_findings.is_empty() {
+            super::validate::validate_discovered_contracts(&repository)
         } else {
-            require_real_directory(contracts_root)?;
-            load_repository(contracts_root)?
+            source_findings
         };
-        let findings = super::validate::validate_discovered_contracts(&repository);
         Ok(ContractGovernanceInspection {
             contracts_root: contracts_root.to_path_buf(),
+            source_count,
             repository,
             findings,
         })
@@ -762,20 +805,103 @@ impl ContractGovernanceIr {
     }
 }
 
-fn load_repository(contracts_root: &Path) -> Result<Vec<RepositoryContract>> {
-    load_contract_repository(contracts_root).map_err(anyhow::Error::new)
+fn load_nonempty_repository(contracts_root: &Path) -> Result<Vec<RepositoryContract>> {
+    let (_, repository, findings) = inspect_repository(contracts_root, true)?;
+    if !findings.is_empty() {
+        bail!("contract governance fixture contains invalid schema sources");
+    }
+    Ok(repository)
 }
 
-fn load_nonempty_repository(contracts_root: &Path) -> Result<Vec<RepositoryContract>> {
+fn inspect_repository(
+    contracts_root: &Path,
+    require_nonempty: bool,
+) -> Result<(
+    usize,
+    Vec<RepositoryContract>,
+    Vec<super::validate::Finding>,
+)> {
     require_real_directory(contracts_root)?;
-    let repository = load_repository(contracts_root)?;
-    if repository.is_empty() {
+    let inspection = inspect_contract_repository(contracts_root).map_err(anyhow::Error::new)?;
+    let source_count = inspection.len();
+    if require_nonempty && source_count == 0 {
         bail!(
             "contract governance repository contains no contracts: {}",
             contracts_root.display()
         );
     }
-    Ok(repository)
+    if !inspection.issues().is_empty() {
+        let findings = inspection
+            .issues()
+            .iter()
+            .map(|issue| {
+                let rule = match issue.kind() {
+                    SchemaSourceIssueKind::Missing | SchemaSourceIssueKind::Malformed => {
+                        ContractRuleId::MissingSchema
+                    }
+                    SchemaSourceIssueKind::UnsafeName => ContractRuleId::UnsafeSchemaPath,
+                };
+                let RuleExecution::ValidationSource(project) = rule.spec().execution else {
+                    unreachable!("source-owned contract rule must bind a source projector")
+                };
+                project(issue, contracts_root)
+            })
+            .collect();
+        return Ok((source_count, Vec::new(), findings));
+    }
+    let repository = inspection.promote().map_err(anyhow::Error::new)?;
+    if repository.is_empty() {
+        return Ok((source_count, repository, Vec::new()));
+    }
+    Ok((source_count, repository, Vec::new()))
+}
+
+fn source_issue_subject(
+    issue: &assembly_schema::repository_contract::SchemaSourceIssue,
+    _contracts_root: &Path,
+) -> String {
+    issue.path().display().to_string()
+}
+
+fn project_r5_source_issue(
+    issue: &assembly_schema::repository_contract::SchemaSourceIssue,
+    contracts_root: &Path,
+) -> super::validate::Finding {
+    let detail = match issue.kind() {
+        SchemaSourceIssueKind::Missing => {
+            format!("schema source 缺失: {} ({})", issue.file(), issue.message())
+        }
+        SchemaSourceIssueKind::Malformed => format!(
+            "schema JSON 非良构: {} category={} line={} column={}: {}",
+            issue.file(),
+            issue
+                .category()
+                .map_or("unknown", SchemaJsonErrorCategory::as_str),
+            issue.line(),
+            issue.column(),
+            issue.message()
+        ),
+        SchemaSourceIssueKind::UnsafeName => {
+            unreachable!("unsafe schema filename belongs to the R6 source projector")
+        }
+    };
+    crate::diagnostic::finding(
+        ContractRuleId::MissingSchema,
+        source_issue_subject(issue, contracts_root),
+        detail,
+    )
+}
+
+fn project_r6_source_issue(
+    issue: &assembly_schema::repository_contract::SchemaSourceIssue,
+    contracts_root: &Path,
+) -> super::validate::Finding {
+    assert_eq!(issue.kind(), SchemaSourceIssueKind::UnsafeName);
+    crate::diagnostic::finding(
+        ContractRuleId::UnsafeSchemaPath,
+        source_issue_subject(issue, contracts_root),
+        format!("schema 文件名不是安全单路径段: {:?}", issue.file()),
+    )
 }
 
 fn require_real_directory(path: &Path) -> Result<()> {
@@ -808,6 +934,7 @@ pub(crate) fn validate_catalog() -> Result<()> {
         .collect::<Vec<_>>();
     let validation_plan = per_contract_validation_plan()
         .map(|(id, _)| id.as_str())
+        .chain(source_inspection_plan().map(|(id, _)| id.as_str()))
         .chain(catalog_validation_plan().map(|(id, _)| id.as_str()))
         .collect::<Vec<_>>();
     exact_id_projection(
@@ -858,7 +985,10 @@ pub(crate) fn validate_catalog() -> Result<()> {
             RuleStage::Validation => {
                 if spec.gate() != GateId::ContractValidate
                     || spec.enforcement() != Enforcement::Medium
-                    || !matches!(spec.step(), RuleStep::PerContract | RuleStep::Catalog)
+                    || !matches!(
+                        spec.step(),
+                        RuleStep::SourceInspection | RuleStep::PerContract | RuleStep::Catalog
+                    )
                 {
                     bail!(
                         "contract validation rule {} has an invalid execution binding",
@@ -867,7 +997,9 @@ pub(crate) fn validate_catalog() -> Result<()> {
                 }
                 if !matches!(
                     spec.execution,
-                    RuleExecution::ValidationPerContract(_) | RuleExecution::ValidationCatalog(_)
+                    RuleExecution::ValidationSource(_)
+                        | RuleExecution::ValidationPerContract(_)
+                        | RuleExecution::ValidationCatalog(_)
                 ) {
                     bail!(
                         "contract validation rule {} has no typed handler",
@@ -1070,6 +1202,7 @@ role = "fact"
 
         let inspection = ContractGovernanceInspection {
             contracts_root: PathBuf::from("contracts"),
+            source_count: 0,
             repository: Vec::new(),
             findings: vec![finding],
         };
@@ -1167,6 +1300,88 @@ role = "fact"
         assert!(
             error.to_string().contains("  [R3] http/identity/v1:"),
             "{error}"
+        );
+
+        std::fs::remove_dir_all(contracts_root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn malformed_schema_yields_one_canonical_source_finding() -> Result<()> {
+        let contracts_root = crate::testutil::unique_tmp("contract-schema-parse-once-red");
+        let (manifest, schema) = write_snapshot_fixture(&contracts_root)?;
+        let manifest_source = std::fs::read_to_string(&manifest)?;
+        std::fs::write(
+            &manifest,
+            manifest_source.replace("kind = \"event\"", "kind = \"http\""),
+        )?;
+        std::fs::write(&schema, br#"{"title":"IdentityChanged""#)?;
+
+        let inspection = ContractGovernanceIr::inspect_contracts_root(&contracts_root)?;
+        assert_eq!(
+            inspection.findings().len(),
+            1,
+            "source-stage failure must suppress downstream semantic noise: {:?}",
+            inspection.findings()
+        );
+        let parse_findings = inspection
+            .findings()
+            .iter()
+            .filter(|finding| finding.rule == ContractRuleId::MissingSchema)
+            .collect::<Vec<_>>();
+        assert_eq!(parse_findings.len(), 1, "{:?}", inspection.findings());
+        assert_eq!(
+            parse_findings[0].subject,
+            "event/identity/v1/changed/payload.schema.json"
+        );
+        assert!(
+            parse_findings[0].detail.contains("JSON")
+                && parse_findings[0].detail.contains("payload.schema.json"),
+            "{:?}",
+            parse_findings[0]
+        );
+        assert!(
+            parse_findings[0].detail.contains("category=eof")
+                && parse_findings[0].detail.contains("line=1 column="),
+            "{:?}",
+            parse_findings[0]
+        );
+
+        std::fs::remove_dir_all(contracts_root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn missing_and_unsafe_schema_sources_are_owned_by_source_stage() -> Result<()> {
+        let contracts_root = crate::testutil::unique_tmp("contract-schema-source-stage");
+        let (manifest, schema) = write_snapshot_fixture(&contracts_root)?;
+        std::fs::remove_file(&schema)?;
+
+        let missing = ContractGovernanceIr::inspect_contracts_root(&contracts_root)?;
+        assert_eq!(missing.sources().len(), 0);
+        assert_eq!(missing.findings().len(), 1, "{:?}", missing.findings());
+        assert_eq!(missing.findings()[0].rule, ContractRuleId::MissingSchema);
+
+        std::fs::write(&schema, r#"{"title":"IdentityChanged","type":"object"}"#)?;
+        let source = std::fs::read_to_string(&manifest)?;
+        std::fs::write(
+            &manifest,
+            source.replace(
+                "payload = \"payload.schema.json\"",
+                "payload = \"../payload.schema.json\"",
+            ),
+        )?;
+        let unsafe_name = ContractGovernanceIr::inspect_contracts_root(&contracts_root)?;
+        assert_eq!(unsafe_name.sources().len(), 0);
+        assert_eq!(
+            unsafe_name.findings().len(),
+            1,
+            "{:?}",
+            unsafe_name.findings()
+        );
+        assert_eq!(
+            unsafe_name.findings()[0].rule,
+            ContractRuleId::UnsafeSchemaPath
         );
 
         std::fs::remove_dir_all(contracts_root)?;

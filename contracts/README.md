@@ -64,7 +64,7 @@ contracts/{kind}/{domain}/{version}/
 | R2 | `FrameworkKind` | `contract` | `manifest` | owner=_framework 仅可用于 framework 允许的契约 kind |
 | R3 | `PathMismatch` | `contract` | `repository` | 磁盘 kind/domain/version/slug 必须与 manifest 身份精确一致 |
 | R4 | `SchemaShape` | `contract` | `manifest` | 每种 contract kind 只能声明其闭合 schema slot 形状 |
-| R5 | `MissingSchema` | `contract` | `schema` | 每个已声明 schema 文件必须存在于同一真实契约目录 |
+| R5 | `MissingSchema` | `contract` | `schema` | 每个已声明 schema source 必须存在且 JSON 良构；source inspection 按物理路径只投影一次 canonical finding |
 | R6 | `UnsafeSchemaPath` | `contract` | `schema` | schema 文件名必须是安全的单路径段且不得逃逸契约目录 |
 | R7 | `IdentSyntax` | `contract` | `manifest` | domain/id/version/topic 等 authoring 标识必须符合各自 canonical grammar |
 | R8 | `PerKindActiveFields` | `contract` | `manifest` | 期望 active HTTP 有 path+method、active Event 有 topic+delivery、active Command 有 topic；拒绝任一 active 契约缺其发布接线字段 |

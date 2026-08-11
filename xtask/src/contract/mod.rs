@@ -209,7 +209,7 @@ mod tests {
         std::fs::create_dir_all(&root)?;
         std::fs::create_dir_all(&outside)?;
         symlink(&outside, root.join("event"))?;
-        assert!(assembly_schema::repository_contract::load_contract_repository(&root).is_err());
+        assert!(assembly_schema::repository_contract::inspect_contract_repository(&root).is_err());
 
         std::fs::remove_file(root.join("event"))?;
 
@@ -218,7 +218,7 @@ mod tests {
         let outside_manifest = outside.join("contract.toml");
         std::fs::write(&outside_manifest, "outside")?;
         symlink(&outside_manifest, contract_dir.join("contract.toml"))?;
-        assert!(assembly_schema::repository_contract::load_contract_repository(&root).is_err());
+        assert!(assembly_schema::repository_contract::inspect_contract_repository(&root).is_err());
 
         std::fs::remove_file(contract_dir.join("contract.toml"))?;
         std::fs::write(
@@ -239,7 +239,7 @@ role="fact"
         let outside_schema = outside.join("payload.schema.json");
         std::fs::write(&outside_schema, "{}")?;
         symlink(&outside_schema, contract_dir.join("payload.schema.json"))?;
-        assert!(assembly_schema::repository_contract::load_contract_repository(&root).is_err());
+        assert!(assembly_schema::repository_contract::inspect_contract_repository(&root).is_err());
 
         std::fs::remove_dir_all(root)?;
         std::fs::remove_dir_all(outside)?;

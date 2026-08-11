@@ -1368,7 +1368,7 @@ const SHIPPED_TEST_SUPPORT_FEATURE_BANS: &[(&str, &str, &str)] = &[
     (
         "assembly-schema",
         "test-support",
-        "RepositoryContractTestBuilder bypasses manifest-backed contract owner provenance",
+        "repository contract fixture construction must stay outside every shipped feature closure",
     ),
     (
         "runctx",
@@ -3052,7 +3052,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
         assert!(findings.is_empty(), "{findings:?}");
     }
 
-    /// 红：assembly-schema 的 synthetic repository/owner builder 不得进入 shipped graph。
+    /// 红：assembly-schema 的 repository fixture writer 不得进入 shipped graph。
     #[test]
     fn red_assembly_schema_repository_builder_in_dependencies() {
         let findings = scan_shipped_testsupport_features(&[sdep(
@@ -3062,7 +3062,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             &["test-support"],
         )]);
         assert_eq!(findings.len(), 1, "{findings:?}");
-        assert!(findings[0].detail.contains("owner provenance"));
+        assert!(findings[0].detail.contains("fixture construction"));
     }
 
     /// 红：`bootstrap/test-support` 单独条目（forge_topology_for_test）须 flagged。

@@ -10,6 +10,7 @@ fn assembly_lock_construction_is_sealed() {
     cases.compile_fail("tests/ui/contract_owner_private.rs");
     cases.compile_fail("tests/ui/raw_contract_owner_private.rs");
     cases.compile_fail("tests/ui/repository_contract_private.rs");
+    cases.compile_fail("tests/ui/declared_schema_path_removed.rs");
     cases.compile_fail("tests/ui/repository_manifest_private.rs");
     cases.compile_fail("tests/ui/repository_snapshot_private.rs");
 }

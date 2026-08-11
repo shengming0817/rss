@@ -27,4 +27,5 @@ members = [
   "rss_test_no_bare_sleep",
   "rss_instrument_err_level",
   "rss_diagctx_auth_source",
+  "rss_contract_schema_parse_funnel",
 ]

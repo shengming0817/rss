@@ -2146,6 +2146,10 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[];
             root.join("contracts/event/identity/v1/session-created/contract.toml"),
             VALID_CONTRACT,
         )?;
+        fs::write(
+            root.join("contracts/event/identity/v1/session-created/payload.schema.json"),
+            include_str!("../../contracts/event/identity/v1/session-created/payload.schema.json"),
+        )?;
         fs::create_dir_all(root.join("journeys-fault-matrix/tests"))?;
         fs::write(
             root.join(JOURNEY_MANIFEST),
