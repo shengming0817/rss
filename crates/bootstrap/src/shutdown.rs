@@ -126,9 +126,6 @@ impl Drop for CancelOnDrop {
     }
 }
 
-// ShutdownStack 的 deferred-cancel wrapper 住在 bootstrap（服务层），不是 provider adapter。
-// diport allowlist 仅 adapters/bins/assemblies/composition；本 impl 是栈私有 cancel 载体，非 DI provider。
-#[allow(unknown_lints, rss_diport_impl_allowlist)] // reason: bootstrap ShutdownStack owns DeferredCancellationResource
 impl ManagedResource for DeferredCancellationResource {
     fn name(&self) -> &str {
         &self.name

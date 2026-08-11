@@ -860,12 +860,6 @@ impl AdoptedWorker {
 }
 
 /// 由 newtype 包裹 [`AdoptedWorker`] 生成 public worker + 委派 `ManagedResource`（仅 `name()` 各异）。
-///
-/// reason(rss_diport_impl_allowlist): spec T004.4 显式将 outbox 后台 worker 归属 eventexec 服务层并 impl
-/// `ManagedResource`（经组合根 ShutdownStack 注入两阶段关闭）。`ManagedResource` 是生命周期 trait（非可替换
-/// provider port），worker 持 loop spawn 的 JoinHandle、是引擎驱动产物而非 adapter provider，不迁 adapter。
-/// allowlist 外 item-level 例外（DIPORT-IMPL-ALLOWLIST-01 逃生门）；根治（豁免 `ManagedResource` 出 lint 扫描集）
-/// 见 #1153。unknown_lints 同 allow：dylint 自定义 lint 在 plain clippy 未注册（make verify 跑 plain clippy + dylint 双路）。
 macro_rules! adopt_worker {
     ($(#[doc = $doc:literal])+ $worker:ident => $name_const:ident) => {
         $(#[doc = $doc])+
@@ -889,7 +883,6 @@ macro_rules! adopt_worker {
             }
         }
 
-        #[allow(unknown_lints, rss_diport_impl_allowlist)]
         impl diport::ManagedResource for $worker {
             fn name(&self) -> &str {
                 $name_const
@@ -946,10 +939,6 @@ impl SweeperWorker {
     }
 }
 
-// reason(rss_diport_impl_allowlist): 同 adopt_worker! 宏——sweeper 后台 worker 归属 eventexec 服务层并 impl
-// `ManagedResource`（经组合根 ShutdownStack 注入两阶段关闭）；worker 持 loop spawn 的 JoinHandle、是引擎驱动产物
-// 而非 adapter provider，不迁 adapter。allowlist 外 item-level 例外（DIPORT-IMPL-ALLOWLIST-01 逃生门，根治见 #1153）。
-#[allow(unknown_lints, rss_diport_impl_allowlist)]
 impl diport::ManagedResource for SweeperWorker {
     fn name(&self) -> &str {
         self.name

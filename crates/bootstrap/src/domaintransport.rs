@@ -128,6 +128,7 @@ mod tests {
     const URL_IDENTITY: &str = "https://identity.internal/rpc";
     const URL_SHARED: &str = "https://gateway.internal/rpc";
 
+    #[allow(clippy::expect_used)] // reason: test-only helper parses fixed valid HTTPS fixture constants
     fn endpoint(raw: &str) -> DomainHttpEndpoint {
         DomainHttpEndpoint::parse(raw).expect("valid domain HTTP endpoint fixture")
     }

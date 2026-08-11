@@ -105,9 +105,6 @@ impl SagaWorker {
     }
 }
 
-#[allow(unknown_lints, rss_diport_impl_allowlist)]
-// reason(rss_diport_impl_allowlist): saga background worker is an eventexec runtime resource,
-// matching RelayWorker/ProjectionWorker ManagedResource ownership.
 impl ManagedResource for SagaWorker {
     fn name(&self) -> &str {
         &self.name

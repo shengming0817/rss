@@ -8,6 +8,7 @@
 - **后续修订**：**Amendment（#1142，2026-06-25）**——新增 ack-capable delivery seam（`Acker` / `AckableSubscriber` 两个 async DI port + `Delivery`/`AckAction` 值类型），照本 ADR 既定 `make(X: Send)`+dynosaur 范式扩端口（**非新机制**），使 AMQP 消费达成 at-least-once。§7 补行、威胁矩阵重评。见下「Amendment（#1142）」节。
 - **后续修订**：**Amendment（#1168，2026-07-14）**——DLX lifecycle 两个 provider-neutral port 归 `diport`，按 #1095 的多次 `Send + Sync` 调用形态使用 `trait_variant` Send 变体 + 静态泛型；不生成无消费方的 dyn wrapper。第三个 cipher port 删除，eventexec 直接静态消费既有 `KeyProvider`。见下「Amendment（#1168）」节。
 - **后续修订**：**Amendment（#1828，2026-07-16）**——HTTP serving 的 PDP 必须跨 Pending 共享，故 `PdpLocal` / `Pdp` 收紧为 `Send + Sync`，成为 #1095 默认规则的窄例外；同步轮询路径删除并由机器门禁止。
+- **后续修订**：**Amendment（#1153，2026-08-11）**——`ManagedResource` / `ManagedResourceLocal` 明确分类为 lifecycle seam，不属于 provider impl-site allowlist；其合法实现面覆盖 adapter resource、service worker 与 runtime wrapper。见下「Amendment（#1153）」节。
 - **归属**：framework（DI 接缝是 provider-agnostic 基础设施，不绑单一域）
 - **AI-robust 评级**：见 §7（本 ADR 引入的 enforcement 逐条 Hard/Medium）
 
@@ -39,6 +40,32 @@ dynosaur 0.3 落地 spike 实测，三项开放风险结论 + 对原 ADR 的修�
 5. **ManagedResource（§7 末条 + 跨 ADR-001 冲突）→ 已收敛**：迁入 `diport` 改 dynosaur Send 变体；`bootstrap`
    `ShutdownStack` 以 `Box<DynManagedResource<'static>>` 持有并 `tokio::spawn` 隔离 panic——`Box` 仅需 `Send`
    （免 `Arc` 的 `Send+Sync`），并去掉原 `Arc::clone`。ADR-001 威胁矩阵同步重评（见 ADR-001 落地回写）。
+
+---
+
+## Amendment（2026-08-11，#1153）：ManagedResource lifecycle seam 分类
+
+**触发**：DIPORT-IMPL-ALLOWLIST-01 最初以“`diport` 只包含 provider port”为前提，把 crate 中任一 trait 的
+production impl 都限制到 adapter / 组合根。`ManagedResource` 实际是由 `ShutdownStack` 驱动的进程内生命周期
+协议；relay、saga、blocking worker 等 service-owned resource 必须在其行为所有者处实现，继续复制 item-level
+escape hatch 只会掩盖分类错误。
+
+**决策**：`ManagedResource` 与 trait-variant 基 trait `ManagedResourceLocal` 保持位于 `diport`，作为跨 crate
+lifecycle seam；它们不属于 provider impl-site allowlist。adapter resource、service worker 与 runtime wrapper
+均可在各自 crate 实现。其余 `diport` trait 仍 fail-closed 受原 package allowlist 约束，不改公开 trait、dyn
+wrapper、`ShutdownStack` 或 provider 实现位置规则。
+
+### 威胁矩阵 / AI-robust 重评
+
+- **provider impl 面**：不退化。Dylint 以 trait `DefId` 的 canonical DefPath 精确排除两个 lifecycle 身份；
+  其它 `diport` trait 默认受限（Medium，DIPORT-IMPL-ALLOWLIST-01）。按名称、源文件或 consumer crate 放宽均不成立。
+- **lifecycle impl 面**：允许行为所有者实现是目标能力，不是绕过。Rust sealing 会同时禁止独立 adapter 的合法
+  实现，故不存在低成本 Hard 载体；UI synthetic red/green 与 workspace Dylint 提供 anti-vacuity（Medium）。
+- **运行期与依赖面**：无新增攻击面或依赖边。生命周期关闭顺序、panic 隔离及 timeout 仍由 ADR-001 与
+  `ShutdownStack` 约束；本 amendment 只修正静态治理分类。
+
+> 上方「落地结论」第 2 项“任一 diport port trait”是 #1060 时的历史表述；自本 amendment 起仅指
+> provider port，不包含上述两个 lifecycle trait。
 
 ---
 
@@ -470,6 +497,7 @@ dylint Medium（#1060 闭环）。
 | **必填 DI 依赖非 Option** | **Hard（类型系统）** | 构造器必填位置参 `Box<Dyn*>`，缺失即编译错误（ai-robust 范本）。 |
 | **dynosaur 版本 pin** | **Medium（cargo-deny）** | `deny.toml` 注释 ID：dynosaur `=0.3.x`。列 §8 follow-up（`diport` 落地时加）。 |
 | **shutdown 逆序关闭** | **Soft（当前）→ Medium（`bootstrap` 框架落地后）** | 逆序类型系统管不到（无 async Drop）。`bootstrap` shutdown 框架（§8 follow-up，**尚未落地**）按注册逆序统一执行 `shutdown()` 后升 Medium；在此之前为 Soft，故该框架是 `diport` 实落的**前置项**而非可选 follow-up——**禁止**长期停留在「组合根手记顺序」的 Soft 纪律。 |
+| **provider port impl-site allowlist**（Amendment #1153：lifecycle seam 不属于 provider port） | **Medium（Dylint）** | `rss_diport_impl_allowlist` 以 canonical trait DefPath 精确排除 `ManagedResource` / `ManagedResourceLocal`；其余 `diport` trait fail-closed，package manifest parent allowlist 与 item-level escape hatch 不变。UI synthetic red/green + workspace Dylint 锁 anti-vacuity。 |
 | **多次调用 async 消费者注入形态收口**（Amendment #1095：`Arc<DynX>` 跨 Send future 不可表达，改泛型静态分发） | **Hard（类型系统）+ Medium 回归锁** | `Arc<DynX>: !Send`（`DynX` Send 非 Sync）使误用 `tokio::spawn` 处 `E0277`（Hard，不依赖人记）；负例 `tests/ui/arc_dyn_ports_not_send.rs`（trybuild compile-fail，**Medium** anti-vacuity，INVARIANT DIPORT-ASYNC-ARC-SEND-01）锁事实，改 Send+Sync（Option A）即破。详见 Amendment（#1095）。 |
 | **Dyn* Arc Send/Sync concurrency buckets**（Amendment #1331 / #1319：`async_sync` / `async_send` / `sync_obj` 闭集） | **Hard（类型系统）+ Medium 回归锁** | Hard：`classify_ports!` + sealed `DiPortConcurrency` + `async_sync` 臂 `assert_send_sync_bound::<Arc<DynX>>()`（native-compile，INVARIANT DIPORT-DYN-CONCURRENCY-01）。Medium：`ui_assert_*` trybuild anti-vacuity（同 INVARIANT，`source=trybuild`）。四处同源含 xtask `collect_diport` Dyn* export vs `async_sync∪async_send` exact-set。详见 Amendment（#1828 / #1331）。 |
 | **ack seam 不挂 `Message` 冻结值类型**（Amendment #1142：acker 落 `Delivery` 独立 seam） | **Hard（类型系统）** | `Acker` 句柄经 `Delivery { message, acker }` 与 `Message` 并置，`Message` 无 ack/nack 字段或方法——给 `Message` 加 acker 即触其冻结（无 setter / Debug 脱敏 DIPORT-DTO-PII-DEBUG-REDACT-01）。`AckAction` 用 typed enum 而非 `requeue: bool`（typed function choice 范本）。新端口宏依赖/impl 面复用 DIPORT-MACRO-CONFINE-01′ + DIPORT-IMPL-ALLOWLIST-01（`deny.toml` 无需改）。详见 Amendment（#1142）。 |

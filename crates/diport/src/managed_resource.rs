@@ -1,8 +1,9 @@
-//! `ManagedResource` —— 进程关闭时按依赖逆序 await 关干净的托管资源 DI port。
+//! `ManagedResource` —— 进程关闭时按依赖逆序 await 关干净的生命周期 seam。
 //!
 //! 关闭编排（[`ShutdownStack`] + 两阶段 LIFO 驱动器）归属 `bootstrap`（ADR-001）；本 crate 仅持
-//! **port trait 单源**——adapters（postgres / amqp / relay …）`impl ManagedResource`，经组合根注入
-//! `bootstrap` 的 `ShutdownStack`。迁入 diport 因 ADR-003 把可替换 provider DI port 统一 dynosaur 派发
+//! **lifecycle trait 单源**——adapter resource、服务 worker 与 runtime wrapper 均可 `impl ManagedResource`，
+//! 经组合根注入 `bootstrap` 的 `ShutdownStack`。它与 provider port 同置于 diport 以复用 dynosaur 派发，
+//! 但不受 provider impl-site allowlist 限制。迁入 diport 因 ADR-003 把跨 crate async trait 统一 dynosaur 派发
 //! （原 ADR-001 用 `#[async_trait]` + `Arc<dyn>`，inter-ADR 冲突在 PR-diport 收敛，见 ADR-001/ADR-003 回链）。
 //!
 //! [`ShutdownStack`]: 见 `bootstrap` crate。
@@ -66,7 +67,7 @@ impl<T> Drop for OwnedTask<T> {
 /// （DB pool / outbox relay / event consumer / 后台 worker / HTTP listener 等）。
 ///
 /// Rust 无 async `Drop`——关闭顺序与等待由 `bootstrap::ShutdownStack` 显式驱动，而非 RAII `Drop`。
-/// 公开 [`ManagedResource`] 是 **Send 变体**（adapters `impl ManagedResource for ...`）；
+/// 公开 [`ManagedResource`] 是 **Send 变体**（adapter resource / service worker / runtime wrapper 均可实现）；
 /// [`DynManagedResource`] 是其 dyn-compatible wrapper——`ShutdownStack` 以
 /// `Box<DynManagedResource<'static>>` 持有并 `tokio::spawn` 隔离 panic（boxed future 须 Send，
 /// 故走 Send 变体）。非 Send 基 trait `ManagedResourceLocal` 不在 crate 根 re-export。
@@ -109,7 +110,7 @@ pub trait ManagedResourceLocal {
     }
 }
 
-/// 资源关闭失败：adapter 实现 [`ManagedResource::shutdown`] 时返回的 typed 错误。
+/// 资源关闭失败：lifecycle owner 实现 [`ManagedResource::shutdown`] 时返回的 typed 错误。
 ///
 /// **PII 边界**（替代 `anyhow` 暴露在公共 port）：`Display` 仅输出资源无关的安全摘要常量
 /// （不含 runtime 数据）；source 经 [`RedactedSource`] 脱敏（`Debug`/`Display` 固定 `<redacted>`、

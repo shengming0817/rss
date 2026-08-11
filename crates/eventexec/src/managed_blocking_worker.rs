@@ -159,9 +159,6 @@ where
     })
 }
 
-#[allow(unknown_lints, rss_diport_impl_allowlist)]
-// reason(rss_diport_impl_allowlist): eventexec owns this lifecycle primitive; it supervises an
-// already-typed event worker runner and is not an adapter/provider implementation.
 impl diport::ManagedResource for ManagedBlockingWorker {
     fn name(&self) -> &str {
         &self.name

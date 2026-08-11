@@ -2517,13 +2517,13 @@ mod tests {
     /// - CapVisit 捕获 per-event 字段 map（Vec<HashMap<String,String>>），
     ///   每个 ERROR 事件一条，断言「存在某条 event 其 domain=="tc5-domain" 且含全部六字段」。
     ///
-    /// 实现：自定义轻量 `tracing::Subscriber` + `block_on`，set_global_default 消除
-    /// callsite interest cache 导致的 flake（nextest 每测试独立进程；cargo test 单进程仅此设全局）。
+    /// 实现：自定义轻量 `tracing::Subscriber` + `block_on`；线程局部 subscriber
+    /// 隔离并行测试，并以 `Interest::always()` 避免 callsite interest cache 导致 flake。
     #[test]
     fn tc5_dlx_tracing_fields_and_no_payload_leak() {
         use std::collections::HashMap;
-        use std::sync::atomic::AtomicBool;
         use tracing::field::{Field, Visit};
+        use tracing::subscriber::Interest;
         use tracing::{Event, Id, Metadata, span};
 
         // 每个 ERROR 事件捕获为独立 HashMap<fieldname, value>。
@@ -2568,10 +2568,13 @@ mod tests {
         // 极简 Subscriber——只捕获 ERROR 事件，其余方法 noop。
         struct CapSubscriber {
             captured: Arc<Captured>,
-            enabled: AtomicBool,
         }
 
         impl tracing::Subscriber for CapSubscriber {
+            fn register_callsite(&self, _metadata: &'static Metadata<'static>) -> Interest {
+                Interest::always()
+            }
+
             fn enabled(&self, meta: &Metadata<'_>) -> bool {
                 let _ = meta;
                 true
@@ -2590,7 +2593,6 @@ mod tests {
                 if *event.metadata().level() != tracing::Level::ERROR {
                     return;
                 }
-                let _ = self.enabled.load(Ordering::Relaxed);
                 let mut visitor = CapVisit {
                     current: HashMap::new(),
                 };
@@ -2604,47 +2606,46 @@ mod tests {
         let captured = Captured::new();
         let subscriber = CapSubscriber {
             captured: captured.clone(),
-            enabled: AtomicBool::new(true),
         };
 
-        // set_global_default 消除 callsite interest cache flake（与旧 TC5 同理，见旧注释）。
-        let _ = tracing::subscriber::set_global_default(subscriber);
         #[allow(clippy::unwrap_used)]
         // reason: 测试 runtime 构造，item-level carve-out
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(async {
-            let idem = FakeInboxStore::fresh();
-            let dlx_store = FakeDeadLetterStore::new();
-            let dlx = fake_dlx(dlx_store.clone());
-            let handler_count = Arc::new(AtomicU32::new(0));
+        tracing::subscriber::with_default(subscriber, || {
+            rt.block_on(async {
+                let idem = FakeInboxStore::fresh();
+                let dlx_store = FakeDeadLetterStore::new();
+                let dlx = fake_dlx(dlx_store.clone());
+                let handler_count = Arc::new(AtomicU32::new(0));
 
-            // 唯一 meta（domain="tc5-domain"），与 TC2/TC3 "identity" 区分——anti-vacuity 核心。
-            let tc5_meta = ConsumerMeta::new(
-                "tc5-domain",
-                "tc5-domain",
-                "tc5-contract",
-                "tc5-topic",
-                "tc5-group",
-                tenant_authority(),
-            );
-            let payload = b"SENSITIVE_PAYLOAD_BYTES";
-            let msg = Message::new_with_metadata(
-                "msg-t007-tc5",
-                payload.to_vec(),
-                tenant_metadata_for("msg-t007-tc5", "tc5-domain", "tc5-contract", "tc5-topic"),
-            );
-            run_consumer(
-                Box::pin(futures::stream::iter(vec![msg])),
-                idem,
-                dlx,
-                tc5_meta,
-                handler_reject(handler_count),
-                lease_cfg_test(),
-            )
-            .await;
+                // 唯一 meta（domain="tc5-domain"），与 TC2/TC3 "identity" 区分——anti-vacuity 核心。
+                let tc5_meta = ConsumerMeta::new(
+                    "tc5-domain",
+                    "tc5-domain",
+                    "tc5-contract",
+                    "tc5-topic",
+                    "tc5-group",
+                    tenant_authority(),
+                );
+                let payload = b"SENSITIVE_PAYLOAD_BYTES";
+                let msg = Message::new_with_metadata(
+                    "msg-t007-tc5",
+                    payload.to_vec(),
+                    tenant_metadata_for("msg-t007-tc5", "tc5-domain", "tc5-contract", "tc5-topic"),
+                );
+                run_consumer(
+                    Box::pin(futures::stream::iter(vec![msg])),
+                    idem,
+                    dlx,
+                    tc5_meta,
+                    handler_reject(handler_count),
+                    lease_cfg_test(),
+                )
+                .await;
+            });
         });
 
         // 找到 domain=="tc5-domain" 的 event（排除并发 TC2/TC3 的 "identity" 污染）。
