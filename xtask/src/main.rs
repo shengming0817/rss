@@ -93,7 +93,9 @@ fn main() -> Result<()> {
 fn dispatch(command: Command) -> Result<()> {
     match command {
         Command::Codegen { check } => codegen::run(check),
-        Command::PackageProof => package_proof::run_command(),
+        Command::PackageProof {
+            export_candidate_bundle,
+        } => package_proof::run_command(export_candidate_bundle.as_deref()),
         Command::CdcConfig(CdcConfigCommand::Debezium) => cdc_config::run_debezium(),
         Command::Contract(ContractCommand::Validate) => {
             diagnostic::run_check(&contract::validate::ContractValidate)

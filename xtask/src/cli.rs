@@ -42,7 +42,11 @@ pub(crate) enum Command {
         check: bool,
     },
     /// Build a real `.crate` and prove it from an independent offline local-registry consumer.
-    PackageProof,
+    PackageProof {
+        /// Atomically export the proven Release Surface as a portable candidate bundle.
+        #[arg(long, value_name = "ABSENT_ABSOLUTE_DIR")]
+        export_candidate_bundle: Option<PathBuf>,
+    },
     /// Debezium / CDC connector skeleton。
     #[command(subcommand)]
     CdcConfig(CdcConfigCommand),
@@ -334,6 +338,14 @@ impl Command {
     /// RSS 跨字段业务前置；clap 已表达的结构约束不再重复。
     pub(crate) fn validate(&self) -> Result<()> {
         match self {
+            Self::PackageProof {
+                export_candidate_bundle: Some(output),
+            } => {
+                if !output.is_absolute() || output.file_name().is_none() {
+                    bail!("package-proof --export-candidate-bundle 必须是带目录名的绝对路径");
+                }
+                Ok(())
+            }
             Self::Verify {
                 fast, fresh, only, ..
             } => {
@@ -483,6 +495,29 @@ mod tests {
             Command::Codegen { check: true }
         );
         assert!(parse(&["codegen", "extra"]).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn try_parse_package_proof_export_is_closed() -> Result<()> {
+        assert_eq!(
+            parse(&["package-proof"])?,
+            Command::PackageProof {
+                export_candidate_bundle: None,
+            }
+        );
+        assert_eq!(
+            parse(&[
+                "package-proof",
+                "--export-candidate-bundle",
+                "/tmp/rss-candidate-bundle",
+            ])?,
+            Command::PackageProof {
+                export_candidate_bundle: Some("/tmp/rss-candidate-bundle".into()),
+            }
+        );
+        assert!(parse(&["package-proof", "--export-candidate-bundle", "relative",]).is_err());
+        assert!(parse(&["package-proof", "--diag-version", "0.1.0"]).is_err());
         Ok(())
     }
 

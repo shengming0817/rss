@@ -1,7 +1,7 @@
 //! Real `.crate` → local registry → independent locked/offline consumer proof.
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
@@ -31,18 +31,19 @@ const STANDALONE_REPOSITORY: &str = "https://github.com/shengming0817/rss-standa
 /// The pinned external Git repository consumes both standalone candidates from this invocation's
 /// same-HEAD local registry. Its manifest, resolved graph, generated lock and executed tests must
 /// agree exactly; path/git/workspace sources and every other RSS package fail closed.
-pub(crate) fn run_command() -> Result<()> {
+pub(crate) fn run_command(export_candidate_bundle: Option<&Path>) -> Result<()> {
     let root = crate::workspace_root()?;
     let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
     let facts = command_facts.get()?;
     let surface = crate::publicapi::validated_release_surface(&root, facts)?;
-    run(&root, facts, &surface)
+    run(&root, facts, &surface, export_candidate_bundle)
 }
 
 pub(crate) fn run(
     root: &Path,
     facts: &WorkspaceFacts,
     surface: &crate::release_surface::ReleaseSurface,
+    export_candidate_bundle_path: Option<&Path>,
 ) -> Result<()> {
     require_tracked_clean(root)?;
     let head = crate::cmd::source_revision(root)?;
@@ -103,9 +104,57 @@ pub(crate) fn run(
     }
     init_git(&index)?;
 
+    if let Some(output) = export_candidate_bundle_path {
+        let packages = artifacts
+            .iter()
+            .map(|artifact| CandidateBundlePackage {
+                name: artifact.plan.package.clone(),
+                version: artifact.plan.version.clone(),
+                checksum: artifact.checksum.clone(),
+            })
+            .collect::<Vec<_>>();
+        let portable_registry = temp.root.join("portable-candidate-registry");
+        export_candidate_bundle(output, &head, &packages, &registry, |bundle| {
+            materialize_candidate_bundle_registry(bundle, &portable_registry)?;
+            run_registry_consumers(
+                root,
+                facts,
+                surface,
+                &plans,
+                &artifacts,
+                &portable_registry.join("index"),
+                &temp.root,
+                &head,
+            )?;
+            Ok(())
+        })?;
+        println!(
+            "package-proof: candidate-bundle={} rss-head={} packages={}",
+            output.display(),
+            head,
+            packages.len()
+        );
+    } else {
+        run_registry_consumers(
+            root, facts, surface, &plans, &artifacts, &index, &temp.root, &head,
+        )?;
+    }
+    Ok(())
+}
+
+fn run_registry_consumers(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    surface: &crate::release_surface::ReleaseSurface,
+    plans: &[PackageProofPlan],
+    artifacts: &[PackageArtifact<'_>],
+    index: &Path,
+    proof_root: &Path,
+    head: &str,
+) -> Result<String> {
     let mut executed = BTreeSet::new();
-    for artifact in &artifacts {
-        run_archive_consumer(root, artifact.plan, &index, &temp.root).with_context(|| {
+    for artifact in artifacts {
+        run_archive_consumer(root, artifact.plan, index, proof_root).with_context(|| {
             format!(
                 "archive consumer proof failed for `{}`",
                 artifact.plan.package
@@ -119,7 +168,7 @@ pub(crate) fn run(
             artifact.plan.package, artifact.plan.version, head, artifact.checksum
         );
     }
-    validate_execution_coverage(&plans, &executed)?;
+    validate_execution_coverage(plans, &executed)?;
     let standalone_packages = surface
         .packages()
         .iter()
@@ -129,16 +178,16 @@ pub(crate) fn run(
     let consumer_revision = run_standalone_consumer(
         root,
         facts,
-        &artifacts,
+        artifacts,
         &standalone_packages,
-        &index,
-        &temp.root,
+        index,
+        proof_root,
     )?;
     println!(
         "package-proof: standalone-consumer={} rss-head={} axes=gitlink,exact-candidates,lock,metadata,check,test,clippy",
         consumer_revision, head
     );
-    Ok(())
+    Ok(consumer_revision)
 }
 
 fn validate_execution_coverage(
@@ -1386,6 +1435,270 @@ fn copy_tree(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct CandidateBundlePackage {
+    name: String,
+    version: String,
+    checksum: String,
+}
+
+#[derive(Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CandidateBundleManifest {
+    schema_version: u32,
+    rss_revision: String,
+    packages: Vec<CandidateBundlePackage>,
+}
+
+fn candidate_bundle_manifest(
+    rss_revision: &str,
+    mut packages: Vec<CandidateBundlePackage>,
+) -> Result<CandidateBundleManifest> {
+    if rss_revision.len() != 40
+        || !rss_revision
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        bail!("candidate bundle RSS revision must be a lowercase 40-hex Git identity");
+    }
+    if packages.is_empty() {
+        bail!("candidate bundle requires at least one Release Surface package");
+    }
+    packages.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut seen = BTreeSet::new();
+    for package in &packages {
+        if !seen.insert(package.name.as_str()) {
+            bail!(
+                "candidate bundle contains duplicate package `{}`",
+                package.name
+            );
+        }
+        if package.checksum.len() != 64
+            || !package
+                .checksum
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            bail!(
+                "candidate bundle package `{}` has an invalid checksum",
+                package.name
+            );
+        }
+    }
+    Ok(CandidateBundleManifest {
+        schema_version: 1,
+        rss_revision: rss_revision.to_owned(),
+        packages,
+    })
+}
+
+fn export_candidate_bundle(
+    output: &Path,
+    rss_revision: &str,
+    packages: &[CandidateBundlePackage],
+    registry: &Path,
+    prove_portable_bundle: impl FnOnce(&Path) -> Result<()>,
+) -> Result<()> {
+    if !output.is_absolute() {
+        bail!("candidate bundle output must be an absolute path");
+    }
+    if output.exists() {
+        bail!(
+            "candidate bundle output already exists: {}",
+            output.display()
+        );
+    }
+    let parent = output
+        .parent()
+        .context("candidate bundle output has no parent")?;
+    if !parent.is_dir() {
+        bail!(
+            "candidate bundle output parent is not a directory: {}",
+            parent.display()
+        );
+    }
+    let manifest = candidate_bundle_manifest(rss_revision, packages.to_vec())?;
+    validate_candidate_registry_exact_set(registry, &manifest.packages)?;
+    let staging = parent.join(format!(
+        ".rss-candidate-bundle-{}-{}.tmp",
+        std::process::id(),
+        NEXT_BUNDLE_STAGE.fetch_add(1, Ordering::Relaxed)
+    ));
+    fs::create_dir(&staging).with_context(|| {
+        format!(
+            "reserve candidate bundle staging directory `{}`",
+            staging.display()
+        )
+    })?;
+
+    let result = (|| -> Result<()> {
+        let mut manifest_bytes = serde_json::to_vec_pretty(&manifest)?;
+        manifest_bytes.push(b'\n');
+        fs::write(staging.join("candidate-bundle.json"), manifest_bytes)?;
+
+        for package in &manifest.packages {
+            let relative_index = index_relative_path(&package.name);
+            let source_index = registry.join("index").join(&relative_index);
+            if !source_index.is_file() {
+                bail!(
+                    "candidate bundle index entry is missing for `{}`",
+                    package.name
+                );
+            }
+            let target_index = staging.join("registry/index").join(&relative_index);
+            fs::create_dir_all(
+                target_index
+                    .parent()
+                    .context("bundle index has no parent")?,
+            )?;
+            fs::copy(source_index, target_index)?;
+
+            let relative_archive = PathBuf::from("registry/crates")
+                .join(&package.name)
+                .join(&package.version)
+                .join("download");
+            let source_archive = registry
+                .join("crates")
+                .join(&package.name)
+                .join(&package.version)
+                .join("download");
+            if !source_archive.is_file() {
+                bail!(
+                    "candidate bundle archive is missing for `{}@{}`",
+                    package.name,
+                    package.version
+                );
+            }
+            let target_archive = staging.join(relative_archive);
+            fs::create_dir_all(
+                target_archive
+                    .parent()
+                    .context("bundle archive has no parent")?,
+            )?;
+            fs::copy(source_archive, target_archive)?;
+        }
+        validate_candidate_bundle_archive_checksums(&staging, &manifest.packages)?;
+        prove_portable_bundle(&staging).context("portable candidate bundle proof failed")?;
+        fs::rename(&staging, output).with_context(|| {
+            format!("atomically publish candidate bundle `{}`", output.display())
+        })?;
+        Ok(())
+    })();
+    if let Err(error) = result {
+        if let Err(cleanup_error) = fs::remove_dir_all(&staging) {
+            bail!(
+                "candidate bundle export failed: {error:#}; cleanup of `{}` also failed: {cleanup_error}",
+                staging.display()
+            );
+        }
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn validate_candidate_bundle_archive_checksums(
+    bundle: &Path,
+    packages: &[CandidateBundlePackage],
+) -> Result<()> {
+    for package in packages {
+        let archive = bundle
+            .join("registry/crates")
+            .join(&package.name)
+            .join(&package.version)
+            .join("download");
+        let actual = format!("{:x}", Sha256::digest(fs::read(&archive)?));
+        if actual != package.checksum {
+            bail!(
+                "candidate bundle archive checksum differs for `{}@{}`",
+                package.name,
+                package.version
+            );
+        }
+    }
+    Ok(())
+}
+
+fn materialize_candidate_bundle_registry(bundle: &Path, registry: &Path) -> Result<()> {
+    if registry.exists() {
+        bail!(
+            "portable candidate registry destination already exists: {}",
+            registry.display()
+        );
+    }
+    copy_tree(&bundle.join("registry"), registry)?;
+    let index = registry.join("index");
+    let download_root = file_url(&registry.join("crates"))?;
+    fs::write(
+        index.join("config.json"),
+        serde_json::to_vec(&json!({ "dl": download_root, "api": null }))?,
+    )?;
+    init_git(&index)?;
+    Ok(())
+}
+
+fn validate_candidate_registry_exact_set(
+    registry: &Path,
+    packages: &[CandidateBundlePackage],
+) -> Result<()> {
+    let expected_index = packages
+        .iter()
+        .map(|package| index_relative_path(&package.name))
+        .collect::<BTreeSet<_>>();
+    let mut actual_index = collect_regular_files(&registry.join("index"))?;
+    actual_index.remove(Path::new("config.json"));
+    actual_index.retain(|path| {
+        path.components()
+            .next()
+            .is_none_or(|part| part.as_os_str() != ".git")
+    });
+    if actual_index != expected_index {
+        bail!("candidate bundle registry index exact-set differs from Release Surface");
+    }
+
+    let expected_archives = packages
+        .iter()
+        .map(|package| {
+            PathBuf::from(&package.name)
+                .join(&package.version)
+                .join("download")
+        })
+        .collect::<BTreeSet<_>>();
+    if collect_regular_files(&registry.join("crates"))? != expected_archives {
+        bail!("candidate bundle registry archive exact-set differs from Release Surface");
+    }
+    Ok(())
+}
+
+fn collect_regular_files(root: &Path) -> Result<BTreeSet<PathBuf>> {
+    fn visit(root: &Path, directory: &Path, output: &mut BTreeSet<PathBuf>) -> Result<()> {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            let kind = entry.file_type()?;
+            if kind.is_symlink() {
+                bail!("candidate registry contains a symlink: {}", path.display());
+            }
+            if kind.is_dir() {
+                visit(root, &path, output)?;
+            } else if kind.is_file() {
+                output.insert(path.strip_prefix(root)?.to_owned());
+            } else {
+                bail!(
+                    "candidate registry contains a non-file entry: {}",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    let mut output = BTreeSet::new();
+    visit(root, root, &mut output)?;
+    Ok(output)
+}
+
+static NEXT_BUNDLE_STAGE: AtomicU64 = AtomicU64::new(0);
+
 fn file_url(path: &Path) -> Result<String> {
     let canonical = fs::canonicalize(path)?;
     let url = url::Url::from_file_path(&canonical).map_err(|()| {
@@ -1691,6 +2004,188 @@ mod tests {
         let mut extra = complete;
         extra.insert("unselected-package".to_owned());
         assert!(validate_execution_coverage(&plans, &extra).is_err());
+    }
+
+    #[test]
+    fn candidate_bundle_manifest_is_sorted_and_rejects_duplicates() {
+        let manifest = candidate_bundle_manifest(
+            "0123456789abcdef0123456789abcdef01234567",
+            vec![
+                CandidateBundlePackage {
+                    name: "rss-trace-context".to_owned(),
+                    version: "0.1.0".to_owned(),
+                    checksum: "bb".repeat(32),
+                },
+                CandidateBundlePackage {
+                    name: "rss-diag-context".to_owned(),
+                    version: "0.1.0".to_owned(),
+                    checksum: "aa".repeat(32),
+                },
+            ],
+        )
+        .expect("valid candidate bundle manifest");
+        assert_eq!(manifest.schema_version, 1);
+        assert_eq!(manifest.packages[0].name, "rss-diag-context");
+        assert_eq!(manifest.packages[1].name, "rss-trace-context");
+
+        let duplicate = manifest.packages[0].clone();
+        assert!(
+            candidate_bundle_manifest(
+                "0123456789abcdef0123456789abcdef01234567",
+                vec![duplicate.clone(), duplicate],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn candidate_bundle_export_is_atomic_and_portable() {
+        let temp = TempProof::new().expect("temporary bundle fixture");
+        let registry = temp.root.join("registry");
+        let index = registry.join("index");
+        let crates = registry.join("crates");
+        let package = CandidateBundlePackage {
+            name: "rss-diag-context".to_owned(),
+            version: "0.1.0".to_owned(),
+            checksum: format!("{:x}", Sha256::digest(b"crate archive")),
+        };
+        let index_entry = index.join(index_relative_path(&package.name));
+        fs::create_dir_all(index_entry.parent().expect("index parent"))
+            .expect("create index parent");
+        fs::write(&index_entry, "index-record\n").expect("write index record");
+        fs::write(index.join("config.json"), r#"{"dl":"file:///host-only"}"#)
+            .expect("write non-portable config");
+        fs::create_dir_all(index.join(".git")).expect("create git metadata");
+        fs::write(index.join(".git/HEAD"), "ref: refs/heads/main\n").expect("write git metadata");
+        let archive = crates
+            .join(&package.name)
+            .join(&package.version)
+            .join("download");
+        fs::create_dir_all(archive.parent().expect("archive parent"))
+            .expect("create archive parent");
+        fs::write(&archive, b"crate archive").expect("write archive");
+
+        let output = temp.root.join("candidate-bundle");
+        let materialized_registry = temp.root.join("materialized-registry");
+        export_candidate_bundle(
+            &output,
+            "0123456789abcdef0123456789abcdef01234567",
+            &[package.clone()],
+            &registry,
+            |bundle| materialize_candidate_bundle_registry(bundle, &materialized_registry),
+        )
+        .expect("export bundle");
+
+        assert!(output.join("candidate-bundle.json").is_file());
+        assert!(
+            output
+                .join("registry/index")
+                .join(index_relative_path("rss-diag-context"))
+                .is_file()
+        );
+        assert!(
+            output
+                .join("registry/crates/rss-diag-context/0.1.0/download")
+                .is_file()
+        );
+        assert!(!output.join("registry/index/config.json").exists());
+        assert!(!output.join("registry/index/.git").exists());
+        assert!(materialized_registry.join("index/config.json").is_file());
+        assert!(materialized_registry.join("index/.git/HEAD").is_file());
+        let materialized_config =
+            fs::read_to_string(materialized_registry.join("index/config.json"))
+                .expect("read relocated registry config");
+        assert!(materialized_config.contains(
+            &file_url(&materialized_registry.join("crates")).expect("materialized crates URL")
+        ));
+        assert!(!materialized_config.contains("host-only"));
+
+        let proof_failure = temp.root.join("proof-failure-bundle");
+        assert!(
+            export_candidate_bundle(
+                &proof_failure,
+                "0123456789abcdef0123456789abcdef01234567",
+                &[package.clone()],
+                &registry,
+                |_| bail!("synthetic portable consumer failure"),
+            )
+            .is_err()
+        );
+        assert!(
+            !proof_failure.exists(),
+            "portable consumer failure must not publish a bundle"
+        );
+        assert_no_bundle_staging(&temp.root);
+
+        let checksum_mismatch = temp.root.join("checksum-mismatch-bundle");
+        assert!(
+            export_candidate_bundle(
+                &checksum_mismatch,
+                "0123456789abcdef0123456789abcdef01234567",
+                &[CandidateBundlePackage {
+                    name: package.name.clone(),
+                    version: package.version.clone(),
+                    checksum: "aa".repeat(32),
+                }],
+                &registry,
+                |_| Ok(()),
+            )
+            .is_err()
+        );
+        assert!(
+            !checksum_mismatch.exists(),
+            "checksum mismatch must not publish a bundle"
+        );
+        assert_no_bundle_staging(&temp.root);
+
+        let extra = temp.root.join("extra-bundle");
+        fs::write(index.join("unexpected-record"), "unexpected\n").expect("write extra record");
+        assert!(
+            export_candidate_bundle(
+                &extra,
+                "0123456789abcdef0123456789abcdef01234567",
+                &[package.clone()],
+                &registry,
+                |_| Ok(()),
+            )
+            .is_err()
+        );
+        assert!(!extra.exists(), "extra registry artifacts must fail closed");
+        assert_no_bundle_staging(&temp.root);
+        fs::remove_file(index.join("unexpected-record")).expect("remove extra record");
+
+        let missing = temp.root.join("missing-bundle");
+        fs::remove_file(index_entry).expect("remove required index entry");
+        assert!(
+            export_candidate_bundle(
+                &missing,
+                "0123456789abcdef0123456789abcdef01234567",
+                &[CandidateBundlePackage {
+                    name: "rss-diag-context".to_owned(),
+                    version: "0.1.0".to_owned(),
+                    checksum: "aa".repeat(32),
+                }],
+                &registry,
+                |_| Ok(()),
+            )
+            .is_err()
+        );
+        assert!(!missing.exists(), "failed exports must not publish output");
+        assert_no_bundle_staging(&temp.root);
+    }
+
+    fn assert_no_bundle_staging(root: &Path) {
+        let staging = fs::read_dir(root)
+            .expect("read fixture root")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".rss-candidate-bundle-")
+            })
+            .collect::<Vec<_>>();
+        assert!(staging.is_empty(), "failed export left staging behind");
     }
 
     #[test]

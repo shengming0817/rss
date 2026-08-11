@@ -1579,7 +1579,7 @@ fn run_internal(
                 &opts.contract_against,
                 opts.allow_missing_tools,
             )?;
-            crate::package_proof::run(root, facts, &surface)
+            crate::package_proof::run(root, facts, &surface, None)
         }
     }
 }

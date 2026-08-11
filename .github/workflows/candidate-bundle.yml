@@ -1,0 +1,96 @@
+name: RSS candidate bundle
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rss-candidate-bundle-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  candidate-bundle:
+    name: candidate-bundle
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      CARGO_BUILD_JOBS: 6
+    steps:
+      - name: Checkout exact RSS revision
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          submodules: true
+
+      - name: Install pinned Rust toolchain
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+          rustup default 1.96.0
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Prove and export candidate bundle
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/rss-candidate-target
+          RSS_BUNDLE_PATH: ${{ runner.temp }}/rss-candidate-bundle
+        run: |
+          set -euo pipefail
+          ./hack/cargo.sh xtask package-proof \
+            --export-candidate-bundle "$RSS_BUNDLE_PATH"
+
+      - name: Validate bundle identity before upload
+        env:
+          RSS_BUNDLE_PATH: ${{ runner.temp }}/rss-candidate-bundle
+        run: |
+          set -euo pipefail
+          manifest="$RSS_BUNDLE_PATH/candidate-bundle.json"
+          jq -e --arg revision "$GITHUB_SHA" '
+            .schemaVersion == 1 and
+            .rssRevision == $revision and
+            (.packages | type == "array" and length > 0) and
+            all(.packages[];
+              (.name | test("^rss-[a-z0-9]+(-[a-z0-9]+)*$")) and
+              (.version | test("^[0-9A-Za-z.+-]+$")) and
+              (.checksum | test("^[0-9a-f]{64}$")))
+          ' "$manifest" >/dev/null
+          jq -r '.packages[] | [.name, .version, .checksum] | @tsv' "$manifest" |
+          while IFS=$'\t' read -r package version checksum; do
+            archive="$RSS_BUNDLE_PATH/registry/crates/$package/$version/download"
+            test -f "$archive"
+            test "$(sha256sum "$archive" | awk '{print $1}')" = "$checksum"
+          done
+
+      - name: Upload immutable candidate bundle
+        id: upload
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: rss-candidate-bundle-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/rss-candidate-bundle
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Publish traceable bundle summary
+        env:
+          RSS_ARTIFACT_DIGEST: ${{ steps.upload.outputs.artifact-digest }}
+          RSS_BUNDLE_PATH: ${{ runner.temp }}/rss-candidate-bundle
+        run: |
+          set -euo pipefail
+          manifest="$RSS_BUNDLE_PATH/candidate-bundle.json"
+          [[ "$RSS_ARTIFACT_DIGEST" =~ ^[0-9a-f]{64}$ ]]
+          {
+            echo '## RSS candidate bundle'
+            echo
+            echo "- RSS revision: \`$GITHUB_SHA\`"
+            echo "- Producer run: https://github.com/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}/attempts/${GITHUB_RUN_ATTEMPT}"
+            echo "- Artifact: \`rss-candidate-bundle-$GITHUB_SHA-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT\`"
+            echo "- Artifact digest: \`$RSS_ARTIFACT_DIGEST\`"
+            echo '- Release Surface packages:'
+            jq -r '.packages[] | "  - `\(.name)@\(.version)` — `\(.checksum)`"' "$manifest"
+          } >> "$GITHUB_STEP_SUMMARY"
