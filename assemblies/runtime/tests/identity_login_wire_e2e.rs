@@ -35,7 +35,7 @@ use httpserve::ProducerMarker;
 use identity::ports::{
     AccountSecurityReadRepo as _, AccountStatus, AuthGrantProvider as _, Credential,
     CredentialRepo as _, DynRoleBindingLifecycle, DynRoleReadRepo, IdentitySecurityLifecycle as _,
-    Role, RoleWriteRepo as _, TenantId, TenantRepoScope,
+    Role, TenantId, TenantRepoScope,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
@@ -592,6 +592,31 @@ async fn role_binding_count(
     Ok(count)
 }
 
+async fn seed_role_revision(
+    pool: &PgPool,
+    tenant: TenantId,
+    actor: &str,
+    kind: vocab::PrincipalKind,
+    role: &Role,
+) -> TestResult {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    let permissions = role.permission_ids().collect::<Vec<_>>();
+    sqlx::query("SELECT * FROM rss_record_role_revision($1, $2, $3, $4::uuid, $5)")
+        .bind(role.id().as_str())
+        .bind(role.name())
+        .bind(permissions)
+        .bind(actor)
+        .bind(kind.as_actor_metadata_label())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
 async fn config_entry_count(
     pool: &PgPool,
     key: &str,
@@ -672,7 +697,14 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
         ],
     )?;
     let logout_role_id = logout_role.id().clone();
-    identity.role_repo().save(tenant_scope, logout_role).await?;
+    seed_role_revision(
+        &observation_pool,
+        tenant,
+        CANON_USER,
+        vocab::PrincipalKind::User,
+        &logout_role,
+    )
+    .await?;
     let setup_rbac = identity::RbacAdminService::new(
         Arc::from(DynRoleReadRepo::new_box(identity.role_repo())),
         Arc::from(DynRoleBindingLifecycle::new_box(
@@ -1040,20 +1072,21 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
         )
         .await?;
     assert_eq!(denied_all.status(), StatusCode::FORBIDDEN);
-    identity
-        .role_repo()
-        .save(
-            tenant_scope,
-            Role::hydrate(
-                "session-owner",
-                "All-session logout only",
-                &[
-                    "identity:session:logout-all".to_string(),
-                    "identity:role:read".to_string(),
-                ],
-            )?,
-        )
-        .await?;
+    seed_role_revision(
+        &observation_pool,
+        tenant,
+        CANON_USER,
+        vocab::PrincipalKind::Admin,
+        &Role::hydrate(
+            "session-owner",
+            "All-session logout only",
+            &[
+                "identity:session:logout-all".to_string(),
+                "identity:role:read".to_string(),
+            ],
+        )?,
+    )
+    .await?;
     let denied_current = app
         .clone()
         .oneshot(
@@ -1070,21 +1103,22 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
         StatusCode::FORBIDDEN,
         "logout-all permission must not imply logout-current"
     );
-    identity
-        .role_repo()
-        .save(
-            tenant_scope,
-            Role::hydrate(
-                "session-owner",
-                "Current and all session logout",
-                &[
-                    "identity:session:logout-current".to_string(),
-                    "identity:session:logout-all".to_string(),
-                    "identity:role:read".to_string(),
-                ],
-            )?,
-        )
-        .await?;
+    seed_role_revision(
+        &observation_pool,
+        tenant,
+        CANON_USER,
+        vocab::PrincipalKind::Admin,
+        &Role::hydrate(
+            "session-owner",
+            "Current and all session logout",
+            &[
+                "identity:session:logout-current".to_string(),
+                "identity:session:logout-all".to_string(),
+                "identity:role:read".to_string(),
+            ],
+        )?,
+    )
+    .await?;
     let targeted_all = app
         .clone()
         .oneshot(
@@ -1365,18 +1399,26 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         ],
     )?;
     let admin_role_id = admin_role.id().clone();
-    let tenant_scope = TenantRepoScope::for_test(tenant);
-    id.role_repo().save(tenant_scope, admin_role).await?;
-    id.role_repo()
-        .save(
-            tenant_scope,
-            Role::hydrate(
-                OPERATOR_ROLE,
-                "Operator",
-                &["identity:profile:read".to_string()],
-            )?,
-        )
-        .await?;
+    seed_role_revision(
+        &assertion_pool,
+        tenant,
+        CANON_USER,
+        vocab::PrincipalKind::Admin,
+        &admin_role,
+    )
+    .await?;
+    seed_role_revision(
+        &assertion_pool,
+        tenant,
+        CANON_USER,
+        vocab::PrincipalKind::Admin,
+        &Role::hydrate(
+            OPERATOR_ROLE,
+            "Operator",
+            &["identity:profile:read".to_string()],
+        )?,
+    )
+    .await?;
     let setup_roles: Arc<DynRoleReadRepo<'static>> =
         Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let setup_bindings: Arc<DynRoleBindingLifecycle<'static>> = Arc::from(

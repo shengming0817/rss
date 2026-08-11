@@ -18,6 +18,10 @@ ALTER POLICY tenant_isolation ON roles
     USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
 
+ALTER POLICY tenant_isolation ON role_revisions
+    USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
+    WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);
+
 ALTER POLICY tenant_isolation ON secret_refs
     USING (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid)
     WITH CHECK (tenant_id = NULLIF(current_setting('rss.tenant_id', true), '')::uuid);

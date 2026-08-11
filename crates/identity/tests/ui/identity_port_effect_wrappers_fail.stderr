@@ -10,11 +10,11 @@ note: required by a bound in `require_auth`
  6 | fn require_auth<T: IdentityPortEffect<Effect = AuthEffect> + ?Sized>() {}
    |                                       ^^^^^^^^^^^^^^^^^^^ required by this bound in `require_auth`
 
-error[E0271]: type mismatch resolving `<Box<DynRoleWriteRepo<'static>> as IdentityPortEffect>::Effect == ReadEffect`
+error[E0271]: type mismatch resolving `<Box<DynRoleDefinitionLifecycle<'static>> as IdentityPortEffect>::Effect == ReadEffect`
   --> tests/ui/identity_port_effect_wrappers_fail.rs:11:20
    |
-11 |     require_read::<Box<DynRoleWriteRepo<'static>>>();
-   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ReadEffect`, found `BusinessWriteEffect`
+11 |     require_read::<Box<DynRoleDefinitionLifecycle<'static>>>();
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `ReadEffect`, found `BusinessWriteEffect`
    |
 note: required by a bound in `require_read`
   --> tests/ui/identity_port_effect_wrappers_fail.rs:7:39

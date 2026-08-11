@@ -2,7 +2,7 @@
 
 - **状态**：Accepted（#1998 修订：连续性 / 固定四位假门退役；唯一性上移 inventory Hard SoT；`MIGRATION-SERIAL-UNIQUE-01` Medium 门删除）
 - **日期**：2026-06-27
-- **关联**：issue #1134 [infra-deploy]（容器化交付时 E2E 首次对真实 PG 跑 `run_migrations` 暴露本 bug）；issue #1457 / #1458（未部署 audit schema 真源硬化）；issue #1998（假连续性门清理 + Migrator 同源 inventory）；issue #2060（未部署 migration 中 Projection source SQL 归位）
+- **关联**：issue #1134 [infra-deploy]（容器化交付时 E2E 首次对真实 PG 跑 `run_migrations` 暴露本 bug）；issue #1291（未部署角色版本审计真源）；issue #1457 / #1458（未部署 audit schema 真源硬化）；issue #1998（假连续性门清理 + Migrator 同源 inventory）；issue #2060（未部署 migration 中 Projection source SQL 归位）
 - **归属**：framework（持久化基座 / 迁移治理，provider-agnostic）
 - **AI-robust 评级**：序号唯一性 + version/checksum 同源 = **Hard**（`postgres-migration-inventory` build.rs 调用 `sqlx_core::migrate::resolve_blocking`，INVARIANT `POSTGRES-MIGRATION-INVENTORY-01`）
 
@@ -87,6 +87,17 @@ Projection apply funnel 之外后置覆盖 `0088` 的 scoped read 与 high-water
 该例外只覆盖本次 fresh-install audit schema 真源修正，不授权改写其他 migration，也不引入 backfill、兼容
 reader、双写或后置 migration。一旦出现任何部署、migration checksum ledger、历史行或 GA 发布，窗口立即
 失效；后续 SQL 语义修正必须恢复严格 forward-only。
+
+### 2.7 #1291 窄例外：未部署角色定义不可变版本审计
+
+用户再次确认项目从未部署，不存在 `_sqlx_migrations` ledger、外部数据库或历史角色行。#1291 因而直接把
+`0009_create_roles.sql` 收敛为 fresh-install 最终模型：`roles` 只保存被 role binding FK 引用的稳定 identity，
+`role_revisions` append-only 保存每次实际内容变化的完整 snapshot、actor、actor kind、version 与 timestamp；
+`rss_record_role_revision` 是应用唯一写漏斗。`0012`/`0024` 同步两表最终 RLS/ACL，`0075` 删除对不存在历史
+role permission 行的迁移假设。HEAD 仍为 `0104`，没有 `0105`、回填、兼容 reader、双写或旧无 actor API。
+
+该例外只覆盖 #1291 上述四个 migration 的角色定义最终态，不授权改写其他历史 SQL。一旦存在任何部署、旧
+checksum ledger、历史数据或 GA 发布，本窗口立即失效；后续修正必须提交新的 forward-only migration。
 
 ## 3. 备选与否决
 

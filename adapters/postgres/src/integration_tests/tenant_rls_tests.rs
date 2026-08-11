@@ -500,7 +500,7 @@ async fn rss_app_serving_pool_enforces_tenant_ab_isolation() -> TestResult {
     assert_eq!(session_user, "rss_app", "serving pool 必须直连 rss_app");
     assert_eq!(current_user, "rss_app", "serving pool 必须直连 rss_app");
 
-    let observed = observe_rss_app_tenant_ab_isolation(&app).await?;
+    let observed = observe_rss_app_tenant_ab_isolation(&store, &app).await?;
     assert_eq!(
         observed.tenant_a_visible, 1,
         "tenant A scope 应能看到 tenant A role"
@@ -510,18 +510,8 @@ async fn rss_app_serving_pool_enforces_tenant_ab_isolation() -> TestResult {
         "tenant B scope 不得看到 tenant A role"
     );
     assert_eq!(
-        observed.cross_write,
-        RssAppWriteObservation::RlsRejected,
-        "tenant B scope 写入 tenant A 行须被 WITH CHECK 拒绝"
-    );
-    assert_eq!(
         observed.unset_guc_visible, 0,
         "未设 rss.tenant_id 时读必须 fail-closed"
-    );
-    assert_eq!(
-        observed.unset_guc_write,
-        RssAppWriteObservation::RlsRejected,
-        "未设 rss.tenant_id 时写必须被拒绝"
     );
 
     app.shutdown().await?;
@@ -530,7 +520,8 @@ async fn rss_app_serving_pool_enforces_tenant_ab_isolation() -> TestResult {
 }
 
 /// Behavior synthetic-red：isolated DB 上追加 allow-all permissive policy 后，同一 A/B 观察 helper
-/// 必须实证跨租可见、cross-write 与无 GUC 写成功（以及无 GUC 可见）——证明 green 不是 vacuous。
+/// 必须实证跨租与无 GUC 可见——证明 green 读取隔离不是 vacuous。角色 mutation 的唯一入口与
+/// fail-closed 由独立 function/ACL 测试覆盖，不能通过放宽 RLS 获得直接 DML 能力。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: uuid v4 与固定 SQL happy-path；集成测试构造值均合法。
@@ -568,7 +559,7 @@ async fn assert_permissive_policy_breaks_ab_isolation(
         TEST_APP_PASSWORD,
     ))
     .await?;
-    let observed = observe_rss_app_tenant_ab_isolation(&app).await?;
+    let observed = observe_rss_app_tenant_ab_isolation(&owner, &app).await?;
     assert_eq!(
         observed.tenant_a_visible, 1,
         "seed under A must remain visible to A"
@@ -578,20 +569,10 @@ async fn assert_permissive_policy_breaks_ab_isolation(
         "permissive policy must let tenant B see tenant A rows, got {}",
         observed.tenant_b_visible
     );
-    assert_eq!(
-        observed.cross_write,
-        RssAppWriteObservation::Succeeded,
-        "permissive policy must allow cross-tenant writes"
-    );
     assert!(
         observed.unset_guc_visible > 0,
         "permissive policy must make rows visible without GUC, got {}",
         observed.unset_guc_visible
-    );
-    assert_eq!(
-        observed.unset_guc_write,
-        RssAppWriteObservation::Succeeded,
-        "permissive policy must allow writes without GUC"
     );
 
     app.shutdown().await?;
@@ -603,57 +584,28 @@ async fn assert_permissive_policy_breaks_ab_isolation(
 struct RssAppTenantAbObservation {
     tenant_a_visible: i64,
     tenant_b_visible: i64,
-    cross_write: RssAppWriteObservation,
     unset_guc_visible: i64,
-    unset_guc_write: RssAppWriteObservation,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RssAppWriteObservation {
-    Succeeded,
-    RlsRejected,
-    OtherFailure,
 }
 
 #[allow(clippy::unwrap_used)]
 // reason: uuid v4 fixtures are valid; observation is test-only.
 async fn observe_rss_app_tenant_ab_isolation(
+    owner: &PgStore,
     app: &PgStore,
 ) -> Result<RssAppTenantAbObservation, Box<dyn std::error::Error + Send + Sync>> {
     let tenant_a = uuid::Uuid::new_v4().to_string();
     let tenant_b = uuid::Uuid::new_v4().to_string();
     let role_a = uuid::Uuid::new_v4().to_string();
-    let cross_tenant_role = uuid::Uuid::new_v4().to_string();
-    let unset_guc_role = uuid::Uuid::new_v4().to_string();
-
-    {
-        let mut tx = app.pool.begin().await?;
-        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(&tenant_a)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3::uuid)")
-            .bind(&role_a)
-            .bind("rss-app-serving-test")
-            .bind(&tenant_a)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
-    }
+    owner_record_role_revision(owner, &tenant_a, &role_a, "rss-app-serving-test").await?;
 
     let tenant_a_visible = count_roles_under_tenant(app, &tenant_a, &role_a).await?;
     let tenant_b_visible = count_roles_under_tenant(app, &tenant_b, &role_a).await?;
-    let cross_write =
-        observe_role_insert(app, Some(&tenant_b), &cross_tenant_role, &tenant_a).await?;
     let unset_guc_visible = count_roles_without_tenant_guc(app, &role_a).await?;
-    let unset_guc_write = observe_role_insert(app, None, &unset_guc_role, &tenant_a).await?;
 
     Ok(RssAppTenantAbObservation {
         tenant_a_visible,
         tenant_b_visible,
-        cross_write,
         unset_guc_visible,
-        unset_guc_write,
     })
 }
 
@@ -688,38 +640,25 @@ async fn count_roles_without_tenant_guc(
     Ok(cnt.0)
 }
 
-async fn observe_role_insert(
-    app: &PgStore,
-    scope_tenant: Option<&str>,
+async fn owner_record_role_revision(
+    store: &PgStore,
+    tenant: &str,
     role_id: &str,
-    row_tenant: &str,
-) -> Result<RssAppWriteObservation, Box<dyn std::error::Error + Send + Sync>> {
-    let mut tx = app.pool.begin().await?;
-    if let Some(tenant) = scope_tenant {
-        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(tenant)
-            .execute(&mut *tx)
-            .await?;
-    }
-    let write = sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3::uuid)")
-        .bind(role_id)
-        .bind("rss-app-ab-observation-write")
-        .bind(row_tenant)
+    name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let mut tx = store.pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant)
         .execute(&mut *tx)
-        .await;
-    let observation = match &write {
-        Ok(_) => RssAppWriteObservation::Succeeded,
-        Err(sqlx::Error::Database(error)) if error.code().as_deref() == Some("42501") => {
-            RssAppWriteObservation::RlsRejected
-        }
-        Err(_) => RssAppWriteObservation::OtherFailure,
-    };
-    if observation == RssAppWriteObservation::Succeeded {
-        tx.commit().await?;
-    } else {
-        tx.rollback().await?;
-    }
-    Ok(observation)
+        .await?;
+    sqlx::query("SELECT * FROM rss_record_role_revision($1, $2, '{}'::text[], $3::uuid, 'admin')")
+        .bind(role_id)
+        .bind(name)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 /// Tenant-scoped read transactions must be physically read-only, even when the underlying
@@ -735,12 +674,7 @@ async fn tenant_db_binds_identity_and_read_lifecycle() -> TestResult {
     let tenant = test_tenant();
     let tenant_id = tenant.to_string();
     let role_id = unique_event_id("tenant-read-only");
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3::uuid)")
-        .bind(&role_id)
-        .bind(ORIGINAL_NAME)
-        .bind(&tenant_id)
-        .execute(&store.pool)
-        .await?;
+    owner_record_role_revision(&store, &tenant_id, &role_id, ORIGINAL_NAME).await?;
 
     let tenant_pool =
         crate::cotx::TenantDb::<crate::cotx::ServingReadLane>::from_unverified_for_test(&store);
@@ -800,10 +734,11 @@ async fn tenant_db_binds_identity_and_read_lifecycle() -> TestResult {
         _ => None,
     };
 
-    let persisted_name: String = sqlx::query_scalar("SELECT name FROM roles WHERE id = $1")
-        .bind(&role_id)
-        .fetch_one(&store.pool)
-        .await?;
+    let persisted_name: String =
+        sqlx::query_scalar("SELECT name FROM role_revisions WHERE role_id = $1")
+            .bind(&role_id)
+            .fetch_one(&store.pool)
+            .await?;
 
     assert_eq!(
         (
@@ -834,12 +769,7 @@ async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() -> TestRe
     let tenant_b = vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc")?;
     let tenant_a_id = tenant_a.to_string();
     let role_id = unique_event_id("tenant-reader-role");
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, $2, $3::uuid)")
-        .bind(&role_id)
-        .bind(ORIGINAL_NAME)
-        .bind(&tenant_a_id)
-        .execute(&owner.pool)
-        .await?;
+    owner_record_role_revision(&owner, &tenant_a_id, &role_id, ORIGINAL_NAME).await?;
 
     let reader_config = rss_app_read_config(&pg, &owner).await?;
     let verified_reader = PgStore::connect_verified_read(&reader_config).await?;
@@ -881,12 +811,14 @@ async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() -> TestRe
 
     let mut forced_read_write = reader_store.pool.begin_with("BEGIN READ WRITE").await?;
     crate::cotx::set_local_tenant(&mut forced_read_write, tenant_a).await?;
-    let denied = sqlx::query("UPDATE roles SET name = $1 WHERE id = $2 AND tenant_id = $3::uuid")
-        .bind(ATTEMPTED_NAME)
-        .bind(&role_id)
-        .bind(&tenant_a_id)
-        .execute(&mut *forced_read_write)
-        .await;
+    let denied = sqlx::query(
+        "UPDATE role_revisions SET name = $1 WHERE role_id = $2 AND tenant_id = $3::uuid",
+    )
+    .bind(ATTEMPTED_NAME)
+    .bind(&role_id)
+    .bind(&tenant_a_id)
+    .execute(&mut *forced_read_write)
+    .await;
     assert!(
         matches!(
             denied,
@@ -896,10 +828,11 @@ async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() -> TestRe
     );
     forced_read_write.rollback().await?;
 
-    let persisted_name: String = sqlx::query_scalar("SELECT name FROM roles WHERE id = $1")
-        .bind(&role_id)
-        .fetch_one(&owner.pool)
-        .await?;
+    let persisted_name: String =
+        sqlx::query_scalar("SELECT name FROM role_revisions WHERE role_id = $1")
+            .bind(&role_id)
+            .fetch_one(&owner.pool)
+            .await?;
     assert_eq!(persisted_name, ORIGINAL_NAME);
 
     reader_store.shutdown().await?;
@@ -1109,11 +1042,7 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
     let tenant = test_tenant();
     let tenant_id = tenant.to_string();
     let role_id = unique_event_id("tenant-reader-column-acl-drift");
-    sqlx::query("INSERT INTO roles (id, name, tenant_id) VALUES ($1, 'before', $2::uuid)")
-        .bind(&role_id)
-        .bind(&tenant_id)
-        .execute(&owner.pool)
-        .await?;
+    owner_record_role_revision(&owner, &tenant_id, &role_id, "before").await?;
 
     sqlx::query("GRANT UPDATE ON roles TO rss_app_read")
         .execute(&owner.pool)
@@ -1130,14 +1059,15 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
         "tenant table-level UPDATE must fail the exact reader ACL gate: {table_dml_verdict:?}"
     );
 
-    sqlx::query("GRANT UPDATE (name) ON roles TO rss_app_read")
+    sqlx::query("GRANT UPDATE (name) ON role_revisions TO rss_app_read")
         .execute(&owner.pool)
         .await?;
     let reader = PgStore::connect(reader_config.as_pg_config()).await?;
     let mut forced_read_write = reader.pool.begin_with("BEGIN READ WRITE").await?;
     crate::cotx::set_local_tenant(&mut forced_read_write, tenant).await?;
     let escalated = sqlx::query(
-        "UPDATE roles SET name = 'column-acl-bypass' WHERE id = $1 AND tenant_id = $2::uuid",
+        "UPDATE role_revisions SET name = 'column-acl-bypass' \
+         WHERE role_id = $1 AND tenant_id = $2::uuid",
     )
     .bind(&role_id)
     .bind(&tenant_id)
@@ -1151,7 +1081,7 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
     forced_read_write.rollback().await?;
     reader.shutdown().await?;
     let column_update_verdict = tenant_reader_gate_verdict(&reader_config).await?;
-    sqlx::query("REVOKE UPDATE (name) ON roles FROM rss_app_read")
+    sqlx::query("REVOKE UPDATE (name) ON role_revisions FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
     assert!(
@@ -1162,11 +1092,11 @@ async fn tenant_reader_gate_rejects_tenant_dml_and_column_acl_drift() -> TestRes
         "column-level UPDATE must fail the exact reader ACL gate: {column_update_verdict:?}"
     );
 
-    sqlx::query("GRANT SELECT (name) ON roles TO rss_app_read WITH GRANT OPTION")
+    sqlx::query("GRANT SELECT (name) ON role_revisions TO rss_app_read WITH GRANT OPTION")
         .execute(&owner.pool)
         .await?;
     let column_grant_option_verdict = tenant_reader_gate_verdict(&reader_config).await?;
-    sqlx::query("REVOKE SELECT (name) ON roles FROM rss_app_read")
+    sqlx::query("REVOKE SELECT (name) ON role_revisions FROM rss_app_read")
         .execute(&owner.pool)
         .await?;
     assert!(
@@ -2779,8 +2709,8 @@ async fn policy_repo_rls_grants_and_tenant_isolation() -> TestResult {
 
 /// T20：RLS 强制力证明 — auth_grants 表。
 ///
-/// 验证：rss_app 角色 + tenant_a scope 下 INSERT 成功 / SELECT 可见；切换 tenant_b scope → 不可见；
-/// tenant_a scope 内尝试写 tenant_b 行 → WITH CHECK 拒绝。
+/// 验证：rss_app 角色 + tenant_a scope 下经唯一 function 追加成功 / SELECT 可见；切换 tenant_b
+/// scope → 不可见；直接伪造 identity row 即使 tenant scope 正确也被 ACL 拒绝。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: uuid::Uuid::new_v4().to_string() 和固定 UUID 格式化不会失败；函数级 item-level carve-out。
@@ -3066,8 +2996,8 @@ async fn t21_rls_config_entries_enforces_tenant_isolation() -> TestResult {
 
 /// T22：RLS 强制力证明 — roles 表（#1298）。
 ///
-/// 验证：rss_app 角色 + tenant_a scope 下 INSERT 成功 / SELECT 可见；切换 tenant_b scope → 不可见；
-/// tenant_a scope 内尝试写 tenant_b 行 → WITH CHECK 拒绝。
+/// 验证：owner fixture 先追加 role revision；rss_app 在 tenant_a scope 下 SELECT 可见，切换 tenant_b
+/// scope 后不可见；任何 direct/function mutation 都因 ACL 拒绝。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: uuid::Uuid::new_v4().to_string() 不会失败；函数级 item-level carve-out。
@@ -3083,29 +3013,8 @@ async fn t22_rls_roles_enforces_tenant_isolation() -> TestResult {
     let tenant_b = uuid::Uuid::new_v4().to_string();
     let role_id = format!("rls-role-{}", uuid::Uuid::new_v4());
 
-    // Tx1：rss_app + tenant_a scope → INSERT role → 成功。
-    {
-        let mut tx = store.pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE rss_app")
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(&tenant_a)
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(
-            "INSERT INTO roles (tenant_id, id, name, permissions) \
-             VALUES ($1::uuid, $2, $3, $4)",
-        )
-        .bind(&tenant_a)
-        .bind(&role_id)
-        .bind("RlsTestRole")
-        .bind(vec!["identity:policy:read".to_string()])
-        .execute(&mut *tx)
-        .await
-        .map_err(|e| format!("Tx1 INSERT tenant_a role failed (should succeed): {e}"))?;
-        tx.commit().await?;
-    }
+    // Tx1：test owner 追加 revision，避免给通用 serving role 暴露自报 actor 的 mutation 路径。
+    owner_record_role_revision(&store, &tenant_a, &role_id, "RlsTestRole").await?;
 
     // Tx2：rss_app + tenant_a scope → SELECT → 可见（USING pass）。
     {
@@ -3151,7 +3060,7 @@ async fn t22_rls_roles_enforces_tenant_isolation() -> TestResult {
         tx.rollback().await?;
     }
 
-    // Tx4：rss_app + tenant_a scope，尝试写 tenant_b role → WITH CHECK 拒绝。
+    // Tx4：rss_app + tenant_a scope，尝试直接伪造 role identity → ACL 拒绝。
     {
         let mut tx = store.pool.begin().await?;
         sqlx::query("SET LOCAL ROLE rss_app")
@@ -3161,19 +3070,14 @@ async fn t22_rls_roles_enforces_tenant_isolation() -> TestResult {
             .bind(&tenant_a)
             .execute(&mut *tx)
             .await?;
-        let result = sqlx::query(
-            "INSERT INTO roles (tenant_id, id, name, permissions) \
-             VALUES ($1::uuid, $2, $3, $4)",
-        )
-        .bind(&tenant_b) // tenant_b ≠ rss.tenant_id(=tenant_a) → WITH CHECK fail
-        .bind(format!("{role_id}-cross"))
-        .bind("CrossTenantRole")
-        .bind(vec!["identity:policy:read".to_string()])
-        .execute(&mut *tx)
-        .await;
+        let result = sqlx::query("INSERT INTO roles (tenant_id, id) VALUES ($1::uuid, $2)")
+            .bind(&tenant_b)
+            .bind(format!("{role_id}-cross"))
+            .execute(&mut *tx)
+            .await;
         assert!(
-            result.is_err(),
-            "t22: WITH CHECK 应拒绝 tenant_b role 写入（rss.tenant_id=tenant_a）"
+            matches!(result, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
+            "t22: rss_app 必须没有直接 role INSERT 能力: {result:?}"
         );
         tx.rollback().await?;
     }
@@ -3222,18 +3126,12 @@ async fn t22b_rls_role_bindings_enforces_tenant_isolation() -> TestResult {
     let subject = format!("rls-binding-subject-{}", uuid::Uuid::new_v4());
 
     // FK 前置：两个租户各有同 id role，避免 Tx4 被 FK 失败遮蔽 RLS WITH CHECK。
-    sqlx::query(
-        "INSERT INTO roles (tenant_id, id, name, permissions) \
-         VALUES ($1::uuid, $2, $3, $4), ($5::uuid, $2, $6, $4)",
-    )
-    .bind(&tenant_a)
-    .bind(&role_id)
-    .bind("RlsBindingRoleA")
-    .bind(vec!["identity:role:read".to_string()])
-    .bind(&tenant_b)
-    .bind("RlsBindingRoleB")
-    .execute(&store.pool)
-    .await?;
+    sqlx::query("INSERT INTO roles (tenant_id, id) VALUES ($1::uuid, $2), ($3::uuid, $2)")
+        .bind(&tenant_a)
+        .bind(&role_id)
+        .bind(&tenant_b)
+        .execute(&store.pool)
+        .await?;
 
     // Tx1：rss_app + tenant_a scope → INSERT tenant_a binding → 成功。
     {

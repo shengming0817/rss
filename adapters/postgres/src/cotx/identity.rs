@@ -881,7 +881,12 @@ impl IdentityRead<'_, '_> {
         use sqlx::Row;
 
         let row = sqlx::query(
-            "SELECT name, permissions FROM roles WHERE tenant_id = $1::uuid AND id = $2",
+            "SELECT revision.name, revision.permissions \
+             FROM roles AS role \
+             JOIN LATERAL (SELECT name, permissions FROM role_revisions \
+                           WHERE tenant_id = role.tenant_id AND role_id = role.id \
+                           ORDER BY version DESC LIMIT 1) AS revision ON true \
+             WHERE role.tenant_id = $1::uuid AND role.id = $2",
         )
         .bind(self.tx.tenant.as_uuid().to_string())
         .bind(id.as_str())
@@ -900,11 +905,18 @@ impl IdentityRead<'_, '_> {
 
         let rows = sqlx::query(
             r#"
-            SELECT id, name, permissions
-            FROM roles
-            WHERE tenant_id = $1::uuid
-              AND ($2::text IS NULL OR id > $2)
-            ORDER BY id ASC
+            SELECT role.id, revision.name, revision.permissions
+            FROM roles AS role
+            JOIN LATERAL (
+                SELECT name, permissions
+                FROM role_revisions
+                WHERE tenant_id = role.tenant_id AND role_id = role.id
+                ORDER BY version DESC
+                LIMIT 1
+            ) AS revision ON true
+            WHERE role.tenant_id = $1::uuid
+              AND ($2::text IS NULL OR role.id > $2)
+            ORDER BY role.id ASC
             LIMIT $3
             "#,
         )
@@ -1998,26 +2010,26 @@ impl IdentityWrite<'_, '_> {
         Ok(closed.as_deref() == Some(close.grant_id.as_str()))
     }
 
-    pub(crate) async fn save_role(
+    #[cfg(all(test, feature = "integration"))]
+    pub(crate) async fn record_role_revision(
         &mut self,
+        actor: &::identity::ports::RoleMutationActor,
         role: &::identity::ports::Role,
-    ) -> Result<(), sqlx::Error> {
+    ) -> Result<(i64, bool), sqlx::Error> {
         let permissions: Vec<String> = role.permission_ids().collect();
-        sqlx::query(
+        sqlx::query_as(
             r#"
-            INSERT INTO roles (tenant_id, id, name, permissions)
-            VALUES ($1::uuid, $2, $3, $4)
-            ON CONFLICT (tenant_id, id) DO UPDATE
-            SET name = EXCLUDED.name, permissions = EXCLUDED.permissions
+            SELECT version, changed
+            FROM rss_record_role_revision($1, $2, $3, $4::uuid, $5)
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
         .bind(role.id().as_str())
         .bind(role.name())
         .bind(permissions)
-        .execute(&mut *self.tx.conn)
+        .bind(actor.id().as_str())
+        .bind(actor.kind().as_actor_metadata_label())
+        .fetch_one(&mut *self.tx.conn)
         .await
-        .map(|_| ())
     }
 
     pub(crate) async fn upsert_role_binding(

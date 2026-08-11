@@ -105,6 +105,20 @@ pub mod test_support {
         ids::UserId::parse(raw).expect("test user id must be canonical")
     }
 
+    /// Mint a role-mutation actor from a canonical test identity.
+    pub fn role_mutation_actor(
+        tenant: &str,
+        raw: &str,
+        kind: vocab::PrincipalKind,
+    ) -> crate::ports::RoleMutationActor {
+        crate::ports::RoleMutationActor::for_test_user(
+            vocab::TenantId::parse(tenant).expect("test tenant id must be canonical"),
+            user_id(raw),
+            kind,
+        )
+        .expect("test role actor must be authenticated")
+    }
+
     use crate::domain::{
         AccountSecuritySnapshot, AccountSecurityState, AccountStatus, AccountStatusSetCommand,
         Credential, CredentialSecurityCommand, CredentialSecurityInitiator, LoginIdentifier,

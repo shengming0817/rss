@@ -22,7 +22,7 @@ use generated::http::identity_v1::roles_assign::PRODUCER as ROLES_ASSIGN_PRODUCE
 use httpserve::ProducerMarker;
 use identity::ports::{
     AccountSecurityReadRepo as _, Credential, CredentialRepo as _, DynRoleBindingLifecycle,
-    DynRoleReadRepo, Role, RoleWriteRepo as _, TenantId, TenantRepoScope,
+    DynRoleReadRepo, Role, TenantId, TenantRepoScope,
 };
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
@@ -421,7 +421,32 @@ async fn login(app: &axum::Router, password: &str) -> TestResult<IdentityLoginRe
     Ok(serde_json::from_slice(&body)?)
 }
 
-async fn seed_rbac(pg: &postgres::PgRuntimeHandle, tenant: TenantId) -> TestResult {
+async fn seed_role_revision(
+    pool: &PgPool,
+    tenant: TenantId,
+    actor: &str,
+    kind: vocab::PrincipalKind,
+    role: &Role,
+) -> TestResult {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant.to_string())
+        .execute(&mut *tx)
+        .await?;
+    let permissions = role.permission_ids().collect::<Vec<_>>();
+    sqlx::query("SELECT * FROM rss_record_role_revision($1, $2, $3, $4::uuid, $5)")
+        .bind(role.id().as_str())
+        .bind(role.name())
+        .bind(permissions)
+        .bind(actor)
+        .bind(kind.as_actor_metadata_label())
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+async fn seed_rbac(pg: &postgres::PgRuntimeHandle, owner: &PgPool, tenant: TenantId) -> TestResult {
     let identity = pg.for_domain::<caps::Identity>();
     let role = Role::hydrate(
         "credential-security-owner",
@@ -432,10 +457,7 @@ async fn seed_rbac(pg: &postgres::PgRuntimeHandle, tenant: TenantId) -> TestResu
         ],
     )?;
     let role_id = role.id().clone();
-    identity
-        .role_repo()
-        .save(TenantRepoScope::for_test(tenant), role)
-        .await?;
+    seed_role_revision(owner, tenant, USER, vocab::PrincipalKind::Admin, &role).await?;
     let service = identity::RbacAdminService::new(
         Arc::from(DynRoleReadRepo::new_box(identity.role_repo())),
         Arc::from(DynRoleBindingLifecycle::new_box(
@@ -614,7 +636,7 @@ async fn identity_password_security_event_journey() -> TestResult {
             ),
         )
         .await?;
-    seed_rbac(&pg, tenant).await?;
+    seed_rbac(&pg, &observer, tenant).await?;
     let account_before = identity
         .account_security_repo()
         .find(TenantRepoScope::for_test(tenant), ids::UserId::parse(USER)?)

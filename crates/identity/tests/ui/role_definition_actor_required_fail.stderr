@@ -1,0 +1,15 @@
+error[E0061]: this method takes 3 arguments but 2 arguments were supplied
+ --> tests/ui/role_definition_actor_required_fail.rs:8:23
+  |
+8 |     let _ = lifecycle.create_or_update(scope, role).await;
+  |                       ^^^^^^^^^^^^^^^^        ---- argument #2 of type `RoleMutationActor` is missing
+  |
+note: method defined here
+ --> src/ports.rs
+  |
+  |     async fn create_or_update(
+  |              ^^^^^^^^^^^^^^^^
+help: provide the argument
+  |
+8 |     let _ = lifecycle.create_or_update(scope, /* RoleMutationActor */, role).await;
+  |                                               ++++++++++++++++++++++++

@@ -317,18 +317,28 @@ pub(in super::super) use identity::ports::{
     PolicyValueRef, PolicyValueType, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
     ResourceAttributeReadRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
     ResourceAttributeVersion, ResourceAttributeWriteRepo, Role, RoleBinding, RoleBindingLifecycle,
-    RoleBindingReadRepo, RolePage, RoleReadRepo, RoleWriteRepo, ScalarOperandInput,
+    RoleBindingReadRepo, RoleDefinitionLifecycle, RolePage, RoleReadRepo, ScalarOperandInput,
     StringPredicate, TypedPolicyValueInput,
 };
 
 pub(in super::super) use crate::{
     PgPolicyLifecycle, PgPolicyRepo, PgResourceAttributeRepo, PgRoleBindingLifecycle,
-    PgRoleBindingReadRepo, PgRoleRepo,
+    PgRoleBindingReadRepo, PgRoleDefinitionLifecycle, PgRoleRepo,
 };
 
 pub(in super::super) const ROLE_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
 pub(in super::super) const ROLE_TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
+
+pub(in super::super) fn role_mutation_actor(
+    tenant: TenantId,
+) -> identity::ports::RoleMutationActor {
+    identity::test_support::role_mutation_actor(
+        &tenant.to_string(),
+        "11111111-2222-4333-8444-555555555555",
+        vocab::PrincipalKind::Admin,
+    )
+}
 
 pub(in super::super) fn role_tenant(
     raw: &str,

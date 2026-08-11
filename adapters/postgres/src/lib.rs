@@ -276,6 +276,8 @@ pub use revocation_sweeper::{
 pub use role_binding_lifecycle::PgRoleBindingLifecycle;
 #[cfg(feature = "domain-identity")]
 pub use role_binding_read_repo::PgRoleBindingReadRepo;
+#[cfg(all(test, feature = "integration"))]
+pub(crate) use role_repo::PgRoleDefinitionLifecycle;
 #[cfg(feature = "domain-identity")]
 pub use role_repo::PgRoleRepo;
 pub use saga::{PgSagaDurableStore, PgSagaReceiptProtection};
@@ -462,7 +464,11 @@ mod smoke {
     fn assert_pg_domain<D: super::PgDomain>(_: PhantomData<D>) {}
     fn assert_managed_resource<T: diport::ManagedResource>(_: PhantomData<T>) {}
     fn assert_role_repo<T: identity::ports::RoleReadRepo>(_: PhantomData<T>) {}
-    fn assert_role_write_repo<T: identity::ports::RoleWriteRepo>(_: PhantomData<T>) {}
+    #[cfg(feature = "integration")]
+    fn assert_role_definition_lifecycle<T: identity::ports::RoleDefinitionLifecycle>(
+        _: PhantomData<T>,
+    ) {
+    }
     fn assert_policy_repo<T: identity::ports::PolicyRepo>(_: PhantomData<T>) {}
     fn assert_credential_repo<T: identity::ports::CredentialRepo>(_: PhantomData<T>) {}
     fn assert_auth_grant_lifecycle<T: identity::ports::AuthGrantLifecycle>(_: PhantomData<T>) {}
@@ -499,7 +505,8 @@ mod smoke {
         assert_managed_resource(PhantomData::<super::PgStore>);
         // `PgRoleRepo: RoleReadRepo` 真实 impl（非 edge proof）——roles 表持久化 + tenant scope（#1250）。
         assert_role_repo(PhantomData::<super::PgRoleRepo>);
-        assert_role_write_repo(PhantomData::<super::PgRoleRepo>);
+        #[cfg(feature = "integration")]
+        assert_role_definition_lifecycle(PhantomData::<super::PgRoleDefinitionLifecycle>);
         // `PgPolicyRepo: PolicyRepo` 真实 impl——tenant-scoped durable ABAC policy store（#1588）。
         assert_policy_repo(PhantomData::<super::PgPolicyRepo>);
         // `PgCredentialRepo: CredentialRepo` 真实 impl（非 edge proof）——credentials 表 + 折叠锁定态 +

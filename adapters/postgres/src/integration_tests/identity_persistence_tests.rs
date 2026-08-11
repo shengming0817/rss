@@ -3906,32 +3906,37 @@ async fn auth_grant_composite_fk_rejects_every_mismatched_refresh_binding() -> T
     Ok(())
 }
 
-// CRUD：save 新角色 → find 往返一致；同 id 二次 save → upsert 覆盖 name+permissions（非新增行）；查无 → None。
+// Revision lifecycle：首次 mutation 追加 v1；同 id 内容变化追加 v2；canonical 相同则 no-op；查无 → None。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::expect_used)]
-// reason: 已保存/upserted role 必定可查到；集成测试 happy-path；item-level carve-out（error-handling.md §Carve-out）。
-async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
+// reason: 已追加 revision 的 role 必定可查到；集成测试 happy-path；item-level carve-out（error-handling.md §Carve-out）。
+async fn role_definition_revision_roundtrip_and_canonical_noop() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgRoleRepo::from_unverified_for_test(&store);
+    let lifecycle = PgRoleDefinitionLifecycle::from_unverified_for_test(&store);
     let tenant = role_tenant(ROLE_TENANT_A)?;
 
-    // 未保存 → None（fail-closed，anti-vacuity 的负例基线）。
+    // 尚无 revision → None（fail-closed，anti-vacuity 的负例基线）。
     let admin = Role::hydrate("role-admin", "Admin", &["identity:policy:read".to_string()])?;
     let admin_id = admin.id().clone();
     assert!(
         repo.find(identity_scope(tenant), admin_id.clone())
             .await?
             .is_none(),
-        "未保存 → None"
+        "无 revision → None"
     );
 
-    // save → find 往返一致（id / name / permissions）。
-    repo.save(identity_scope(tenant), admin).await?;
+    // 首次 mutation → revision 1，read model 往返一致（id / name / permissions）。
+    let created = lifecycle
+        .create_or_update(identity_scope(tenant), role_mutation_actor(tenant), admin)
+        .await?;
+    assert!(created.changed());
+    assert_eq!(created.revision().get(), 1);
     let got = repo
         .find(identity_scope(tenant), admin_id.clone())
         .await?
-        .expect("saved role visible");
+        .expect("revision 1 role visible");
     assert_eq!(got.id().as_str(), "role-admin");
     assert_eq!(got.name(), "Admin");
     assert_eq!(
@@ -3939,7 +3944,7 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
         vec!["identity:policy:read"]
     );
 
-    // 同 id 二次 save → upsert 覆盖 name + permissions。
+    // 同 id 内容变化 → append revision 2，latest read model 切到新快照。
     let admin_v2 = Role::hydrate(
         "role-admin",
         "Administrator",
@@ -3948,25 +3953,231 @@ async fn role_repo_save_find_roundtrip_and_upsert() -> TestResult {
             "identity:policy:update".to_string(),
         ],
     )?;
-    repo.save(identity_scope(tenant), admin_v2).await?;
+    let updated = lifecycle
+        .create_or_update(
+            identity_scope(tenant),
+            role_mutation_actor(tenant),
+            admin_v2,
+        )
+        .await?;
+    assert!(updated.changed());
+    assert_eq!(updated.revision().get(), 2);
     let got2 = repo
         .find(identity_scope(tenant), admin_id)
         .await?
-        .expect("upserted role visible");
-    assert_eq!(got2.name(), "Administrator", "upsert 覆盖 name");
+        .expect("revision 2 role visible");
+    assert_eq!(got2.name(), "Administrator", "latest revision updates name");
     assert_eq!(
         got2.permission_ids().collect::<Vec<_>>(),
         vec!["identity:policy:read", "identity:policy:update"],
-        "upsert 覆盖 permissions"
+        "latest revision updates permissions"
     );
-    // upsert 不新增行（DO UPDATE，非 INSERT）。
+    // stable role identity 始终单行；可变内容只追加到 revision history。
     let n: (i64,) =
         sqlx::query_as("SELECT count(*) FROM roles WHERE tenant_id = $1::uuid AND id = $2")
             .bind(ROLE_TENANT_A)
             .bind("role-admin")
             .fetch_one(&store.pool)
             .await?;
-    assert_eq!(n.0, 1, "upsert 不新增行");
+    assert_eq!(n.0, 1, "stable role identity remains one row");
+    let revisions: (i64,) = sqlx::query_as(
+        "SELECT count(*) FROM role_revisions WHERE tenant_id = $1::uuid AND role_id = $2",
+    )
+    .bind(ROLE_TENANT_A)
+    .bind("role-admin")
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(revisions.0, 2, "每次实际变化追加 revision");
+    let history: Vec<(i64, String, Vec<String>, String, String, bool)> = sqlx::query_as(
+        "SELECT version, name, permissions, changed_by::text, changed_by_kind, \
+                changed_at <= clock_timestamp() \
+         FROM role_revisions WHERE tenant_id = $1::uuid AND role_id = $2 ORDER BY version",
+    )
+    .bind(ROLE_TENANT_A)
+    .bind("role-admin")
+    .fetch_all(&store.pool)
+    .await?;
+    assert_eq!(history.len(), 2);
+    assert_eq!(history[0].0, 1);
+    assert_eq!(history[0].1, "Admin");
+    assert_eq!(history[1].0, 2);
+    assert_eq!(history[1].1, "Administrator");
+    assert_eq!(history[1].3, "11111111-2222-4333-8444-555555555555");
+    assert_eq!(history[1].4, "admin");
+    assert!(history.iter().all(|revision| revision.5));
+
+    let reordered = Role::hydrate(
+        "role-admin",
+        "Administrator",
+        &[
+            "identity:policy:update".to_string(),
+            "identity:policy:read".to_string(),
+            "identity:policy:read".to_string(),
+        ],
+    )?;
+    let no_change = lifecycle
+        .create_or_update(
+            identity_scope(tenant),
+            role_mutation_actor(tenant),
+            reordered,
+        )
+        .await?;
+    assert!(
+        !no_change.changed(),
+        "canonical-equal permissions must be a no-op"
+    );
+    assert_eq!(no_change.revision().get(), 2);
+
+    let mismatched = lifecycle
+        .create_or_update(
+            identity_scope(tenant),
+            role_mutation_actor(role_tenant(ROLE_TENANT_B)?),
+            Role::hydrate("wrong-tenant-actor", "Wrong", &[])?,
+        )
+        .await;
+    assert!(
+        matches!(mismatched, Err(IdentityError::PermissionDenied)),
+        "actor evidence from another tenant must fail closed"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn role_revision_function_is_not_an_rss_app_mutation_path() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    sqlx::query("GRANT rss_app TO CURRENT_USER")
+        .execute(&store.pool)
+        .await?;
+    let tenant = ROLE_TENANT_A;
+    let actor = "11111111-2222-4333-8444-555555555555";
+
+    let mut denied_function = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_app")
+        .execute(&mut *denied_function)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant)
+        .execute(&mut *denied_function)
+        .await?;
+    let function_call = sqlx::query_as::<_, (i64, bool)>(
+        "SELECT version, changed FROM rss_record_role_revision($1, $2, $3, $4::uuid, $5)",
+    )
+    .bind("acl-role")
+    .bind("ACL Role")
+    .bind(vec!["identity:role:read".to_string()])
+    .bind(actor)
+    .bind("admin")
+    .fetch_one(&mut *denied_function)
+    .await;
+    assert!(
+        matches!(function_call, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
+        "generic rss_app must not execute the actor-attributed role revision function: {function_call:?}"
+    );
+    denied_function.rollback().await?;
+
+    let mut denied = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_app")
+        .execute(&mut *denied)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant)
+        .execute(&mut *denied)
+        .await?;
+    let direct = sqlx::query("INSERT INTO roles (tenant_id, id) VALUES ($1::uuid, $2)")
+        .bind(tenant)
+        .bind("forged-role")
+        .execute(&mut *denied)
+        .await;
+    assert!(
+        matches!(direct, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
+        "rss_app direct role insert must be denied: {direct:?}"
+    );
+    denied.rollback().await?;
+
+    for statement in [
+        "UPDATE roles SET id = id WHERE tenant_id = current_setting('rss.tenant_id')::uuid",
+        "DELETE FROM roles WHERE tenant_id = current_setting('rss.tenant_id')::uuid",
+        "INSERT INTO role_revisions \
+         (tenant_id, role_id, version, name, permissions, changed_by, changed_by_kind) \
+         VALUES (current_setting('rss.tenant_id')::uuid, 'acl-role', 99, 'forged', \
+                 '{}'::text[], '11111111-2222-4333-8444-555555555555'::uuid, 'admin')",
+        "UPDATE role_revisions SET name = 'forged' \
+         WHERE tenant_id = current_setting('rss.tenant_id')::uuid",
+        "DELETE FROM role_revisions WHERE tenant_id = current_setting('rss.tenant_id')::uuid",
+    ] {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await?;
+        let result = sqlx::query(statement).execute(&mut *tx).await;
+        assert!(
+            matches!(result, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
+            "rss_app direct role mutation must be denied for {statement}: {result:?}"
+        );
+        tx.rollback().await?;
+    }
+
+    let catalog: (String, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT pg_get_userbyid(proc.proowner), proc.prosecdef, \
+                proc.proconfig @> ARRAY['search_path=pg_catalog, pg_temp'], \
+                has_function_privilege('rss_app', proc.oid, 'EXECUTE'), \
+                has_table_privilege('rss_app', 'public.role_revisions', 'INSERT,UPDATE,DELETE'), \
+                owner.rolcanlogin, owner.rolbypassrls \
+         FROM pg_proc AS proc JOIN pg_roles AS owner ON owner.oid = proc.proowner \
+         WHERE proc.oid = 'public.rss_record_role_revision(text,text,text[],uuid,text)'::regprocedure",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(catalog.0, "rss_role_revision_owner");
+    assert!(catalog.1, "function must be SECURITY DEFINER");
+    assert!(catalog.2, "function search_path must be pinned");
+    assert!(
+        !catalog.3,
+        "rss_app must not execute the role revision function"
+    );
+    assert!(
+        !catalog.4,
+        "rss_app must not insert role revisions directly"
+    );
+    assert!(!catalog.5, "function owner must be NOLOGIN");
+    assert!(!catalog.6, "function owner must be NOBYPASSRLS");
+    let owner_security: (bool, bool, bool, bool, bool, i64) = sqlx::query_as(
+        "SELECT owner.rolsuper, owner.rolcreatedb, owner.rolcreaterole, \
+                owner.rolreplication, owner.rolinherit, \
+                (SELECT count(*) FROM pg_catalog.pg_auth_members AS membership \
+                 WHERE membership.member = owner.oid OR membership.roleid = owner.oid) \
+         FROM pg_catalog.pg_roles AS owner WHERE owner.rolname = 'rss_role_revision_owner'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        owner_security,
+        (false, false, false, false, false, 0),
+        "function owner must have exact non-inheriting attributes and no memberships"
+    );
+    let unexpected_execute_grantees: i64 = sqlx::query_scalar(
+        "SELECT count(DISTINCT privilege.grantee) \
+         FROM pg_catalog.pg_proc AS proc \
+         CROSS JOIN LATERAL pg_catalog.aclexplode( \
+             COALESCE(proc.proacl, pg_catalog.acldefault('f', proc.proowner)) \
+         ) AS privilege \
+         WHERE proc.oid = 'public.rss_record_role_revision(text,text,text[],uuid,text)'::regprocedure \
+           AND privilege.privilege_type = 'EXECUTE' \
+           AND privilege.grantee <> proc.proowner",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        unexpected_execute_grantees, 0,
+        "only the isolated function owner may execute the role revision function"
+    );
 
     store.shutdown().await?;
     Ok(())
@@ -3977,6 +4188,7 @@ async fn role_repo_tenant_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgRoleRepo::from_unverified_for_test(&store);
+    let lifecycle = PgRoleDefinitionLifecycle::from_unverified_for_test(&store);
     let tenant_a = role_tenant(ROLE_TENANT_A)?;
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
     let role_id = Role::hydrate("tenant-conf-role", "seed", &[])?.id().clone();
@@ -3985,17 +4197,20 @@ async fn role_repo_tenant_conformance() -> TestResult {
         tenant_a,
         tenant_b,
         |tenant| {
-            let repo = &repo;
+            let lifecycle = &lifecycle;
             async move {
-                repo.save(
-                    identity_scope(tenant),
-                    Role::hydrate(
-                        "tenant-conf-role",
-                        "TenantConf",
-                        &["identity:policy:read".to_string()],
-                    )?,
-                )
-                .await
+                lifecycle
+                    .create_or_update(
+                        identity_scope(tenant),
+                        role_mutation_actor(tenant),
+                        Role::hydrate(
+                            "tenant-conf-role",
+                            "TenantConf",
+                            &["identity:policy:read".to_string()],
+                        )?,
+                    )
+                    .await
+                    .map(|_| ())
             }
         },
         |tenant| {
@@ -5273,22 +5488,23 @@ async fn policy_route_gate_conformance_denies_nonempty_obligations() -> TestResu
     Ok(())
 }
 
-// 并发：同 (tenant,id) 并发 save → ON CONFLICT 收敛、全 Ok（无 PK 错逃逸）、终态单行；不同 id 并发 → 各自落库。
+// 并发：同 (tenant,id) 由 stable identity 行锁串行 append，revision 唯一连续且不覆盖；不同 id 互不干扰。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 // reason: tokio::spawn join 必定成功（task 正常 Ok）；converged role 必定可查到；item-level carve-out（error-handling.md §Carve-out）。
-async fn role_repo_concurrent_save_converges() -> TestResult {
+async fn role_definition_concurrent_revisions_are_contiguous() -> TestResult {
     use std::sync::Arc;
 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = Arc::new(PgRoleRepo::from_unverified_for_test(&store));
+    let lifecycle = Arc::new(PgRoleDefinitionLifecycle::from_unverified_for_test(&store));
     let tenant = role_tenant(ROLE_TENANT_A)?;
 
-    // 同 id 并发 upsert：8 个 task 竞写同一 (tenant,id)。
+    // 同 id 并发 mutation：8 个 task 竞写同一 (tenant,id)。
     let mut handles = Vec::new();
     for i in 0..8 {
-        let repo = Arc::clone(&repo);
+        let lifecycle = Arc::clone(&lifecycle);
         handles.push(tokio::spawn(async move {
             let permission = if i % 2 == 0 {
                 "identity:policy:read"
@@ -5296,14 +5512,17 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
                 "identity:policy:update"
             };
             let role = Role::hydrate("contended", "C", &[permission.to_string()])?;
-            repo.save(identity_scope(tenant), role).await
+            lifecycle
+                .create_or_update(identity_scope(tenant), role_mutation_actor(tenant), role)
+                .await
+                .map(|_| ())
         }));
     }
     for h in handles {
-        // 每个 save 必 Ok——并发 PK 冲突由 ON CONFLICT DO UPDATE 收敛，不逃逸为 unique violation。
+        // 每个 mutation 必 Ok——stable identity 行锁串行 revision 分配，不逃逸 unique violation。
         h.await.expect("join")?;
     }
-    // throwaway role 取 contended 的 RoleId（不 save，仅为 mint id 查终态）。
+    // throwaway role 取 contended 的 RoleId（不持久化，仅为 mint id 查终态）。
     let contended_id = Role::hydrate("contended", "x", &[])?.id().clone();
     let got = repo
         .find(identity_scope(tenant), contended_id)
@@ -5319,14 +5538,34 @@ async fn role_repo_concurrent_save_converges() -> TestResult {
             .fetch_one(&store.pool)
             .await?;
     assert_eq!(n.0, 1, "并发同 id → 终态单行");
+    let versions: Vec<i64> = sqlx::query_scalar(
+        "SELECT version FROM role_revisions \
+         WHERE tenant_id = $1::uuid AND role_id = $2 ORDER BY version",
+    )
+    .bind(ROLE_TENANT_A)
+    .bind("contended")
+    .fetch_all(&store.pool)
+    .await?;
+    assert!(
+        (2..=8).contains(&versions.len()),
+        "two distinct snapshots must both be retained, while consecutive duplicates may no-op: {versions:?}"
+    );
+    assert_eq!(
+        versions,
+        (1..=i64::try_from(versions.len())?).collect::<Vec<_>>(),
+        "concurrent revision allocation must have no duplicates or gaps"
+    );
 
-    // 不同 id 并发 save → 各自落库（无相互干扰）。
+    // 不同 id 并发 mutation → 各自追加 revision（无相互干扰）。
     let mut handles2 = Vec::new();
     for i in 0..8 {
-        let repo = Arc::clone(&repo);
+        let lifecycle = Arc::clone(&lifecycle);
         handles2.push(tokio::spawn(async move {
             let role = Role::hydrate(&format!("role-{i}"), "N", &[])?;
-            repo.save(identity_scope(tenant), role).await
+            lifecycle
+                .create_or_update(identity_scope(tenant), role_mutation_actor(tenant), role)
+                .await
+                .map(|_| ())
         }));
     }
     for h in handles2 {
@@ -5351,21 +5590,26 @@ async fn role_repo_list_paginates_and_is_tenant_scoped() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let repo = PgRoleRepo::from_unverified_for_test(&store);
+    let lifecycle = PgRoleDefinitionLifecycle::from_unverified_for_test(&store);
     let tenant_a = role_tenant(ROLE_TENANT_A)?;
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
 
     for (id, name) in [("role-a", "A"), ("role-b", "B"), ("role-c", "C")] {
-        repo.save(
-            identity_scope(tenant_a),
-            Role::hydrate(id, name, &["identity:policy:read".to_string()])?,
+        lifecycle
+            .create_or_update(
+                identity_scope(tenant_a),
+                role_mutation_actor(tenant_a),
+                Role::hydrate(id, name, &["identity:policy:read".to_string()])?,
+            )
+            .await?;
+    }
+    lifecycle
+        .create_or_update(
+            identity_scope(tenant_b),
+            role_mutation_actor(tenant_b),
+            Role::hydrate("role-aa", "TenantB", &["identity:policy:read".to_string()])?,
         )
         .await?;
-    }
-    repo.save(
-        identity_scope(tenant_b),
-        Role::hydrate("role-aa", "TenantB", &["identity:policy:read".to_string()])?,
-    )
-    .await?;
 
     let page1 = repo
         .list(
@@ -5439,9 +5683,21 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
     let tenant_b = role_tenant(ROLE_TENANT_B)?;
     let role = Role::hydrate("role-admin", "Admin", &["identity:role:assign".to_string()])?;
     let role_id = role.id().clone();
-    let repo = PgRoleRepo::from_unverified_for_test(&store);
-    repo.save(identity_scope(tenant), role.clone()).await?;
-    repo.save(identity_scope(tenant_b), role).await?;
+    let lifecycle = PgRoleDefinitionLifecycle::from_unverified_for_test(&store);
+    lifecycle
+        .create_or_update(
+            identity_scope(tenant),
+            role_mutation_actor(tenant),
+            role.clone(),
+        )
+        .await?;
+    lifecycle
+        .create_or_update(
+            identity_scope(tenant_b),
+            role_mutation_actor(tenant_b),
+            role,
+        )
+        .await?;
 
     let svc = identity::RbacAdminService::new(
         Arc::from(DynRoleReadRepo::new_box(
@@ -5582,9 +5838,10 @@ async fn role_binding_fact_conflict_rolls_back_assignment() -> TestResult {
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let role_name = format!("role-fact-conflict-{}", uuid_like());
     let subject = format!("subject-fact-conflict-{}", uuid_like());
-    PgRoleRepo::from_unverified_for_test(&store)
-        .save(
+    PgRoleDefinitionLifecycle::from_unverified_for_test(&store)
+        .create_or_update(
             identity_scope(tenant),
+            role_mutation_actor(tenant),
             Role::hydrate(
                 &role_name,
                 "Fact conflict",
@@ -6882,7 +7139,7 @@ async fn credential_repo_db_check_constraints_reject_invalid() -> TestResult {
 
 // 并发行锁 RMW 红用例（#1316 review F1）：同 (tenant, login) 5 路并发 wrong-password authenticate——
 // SELECT ... FOR UPDATE 串行化各事务 RMW，全部完成后失败计数恰 = 5（无丢更新）且达阈值锁定。
-// 对标 role_repo_concurrent_save_converges（Arc<repo> + tokio::spawn 竞争同行）。
+// 对标 role_definition_concurrent_revisions_are_contiguous（Arc<lifecycle> + tokio::spawn 竞争同行）。
 #[tokio::test(flavor = "multi_thread")]
 async fn credential_repo_concurrent_failures_no_lost_update() -> TestResult {
     use std::sync::Arc;

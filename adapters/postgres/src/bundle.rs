@@ -2045,6 +2045,19 @@ fn identity_ok(
 ```
 "#
 )]
+///
+/// 角色 definition mutation 不属于 production bundle surface；外部生产 consumer 无法取得该能力：
+#[cfg_attr(
+    feature = "domain-identity",
+    doc = r#"
+```compile_fail
+use postgres::{PgDomainDeps, caps};
+fn forbidden(d: PgDomainDeps<caps::Identity>) {
+    let _ = d.role_definition_lifecycle();
+}
+```
+"#
+)]
 pub struct PgDomainDeps<D: PgDomain> {
     stores: Arc<PgRuntimeStores>,
     audit_admin_store: Option<VerifiedPgAuditAdminStore>,
@@ -2375,10 +2388,7 @@ impl PgDomainDeps<caps::Identity> {
     /// 角色仓储（roles 表 + tenant scope）。
     #[must_use]
     pub fn role_repo(&self) -> PgRoleRepo {
-        PgRoleRepo::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
+        PgRoleRepo::new(self.stores.reader_capability())
     }
 
     /// durable ABAC policy store（abac_policies 表 + tenant scope）。

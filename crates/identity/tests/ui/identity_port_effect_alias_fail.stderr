@@ -1,4 +1,4 @@
-error[E0271]: type mismatch resolving `<DynRoleWriteRepo<'static> as IdentityPortEffect>::Effect == ReadEffect`
+error[E0271]: type mismatch resolving `<DynRoleDefinitionLifecycle<'static> as IdentityPortEffect>::Effect == ReadEffect`
  --> tests/ui/identity_port_effect_alias_fail.rs:9:20
   |
 9 |     require_read::<AllegedlyRead>();

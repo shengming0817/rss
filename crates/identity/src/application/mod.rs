@@ -153,7 +153,7 @@ use crate::ports::{
     RolePage, RoleReadRepo, TenantRepoScope,
 };
 #[cfg(test)]
-use crate::ports::{DynRoleBindingLifecycle, RoleWriteRepo};
+use crate::ports::{DynRoleBindingLifecycle, RoleDefinitionLifecycle, RoleMutationActor};
 
 /// RBAC 角色管理子域（角色分配 / 撤销 + L2 角色事件发布，#1190 US5）。私有——只经 facade re-export 暴露。
 mod rbac_admin;
@@ -6411,9 +6411,18 @@ mod tests {
         crate::internal::mem::InMemRoleBindingLifecycle,
     ) {
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(tenant_repo_scope(tid(CANON_TENANT)), role.clone())
-            .await
-            .expect("save role");
+        repo.create_or_update(
+            tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
+            role.clone(),
+        )
+        .await
+        .expect("save role");
         let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
             tid(CANON_TENANT),
             role.id(),
@@ -7278,8 +7287,14 @@ mod tests {
     #[allow(clippy::expect_used, clippy::panic)]
     async fn contract_authorizer_limits_rss_user_grants_to_explicitly_supported_routes() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(
+        repo.create_or_update(
             tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
             role(
                 "role-admin",
                 "Admin",
@@ -8092,8 +8107,14 @@ mod tests {
     async fn contract_authorizer_audit_projection_role_field_permissions_become_projection()
     -> Result<(), String> {
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(
+        repo.create_or_update(
             tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
             role(
                 "role-audit",
                 "Audit",
@@ -8149,8 +8170,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn contract_authorizer_audit_projection_read_without_field_permission_stays_masked() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(
+        repo.create_or_update(
             tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
             role(
                 "role-audit",
                 "Audit",
@@ -8509,8 +8536,14 @@ mod tests {
     async fn contract_authorizer_allows_non_identity_permission_route_by_rbac() {
         let external_permission = vocab::RoutePermissionId::SettingsConfigPublish;
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(
+        repo.create_or_update(
             tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
             role("role-admin", "Admin", &[external_permission.as_str()]),
         )
         .await
@@ -8619,9 +8652,18 @@ mod tests {
     async fn roles_revoke_handler_returns_typed_revoked_flag() {
         let seeded_role = role("role-admin", "Admin", &["identity:role:revoke"]);
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(tenant_repo_scope(tid(CANON_TENANT)), seeded_role.clone())
-            .await
-            .expect("save role");
+        repo.create_or_update(
+            tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
+            seeded_role.clone(),
+        )
+        .await
+        .expect("save role");
         let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new()
             .with_binding(tid(CANON_TENANT), seeded_role.id(), CANON_USER)
             .with_binding(tid(CANON_TENANT), seeded_role.id(), "target-user");
@@ -8673,9 +8715,18 @@ mod tests {
     async fn roles_revoke_handler_rejects_auth_json_subject_and_role_id_errors() {
         let seeded_role = role("role-admin", "Admin", &["identity:role:revoke"]);
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(tenant_repo_scope(tid(CANON_TENANT)), seeded_role.clone())
-            .await
-            .expect("save role");
+        repo.create_or_update(
+            tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
+            seeded_role.clone(),
+        )
+        .await
+        .expect("save role");
         let bindings = crate::internal::mem::InMemRoleBindingLifecycle::new()
             .with_binding(tid(CANON_TENANT), seeded_role.id(), CANON_USER)
             .with_binding(tid(CANON_TENANT), seeded_role.id(), "target-user");
@@ -8733,14 +8784,26 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn roles_list_handler_pages_and_rejects_bad_cursor() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(
+        repo.create_or_update(
             tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
             role("role-a", "A", &["identity:role:read"]),
         )
         .await
         .expect("save a");
-        repo.save(
+        repo.create_or_update(
             tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
             role("role-b", "B", &["identity:policy:update"]),
         )
         .await
@@ -8776,8 +8839,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn roles_list_handler_rejects_invalid_limit() {
         let repo = crate::internal::mem::InMemRoleRepo::new();
-        repo.save(
+        repo.create_or_update(
             tenant_repo_scope(tid(CANON_TENANT)),
+            RoleMutationActor::for_test_user(
+                tid(CANON_TENANT),
+                uid(CANON_USER),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("authenticated role actor"),
             role("role-a", "A", &["identity:role:read"]),
         )
         .await

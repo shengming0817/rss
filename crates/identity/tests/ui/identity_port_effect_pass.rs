@@ -8,7 +8,7 @@ use identity::ports::{
     DynAccountReactivationLifecycle, DynAccountSecurityReadRepo, DynAuthGrantLifecycle,
     DynCredentialRepo, DynIdentitySecurityLifecycle, DynPolicyLifecycle, DynPolicyRepo,
     DynRefreshTokenStore, DynResourceAttributeReadRepo, DynResourceAttributeWriteRepo,
-    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, DynRoleWriteRepo,
+    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleDefinitionLifecycle, DynRoleReadRepo,
     IdentityPortEffect,
 };
 
@@ -27,7 +27,7 @@ fn main() {
     assert_effect::<DynResourceAttributeWriteRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
     assert_effect::<DynRoleReadRepo<'static>, ReadEffect, LocalPrivilege>();
     assert_effect::<DynRoleBindingReadRepo<'static>, AuthEffect, LocalPrivilege>();
-    assert_effect::<DynRoleWriteRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
+    assert_effect::<DynRoleDefinitionLifecycle<'static>, BusinessWriteEffect, LocalPrivilege>();
     assert_effect::<DynAccountSecurityReadRepo<'static>, AuthEffect, LocalPrivilege>();
     assert_effect::<DynCredentialRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
     assert_effect::<DynRefreshTokenStore<'static>, AuthEffect, LocalPrivilege>();

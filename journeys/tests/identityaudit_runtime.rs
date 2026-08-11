@@ -89,14 +89,19 @@ async fn seed_login(pool: &PgPool) -> Result<()> {
 }
 
 async fn seed_runtime_inventory_grant(pool: &PgPool) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(identityaudit_fixture::tenant())
+        .execute(&mut *tx)
+        .await?;
     sqlx::query(
-        "INSERT INTO roles (tenant_id, id, name, permissions) \
-         VALUES ($1::uuid, 'identityaudit-runtime-inventory-reader', \
-                 'IdentityAudit runtime inventory reader', \
-                 ARRAY['runtime:inventory:read']::text[])",
+        "SELECT * FROM rss_record_role_revision( \
+         'identityaudit-runtime-inventory-reader', \
+         'IdentityAudit runtime inventory reader', \
+         ARRAY['runtime:inventory:read']::text[], $1::uuid, 'admin')",
     )
-    .bind(identityaudit_fixture::tenant())
-    .execute(pool)
+    .bind(USER_ID)
+    .execute(&mut *tx)
     .await?;
     sqlx::query(
         "INSERT INTO role_bindings (tenant_id, role_id, subject) \
@@ -104,8 +109,9 @@ async fn seed_runtime_inventory_grant(pool: &PgPool) -> Result<()> {
     )
     .bind(identityaudit_fixture::tenant())
     .bind(USER_ID)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(())
 }
 

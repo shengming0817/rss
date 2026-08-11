@@ -1098,7 +1098,7 @@ pub trait PolicyLifecycleLocal: Send + Sync {
 /// dyn-safe（ADR-003 §4.6）：方法 `&self`、参数/返回为具体类型、supertrait 仅 Send。归属为域形 port
 /// （签名引用 `Role`/`RoleId`）→ 本域 crate `ports`，非 diport（ADR-005 category line）。
 ///
-/// **当前方法集 = 只读接缝（find / tenant-scoped list）；save 仅由独立 [`RoleWriteRepo`] 暴露。**
+/// **当前方法集 = 只读接缝（find / tenant-scoped list）；mutation 仅由独立 [`RoleDefinitionLifecycle`] 暴露。**
 /// 安全 scope 由签名承载：`Role` 按租户内角色建模，repo 方法必须接收 [`TenantRepoScope`] 做 store scope
 /// （pre-GA：显式 `WHERE tenant_id` + 写路径 `SET LOCAL`；DB 层 FORCE RLS 属**仓库范围 RLS infra 后续**，跨
 /// roles/sessions/config 统一落地，见 `docs/rules/tenancy.md` §RLS）；若后续需要全局角色定义，须拆独立
@@ -1126,13 +1126,149 @@ pub trait RoleReadRepoLocal: Send + Sync {
     ) -> Result<RoleListResult, IdentityError>;
 }
 
-/// 角色写仓储 DI port。与 [`RoleReadRepo`] 破坏式分离，使读路由类型系统排除写能力。
-#[trait_variant::make(RoleWriteRepo: Send)]
-#[dynosaur(pub DynRoleWriteRepo = dyn(box) RoleWriteRepo, bridge(dyn))]
+/// 角色定义 revision（每个 tenant/role 从 1 严格单调递增）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoleRevision(u64);
+
+impl RoleRevision {
+    /// 从 durable store 受控重建；0 或越界值 fail closed。
+    pub fn hydrate(raw: i64) -> Result<Self, IdentityError> {
+        let revision = u64::try_from(raw)
+            .ok()
+            .filter(|value| *value > 0)
+            .ok_or_else(|| {
+                IdentityError::Storage(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "role revision must be positive",
+                )))
+            })?;
+        Ok(Self(revision))
+    }
+
+    pub fn get(self) -> u64 {
+        self.0
+    }
+}
+
+/// 角色定义变更的已认证操作者。字段私有，生产仅能由 identity application 从可信主体构造。
+#[derive(Clone)]
+pub struct RoleMutationActor {
+    tenant: TenantId,
+    id: diport::OpaqueActorId,
+    kind: vocab::PrincipalKind,
+}
+
+impl RoleMutationActor {
+    /// Raw-value constructor is compiled only for tests. Production role-management wiring must
+    /// add a constructor that consumes one sealed verified-authentication evidence value and
+    /// derives tenant, subject and kind from that same value.
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn for_test_user(
+        tenant: TenantId,
+        user_id: ids::UserId,
+        kind: vocab::PrincipalKind,
+    ) -> Result<Self, IdentityError> {
+        if !matches!(
+            kind,
+            vocab::PrincipalKind::User
+                | vocab::PrincipalKind::Admin
+                | vocab::PrincipalKind::SuperAdmin
+        ) {
+            return Err(IdentityError::PermissionDenied);
+        }
+        Ok(Self {
+            tenant,
+            id: diport::OpaqueActorId::from_user_id(user_id),
+            kind,
+        })
+    }
+
+    /// Persisted-only actor identifier; callers must not log it.
+    pub fn id(&self) -> &diport::OpaqueActorId {
+        &self.id
+    }
+
+    pub fn tenant(&self) -> TenantId {
+        self.tenant
+    }
+
+    pub fn kind(&self) -> vocab::PrincipalKind {
+        self.kind
+    }
+}
+
+impl std::fmt::Debug for RoleMutationActor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RoleMutationActor")
+            .field("id", &"<redacted>")
+            .field("kind", &self.kind)
+            .finish()
+    }
+}
+
+#[cfg(test)]
+mod role_mutation_actor_tests {
+    use super::*;
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn user_backed_test_actor_rejects_non_user_principal_kinds() {
+        let tenant =
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant");
+        let user =
+            ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("canonical user");
+        for kind in [
+            vocab::PrincipalKind::Anonymous,
+            vocab::PrincipalKind::Device,
+            vocab::PrincipalKind::Service,
+        ] {
+            assert!(matches!(
+                RoleMutationActor::for_test_user(tenant, user, kind),
+                Err(IdentityError::PermissionDenied)
+            ));
+        }
+    }
+}
+
+/// 角色写入结果。相同 canonical 内容返回既有 revision 且 `changed=false`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RoleMutationOutcome {
+    revision: RoleRevision,
+    changed: bool,
+}
+
+impl RoleMutationOutcome {
+    pub fn new(revision: RoleRevision, changed: bool) -> Self {
+        Self { revision, changed }
+    }
+
+    pub fn revision(self) -> RoleRevision {
+        self.revision
+    }
+
+    pub fn changed(self) -> bool {
+        self.changed
+    }
+}
+
+/// 角色定义唯一 append-only mutation capability。与 [`RoleReadRepo`] 破坏式分离，且 actor 为必填位置参。
+///
+/// 契约：
+/// - `actor.tenant()` 必须与 `scope.tenant()` 相同，否则 fail closed；
+/// - `role` 的 canonical name/permissions 与最新 revision 相同时不得追加新行，返回既有 revision 且
+///   `changed=false`；
+/// - 内容变化时，provider 必须在同一原子事务中锁定稳定 role identity、将 revision 严格递增 1，并返回
+///   新 revision 且 `changed=true`。
+#[trait_variant::make(RoleDefinitionLifecycle: Send)]
+#[dynosaur(pub DynRoleDefinitionLifecycle = dyn(box) RoleDefinitionLifecycle, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-pub trait RoleWriteRepoLocal: Send + Sync {
-    /// 持久化角色（upsert）。
-    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError>;
+pub trait RoleDefinitionLifecycleLocal: Send + Sync {
+    async fn create_or_update(
+        &self,
+        scope: TenantRepoScope,
+        actor: RoleMutationActor,
+        role: Role,
+    ) -> Result<RoleMutationOutcome, IdentityError>;
 }
 
 /// 角色列表分页参数（handler 已完成 query/cursor 校验，repo 只接收 typed page）。
@@ -1644,7 +1780,7 @@ classify_identity_ports! {
     DynResourceAttributeWriteRepo => diport::BusinessWriteEffect,
     DynRoleBindingReadRepo => diport::AuthEffect,
     DynRoleReadRepo => diport::ReadEffect,
-    DynRoleWriteRepo => diport::BusinessWriteEffect,
+    DynRoleDefinitionLifecycle => diport::BusinessWriteEffect,
     DynAccountSecurityReadRepo => diport::AuthEffect,
     DynAuthGrantValidator => diport::AuthEffect,
     DynCredentialRepo => diport::BusinessWriteEffect,

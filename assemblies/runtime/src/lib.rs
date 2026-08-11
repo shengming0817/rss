@@ -227,8 +227,7 @@ impl RuntimeLifecycleOwner {
 /// → 聚合 readiness/lifecycle outputs → 装配认证接线 → 挂 Health listener
 /// → bind + serve + 信号优雅关停。
 ///
-/// 缺配 / 连不上 / migration 失败均 **fail-fast**（不静默 ready）。各域业务 handler ↔ service 接线
-/// 由 manifest-derived domain list 驱动，禁止回退为手写 per-domain wiring。
+/// 缺配 / 连不上 / migration 失败均 **fail-fast**；各域接线由 manifest-derived domain list 驱动。
 /// tracing subscriber 与配置 snapshot 由 [`prepare_runtime`] 在 `main` 中先于本 fn 装配。
 // reason: 组合根入口顺序编排（infra setup → provider setup → generated domains → compose → finalize → serve）
 // 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。

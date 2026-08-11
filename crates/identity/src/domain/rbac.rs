@@ -116,12 +116,12 @@ impl Role {
         &self.id
     }
 
-    /// 取角色名引用。`pub`（#1250）：adapter 跨 crate 读以绑 `roles.name`。
+    /// 取角色名引用。`pub`（#1250）：adapter 跨 crate 写入不可变 revision 快照。
     pub fn name(&self) -> &str {
         &self.name
     }
 
-    /// 权限 ID 字符串迭代器（adapter 读侧绑 `roles.permissions text[]` / response 输出）。
+    /// 权限 ID 字符串迭代器（adapter 绑 `role_revisions.permissions text[]` / response 输出）。
     /// 内部授权不得反向解析该字符串比较；应读取 [`Self::grant_permissions`]。
     pub fn permission_ids(&self) -> impl Iterator<Item = String> + '_ {
         self.permissions

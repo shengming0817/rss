@@ -54,8 +54,8 @@ use crate::ports::{
     PoliciesCreateProducerReceipt, PoliciesDeactivateProducerReceipt,
     PoliciesUpdateProducerReceipt, PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo,
     ResourceAttributeReadRepo, ResourceAttributeWriteRepo, RoleBindingLifecycle,
-    RoleBindingReadRepo, RoleReadRepo, RoleWriteRepo, RolesAssignProducerReceipt,
-    RolesRevokeProducerReceipt,
+    RoleBindingReadRepo, RoleDefinitionLifecycle, RoleMutationActor, RoleMutationOutcome,
+    RoleReadRepo, RoleRevision, RolesAssignProducerReceipt, RolesRevokeProducerReceipt,
 };
 #[cfg(test)]
 use std::collections::HashSet;
@@ -1132,9 +1132,16 @@ impl ResourceAttributeWriteRepo for InMemResourceAttributeRepo {
 
 /// `RoleReadRepo` 的 in-memory 替身：保存完整 [`Role`]，供 assign/revoke 校验与列表 handler 测试共用。
 #[cfg(test)]
+#[derive(Default)]
+struct InMemRoleState {
+    roles: HashMap<(String, String), Role>, // (tenant, role_id)
+    revisions: HashMap<(String, String), u64>,
+}
+
+#[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct InMemRoleRepo {
-    roles: Arc<Mutex<HashMap<(String, String), Role>>>, // (tenant, role_id)
+    state: Arc<Mutex<InMemRoleState>>,
 }
 
 #[cfg(test)]
@@ -1145,16 +1152,24 @@ impl InMemRoleRepo {
 
     /// 种子：标记 `(tenant, role_id)` 存在。
     pub(crate) fn with_role(self, tenant: TenantId, role_id: &RoleId) -> Self {
-        recover(&self.roles).insert(
-            (tenant.to_string(), role_id.as_str().to_string()),
+        let key = (tenant.to_string(), role_id.as_str().to_string());
+        let mut state = recover(&self.state);
+        state.roles.insert(
+            key.clone(),
             Role::new(role_id.clone(), "seeded".to_string(), vec![]),
         );
+        state.revisions.insert(key, 1);
+        drop(state);
         self
     }
 
     /// 种子：保存完整 role（含权限），供 handler/authorizer 测试构造 RBAC baseline。
     pub(crate) fn with_role_entity(self, tenant: TenantId, role: Role) -> Self {
-        recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()), role);
+        let key = (tenant.to_string(), role.id().as_str().to_string());
+        let mut state = recover(&self.state);
+        state.roles.insert(key.clone(), role);
+        state.revisions.insert(key, 1);
+        drop(state);
         self
     }
 }
@@ -1167,7 +1182,8 @@ impl RoleReadRepo for InMemRoleRepo {
         id: RoleId,
     ) -> Result<Option<Role>, IdentityError> {
         let tenant = scope.tenant();
-        Ok(recover(&self.roles)
+        Ok(recover(&self.state)
+            .roles
             .get(&(tenant.to_string(), id.as_str().to_string()))
             .cloned())
     }
@@ -1180,7 +1196,8 @@ impl RoleReadRepo for InMemRoleRepo {
         let tenant = scope.tenant();
         let limit = usize::from(page.limit.get());
         let after = page.after.as_ref().map(RoleId::as_str);
-        let mut roles = recover(&self.roles)
+        let mut roles = recover(&self.state)
+            .roles
             .iter()
             .filter(|((t, id), _)| {
                 t == &tenant.to_string() && after.is_none_or(|a| id.as_str() > a)
@@ -1195,11 +1212,45 @@ impl RoleReadRepo for InMemRoleRepo {
 }
 
 #[cfg(test)]
-impl RoleWriteRepo for InMemRoleRepo {
-    async fn save(&self, scope: TenantRepoScope, role: Role) -> Result<(), IdentityError> {
+impl RoleDefinitionLifecycle for InMemRoleRepo {
+    async fn create_or_update(
+        &self,
+        scope: TenantRepoScope,
+        actor: RoleMutationActor,
+        role: Role,
+    ) -> Result<RoleMutationOutcome, IdentityError> {
+        if actor.tenant() != scope.tenant() {
+            return Err(IdentityError::PermissionDenied);
+        }
         let tenant = scope.tenant();
-        recover(&self.roles).insert((tenant.to_string(), role.id().as_str().to_string()), role);
-        Ok(())
+        let key = (tenant.to_string(), role.id().as_str().to_string());
+        let mut permissions = role.permission_ids().collect::<Vec<_>>();
+        permissions.sort();
+        permissions.dedup();
+        let canonical = Role::hydrate(role.id().as_str(), role.name(), &permissions)?;
+        let mut state = recover(&self.state);
+        let changed = state.roles.get(&key).is_none_or(|current| {
+            let mut current_permissions = current.permission_ids().collect::<Vec<_>>();
+            current_permissions.sort();
+            current_permissions.dedup();
+            current.name() != canonical.name() || current_permissions != permissions
+        });
+        let current_revision = state.revisions.get(&key).copied().unwrap_or(0);
+        let revision = if changed {
+            current_revision.checked_add(1).ok_or_else(|| {
+                IdentityError::Storage(Box::new(std::io::Error::other("role revision overflow")))
+            })?
+        } else {
+            current_revision
+        };
+        if changed {
+            state.roles.insert(key.clone(), canonical);
+            state.revisions.insert(key, revision);
+        }
+        let revision = RoleRevision::hydrate(
+            i64::try_from(revision).map_err(|error| IdentityError::Storage(Box::new(error)))?,
+        )?;
+        Ok(RoleMutationOutcome::new(revision, changed))
     }
 }
 
@@ -1412,20 +1463,21 @@ impl RefreshTokenStore for InMemAuthGrantStore {
 mod tests {
     use super::{
         Credential, InMemAuthGrantStore, InMemCredentialRepo, InMemPolicyRepo,
-        InMemResourceAttributeRepo, InMemRoleBindingLifecycle, TenantId, recover,
+        InMemResourceAttributeRepo, InMemRoleBindingLifecycle, InMemRoleRepo, TenantId, recover,
     };
     use crate::domain::{
         AccountSecurityState, AuthOutcome, IdentityError, LoginIdentifier, Policy, PolicyId,
         PolicyRouteScope, PolicyValue, PolicyVersion, RefreshStatus, RefreshTokenHash,
         RefreshTokenId, RefreshTokenRecord, ResourceAttribute, ResourceAttributeKey,
-        ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
+        ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion, Role,
         RoleBinding, RoleId,
     };
     use crate::ports::{
         AccountSecurityReadRepo, AuthGrantLifecycle, CredentialRepo, IdentitySecurityLifecycle,
         LoginGrantMutation, PolicyLifecycle, PolicyRepo, RefreshExecutionCommand,
         RefreshExecutionOutcome, RefreshTokenStore, ResourceAttributeReadRepo,
-        ResourceAttributeWriteRepo, RoleBindingLifecycle, TenantRepoScope,
+        ResourceAttributeWriteRepo, RoleBindingLifecycle, RoleDefinitionLifecycle,
+        RoleMutationActor, TenantRepoScope,
     };
     use authn::{
         AuthGrant, AuthGrantId, AuthGrantSnapshot, AuthGrantStatus, AuthnEpoch,
@@ -1457,6 +1509,36 @@ mod tests {
 
     fn scope(tenant: TenantId) -> TenantRepoScope {
         TenantRepoScope::for_test(tenant)
+    }
+
+    #[tokio::test]
+    async fn in_mem_role_identical_concurrent_writes_share_revision_one() {
+        let tenant = tid(TENANT_A);
+        let repo = InMemRoleRepo::new();
+        let role = Role::hydrate(
+            "concurrent-role",
+            "Concurrent",
+            &["identity:role:read".to_owned()],
+        )
+        .expect("valid role");
+        let actor = || {
+            RoleMutationActor::for_test_user(
+                tenant,
+                ids::UserId::parse(USER_ALICE).expect("canonical user"),
+                vocab::PrincipalKind::Admin,
+            )
+            .expect("user-backed actor")
+        };
+
+        let (left, right) = tokio::join!(
+            repo.create_or_update(scope(tenant), actor(), role.clone()),
+            repo.create_or_update(scope(tenant), actor(), role),
+        );
+        let left = left.expect("left write");
+        let right = right.expect("right write");
+        assert_eq!(left.revision().get(), 1);
+        assert_eq!(right.revision().get(), 1);
+        assert_ne!(left.changed(), right.changed());
     }
 
     fn grant_id(raw: impl AsRef<str>) -> AuthGrantId {

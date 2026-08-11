@@ -3,6 +3,42 @@
 use super::support::*;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn migration_0009_rejects_preexisting_privileged_role_revision_owner_atomically() -> TestResult
+{
+    let (_fixture, store) = connect_pg().await?;
+    migrations_through(8).run(&store.pool).await?;
+    sqlx::query(
+        "CREATE ROLE rss_role_revision_owner LOGIN NOSUPERUSER BYPASSRLS \
+         NOCREATEDB NOCREATEROLE NOREPLICATION NOINHERIT",
+    )
+    .execute(&store.pool)
+    .await?;
+
+    let failure = migrations_through(9)
+        .run(&store.pool)
+        .await
+        .expect_err("0009 must reject a privileged cluster-global owner collision");
+    assert!(
+        format!("{failure:#}").contains("rss_role_revision_owner has forbidden role attributes"),
+        "migration must fail for the exact owner preflight reason: {failure:#}"
+    );
+    let roles_created: Option<String> =
+        sqlx::query_scalar("SELECT to_regclass('public.roles')::text")
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        roles_created, None,
+        "failed owner preflight must leave 0009 schema fully rolled back"
+    );
+
+    sqlx::query("DROP ROLE rss_role_revision_owner")
+        .execute(&store.pool)
+        .await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn migration_0018_pins_session_audit_resource_to_event_uuid_v4() -> TestResult {
     let (_pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
@@ -1753,15 +1789,6 @@ async fn migration_0075_replaces_legacy_session_permission_without_expanding_aut
     let resource = "11111111-2222-4333-8444-555555555555";
 
     sqlx::query(
-        "INSERT INTO roles (tenant_id, id, name, permissions) VALUES \
-         ($1::uuid, 'legacy-logout', 'legacy logout', \
-          ARRAY['identity:profile:read', 'identity:session:write', \
-                'identity:session:logout-current']::text[])",
-    )
-    .bind(tenant)
-    .execute(&store.pool)
-    .await?;
-    sqlx::query(
         "INSERT INTO abac_policies \
          (tenant_id, id, contract_id, permission, effective_from, rules) VALUES \
          ($1::uuid, 'legacy-logout', 'identity.logout@v1', \
@@ -1783,17 +1810,8 @@ async fn migration_0075_replaces_legacy_session_permission_without_expanding_aut
 
     migrations_through(79).run(&store.pool).await?;
 
-    let permissions: Vec<String> =
-        sqlx::query_scalar("SELECT permissions FROM roles WHERE id = 'legacy-logout'")
-            .fetch_one(&store.pool)
-            .await?;
-    assert_eq!(
-        permissions,
-        ["identity:profile:read", "identity:session:logout-current"]
-    );
     let remaining_legacy: i64 = sqlx::query_scalar(
         "SELECT \
-           (SELECT count(*) FROM roles WHERE 'identity:session:write' = ANY(permissions)) + \
            (SELECT count(*) FROM abac_policies WHERE permission = 'identity:session:write') + \
            (SELECT count(*) FROM resource_attributes WHERE permission = 'identity:session:write')",
     )
@@ -1810,7 +1828,6 @@ async fn migration_0075_replaces_legacy_session_permission_without_expanding_aut
     assert_eq!(current_rows, (1, 1));
     let expanded: i64 = sqlx::query_scalar(
         "SELECT \
-           (SELECT count(*) FROM roles WHERE 'identity:session:logout-all' = ANY(permissions)) + \
            (SELECT count(*) FROM abac_policies WHERE permission = 'identity:session:logout-all') + \
            (SELECT count(*) FROM resource_attributes WHERE permission = 'identity:session:logout-all')",
     )

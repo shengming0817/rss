@@ -32,7 +32,7 @@ note: required by a bound in `IdentityPortEffect`
             identity::ports::DynResourceAttributeWriteRepo<'a>
             identity::ports::DynRoleBindingReadRepo<'a>
             identity::ports::DynRoleReadRepo<'a>
-            identity::ports::DynRoleWriteRepo<'a>
+            identity::ports::DynRoleDefinitionLifecycle<'a>
             identity::ports::DynAccountSecurityReadRepo<'a>
             identity::ports::DynAuthGrantValidator<'a>
           and $N others

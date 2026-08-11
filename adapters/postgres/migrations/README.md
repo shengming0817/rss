@@ -41,6 +41,11 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 > owner `0088`，并删除 `0093` 对 scoped read/high-water 的后置覆盖；不建立历史 migration 语义改写的通用许可。
 > 依据与失效边界见 ADR-011 §2.5。
 >
+> **窄例外（#1291，未部署角色版本审计真源）**：用户再次确认项目从未部署，且不存在 migration ledger
+> 或历史角色数据。本次仅原地收敛 `0009` 的角色 schema、`0012`/`0024` 的 RLS/ACL 与 `0075` 的历史权限
+> 假设：稳定 `roles` identity + append-only `role_revisions` + 唯一 actor-attributed function。迁移 HEAD 保持
+> `0104`，不提供 `0105`、回填、兼容 view 或双写。依据与失效边界见 ADR-011 §2.7。
+>
 > **例外扩展（#1255，pre-GA residual duplicate carve-out）**：PR329 后 `develop` 再次残留两个 `0020`
 >（`0020_add_inbox_dedup_sweep_index.sql` / `0020_harden_dead_letter_rls.sql`）。本 PR 仅重编号后者及其后续
 > dead-letter sweep migration（`0021`/`0022`），不改 SQL 语义；RLS predicate 修复改用新的 `0024` 前向迁移。
@@ -86,14 +91,17 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 - CI：migration 影响面经 typed CI impact 选 `integration-critical:postgres-lib`（仅当激活 forge CI）；
   `has-ci=false` 时合入前仍靠 `schema-rls`，不以 required CI 虚标
 
-`0005` / `0006` / `0009` 建表时注释「预 GA 不建 RLS」；依「只增不改」规则不可回改——
-`0012_enable_tenant_rls.sql` 补齐四张 tenant 表（sessions / config_entries / roles / secret_refs）的 RLS；
+`0005` / `0006` 的历史表依「只增不改」规则由 `0012` 补 RLS。`0009` 仅在 ADR-011 §2.7 的 #1291
+未部署窄例外内改为最终角色版本模型；`0012_enable_tenant_rls.sql` 同步为五张 tenant 表
+（sessions / config_entries / roles / role_revisions / secret_refs）补齐 RLS；
 `0024_harden_tenant_rls_empty_setting.sql` 将旧 policy 前向升级为 NULLIF 形态，避免空 GUC cast 在 policy 判定前报错。
 
-非 owner serving role `rss_app`（NOLOGIN、NOBYPASSRLS）由 `0012` provision，并随各表落地按最小权限
-**forward-only 增量授权**（不回改历史迁移，新增表在其建表迁移内补 grant）：
+非 owner serving role `rss_app`（NOLOGIN、NOBYPASSRLS）由 `0012` provision。除 ADR-011 §2.7 明列的
+#1291 未部署角色窄例外外，后续表仍在其建表迁移内按 forward-only 最小权限增量授权：
 
-- `0012`：原四张 tenant 表（`sessions` / `config_entries` / `roles` / `secret_refs`）DML（SELECT/INSERT/UPDATE/DELETE）。
+- `0012`：普通 tenant 表 `sessions` / `config_entries` / `secret_refs` DML；角色两表仅 SELECT，且不授
+  `rss_record_role_revision` EXECUTE。当前没有可信授权闭环的 production role-definition consumer，故通用
+  `rss_app` 不持有角色定义 mutation 能力，也不持有角色两表 INSERT/UPDATE/DELETE。
   `sessions` 过期清理由 `0032` 的窄 `rss_sweep_expired_sessions()` SECURITY DEFINER 函数授权给
   `rss_app`，函数按 `expires_at, session_id` 固定删除单批最多 1000 条 `expires_at <= now()` 的 session；
   函数 owner 是 NOLOGIN `rss_session_maintenance`（BYPASSRLS），用于 FORCE RLS 下的全域 expired-only sweep。
@@ -837,10 +845,10 @@ forward-only 不写 `.down.sql`；当前 pre-GA 无自动 retention 策略或分
 
 ### 0075 session permission 窄化切换
 
-`0075` 在新 binary serving 前，把 `roles.permissions`、`abac_policies.permission` 与
-`resource_attributes.permission` 中已删除的 `identity:session:write` 原子替换为
-`identity:session:logout-current`。迁移绝不自动授予 `identity:session:logout-all`；role 数组保持首次出现顺序并
-去除替换产生的重复项。resource attribute successor 主键若已异常存在，迁移以唯一约束失败并完整回滚，不猜测合并。
+`0075` 在新 binary serving 前，把 `abac_policies.permission` 与 `resource_attributes.permission` 中已删除的
+`identity:session:write` 原子替换为 `identity:session:logout-current`。迁移绝不自动授予
+`identity:session:logout-all`；resource attribute successor 主键若已异常存在，迁移以唯一约束失败并完整回滚，
+不猜测合并。#1291 的 fresh-install 最终 schema 从第一天起只接受当前权限词汇，因此不存在可迁移的历史 role revision。
 
 这是 non-rolling、forward-only cutover；只由唯一 migration runner 执行，成功后才允许新 binary serving。
 

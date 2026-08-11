@@ -160,7 +160,7 @@ const CARRIERS: &[Carrier] = &[
             "async fn resolve_expired_outbox(",
             ".dlq_write(",
             "dlq_tenant_scope(tenant)",
-            "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {",
+            ".dlq_resolve_expired_outbox(DlqExpiredResolution {",
             "OutboxExpiredResolutionOutcome::Resolved",
             "OutboxExpiredResolutionOutcome::EvidenceRejected",
         ],
@@ -204,7 +204,8 @@ const CARRIERS: &[Carrier] = &[
         path: "assemblies/runtime/src/operator/dlq.rs",
         purpose: "operator CLI exposes terminal resolution only after durable audit, authentication and exact grant mint an action proof",
         anchors: &[
-            "\"resolve-expired-outbox\" =>",
+            "#[command(name = \"resolve-expired-outbox\")]",
+            "ResolveExpiredOutbox(DlqResolveExpiredOutboxArgs)",
             "fn issue_dlq_authorization<A: diport::DlqOperatorAction>(",
             "DlqOperatorAuthorization::issue(",
             "finish_audit_context::<dlq_operator_action::ResolveExpiredOutbox>",
@@ -440,14 +441,17 @@ fn scan_expired_resolution_topology(
     if let Some(source) = sources.get(DLQ_PATH) {
         let signature = "async fn resolve_expired_outbox(";
         let body = rust_item_body(source, signature);
-        let call = "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {";
+        let call = ".dlq_resolve_expired_outbox(DlqExpiredResolution {";
         let sequence = [
             ".write",
             ".dlq_write(",
             "dlq_tenant_scope(tenant)",
             call,
-            "Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved)",
-            "Ok(-2) => Ok(OutboxExpiredResolutionOutcome::EvidenceRejected)",
+            "match affected {",
+            "1 => (OutboxExpiredResolutionOutcome::Resolved",
+            "-2 => (",
+            "OutboxExpiredResolutionOutcome::EvidenceRejected",
+            "conn.dlq_record_finish_audit(DlqFinishAudit {",
         ];
         let scoped = body.is_some_and(|body| {
             body.matches(call).count() == 1
@@ -571,17 +575,24 @@ async fn resolve_expired_outbox(
         .dlq_write(
             dlq_tenant_scope(tenant),
             move |conn| Box::pin(async move {
-                conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
+                let affected = conn.dlq_resolve_expired_outbox(DlqExpiredResolution {
                     event_id: &event_id,
-                }).await
+                }).await?;
+                let outcome = match affected {
+                    1 => (OutboxExpiredResolutionOutcome::Resolved, "success", None),
+                    -2 => (
+                        OutboxExpiredResolutionOutcome::EvidenceRejected,
+                        "failure",
+                        Some("evidence_rejected"),
+                    ),
+                    _ => (OutboxExpiredResolutionOutcome::NotFound, "failure", Some("not_found")),
+                };
+                conn.dlq_record_finish_audit(DlqFinishAudit { outcome: outcome.1 }).await?;
+                Ok(outcome.0)
             }),
         )
         .await;
-    match result {
-        Ok(1) => Ok(OutboxExpiredResolutionOutcome::Resolved),
-        Ok(-2) => Ok(OutboxExpiredResolutionOutcome::EvidenceRejected),
-        _ => Ok(OutboxExpiredResolutionOutcome::NotFound),
-    }
+    result
 }
 "#
             .to_owned(),
@@ -694,7 +705,7 @@ async fn resolve_expired_outbox(
     #[test]
     #[allow(clippy::expect_used)] // reason: complete_sources must carry the DLQ fixture.
     fn scan_rejects_expired_resolution_call_moved_outside_dlq_operation() {
-        const CALL: &str = "conn.dlq_resolve_expired_outbox(DlqExpiredResolution {";
+        const CALL: &str = ".dlq_resolve_expired_outbox(DlqExpiredResolution {";
         let mut sources = complete_sources();
         let content = sources
             .get_mut("adapters/postgres/src/dlq.rs")

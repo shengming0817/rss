@@ -1,24 +1,6 @@
--- Replace the removed broad session-write permission in every durable authorization carrier.
--- The only non-expanding successor is logout-current; logout-all always requires a fresh grant.
-
-UPDATE roles AS role
-SET permissions = (
-    SELECT array_agg(permission ORDER BY first_ordinal) AS permissions
-    FROM (
-        SELECT mapped.permission, min(mapped.ordinality) AS first_ordinal
-        FROM (
-            SELECT CASE
-                       WHEN permission = 'identity:session:write'
-                           THEN 'identity:session:logout-current'
-                       ELSE permission
-                   END AS permission,
-                   ordinality
-            FROM unnest(role.permissions) WITH ORDINALITY AS raw(permission, ordinality)
-        ) AS mapped
-        GROUP BY mapped.permission
-    ) AS deduplicated
-)
-WHERE 'identity:session:write' = ANY(role.permissions);
+-- Replace the removed broad session-write permission in durable ABAC carriers. Role definitions
+-- are append-only from their initial schema (#1291) and the project has no historical rows, so this
+-- migration must not synthesize or rewrite a role revision for a compatibility state that never ran.
 
 UPDATE abac_policies
 SET permission = 'identity:session:logout-current'

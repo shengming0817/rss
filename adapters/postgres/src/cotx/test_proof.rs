@@ -367,12 +367,15 @@ impl TestTx<'_, '_, ServingReadLane> {
         role_id: &str,
         name: &str,
     ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
-        sqlx::query("UPDATE roles SET name = $1 WHERE id = $2 AND tenant_id = $3::uuid")
-            .bind(name)
-            .bind(role_id)
-            .bind(self.tx.tenant.as_uuid().to_string())
-            .execute(&mut *self.tx.conn)
-            .await
+        sqlx::query(
+            "UPDATE role_revisions SET name = $1 \
+             WHERE role_id = $2 AND tenant_id = $3::uuid",
+        )
+        .bind(name)
+        .bind(role_id)
+        .bind(self.tx.tenant.as_uuid().to_string())
+        .execute(&mut *self.tx.conn)
+        .await
     }
 
     /// Current reconcile lease epoch for `target_id` under this capability's tenant.
