@@ -124,8 +124,6 @@ const MACHINE_INPUT_PATHS: &[&str] = &[
 const POLICY_BEHAVIOR_SPEC: &str = include_str!("../tests/golden/ci-impact-policy.json");
 const HIGH_IMPACT_PATHS: &[&str] = &[
     ".gitattributes",
-    ".github/workflows/ci.yml",
-    ".github/workflows/rss-rust-job.yml",
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -141,7 +139,14 @@ const HIGH_IMPACT_PATHS: &[&str] = &[
     "xtask/src/report_format.rs",
     "xtask/src/verify.rs",
 ];
-const HIGH_IMPACT_PREFIXES: &[&str] = &[".config/ci-impact"];
+const HIGH_IMPACT_PREFIXES: &[&str] = &[
+    ".config/ci-impact",
+    ".github/actions/finalize-rss-ci/",
+    ".github/actions/setup-rss-ci/",
+    ".github/scripts/ci-cache-",
+    ".github/scripts/ci-sccache-stats",
+    ".github/workflows/",
+];
 #[derive(Debug, Clone, PartialEq, Eq, Args)]
 pub(crate) struct Options {
     #[arg(long = "event-path", required = true)]
@@ -6923,6 +6928,29 @@ mod tests {
                     }
                 ),
                 "machine-consumed input {path} must conservatively execute the complete PR set"
+            );
+        }
+    }
+
+    #[test]
+    fn ci_cache_governance_inputs_always_select_the_complete_pr_set() {
+        for path in [
+            ".github/actions/setup-rss-ci/action.yml",
+            ".github/actions/finalize-rss-ci/action.yml",
+            ".github/scripts/ci-cache-maintain.sh",
+            ".github/scripts/ci-sccache-stats.sh",
+            ".github/workflows/new-cache-caller.yaml",
+        ] {
+            assert!(
+                matches!(
+                    classify_diff(&[DiffEntry::modified(path)]),
+                    RemoteProjection {
+                        mode: SelectionMode::PrComplete,
+                        cause: Some(EscalationCause::GlobalImpact),
+                        ..
+                    }
+                ),
+                "cache governance input {path} must execute the complete PR set"
             );
         }
     }

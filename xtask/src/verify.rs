@@ -5679,7 +5679,9 @@ mod tests {
                         .and_then(yaml_map)
                         .is_some_and(|with| {
                             yaml_scalar(with, "lane") == Some("audit")
-                                && yaml_scalar(with, "profile") == Some("audit")
+                                && yaml_scalar(with, "download-cache-epoch") == Some("v5")
+                                && yaml_scalar(with, "tool-cache-epoch") == Some("v4")
+                                && yaml_scalar(with, "compiler-cache-epoch") == Some("v3")
                         })
             })
             && audit.and_then(|step| yaml_scalar(step, "run"))
@@ -5707,8 +5709,75 @@ mod tests {
         })
     }
 
+    fn cache_caller_is_exact(
+        job: &serde_yaml_ng::Mapping,
+        setup_id: &str,
+        execution_id: &str,
+        finalize_id: &str,
+    ) -> bool {
+        let Some(steps) = yaml_field(job, "steps").and_then(serde_yaml_ng::Value::as_sequence)
+        else {
+            return false;
+        };
+        let Some(setup) = unique_step_by_id(steps, setup_id) else {
+            return false;
+        };
+        if unique_step_by_id(steps, execution_id).is_none() {
+            return false;
+        }
+        let Some(finalize) = unique_step_by_id(steps, finalize_id) else {
+            return false;
+        };
+        let expected_context = format!("${{{{ steps.{setup_id}.outputs.cache-context }}}}");
+        let expected_outcome = format!("${{{{ steps.{execution_id}.outcome }}}}");
+        let expected_eligibility = format!(
+            "${{{{ steps.{execution_id}.outcome == 'success' || steps.{execution_id}.outcome == 'failure' }}}}"
+        );
+        let exact_action_pair = steps
+            .iter()
+            .filter_map(serde_yaml_ng::Value::as_mapping)
+            .filter_map(|step| yaml_scalar(step, "uses"))
+            .filter(|uses| {
+                matches!(
+                    *uses,
+                    "./.github/actions/setup-rss-ci" | "./.github/actions/finalize-rss-ci"
+                )
+            })
+            .collect::<Vec<_>>()
+            == [
+                "./.github/actions/setup-rss-ci",
+                "./.github/actions/finalize-rss-ci",
+            ];
+        exact_action_pair
+            && step_ids_are_ordered(job, &[setup_id, execution_id, finalize_id])
+            && yaml_scalar(setup, "uses") == Some("./.github/actions/setup-rss-ci")
+            && yaml_scalar(finalize, "if")
+                == Some(&format!(
+                    "${{{{ always() && !cancelled() && steps.{setup_id}.outcome == 'success' }}}}"
+                ))
+            && yaml_field(finalize, "continue-on-error").and_then(serde_yaml_ng::Value::as_bool)
+                == Some(true)
+            && yaml_scalar(finalize, "uses") == Some("./.github/actions/finalize-rss-ci")
+            && yaml_field(finalize, "with")
+                .and_then(yaml_map)
+                .is_some_and(|with| {
+                    yaml_keys_exact(
+                        with,
+                        &["cache-context", "execution-outcome", "save-eligible"],
+                    ) && yaml_scalar(with, "cache-context") == Some(&expected_context)
+                        && yaml_scalar(with, "execution-outcome") == Some(&expected_outcome)
+                        && yaml_scalar(with, "save-eligible") == Some(&expected_eligibility)
+                })
+    }
+
     /// INVARIANT: CI-FIXED-WORKFLOW-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixed_ci_workflow_guard_rejects_structural_weakening", anti_vacuity = "committed_fixed_ci_workflow_is_closed" }.
-    fn fixed_ci_workflow_is_closed(caller: &str, reusable: &str) -> bool {
+    fn fixed_ci_workflow_is_closed(
+        caller: &str,
+        reusable: &str,
+        setup: &str,
+        finalize: &str,
+        cache_policy: &str,
+    ) -> bool {
         let Ok(caller_value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(caller) else {
             return false;
         };
@@ -5801,6 +5870,15 @@ mod tests {
                 yaml_scalar(step, "if")
                     == Some("${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}")
             });
+        let cache_lifecycle = yaml_field(jobs, "scheduled-audit-fallback")
+            .and_then(yaml_map)
+            .is_some_and(|job| {
+                cache_caller_is_exact(job, "audit-setup", "audit-run", "audit-finalize")
+            })
+            && cache_caller_is_exact(execute, "rss-setup", "xtask", "rss-finalize")
+            && workflow_has_no_direct_cache(caller_root)
+            && workflow_has_no_direct_cache(reusable_root)
+            && fixed_cache_actions_are_closed(setup, finalize, cache_policy);
         let standalone_consumer_is_exact = step_by_id(execute, "policy")
             .and_then(|step| yaml_scalar(step, "run"))
             .is_some_and(|run| {
@@ -5868,6 +5946,7 @@ mod tests {
             && scheduled_audit_is_exact(caller_root, jobs)
             && exact_gate
             && cleanup_is_always
+            && cache_lifecycle
             && standalone_consumer_is_exact
             && lifecycle
             && banned
@@ -5880,6 +5959,9 @@ mod tests {
         assert!(fixed_ci_workflow_is_closed(
             include_str!("../../.github/workflows/ci.yml"),
             include_str!("../../.github/workflows/rss-rust-job.yml"),
+            include_str!("../../.github/actions/setup-rss-ci/action.yml"),
+            include_str!("../../.github/actions/finalize-rss-ci/action.yml"),
+            include_str!("../../.github/scripts/ci-cache-maintain.sh"),
         ));
     }
 
@@ -5887,6 +5969,9 @@ mod tests {
     fn fixed_ci_workflow_guard_rejects_structural_weakening() {
         let caller = include_str!("../../.github/workflows/ci.yml");
         let reusable = include_str!("../../.github/workflows/rss-rust-job.yml");
+        let setup = include_str!("../../.github/actions/setup-rss-ci/action.yml");
+        let finalize = include_str!("../../.github/actions/finalize-rss-ci/action.yml");
+        let cache_policy = include_str!("../../.github/scripts/ci-cache-maintain.sh");
         let reds = [
             (caller.replacen("  check:\n", "  check-removed:\n", 1), reusable.to_owned()),
             (caller.replacen("  check:\n", "  check:\n    strategy:\n      matrix: { shard: [one] }\n", 1), reusable.to_owned()),
@@ -5913,10 +5998,166 @@ mod tests {
         for (index, (red_caller, red_reusable)) in reds.into_iter().enumerate() {
             assert!(red_caller != caller || red_reusable != reusable);
             assert!(
-                !fixed_ci_workflow_is_closed(&red_caller, &red_reusable),
+                !fixed_ci_workflow_is_closed(
+                    &red_caller,
+                    &red_reusable,
+                    setup,
+                    finalize,
+                    cache_policy,
+                ),
                 "fixed workflow synthetic red {index} was accepted"
             );
         }
+        for (label, red_caller) in [
+            (
+                "wrong execution outcome binding",
+                caller.replacen(
+                    "execution-outcome: ${{ steps.audit-run.outcome }}",
+                    "execution-outcome: ${{ steps.audit-prose-scan.outcome }}",
+                    1,
+                ),
+            ),
+            (
+                "constant save eligibility",
+                caller.replacen(
+                    "save-eligible: ${{ steps.audit-run.outcome == 'success' || steps.audit-run.outcome == 'failure' }}",
+                    "save-eligible: true",
+                    1,
+                ),
+            ),
+            (
+                "direct caller cache bypass",
+                caller.replacen(
+                    "      - name: Finalize scheduled audit caches\n",
+                    "      - name: Direct cache bypass\n        uses: actions/cache/save@v4\n        with:\n          path: .cache/direct\n          key: direct\n\n      - name: Finalize scheduled audit caches\n",
+                    1,
+                ),
+            ),
+            (
+                "duplicate setup action",
+                caller.replacen(
+                    "      - name: Finalize scheduled audit caches\n",
+                    "      - name: Duplicate setup\n        id: duplicate-setup\n        uses: ./.github/actions/setup-rss-ci\n\n      - name: Finalize scheduled audit caches\n",
+                    1,
+                ),
+            ),
+        ] {
+            assert!(
+                !fixed_ci_workflow_is_closed(
+                    &red_caller,
+                    reusable,
+                    setup,
+                    finalize,
+                    cache_policy,
+                ),
+                "fixed workflow cache synthetic red `{label}` was accepted"
+            );
+        }
+        for (label, red_setup, red_finalize) in [
+            (
+                "combined compiler cache",
+                setup.replacen(
+                    "      id: compiler-cache\n      continue-on-error: true\n      uses: actions/cache/restore@v4",
+                    "      id: compiler-cache\n      continue-on-error: true\n      uses: actions/cache@v4",
+                    1,
+                ),
+                finalize.to_owned(),
+            ),
+            (
+                "missing broad compiler restore",
+                setup.replacen(
+                    "          ${{ steps.cache-keys.outputs.compiler-broad-restore-prefix }}\n",
+                    "",
+                    1,
+                ),
+                finalize.to_owned(),
+            ),
+            (
+                "cache failure changes job verdict",
+                setup.replacen(
+                    "      continue-on-error: true\n      uses: actions/cache/restore@v4",
+                    "      continue-on-error: false\n      uses: actions/cache/restore@v4",
+                    1,
+                ),
+                finalize.to_owned(),
+            ),
+            (
+                "matched key used for save",
+                setup.to_owned(),
+                finalize.replace(
+                    "steps.policy.outputs.compiler-primary-key",
+                    "steps.policy.outputs.compiler-matched-key",
+                ),
+            ),
+            (
+                "cancelled compiler save",
+                setup.to_owned(),
+                finalize.replace("!cancelled() && ", ""),
+            ),
+            (
+                "download restore path rewire",
+                setup.replacen(
+                    "${{ runner.temp }}/rss-cargo-home/registry/cache\n          ${{ runner.temp }}/rss-cargo-home/registry/index\n          ${{ runner.temp }}/rss-cargo-home/git/db",
+                    ".cache/ci-tools/${{ inputs.lane }}",
+                    1,
+                ),
+                finalize.to_owned(),
+            ),
+            (
+                "download save key rewire",
+                setup.to_owned(),
+                finalize.replacen(
+                    "key: ${{ steps.policy.outputs.download-primary-key }}",
+                    "key: ${{ steps.policy.outputs.compiler-primary-key }}",
+                    1,
+                ),
+            ),
+        ] {
+            assert!(
+                !fixed_ci_workflow_is_closed(
+                    caller,
+                    reusable,
+                    &red_setup,
+                    &red_finalize,
+                    cache_policy,
+                ),
+                "fixed workflow action synthetic red `{label}` was accepted"
+            );
+        }
+
+        let mut reordered: serde_yaml_ng::Value = serde_yaml_ng::from_str(caller).unwrap();
+        let steps = reordered
+            .as_mapping_mut()
+            .and_then(|root| root.get_mut("jobs"))
+            .and_then(serde_yaml_ng::Value::as_mapping_mut)
+            .and_then(|jobs| jobs.get_mut("scheduled-audit-fallback"))
+            .and_then(serde_yaml_ng::Value::as_mapping_mut)
+            .and_then(|job| job.get_mut("steps"))
+            .and_then(serde_yaml_ng::Value::as_sequence_mut)
+            .unwrap();
+        let execution = steps
+            .iter()
+            .position(|step| {
+                step.as_mapping().and_then(|step| yaml_scalar(step, "id")) == Some("audit-run")
+            })
+            .unwrap();
+        let finalizer = steps
+            .iter()
+            .position(|step| {
+                step.as_mapping().and_then(|step| yaml_scalar(step, "id")) == Some("audit-finalize")
+            })
+            .unwrap();
+        steps.swap(execution, finalizer);
+        assert!(
+            !fixed_ci_workflow_is_closed(
+                &serde_yaml_ng::to_string(&reordered).unwrap(),
+                reusable,
+                setup,
+                finalize,
+                cache_policy,
+            ),
+            "fixed workflow accepted a finalizer before its execution step"
+        );
     }
 
     /// INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixed_tool_adapter_rejects_policy_weakening", anti_vacuity = "committed_fixed_tool_adapter_is_closed" }.
@@ -5931,28 +6172,58 @@ mod tests {
             return false;
         };
         let restore = step_by_id(runs, "tools-cache");
+        let cached_verify = step_by_id(runs, "tools-cache-verify");
+        let reset = step_by_id(runs, "tools-reset");
         let verify = step_by_id(runs, "tools-verify");
         let save = step_by_id(runs, "tools-save");
-        let sealed_cache = step_ids_are_ordered(runs, &["tools-cache", "tools-verify", "tools-save"])
+        let tool_cache_funnel = yaml_field(runs, "steps")
+            .and_then(serde_yaml_ng::Value::as_sequence)
+            .is_some_and(|steps| {
+                cache_steps_with_id_prefix_match_exact(
+                    steps,
+                    "tools-",
+                    &[
+                        ("tools-cache", "actions/cache/restore@v4"),
+                        ("tools-save", "actions/cache/save@v4"),
+                    ],
+                )
+            });
+        let sealed_cache = step_ids_are_ordered(
+            runs,
+            &[
+                "tools-cache",
+                "tools-cache-verify",
+                "tools-reset",
+                "tools-verify",
+                "tools-save",
+            ],
+        )
             && restore.is_some_and(|step| {
                 yaml_scalar(step, "uses") == Some("actions/cache/restore@v4")
+            })
+            && cached_verify
+                .and_then(|step| yaml_scalar(step, "run"))
+                .is_some_and(|run| run.contains("verify --mode cache"))
+            && reset.is_some_and(|step| {
+                yaml_scalar(step, "if") == Some("${{ steps.tools-cache.outcome != 'success' || steps.tools-cache.outputs.cache-hit != 'true' || steps.tools-cache-verify.outcome != 'success' }}")
+                    && yaml_scalar(step, "run").is_some_and(|run| run.contains("reset-descendant"))
             })
             && verify.and_then(|step| yaml_scalar(step, "run")).is_some_and(|run| {
                 run.contains(".github/scripts/ci-tool-adapters.sh verify --mode \"$mode\" --lane \"$RSS_LANE\"")
             })
             && save.is_some_and(|step| {
-                yaml_scalar(step, "if") == Some("${{ steps.tools-cache.outputs.cache-hit != 'true' && ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || github.event_name == 'schedule') }}")
+                yaml_scalar(step, "if") == Some("${{ steps.tools-cache-verify.outcome != 'success' && steps.tools-verify.outcome == 'success' && ((github.event_name == 'push' && github.ref == 'refs/heads/develop') || github.event_name == 'schedule') }}")
                     && yaml_scalar(step, "uses") == Some("actions/cache/save@v4")
                     && yaml_field(step, "with").and_then(yaml_map).is_some_and(|with| {
-                        yaml_scalar(with, "path") == Some(".cache/ci-tools/${{ inputs.profile }}")
+                        yaml_scalar(with, "path") == Some(".cache/ci-tools/${{ inputs.lane }}")
                             && yaml_scalar(with, "key") == Some("${{ steps.cache-keys.outputs.tools-primary-key }}")
                     })
             });
         adapter.contains("all|check|test-affected|integration-critical|audit)")
-            && action
-                .contains("case \"$RSS_LANE\" in check|test-affected|integration-critical|audit)")
-            && action.contains("compiler-cache-identity:")
             && action.contains(".github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\"")
+            && !action.contains("compiler-cache-identity:")
+            && !action.contains("  profile:")
+            && tool_cache_funnel
             && sealed_cache
     }
 
@@ -5970,13 +6241,21 @@ mod tests {
         let adapter = include_str!("../../.github/scripts/ci-tool-adapters.sh");
         for (label, red_action, red_adapter) in [
             (
-                "lane closure",
-                action.replacen("|audit)", "|legacy)", 1),
+                "restore-only tool cache",
+                action.replacen(
+                    "      id: tools-cache\n      continue-on-error: true\n      uses: actions/cache/restore@v4",
+                    "      id: tools-cache\n      continue-on-error: true\n      uses: actions/cache@v4",
+                    1,
+                ),
                 adapter.to_owned(),
             ),
             (
-                "restore-only tool cache",
-                action.replacen("actions/cache/restore@v4", "actions/cache@v4", 1),
+                "invalid restored tools reset",
+                action.replacen(
+                    "steps.tools-cache-verify.outcome != 'success'",
+                    "steps.tools-cache-verify.outcome == 'success'",
+                    1,
+                ),
                 adapter.to_owned(),
             ),
             (
@@ -6012,6 +6291,368 @@ mod tests {
                 "tool adapter synthetic red `{label}` was accepted"
             );
         }
+    }
+
+    fn cache_action_steps<'a>(
+        root: &'a serde_yaml_ng::Mapping,
+    ) -> Option<&'a Vec<serde_yaml_ng::Value>> {
+        yaml_field(root, "runs")?
+            .as_mapping()
+            .and_then(|runs| yaml_field(runs, "steps"))?
+            .as_sequence()
+    }
+
+    fn unique_step_by_id<'a>(
+        steps: &'a [serde_yaml_ng::Value],
+        id: &str,
+    ) -> Option<&'a serde_yaml_ng::Mapping> {
+        let mut matches = steps
+            .iter()
+            .filter_map(serde_yaml_ng::Value::as_mapping)
+            .filter(|step| yaml_scalar(step, "id") == Some(id));
+        let step = matches.next()?;
+        matches.next().is_none().then_some(step)
+    }
+
+    fn cache_step_is_exact(
+        steps: &[serde_yaml_ng::Value],
+        id: &str,
+        uses: &str,
+        condition: Option<&str>,
+        with_fields: &[(&str, &str)],
+    ) -> bool {
+        let Some(step) = unique_step_by_id(steps, id) else {
+            return false;
+        };
+        let expected_step_keys = if condition.is_some() {
+            &["name", "id", "if", "continue-on-error", "uses", "with"][..]
+        } else {
+            &["name", "id", "continue-on-error", "uses", "with"][..]
+        };
+        let Some(with) = yaml_field(step, "with").and_then(yaml_map) else {
+            return false;
+        };
+        yaml_keys_exact(step, expected_step_keys)
+            && yaml_scalar(step, "uses") == Some(uses)
+            && condition.is_none_or(|expected| yaml_scalar(step, "if") == Some(expected))
+            && yaml_field(step, "continue-on-error").and_then(serde_yaml_ng::Value::as_bool)
+                == Some(true)
+            && yaml_keys_exact(
+                with,
+                &with_fields.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            )
+            && with_fields
+                .iter()
+                .all(|(key, value)| yaml_scalar(with, key) == Some(*value))
+    }
+
+    fn cache_steps_match_exact_funnel(
+        steps: &[serde_yaml_ng::Value],
+        expected: &[(&str, &str)],
+    ) -> bool {
+        steps
+            .iter()
+            .filter_map(serde_yaml_ng::Value::as_mapping)
+            .filter_map(|step| {
+                let uses = yaml_scalar(step, "uses")?;
+                uses.starts_with("actions/cache")
+                    .then(|| (yaml_scalar(step, "id"), uses))
+            })
+            .map(|(id, uses)| id.map(|id| (id, uses)))
+            .collect::<Option<Vec<_>>>()
+            .is_some_and(|actual| actual == expected)
+    }
+
+    fn cache_steps_with_id_prefix_match_exact(
+        steps: &[serde_yaml_ng::Value],
+        id_prefix: &str,
+        expected: &[(&str, &str)],
+    ) -> bool {
+        steps
+            .iter()
+            .filter_map(serde_yaml_ng::Value::as_mapping)
+            .filter_map(|step| {
+                let id = yaml_scalar(step, "id")?;
+                let uses = yaml_scalar(step, "uses")?;
+                (id.starts_with(id_prefix) && uses.starts_with("actions/cache"))
+                    .then_some((id, uses))
+            })
+            .collect::<Vec<_>>()
+            == expected
+    }
+
+    fn cache_steps_without_id_prefix_match_exact(
+        steps: &[serde_yaml_ng::Value],
+        excluded_prefix: &str,
+        expected: &[(&str, &str)],
+    ) -> bool {
+        steps
+            .iter()
+            .filter_map(serde_yaml_ng::Value::as_mapping)
+            .filter_map(|step| {
+                let id = yaml_scalar(step, "id")?;
+                let uses = yaml_scalar(step, "uses")?;
+                (uses.starts_with("actions/cache") && !id.starts_with(excluded_prefix))
+                    .then_some((id, uses))
+            })
+            .collect::<Vec<_>>()
+            == expected
+    }
+
+    fn workflow_has_no_direct_cache(root: &serde_yaml_ng::Mapping) -> bool {
+        yaml_field(root, "jobs")
+            .and_then(yaml_map)
+            .is_some_and(|jobs| {
+                jobs.values().all(|job| {
+                    let Some(job) = job.as_mapping() else {
+                        return false;
+                    };
+                    yaml_field(job, "steps")
+                        .and_then(serde_yaml_ng::Value::as_sequence)
+                        .is_none_or(|steps| {
+                            steps
+                                .iter()
+                                .filter_map(serde_yaml_ng::Value::as_mapping)
+                                .filter_map(|step| yaml_scalar(step, "uses"))
+                                .all(|uses| !uses.starts_with("actions/cache"))
+                        })
+                })
+            })
+    }
+
+    fn fixed_cache_actions_are_closed(setup: &str, finalize: &str, policy: &str) -> bool {
+        let Ok(setup_value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(setup) else {
+            return false;
+        };
+        let Ok(finalize_value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(finalize) else {
+            return false;
+        };
+        let Some(setup_root) = yaml_map(&setup_value) else {
+            return false;
+        };
+        let Some(finalize_root) = yaml_map(&finalize_value) else {
+            return false;
+        };
+        let Some(setup_steps) = cache_action_steps(setup_root) else {
+            return false;
+        };
+        let Some(finalize_steps) = cache_action_steps(finalize_root) else {
+            return false;
+        };
+        let Some(setup_runs) = yaml_field(setup_root, "runs").and_then(yaml_map) else {
+            return false;
+        };
+        let Some(finalize_runs) = yaml_field(finalize_root, "runs").and_then(yaml_map) else {
+            return false;
+        };
+        let setup_outputs_context = yaml_field(setup_root, "outputs")
+            .and_then(yaml_map)
+            .is_some_and(|outputs| {
+                yaml_keys_exact(outputs, &["cache-context"])
+                    && yaml_field(outputs, "cache-context")
+                        .and_then(yaml_map)
+                        .and_then(|output| yaml_scalar(output, "value"))
+                        == Some("${{ steps.cache-context.outputs.value }}")
+            });
+        let setup_funnel = cache_steps_without_id_prefix_match_exact(
+            setup_steps,
+            "tools-",
+            &[
+                ("download-cache", "actions/cache/restore@v4"),
+                ("compiler-cache", "actions/cache/restore@v4"),
+            ],
+        ) && cache_step_is_exact(
+            setup_steps,
+            "download-cache",
+            "actions/cache/restore@v4",
+            None,
+            &[
+                (
+                    "path",
+                    "${{ runner.temp }}/rss-cargo-home/registry/cache\n${{ runner.temp }}/rss-cargo-home/registry/index\n${{ runner.temp }}/rss-cargo-home/git/db\n",
+                ),
+                (
+                    "key",
+                    "${{ steps.cache-keys.outputs.download-primary-key }}",
+                ),
+                (
+                    "restore-keys",
+                    "${{ steps.cache-keys.outputs.download-input-restore-prefix }}\n${{ steps.cache-keys.outputs.download-restore-prefix }}\n",
+                ),
+            ],
+        ) && cache_step_is_exact(
+            setup_steps,
+            "compiler-cache",
+            "actions/cache/restore@v4",
+            None,
+            &[
+                ("path", "${{ runner.temp }}/rss-sccache-cache"),
+                (
+                    "key",
+                    "${{ steps.cache-keys.outputs.compiler-primary-key }}",
+                ),
+                (
+                    "restore-keys",
+                    "${{ steps.cache-keys.outputs.compiler-input-restore-prefix }}\n${{ steps.cache-keys.outputs.compiler-broad-restore-prefix }}\n",
+                ),
+            ],
+        );
+        let finalize_funnel = cache_steps_match_exact_funnel(
+            finalize_steps,
+            &[
+                ("download-save", "actions/cache/save@v4"),
+                ("compiler-save", "actions/cache/save@v4"),
+            ],
+        ) && cache_step_is_exact(
+            finalize_steps,
+            "download-save",
+            "actions/cache/save@v4",
+            Some("${{ !cancelled() && steps.policy.outputs.save-download == 'true' }}"),
+            &[
+                (
+                    "path",
+                    "${{ runner.temp }}/rss-cargo-home/registry/cache\n${{ runner.temp }}/rss-cargo-home/registry/index\n${{ runner.temp }}/rss-cargo-home/git/db\n",
+                ),
+                ("key", "${{ steps.policy.outputs.download-primary-key }}"),
+            ],
+        ) && cache_step_is_exact(
+            finalize_steps,
+            "compiler-save",
+            "actions/cache/save@v4",
+            Some(
+                "${{ !cancelled() && steps.policy.outputs.save-cache == 'true' && steps.snapshot.outcome == 'success' }}",
+            ),
+            &[
+                ("path", "${{ runner.temp }}/rss-sccache-cache"),
+                ("key", "${{ steps.policy.outputs.compiler-primary-key }}"),
+            ],
+        );
+        let setup_lifecycle = step_ids_are_ordered(
+            setup_runs,
+            &[
+                "cache-keys",
+                "download-cache",
+                "download-reset",
+                "download-configure",
+                "compiler-cache",
+                "compiler-reset",
+                "compiler-configure",
+                "zero-sccache-stats",
+                "cache-context",
+            ],
+        ) && step_by_id(setup_runs, "download-reset")
+            .and_then(|step| yaml_scalar(step, "run"))
+            .is_some_and(|run| run.contains("reset-descendant --parent \"$RUNNER_TEMP\" --path \"$RUNNER_TEMP/rss-cargo-home\""))
+            && step_by_id(setup_runs, "compiler-reset")
+                .and_then(|step| yaml_scalar(step, "run"))
+                .is_some_and(|run| run.contains("reset-descendant --parent \"$RUNNER_TEMP\" --path \"$RUNNER_TEMP/rss-sccache-cache\""))
+            && step_by_id(setup_runs, "compiler-configure")
+                .and_then(|step| yaml_scalar(step, "run"))
+                .is_some_and(|run| {
+                    [
+                        "SCCACHE_CACHE_SIZE=2G",
+                        "SCCACHE_IGNORE_SERVER_IO_ERROR=1",
+                        "SCCACHE_DIR=$RUNNER_TEMP/rss-sccache-cache",
+                    ]
+                    .into_iter()
+                    .all(|binding| run.contains(binding))
+                })
+            && step_by_id(setup_runs, "zero-sccache-stats")
+                .and_then(|step| yaml_scalar(step, "run"))
+                .is_some_and(|run| run.contains("--zero-stats"));
+        let finalize_lifecycle = step_ids_are_ordered(
+            finalize_runs,
+            &[
+                "policy",
+                "stats",
+                "stop",
+                "diagnostics",
+                "snapshot",
+                "download-save",
+                "compiler-save",
+                "summary",
+            ],
+        ) && step_by_id(finalize_runs, "stats")
+            .is_some_and(|step| {
+                yaml_scalar(step, "if")
+                    == Some("${{ always() && !cancelled() && env.RSS_SCCACHE_ENABLED == 'true' }}")
+                    && yaml_scalar(step, "run")
+                        .is_some_and(|run| run.contains("--show-stats --stats-format json"))
+            })
+            && step_by_id(finalize_runs, "stop").is_some_and(|step| {
+                yaml_scalar(step, "if")
+                    == Some("${{ always() && !cancelled() && env.RSS_SCCACHE_ENABLED == 'true' }}")
+                    && yaml_scalar(step, "run").is_some_and(|run| run.contains("--stop-server"))
+            })
+            && step_by_id(finalize_runs, "snapshot").is_some_and(|step| {
+                yaml_scalar(step, "if") == Some("${{ !cancelled() && steps.policy.outputs.save-cache == 'true' && steps.stats.outcome == 'success' && steps.stop.outcome == 'success' && steps.diagnostics.outcome == 'success' }}")
+                    && yaml_scalar(step, "run").is_some_and(|run| {
+                        run.contains("ci-cache-maintain.sh snapshot")
+                            && run.contains("--path \"$RUNNER_TEMP/rss-sccache-cache\"")
+                            && run.contains("--max-bytes 2147483648")
+                    })
+            })
+            && step_by_id(finalize_runs, "summary")
+                .and_then(|step| yaml_scalar(step, "run"))
+                .is_some_and(|run| run.contains("$GITHUB_STEP_SUMMARY"));
+        let namespaces_only_in_policy = [
+            "rss-download-$download_epoch",
+            "rss-tools-$tool_epoch",
+            "rss-sccache-$compiler_epoch",
+        ]
+        .into_iter()
+        .all(|needle| {
+            policy.contains(needle) && !setup.contains(needle) && !finalize.contains(needle)
+        });
+        let no_target_snapshot = [setup, finalize]
+            .into_iter()
+            .all(|source| !source.contains("actions/cache") || !source.contains("target/**"));
+
+        setup_outputs_context
+            && setup_funnel
+            && finalize_funnel
+            && setup_lifecycle
+            && finalize_lifecycle
+            && namespaces_only_in_policy
+            && no_target_snapshot
+    }
+
+    fn committed_shell_selftest_passes(relative: &str) -> anyhow::Result<()> {
+        let root = workspace_root()?;
+        let script = root
+            .join(relative)
+            .to_str()
+            .ok_or_else(|| anyhow::anyhow!("CI selftest path is not UTF-8: {relative}"))?
+            .to_owned();
+        let output = crate::cmd::external_cmd(
+            crate::cmd::ExternalProgram::SystemShell,
+            &["-c", "exec \"$1\"", "ci-selftest", script.as_str()],
+            &[],
+            Some(&root),
+        )
+        .output()?;
+        assert!(
+            output.status.success(),
+            "{relative} failed\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn ci_cache_maintenance_shell_selftest_passes() -> anyhow::Result<()> {
+        committed_shell_selftest_passes(".github/scripts/ci-cache-maintain.selftest.sh")
+    }
+
+    #[test]
+    fn ci_sccache_stats_shell_selftest_passes() -> anyhow::Result<()> {
+        committed_shell_selftest_passes(".github/scripts/ci-sccache-stats.selftest.sh")
+    }
+
+    #[test]
+    fn ci_cache_result_shell_selftest_passes() -> anyhow::Result<()> {
+        committed_shell_selftest_passes(".github/scripts/ci-cache-result.selftest.sh")
     }
 
     fn codeql_workflow_well_formed(yaml: &str) -> bool {

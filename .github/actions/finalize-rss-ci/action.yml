@@ -1,0 +1,157 @@
+name: Finalize RSS Rust CI
+description: Quiesce sccache, report typed cache diagnostics, and save bounded snapshots without changing the job verdict.
+
+inputs:
+  cache-context:
+    description: Closed v1 context emitted by setup-rss-ci.
+    required: true
+  execution-outcome:
+    description: Closed outcome of the repository execution step.
+    required: true
+  save-eligible:
+    description: Whether repository execution ran to success or ordinary failure.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate cache lifecycle context
+      id: policy
+      shell: bash
+      env:
+        RSS_CACHE_CONTEXT: ${{ inputs.cache-context }}
+        RSS_EXECUTION_OUTCOME: ${{ inputs.execution-outcome }}
+        RSS_SAVE_ELIGIBLE: ${{ inputs.save-eligible }}
+      run: |
+        set -euo pipefail
+        context_file="$(mktemp "$RUNNER_TEMP/rss-cache-context.XXXXXX")"
+        printf '%s\n' "$RSS_CACHE_CONTEXT" > "$context_file"
+        .github/scripts/ci-cache-maintain.sh finalize-policy \
+          --context "$context_file" \
+          --execution-outcome "$RSS_EXECUTION_OUTCOME" \
+          --save-eligible "$RSS_SAVE_ELIGIBLE" >> "$GITHUB_OUTPUT"
+
+    - name: Collect compiler cache statistics
+      id: stats
+      if: ${{ always() && !cancelled() && env.RSS_SCCACHE_ENABLED == 'true' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        "$RSS_INTERNAL_SCCACHE_PATH" --show-stats --stats-format json > "$RUNNER_TEMP/rss-sccache-stats.json"
+
+    - name: Stop compiler cache server
+      id: stop
+      if: ${{ always() && !cancelled() && env.RSS_SCCACHE_ENABLED == 'true' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        "$RSS_INTERNAL_SCCACHE_PATH" --stop-server
+
+    - name: Parse compiler cache diagnostics
+      id: diagnostics
+      if: ${{ always() && !cancelled() && steps.stats.outcome == 'success' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -euo pipefail
+        IFS=$'\t' read -r requests hits misses not_cacheable errors timeouts read_errors write_errors < <(
+          .github/scripts/ci-sccache-stats.sh parse --input "$RUNNER_TEMP/rss-sccache-stats.json"
+        )
+        denominator=$((hits + misses))
+        hit_rate=n/a
+        if [ "$denominator" -gt 0 ]; then
+          hit_rate="$(awk -v hits="$hits" -v total="$denominator" 'BEGIN { printf "%.1f%%", (100 * hits) / total }')"
+        fi
+        {
+          echo "requests=$requests"
+          echo "hits=$hits"
+          echo "misses=$misses"
+          echo "not-cacheable=$not_cacheable"
+          echo "errors=$errors"
+          echo "timeouts=$timeouts"
+          echo "read-errors=$read_errors"
+          echo "write-errors=$write_errors"
+          echo "hit-rate=$hit_rate"
+        } >> "$GITHUB_OUTPUT"
+
+    - name: Validate bounded compiler snapshot
+      id: snapshot
+      if: ${{ !cancelled() && steps.policy.outputs.save-cache == 'true' && steps.stats.outcome == 'success' && steps.stop.outcome == 'success' && steps.diagnostics.outcome == 'success' }}
+      continue-on-error: true
+      shell: bash
+      run: |
+        set -euo pipefail
+        bytes="$(.github/scripts/ci-cache-maintain.sh snapshot \
+          --parent "$RUNNER_TEMP" \
+          --path "$RUNNER_TEMP/rss-sccache-cache" \
+          --max-bytes 2147483648)"
+        echo "bytes=$bytes" >> "$GITHUB_OUTPUT"
+
+    - name: Save Cargo downloads after repository execution
+      id: download-save
+      if: ${{ !cancelled() && steps.policy.outputs.save-download == 'true' }}
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ${{ runner.temp }}/rss-cargo-home/registry/cache
+          ${{ runner.temp }}/rss-cargo-home/registry/index
+          ${{ runner.temp }}/rss-cargo-home/git/db
+        key: ${{ steps.policy.outputs.download-primary-key }}
+
+    - name: Save bounded compiler snapshot
+      id: compiler-save
+      if: ${{ !cancelled() && steps.policy.outputs.save-cache == 'true' && steps.snapshot.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/cache/save@v4
+      with:
+        path: ${{ runner.temp }}/rss-sccache-cache
+        key: ${{ steps.policy.outputs.compiler-primary-key }}
+
+    - name: Report cache effectiveness
+      id: summary
+      if: ${{ always() && !cancelled() }}
+      continue-on-error: true
+      shell: bash
+      env:
+        DOWNLOAD_RESTORE: ${{ steps.policy.outputs.download-restore-class }}
+        COMPILER_RESTORE: ${{ steps.policy.outputs.compiler-restore-class }}
+        REQUESTS: ${{ steps.diagnostics.outputs.requests }}
+        HITS: ${{ steps.diagnostics.outputs.hits }}
+        MISSES: ${{ steps.diagnostics.outputs.misses }}
+        NOT_CACHEABLE: ${{ steps.diagnostics.outputs.not-cacheable }}
+        ERRORS: ${{ steps.diagnostics.outputs.errors }}
+        TIMEOUTS: ${{ steps.diagnostics.outputs.timeouts }}
+        READ_ERRORS: ${{ steps.diagnostics.outputs.read-errors }}
+        WRITE_ERRORS: ${{ steps.diagnostics.outputs.write-errors }}
+        HIT_RATE: ${{ steps.diagnostics.outputs.hit-rate }}
+        CACHE_BYTES: ${{ steps.snapshot.outputs.bytes }}
+        DOWNLOAD_SAVE_OUTCOME: ${{ steps.download-save.outcome }}
+        COMPILER_SAVE_OUTCOME: ${{ steps.compiler-save.outcome }}
+      run: |
+        set -euo pipefail
+        report_value() { if [ -n "$1" ]; then printf '%s' "$1"; else printf 'n/a'; fi; }
+        save_value() {
+          case "$1" in success) printf 'attempted-success' ;; failure) printf 'attempted-failure' ;; skipped|'') printf 'skipped' ;; *) printf 'unknown' ;; esac
+        }
+        {
+          echo '### RSS CI cache effectiveness'
+          echo
+          echo '| download restore | compiler restore | compile requests | hits | misses | not cacheable | cache errors | timeouts | read errors | write errors | hit rate | snapshot bytes | download save | compiler save |'
+          echo '| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |'
+          printf '| %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s | %s |\n' \
+            "$(report_value "$DOWNLOAD_RESTORE")" \
+            "$(report_value "$COMPILER_RESTORE")" \
+            "$(report_value "$REQUESTS")" \
+            "$(report_value "$HITS")" \
+            "$(report_value "$MISSES")" \
+            "$(report_value "$NOT_CACHEABLE")" \
+            "$(report_value "$ERRORS")" \
+            "$(report_value "$TIMEOUTS")" \
+            "$(report_value "$READ_ERRORS")" \
+            "$(report_value "$WRITE_ERRORS")" \
+            "$(report_value "$HIT_RATE")" \
+            "$(report_value "$CACHE_BYTES")" \
+            "$(save_value "$DOWNLOAD_SAVE_OUTCOME")" \
+            "$(save_value "$COMPILER_SAVE_OUTCOME")"
+        } | tee -a "$GITHUB_STEP_SUMMARY"

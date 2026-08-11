@@ -64,14 +64,15 @@ jobs:
         run: git submodule update --init -- consumers/standalone
 
       - name: Setup RSS Rust CI
+        id: rss-setup
         uses: ./.github/actions/setup-rss-ci
         with:
           lane: ${{ inputs.job }}
-          profile: ${{ inputs.job }}
           toolchain: 1.96.0
           nightly: ${{ steps.policy.outputs.nightly }}
+          download-cache-epoch: v5
           tool-cache-epoch: v4
-          compiler-cache-identity: ${{ inputs.job }}
+          compiler-cache-epoch: v3
 
       - name: Prepare aggregate integration lifecycle
         id: integration-prepare
@@ -152,3 +153,13 @@ jobs:
             ${{ runner.temp }}/integration-service-logs.tar.gz
           if-no-files-found: warn
           retention-days: 7
+
+      - name: Finalize RSS Rust CI caches
+        id: rss-finalize
+        if: ${{ always() && !cancelled() && steps.rss-setup.outcome == 'success' }}
+        continue-on-error: true
+        uses: ./.github/actions/finalize-rss-ci
+        with:
+          cache-context: ${{ steps.rss-setup.outputs.cache-context }}
+          execution-outcome: ${{ steps.xtask.outcome }}
+          save-eligible: ${{ steps.xtask.outcome == 'success' || steps.xtask.outcome == 'failure' }}

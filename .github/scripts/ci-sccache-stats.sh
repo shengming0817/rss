@@ -40,10 +40,10 @@ parse_stats() {
           ($stats.cache_hits | counter_sum),
           ($stats.cache_misses | counter_sum),
           ($stats.requests_not_cacheable | require_uint),
-          ((($stats.cache_errors | counter_sum)
-            + ($stats.cache_timeouts | require_uint)
-            + ($stats.cache_read_errors | require_uint)
-            + ($stats.cache_write_errors | require_uint)) | require_uint)
+          ($stats.cache_errors | counter_sum),
+          ($stats.cache_timeouts | require_uint),
+          ($stats.cache_read_errors | require_uint),
+          ($stats.cache_write_errors | require_uint)
         ]
         | @tsv
       end

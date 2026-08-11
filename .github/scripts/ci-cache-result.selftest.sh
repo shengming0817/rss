@@ -9,7 +9,7 @@ pass() { printf 'ok - %s\n' "$1"; }
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILURES=$((FAILURES + 1)); }
 expect_result() {
   name=$1 expected=$2 outcome=$3 hit=$4 matched=$5
-  if actual=$("$RESULT" classify --outcome "$outcome" --hit "$hit" --matched "$matched" 2>/dev/null) && [ "$actual" = "$expected" ]; then
+  if actual=$("$RESULT" classify --outcome "$outcome" --primary primary-key --hit "$hit" --matched "$matched" 2>/dev/null) && [ "$actual" = "$expected" ]; then
     pass "$name"
   else
     fail "$name"
@@ -27,14 +27,17 @@ expect_result 'failed restore classifies unknown' unknown failure '' ''
 expect_result 'cancelled restore classifies unknown' unknown cancelled '' ''
 expect_result 'skipped restore classifies unknown' unknown skipped '' ''
 expect_result 'failed restore ignores forged hit outputs' unknown failure true primary-key
+expect_failure 'true with a different matched key fails closed' "$RESULT" classify --outcome success --primary primary-key --hit true --matched other-key
+expect_failure 'false with the primary key fails closed' "$RESULT" classify --outcome success --primary primary-key --hit false --matched primary-key
 expect_failure 'removed aggregate command is rejected' "$RESULT" aggregate --first-hit true --first-matched download-key --second-hit true --second-matched target-key
-expect_failure 'true without matched key fails closed' "$RESULT" classify --outcome success --hit true --matched ''
-expect_failure 'false without matched key fails closed' "$RESULT" classify --outcome success --hit false --matched ''
-expect_failure 'empty hit with matched key fails closed' "$RESULT" classify --outcome success --hit '' --matched prefix-key
-expect_failure 'invalid hit token fails closed' "$RESULT" classify --outcome success --hit yes --matched primary-key
-expect_failure 'invalid outcome fails closed' "$RESULT" classify --outcome unknown --hit '' --matched ''
-expect_failure 'missing outcome fails closed' "$RESULT" classify --hit '' --matched ''
-expect_failure 'missing arguments fail closed' "$RESULT" classify --outcome success --hit true
+expect_failure 'true without matched key fails closed' "$RESULT" classify --outcome success --primary primary-key --hit true --matched ''
+expect_failure 'false without matched key fails closed' "$RESULT" classify --outcome success --primary primary-key --hit false --matched ''
+expect_failure 'empty hit with matched key fails closed' "$RESULT" classify --outcome success --primary primary-key --hit '' --matched prefix-key
+expect_failure 'invalid hit token fails closed' "$RESULT" classify --outcome success --primary primary-key --hit yes --matched primary-key
+expect_failure 'invalid outcome fails closed' "$RESULT" classify --outcome unknown --primary primary-key --hit '' --matched ''
+expect_failure 'missing outcome fails closed' "$RESULT" classify --primary primary-key --hit '' --matched ''
+expect_failure 'missing primary fails closed' "$RESULT" classify --outcome success --hit '' --matched ''
+expect_failure 'missing arguments fail closed' "$RESULT" classify --outcome success --primary primary-key --hit true
 
 if [ "$FAILURES" -ne 0 ]; then
   printf '%s cache result selftest(s) failed\n' "$FAILURES" >&2

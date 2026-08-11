@@ -33,8 +33,16 @@ expect_failure() {
 }
 
 printf '%s\n' '{"stats":{"compile_requests":9,"cache_hits":{"counts":{"Rust":4,"C/C++":0}},"cache_misses":{"counts":{"Rust":3}},"requests_not_cacheable":2,"cache_errors":{"counts":{"Rust":1}},"cache_timeouts":2,"cache_read_errors":3,"cache_write_errors":4}}' >"$TMP_ROOT/valid.json"
-expect_output 'complete stats produce one typed row' "9$(printf '\t')4$(printf '\t')3$(printf '\t')2$(printf '\t')10" \
+expect_output 'complete stats preserve every diagnostic counter' "9$(printf '\t')4$(printf '\t')3$(printf '\t')2$(printf '\t')1$(printf '\t')2$(printf '\t')3$(printf '\t')4" \
   "$PARSER" parse --input "$TMP_ROOT/valid.json"
+
+printf '%s\n' '{"stats":{"compile_requests":0,"cache_hits":{"counts":{}},"cache_misses":{"counts":{}},"requests_not_cacheable":0,"cache_errors":{"counts":{}},"cache_timeouts":0,"cache_read_errors":0,"cache_write_errors":0}}' >"$TMP_ROOT/zero.json"
+expect_output 'zero denominator remains a valid typed row' "0$(printf '\t')0$(printf '\t')0$(printf '\t')0$(printf '\t')0$(printf '\t')0$(printf '\t')0$(printf '\t')0" \
+  "$PARSER" parse --input "$TMP_ROOT/zero.json"
+
+printf '%s\n' '{"stats":{"compile_requests":12,"cache_hits":{"counts":{"Rust":3,"C/C++":2}},"cache_misses":{"counts":{"Rust":4,"C/C++":1}},"requests_not_cacheable":2,"cache_errors":{"counts":{"Rust":0,"C/C++":1}},"cache_timeouts":2,"cache_read_errors":3,"cache_write_errors":4}}' >"$TMP_ROOT/multiple.json"
+expect_output 'multiple language backends are summed without aggregating error classes' "12$(printf '\t')5$(printf '\t')5$(printf '\t')2$(printf '\t')1$(printf '\t')2$(printf '\t')3$(printf '\t')4" \
+  "$PARSER" parse --input "$TMP_ROOT/multiple.json"
 
 printf '%s\n' '{"stats":{}}' >"$TMP_ROOT/missing-fields.json"
 expect_failure 'object with missing fields fails closed' \
@@ -42,6 +50,15 @@ expect_failure 'object with missing fields fails closed' \
 
 printf '%s\n' '{"stats":{"compile_requests":"9"}}' >"$TMP_ROOT/wrong-type.json"
 expect_failure 'wrong counter type fails closed' "$PARSER" parse --input "$TMP_ROOT/wrong-type.json"
+
+printf '%s\n' '{"stats":{"compile_requests":-1,"cache_hits":{"counts":{}},"cache_misses":{"counts":{}},"requests_not_cacheable":0,"cache_errors":{"counts":{}},"cache_timeouts":0,"cache_read_errors":0,"cache_write_errors":0}}' >"$TMP_ROOT/negative.json"
+expect_failure 'negative counters fail closed' "$PARSER" parse --input "$TMP_ROOT/negative.json"
+printf '%s\n' '{"stats":{"compile_requests":1.5,"cache_hits":{"counts":{}},"cache_misses":{"counts":{}},"requests_not_cacheable":0,"cache_errors":{"counts":{}},"cache_timeouts":0,"cache_read_errors":0,"cache_write_errors":0}}' >"$TMP_ROOT/fractional.json"
+expect_failure 'fractional counters fail closed' "$PARSER" parse --input "$TMP_ROOT/fractional.json"
+printf '%s\n' '{"stats":{"compile_requests":9007199254740992,"cache_hits":{"counts":{}},"cache_misses":{"counts":{}},"requests_not_cacheable":0,"cache_errors":{"counts":{}},"cache_timeouts":0,"cache_read_errors":0,"cache_write_errors":0}}' >"$TMP_ROOT/oversized.json"
+expect_failure 'non JSON-safe counters fail closed' "$PARSER" parse --input "$TMP_ROOT/oversized.json"
+printf '%s\n' '{"stats":{"compile_requests":1,"cache_hits":{"counts":[]},"cache_misses":{"counts":{}},"requests_not_cacheable":0,"cache_errors":{"counts":{}},"cache_timeouts":0,"cache_read_errors":0,"cache_write_errors":0}}' >"$TMP_ROOT/wrong-counts.json"
+expect_failure 'non-object backend counts fail closed' "$PARSER" parse --input "$TMP_ROOT/wrong-counts.json"
 
 printf '%s\n' '{broken' >"$TMP_ROOT/malformed.json"
 expect_failure 'malformed JSON fails closed' "$PARSER" parse --input "$TMP_ROOT/malformed.json"
