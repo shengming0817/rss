@@ -23,6 +23,12 @@ feature/MSRV/docs 和最小消费 hazard。真实跨包 seam 由非 workspace Gi
 验证两个 candidate。两类 proof 都不使用 workspace path；成功只表示 candidate eligibility，不表示 RC、published
 或 registry upload。
 
+[`ADR-026`](../../architecture/202608111253-026-rss-incubator-ownership-migration.md) 已接纳后续 ownership cutover：
+RSS 将只拥有 Release Surface 与逐 package `.crate` correctness，联合 product-consumption proof 由独立
+`rss-incubator` workspace/CI 拥有。incubator first-green 与 RSS 原子 cutover 完成前，本节的 submodule 初始化和
+`cargo xtask package-proof` 行为仍是当前 canonical 过渡路径；不得提前删除、并行建立第二 owner，或把旧仓 URL 当作
+兼容承诺。
+
 ## 开始后续 PBI 前
 
 1. 回读对应 Azure PBI 及其 `Blocked-by`，确认所有前置 outcome 已真实落地。

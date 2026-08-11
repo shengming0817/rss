@@ -13,6 +13,10 @@
   [`shengming0817/rss-standalone-consumer`](https://github.com/shengming0817/rss-standalone-consumer)，repository
   custody 为 `ghbvf`、maintenance 为 `github:shengming0817:rss-maintainers`；RSS 只保存 reviewed gitlink 和消费契约，
   不复制外仓源码、lockfile、CI、动态 digest 或 receipt。
+- [`ADR-026`](../../architecture/202608111253-026-rss-incubator-ownership-migration.md) 已接纳将该仓原地迁移为
+  `rss-incubator` 的目标 ownership：RSS 只保留 Release Surface 与 `.crate` correctness，incubator 拥有 workspace、
+  lock、candidate consumption、CI 和自身安全响应。当前 gitlink 在 incubator first-green 与 RSS 原子 cutover 完成前
+  仍是过渡事实，不构成长久源码拓扑或旧 URL 兼容承诺。
 
 本规格不复制 package inventory、代码行数或 API 符号快照。实现 PBI 必须重新从当前 Cargo metadata 与源码读取事实。
 
@@ -69,6 +73,8 @@ revision 生成 `.crate` 并在 workspace 外完成 canonical proof；真实 con
 - package tarball 必须是验证输入，workspace/path build 不能冒充发布证明。
 - 单包 archive fixture 只闭合 package 自身 hazard；真实 consumer 必须从 pinned 外仓 commit 同时消费本次 RSS HEAD
   生成的两个 archive。gitlink、selected/artifact/resolved/executed exact-set 与 lock checksum 任一漂移都必须失败。
+- 上述 pinned 外仓校验只在 ADR-026 的 first-green/cutover 前保持 canonical；cutover 后联合 product-consumption proof
+  由 incubator-owned CI 承担，RSS 不保存其 checkout、lock 或 workspace shape。
 - package digest 与 same-revision 结果只进入 closeout evidence，不形成 committed receipt database；早于最终 API 的
   mechanics 结果不得晋升为该证据。
 

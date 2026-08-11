@@ -135,6 +135,10 @@ SPI 证明稳定共同语义前，不提取通用 provider vocabulary crate。
   capability-specific extension contract；仓内 `pub` 与 internal signature baseline 不自动构成外部兼容承诺。
 - domain、generated internals、provider catalog、RuntimePlan 构造细节、`xtask` 与 journey/fault harness 默认保持 internal。
 - 新公开面必须有真实 consumer、owner、版本与退出路径；不得以“未来可能使用”扩大 release surface。
+- 第一方 product incubator 是外部 consumer 源码树，不是 RSS workspace、Product Surface 或管理面。RSS 只拥有其
+  Release Surface 与 artifact correctness；incubator 自行拥有 workspace、lock、产品构建、CI、发布和安全响应，且只能
+  单向消费不可变 Release Surface artifact。具体迁移边界见
+  [`ADR-026`](../architecture/202608111253-026-rss-incubator-ownership-migration.md)。
 
 ## 验证范围矩阵
 

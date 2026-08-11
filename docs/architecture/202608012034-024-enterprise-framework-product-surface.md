@@ -2,7 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-01
-- **Last updated**：2026-08-09
+- **Last updated**：2026-08-11
 - **Scope**：[`project-scope.md`](../rules/project-scope.md) 的项目目标与目标验收边界
 
 ## Context
@@ -126,6 +126,11 @@ consumer 确需第三方 Provider 扩展，还必须先接纳相应 capability-s
 迁出时必须由单独弃用/迁移决策记录目标仓库、版本边界、consumer build、release ownership 和回退方式。
 Identity、Settings、Audit 的 domain/contract 能力不因 assembly 迁出而自动删除或迁仓；它们仍按
 [`project-scope.md`](../rules/project-scope.md) 的 `Complete`/`Freeze` 边界处置，后续迁移需另行决策。
+
+第一方外部 consumer 孵化仓的 ownership 与 standalone consumer proof cutover 已由
+[`ADR-026`](202608111253-026-rss-incubator-ownership-migration.md) 接纳。该决策只建立仓库与消费证据边界；上述
+`core`/`eventing` canonical artifact、稳定 Platform Public 和外部 build/upgrade 前置仍未满足，因此不构成
+`identityaudit`/`settingsonly` assembly、domain 或 contract 的迁出授权。
 
 ### 现有 T3 基线与处置
 
