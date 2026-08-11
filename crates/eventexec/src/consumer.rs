@@ -140,7 +140,7 @@ impl ConsumerMeta {
         msg: &Message,
     ) -> Result<vocab::TenantId, TenantAuthorityError> {
         let tenant = msg
-            .metadata
+            .metadata()
             .tenant_id()
             .ok_or(TenantAuthorityError::TenantMissing)?;
         self.tenant_authority.verify(
@@ -149,9 +149,9 @@ impl ConsumerMeta {
                 self.authority_domain(),
                 self.contract_id(),
                 self.topic(),
-                msg.id.as_str(),
+                msg.id().as_str(),
             ),
-            &msg.metadata,
+            msg.metadata(),
         )
     }
 
@@ -311,7 +311,7 @@ async fn consume_one<S, H>(
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     // parse 失败 → 结构化 warn + 丢弃（不 panic；key 漂移即等价新消费者，fail-closed）。
-    let key = match IdemKey::parse(msg.id.as_str()) {
+    let key = match IdemKey::parse(msg.id().as_str()) {
         Ok(k) => k,
         Err(_) => {
             log_parse_failed(&msg);
@@ -320,13 +320,13 @@ async fn consume_one<S, H>(
                 acker,
                 diport::AckAction::Reject,
                 meta.domain(),
-                msg.id.as_str(),
+                msg.id().as_str(),
             )
             .await;
             return;
         }
     };
-    let parent_causation = match EnvelopeCausationId::from_opaque(msg.id.as_str()) {
+    let parent_causation = match EnvelopeCausationId::from_opaque(msg.id().as_str()) {
         Ok(causation_id) => causation_id,
         Err(_) => {
             log_parse_failed(&msg);
@@ -334,7 +334,7 @@ async fn consume_one<S, H>(
                 acker,
                 diport::AckAction::Reject,
                 meta.domain(),
-                msg.id.as_str(),
+                msg.id().as_str(),
             )
             .await;
             return;
@@ -377,7 +377,7 @@ async fn consume_one<S, H>(
                 acker,
                 try_claim_err_action(&e),
                 meta.domain(),
-                msg.id.as_str(),
+                msg.id().as_str(),
             )
             .await;
         }
@@ -393,7 +393,7 @@ async fn consume_one<S, H>(
                 acker,
                 diport::AckAction::Ack,
                 meta.domain(),
-                msg.id.as_str(),
+                msg.id().as_str(),
             )
             .await;
         }
@@ -432,7 +432,7 @@ pub async fn settle_claim_in_progress(
     )
     .increment(1);
     tracing::debug!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -446,7 +446,7 @@ pub async fn settle_claim_in_progress(
         acker,
         diport::AckAction::Requeue,
         meta.domain(),
-        msg.id.as_str(),
+        msg.id().as_str(),
     )
     .await;
 }
@@ -485,11 +485,11 @@ async fn handle_fresh<S, H>(
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
     // owned message_id：run_handler_loop 取 msg 所有权，续租 / hard-fence 日志用 owned 串避免借用冲突。
-    let message_id = msg.id.as_str().to_owned();
+    let message_id = msg.id().as_str().to_owned();
     // #1224：从 producer 经 outbox metadata → broker header 透传的 W3C traceparent 还原消费 span 的 remote
     // parent，使 handler span 与 producer 同 trace_id（端到端 trace 续传）。trace 键须在 msg 移入
     // run_handler_loop 前读出（同 message_id 既有范式）；缺 / 畸形 → span 保持 root（fail-open，不阻消费）。
-    let consume_span = build_consume_span(meta, &message_id, msg.metadata.get(diport::KEY_TRACE));
+    let consume_span = build_consume_span(meta, &message_id, msg.metadata().get(diport::KEY_TRACE));
     tokio::select! {
         // biased：双侧同时就绪时优先 handler 分支——handler 已完成（终态正确）时不误触 hard-fence；
         // commit 侧 CAS 仍兜底「续租未及时探测、commit 时租约已失」的竞态（review #279 DX）。
@@ -626,12 +626,12 @@ async fn run_handler_loop<S, H>(
                 // 仅 commit（幂等 done 标记，CAS 守租约）成功才 broker Ack；commit 失败 / 租约丢失 → Requeue
                 // （不移除投递，待 broker 重投后幂等去重收口），守「ack only after durable commit」（review #265 F1/C1）。
                 let action =
-                    if commit_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await {
+                    if commit_key(idempotency, meta, ctx, key, lease, msg.id().as_str()).await {
                         diport::AckAction::Ack
                     } else {
                         diport::AckAction::Requeue
                     };
-                settle(acker, action, meta.domain(), msg.id.as_str()).await;
+                settle(acker, action, meta.domain(), msg.id().as_str()).await;
                 return;
             }
             consistency::Settled::Reject { summary } => {
@@ -779,28 +779,29 @@ pub async fn dead_letter<S>(
     // T007.5：结构化 error，五字段全部出现（domain/contract_id/topic/num_attempts/error_summary）；
     // message_id 额外提供关联维度（DLX 表无该列，log 是唯一关联路径）。
     // 日志收口到 helper 控制本函数认知复杂度 ≤15（tracing 宏展开计入复杂度，同 lib.rs 范式）。
-    log_dead_lettered(meta, num_attempts, error_summary, msg.id.as_str());
+    log_dead_lettered(meta, num_attempts, error_summary, msg.id().as_str());
 
     let record = DeadLetterRecord::new(
         ctx.tenant_id(),
-        msg.id.as_str(),
+        msg.id().as_str(),
         DeadLetterProvenance::consumer(meta.authority_domain(), meta.domain()),
         meta.contract_id(),
         meta.topic(),
         Some(meta.consumer_group().to_string()),
-        msg.payload.as_bytes().to_vec(),
+        msg.payload().as_bytes().to_vec(),
         // 类型层收口：摘要只能是编译期 const literal（SUMMARY_* 常量），不可由 runtime 数据伪造
         // （review #216 F7，INVARIANT DIPORT-DLX-SUMMARY-STATIC-01）。
         DeadLetterSummary::new(error_summary),
         num_attempts,
-        msg.metadata.clone(),
+        msg.metadata().clone(),
     );
 
     match dlx.write_dead_letter(record).await {
         Ok(()) => {
             // dlx 写成功 → commit（标记 done）。仅 commit 成功才 broker Ack；commit 失败 → Requeue
             // （DLX 已落但 done 标记未持久，重投经幂等 Duplicate 收口，守「ack only after durable commit」F1/C1）。
-            let action = if commit_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await {
+            let action = if commit_key(idempotency, meta, ctx, key, lease, msg.id().as_str()).await
+            {
                 if let Some(terminal) = terminal {
                     terminal.cancel();
                 }
@@ -808,7 +809,7 @@ pub async fn dead_letter<S>(
             } else {
                 diport::AckAction::Requeue
             };
-            settle(acker, action, meta.domain(), msg.id.as_str()).await;
+            settle(acker, action, meta.domain(), msg.id().as_str()).await;
         }
         Err(e) => {
             // dlx 写失败 → release（claimed→absent，token CAS），使 broker 重投时 try_claim 回 Fresh、
@@ -816,7 +817,7 @@ pub async fn dead_letter<S>(
             log_dlx_write_failed(meta, &e);
             // release 失败时无法证明后续重投能重新取得 claim；按 eventbus 真源 fail closed 到 Reject，
             // 并由 release-failed 指标告警，避免围绕 60s active lease 热循环。
-            let released = release_key(idempotency, meta, ctx, key, lease, msg.id.as_str()).await;
+            let released = release_key(idempotency, meta, ctx, key, lease, msg.id().as_str()).await;
             settle(
                 acker,
                 if released {
@@ -825,7 +826,7 @@ pub async fn dead_letter<S>(
                     diport::AckAction::Reject
                 },
                 meta.domain(),
-                msg.id.as_str(),
+                msg.id().as_str(),
             )
             .await;
         }
@@ -902,7 +903,7 @@ async fn reject_invalid_envelope_header(
         acker,
         diport::AckAction::Reject,
         meta.domain(),
-        msg.id.as_str(),
+        msg.id().as_str(),
     )
     .await;
 }
@@ -914,12 +915,12 @@ async fn reject_invalid_tenant_authority(
     error: TenantAuthorityError,
 ) {
     record_dead_letter_skip(meta, error.skip_reason());
-    log_dead_letter_tenant_authority_failed(meta, msg.id.as_str(), error);
+    log_dead_letter_tenant_authority_failed(meta, msg.id().as_str(), error);
     settle(
         acker,
         diport::AckAction::Reject,
         meta.domain(),
-        msg.id.as_str(),
+        msg.id().as_str(),
     )
     .await;
 }
@@ -937,7 +938,7 @@ async fn reject_invalid_receipt_context(
         acker,
         diport::AckAction::Reject,
         meta.domain(),
-        msg.id.as_str(),
+        msg.id().as_str(),
     )
     .await;
 }
@@ -990,7 +991,7 @@ pub fn receipt_context_error_reason(error: ReceiptContextBuildError) -> &'static
 /// IdemKey parse 失败（malformed id，fail-closed 不重投）。
 fn log_parse_failed(msg: &Message) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         // 处置随路径：ackable 路径 settle(Reject)（→broker DLX，不无限重投）；brokerless 路径丢弃。
         "consumer: IdemKey parse failed (malformed), rejected to broker DLX (dropped if brokerless)"
     );
@@ -1003,7 +1004,7 @@ fn log_parse_failed(msg: &Message) {
 /// runtime 数据的变体，此处须改走 `secure::redact_error` funnel。
 fn log_try_claim_failed(msg: &Message, error: &consistency::error::EngineError) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         error = %error,
         "consumer: idempotency try_claim failed"
     );
@@ -1024,7 +1025,7 @@ fn try_claim_err_action(error: &consistency::error::EngineError) -> diport::AckA
 /// 幂等短路（已见，跳过）。
 fn log_duplicate(msg: &Message, meta: &ConsumerMeta) {
     tracing::debug!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -1039,7 +1040,7 @@ fn log_invalid_envelope_header(
     error: &EnvelopeHeaderError,
 ) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -1051,7 +1052,7 @@ fn log_invalid_envelope_header(
 
 fn log_invalid_receipt_context(meta: &ConsumerMeta, msg: &Message, reason: &'static str) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -1973,11 +1974,11 @@ mod tests {
         );
         assert_eq!(
             record.message_id, "msg-requeue",
-            "message_id 应来自 Message.id"
+            "message_id 应来自 Message::id()"
         );
         assert_eq!(
             record.tenant_id, "f47ac10b-58cc-4372-a567-0e02b2c3d479",
-            "tenant_id 应来自 Message.metadata.tenantId"
+            "tenant_id 应来自 Message::metadata().tenantId"
         );
         assert_eq!(
             record.consumer_group.as_deref(),
@@ -3507,7 +3508,7 @@ mod tests {
     }
 
     // 端到端（review #298 F#2）：Message 带 broker 透传的 KEY_TRACE → run_consumer → handle_fresh 读
-    // msg.metadata.get(KEY_TRACE) → build_consume_span 还原 → `.instrument` → handler 内 trace_id 与
+    // msg.metadata().get(KEY_TRACE) → build_consume_span 还原 → `.instrument` → handler 内 trace_id 与
     // producer 一致。覆盖「键名 + instrument 接线」整链（build_consume_span 直测覆盖不到 handle_fresh 取值/挂载）。
     // `insert_wire_pair` 在 #[cfg(test)] 子树调用：dylint rss_diport_envelope_reserved_writer 默认不扫 test，合规。
     // reason(unwrap/expect): 测试断言——采样 span capture 恒 Some、runtime build / Mutex lock 测试期不失败。

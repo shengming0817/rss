@@ -474,7 +474,7 @@ mod tests {
     fn tenant_mismatch_log_does_not_expose_transport_message_id() -> TestResult {
         const OTHER_SESSION_BEARER: &str = "37d9f310-5860-4e59-8423-983a2f7b6bc2";
         let transport_message = diport::Message::new(OTHER_SESSION_BEARER, Vec::new());
-        assert_eq!(transport_message.id.as_str(), OTHER_SESSION_BEARER);
+        assert_eq!(transport_message.id().as_str(), OTHER_SESSION_BEARER);
         let ctx = InboxReceiptContext::new(
             vocab::TenantId::parse(TENANT)?,
             consistency::ConsumerGroup::parse("audit-log-redaction")?,

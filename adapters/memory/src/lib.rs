@@ -197,7 +197,7 @@ impl Subscriber for MemSubscriber {
 /// in-mem outbox 发射端口（impl [`diport::OutboxEmitter`]）：把 [`Entry`] 直接 fan-out 到 [`MemBus`]，
 /// **不持久化**——demo / 单进程 / 测试用；不能作为 durable production event writer。
 ///
-/// 经 `MemBus::publisher()` 复用 [`MemPublisher`] 的发布路径：`Message.id = entry.idem_key()`（EventId），
+/// 经 `MemBus::publisher()` 复用 [`MemPublisher`] 的发布路径：`Message::id() = entry.idem_key()`（EventId），
 /// 闭合 demo 侧 EventId 传播（消费侧 `run_consumer` 据此幂等去重）。
 pub struct MemEmitter {
     bus: MemBus,
@@ -3143,12 +3143,12 @@ mod tests {
             .await
             .expect("publish");
         let msg = stream.next().await.expect("message delivered");
-        assert_eq!(msg.payload.as_bytes(), b"hello");
-        // EventId 传播：event_id 须作 Message.id（消费侧幂等键源）。
+        assert_eq!(msg.payload().as_bytes(), b"hello");
+        // EventId 传播：event_id 须作 Message::id()（消费侧幂等键源）。
         assert_eq!(
-            msg.id.as_str(),
+            msg.id().as_str(),
             "evt-roundtrip",
-            "event_id 应作 Message.id 传播到消费侧"
+            "event_id 应作 Message::id() 传播到消费侧"
         );
     }
 
@@ -3175,8 +3175,8 @@ mod tests {
             ))
             .await
             .expect("publish");
-        assert_eq!(a.next().await.expect("a msg").payload.as_bytes(), b"x");
-        assert_eq!(b.next().await.expect("b msg").payload.as_bytes(), b"x");
+        assert_eq!(a.next().await.expect("a msg").payload().as_bytes(), b"x");
+        assert_eq!(b.next().await.expect("b msg").payload().as_bytes(), b"x");
     }
 
     #[tokio::test]
@@ -3237,22 +3237,26 @@ mod tests {
             .await
             .expect("emit");
         let msg = stream.next().await.expect("message delivered");
-        assert_eq!(msg.id.as_str(), "evt-session-77", "EventId 应作 Message.id");
-        assert_eq!(msg.payload.as_bytes(), b"payload");
         assert_eq!(
-            msg.metadata.tenant_id(),
+            msg.id().as_str(),
+            "evt-session-77",
+            "EventId 应作 Message::id()"
+        );
+        assert_eq!(msg.payload().as_bytes(), b"payload");
+        assert_eq!(
+            msg.metadata().tenant_id(),
             Some(vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")),
             "MemEmitter 应透传 tenantId metadata"
         );
-        assert_eq!(msg.metadata.get(diport::KEY_SCHEMA_VERSION), Some("v1"));
-        assert_eq!(msg.metadata.get(diport::KEY_SCHEMA_HASH), Some(HASH));
+        assert_eq!(msg.metadata().get(diport::KEY_SCHEMA_VERSION), Some("v1"));
+        assert_eq!(msg.metadata().get(diport::KEY_SCHEMA_HASH), Some(HASH));
         assert_eq!(
-            msg.metadata.get(diport::KEY_SUBJECT_ID),
+            msg.metadata().get(diport::KEY_SUBJECT_ID),
             None,
             "MemEmitter 不应把 persisted-only subjectId 投递给 consumer"
         );
         assert_eq!(
-            msg.metadata.get(diport::KEY_ACTOR),
+            msg.metadata().get(diport::KEY_ACTOR),
             None,
             "MemEmitter 不应把 persisted-only actor 投递给 consumer"
         );
@@ -3293,9 +3297,9 @@ mod tests {
             .expect("emit");
 
         let msg = stream.next().await.expect("message delivered");
-        assert_eq!(msg.metadata.tenant_id(), Some(tenant));
+        assert_eq!(msg.metadata().tenant_id(), Some(tenant));
         assert_eq!(
-            msg.metadata.get(diport::KEY_TENANT_AUTHORITY),
+            msg.metadata().get(diport::KEY_TENANT_AUTHORITY),
             Some("signed-tenant-authority"),
             "signed memory emit path must carry tenantAuthority"
         );
@@ -3342,22 +3346,22 @@ mod tests {
 
         let msg = stream.next().await.expect("message delivered");
         assert_eq!(
-            msg.metadata.tenant_id(),
+            msg.metadata().tenant_id(),
             Some(tenant),
             "MemAuthGrantStore co-tx path must carry tenantId metadata"
         );
         assert_eq!(
-            msg.metadata.get(diport::KEY_TENANT_AUTHORITY),
+            msg.metadata().get(diport::KEY_TENANT_AUTHORITY),
             Some("signed-tenant-authority"),
             "signed MemAuthGrantStore path must carry tenantAuthority metadata"
         );
         assert_eq!(
-            msg.metadata.get(diport::KEY_SUBJECT_ID),
+            msg.metadata().get(diport::KEY_SUBJECT_ID),
             None,
             "MemAuthGrantStore co-tx path must not expose persisted-only subjectId"
         );
         assert_eq!(
-            msg.metadata.get(diport::KEY_ACTOR),
+            msg.metadata().get(diport::KEY_ACTOR),
             None,
             "MemAuthGrantStore co-tx path must not expose persisted-only actor"
         );
@@ -3408,7 +3412,7 @@ mod tests {
 
         probe.enqueued.wait();
         let message = stream.next().await.expect("event must already be enqueued");
-        assert_eq!(message.id.as_str(), "evt-session-mem-publish-order");
+        assert_eq!(message.id().as_str(), "evt-session-mem-publish-order");
 
         let visible_while_publish_is_paused = store
             .state
@@ -3529,7 +3533,7 @@ mod tests {
         assert!(stream.next().await.is_none());
     }
 
-    /// metadata passthrough：publish 携 envelope metadata → subscriber 端 Message.metadata 保真。
+    /// metadata passthrough：publish 携 envelope metadata → subscriber 端 Message::metadata() 保真。
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn publish_metadata_propagates_to_subscriber() {
@@ -3557,24 +3561,24 @@ mod tests {
             .await
             .expect("publish");
         let msg = stream.next().await.expect("message delivered");
-        assert_eq!(msg.payload.as_bytes(), b"with-meta");
+        assert_eq!(msg.payload().as_bytes(), b"with-meta");
         assert_eq!(
-            msg.metadata.occurred_at_secs(),
+            msg.metadata().occurred_at_secs(),
             Some(1_700_000_003_i64),
-            "occurred_at 应透传到 Message.metadata"
+            "occurred_at 应透传到 Message::metadata()"
         );
         assert_eq!(
-            msg.metadata.get(diport::KEY_CORRELATION),
+            msg.metadata().get(diport::KEY_CORRELATION),
             Some("corr-mem-1"),
-            "correlation 应透传到 Message.metadata"
+            "correlation 应透传到 Message::metadata()"
         );
         assert_eq!(
-            msg.metadata.get(diport::KEY_SUBJECT_ID),
+            msg.metadata().get(diport::KEY_SUBJECT_ID),
             None,
             "memory broker must filter persisted-only subjectId"
         );
         assert_eq!(
-            msg.metadata.get(diport::KEY_ACTOR),
+            msg.metadata().get(diport::KEY_ACTOR),
             None,
             "memory broker must filter persisted-only actor"
         );

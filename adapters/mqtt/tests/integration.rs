@@ -258,13 +258,16 @@ async fn device_uplink_yields_sealed_principal_and_rejects_override() -> anyhow:
 
     // Wire metadata / payload claims cannot mint MQTT identity. Authenticated delivery no longer
     // exposes a conversion into provider-agnostic Message.
-    let mut forged = diport::Message::new("evt-2", br#"{"claim":"other-device"}"#.to_vec());
     let forged_claim = scope(CROSS_TENANT, CURRENT_GENERATION).principal_urn();
-    forged
-        .metadata
-        .insert_wire_pair(diport::KEY_PRINCIPAL, &forged_claim);
+    let mut forged_metadata = diport::EnvelopeMetadata::empty();
+    forged_metadata.insert_wire_pair(diport::KEY_PRINCIPAL, &forged_claim);
+    let forged = diport::Message::new_with_metadata(
+        "evt-2",
+        br#"{"claim":"other-device"}"#.to_vec(),
+        forged_metadata,
+    );
     assert_eq!(
-        forged.metadata.get(diport::KEY_PRINCIPAL),
+        forged.metadata().get(diport::KEY_PRINCIPAL),
         Some(forged_claim.as_str()),
         "wire KEY_PRINCIPAL remains forgeable text and must not be treated as sealed identity"
     );

@@ -209,8 +209,9 @@ pub fn audit_record_from_event_message(
 pub fn security_audit_command_from_message(
     message: &Message,
 ) -> Result<SecurityAuditCommand, AuditEventRecordError> {
-    let payload: IdentitySecurityEventPayload = serde_json::from_slice(message.payload.as_bytes())
-        .map_err(AuditEventRecordError::Decode)?;
+    let payload: IdentitySecurityEventPayload =
+        serde_json::from_slice(message.payload().as_bytes())
+            .map_err(AuditEventRecordError::Decode)?;
     let tenant =
         vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
     let action_raw = match (payload.kind, payload.target.kind) {
@@ -336,14 +337,15 @@ fn from_unix_secs(secs: i64) -> Result<SystemTime, AuditEventRecordError> {
 fn session_created_record_from_message(
     message: &Message,
 ) -> Result<AuditRecord, AuditEventRecordError> {
-    let payload: IdentitySessionCreatedPayload = serde_json::from_slice(message.payload.as_bytes())
-        .map_err(AuditEventRecordError::Decode)?;
+    let payload: IdentitySessionCreatedPayload =
+        serde_json::from_slice(message.payload().as_bytes())
+            .map_err(AuditEventRecordError::Decode)?;
     let tenant =
         vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
     let action = vocab::Action::parse(ACTION_LOGIN).map_err(AuditEventRecordError::Action)?;
     let session =
         ids::SessionId::parse(&payload.session_id).map_err(AuditEventRecordError::Session)?;
-    let resource_id = SessionAuditResourceId::from_message(&message.id, &session)?;
+    let resource_id = SessionAuditResourceId::from_message(message.id(), &session)?;
     Ok(AuditRecord {
         tenant,
         actor: ids::UserId::new(payload.subject),
@@ -387,7 +389,7 @@ impl SessionAuditResourceId {
 fn role_assigned_record_from_message(
     message: &Message,
 ) -> Result<AuditRecord, AuditEventRecordError> {
-    let payload: IdentityRoleAssignedPayload = serde_json::from_slice(message.payload.as_bytes())
+    let payload: IdentityRoleAssignedPayload = serde_json::from_slice(message.payload().as_bytes())
         .map_err(AuditEventRecordError::Decode)?;
     let tenant =
         vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
@@ -407,7 +409,7 @@ fn role_assigned_record_from_message(
 fn role_revoked_record_from_message(
     message: &Message,
 ) -> Result<AuditRecord, AuditEventRecordError> {
-    let payload: IdentityRoleRevokedPayload = serde_json::from_slice(message.payload.as_bytes())
+    let payload: IdentityRoleRevokedPayload = serde_json::from_slice(message.payload().as_bytes())
         .map_err(AuditEventRecordError::Decode)?;
     let tenant =
         vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
@@ -427,8 +429,9 @@ fn role_revoked_record_from_message(
 fn policy_updated_record_from_message(
     message: &Message,
 ) -> Result<AuditRecord, AuditEventRecordError> {
-    let payload: IdentityPolicyUpdatedPayload = serde_json::from_slice(message.payload.as_bytes())
-        .map_err(AuditEventRecordError::Decode)?;
+    let payload: IdentityPolicyUpdatedPayload =
+        serde_json::from_slice(message.payload().as_bytes())
+            .map_err(AuditEventRecordError::Decode)?;
     let tenant =
         vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
     let action = vocab::Action::parse(policy_updated_action(payload.change_kind))

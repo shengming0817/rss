@@ -1069,7 +1069,7 @@ impl PgFaultMatrixHarness {
     ) -> FaultMatrixResult<FaultMatrixConsumerDelivery> {
         let store = self.deps.handle().infra().inbox();
         let ctx = session_created_inbox_ctx(tenant, group)?;
-        let key = IdemKey::parse(message.id.as_str())?;
+        let key = IdemKey::parse(message.id().as_str())?;
         let lease = LeaseToken::mint();
         match store.try_claim(&ctx, &key, &lease).await? {
             SeenState::Duplicate => Ok(FaultMatrixConsumerDelivery::Duplicate),

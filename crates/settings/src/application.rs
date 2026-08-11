@@ -411,7 +411,7 @@ impl ConfigVersionChangedEvent {
 pub fn config_version_changed_event_from_message(
     message: &Message,
 ) -> Result<ConfigVersionChangedEvent, ConfigVersionChangedEventError> {
-    config_version_changed_event_from_payload(message.payload.as_bytes())
+    config_version_changed_event_from_payload(message.payload().as_bytes())
 }
 
 /// Decode one short-lived payload slice without retaining the encoded bytes in domain state.
@@ -1169,7 +1169,7 @@ impl ConfigVersionReconciler {
                 Ok(event) => event,
                 Err(error) => {
                     tracing::warn!(
-                        message_id = message.id.as_str(),
+                        message_id = message.id().as_str(),
                         error = %secure::redact_error(&error),
                         "settings config-version payload rejected"
                     );
@@ -1180,7 +1180,7 @@ impl ConfigVersionReconciler {
             };
             if event.tenant() != authenticated_tenant {
                 log_config_version_tenant_mismatch(
-                    message.id.as_str(),
+                    message.id().as_str(),
                     &event.tenant(),
                     &authenticated_tenant,
                 );

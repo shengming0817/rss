@@ -546,10 +546,10 @@ async fn next_consumer_tx_delivery(
         .await
         .context(wait_context)?
         .ok_or_else(|| anyhow!("session-created delivery stream closed"))?;
-    if delivery.message.id.as_str() != ids.event_id {
+    if delivery.message.id().as_str() != ids.event_id {
         bail!(
             "session-created delivery id = {}, expected {}",
-            delivery.message.id.as_str(),
+            delivery.message.id().as_str(),
             ids.event_id
         );
     }
@@ -707,10 +707,10 @@ async fn outbox_publish_before_settle_redelivers(
         .await
         .context("timeout waiting for outbox redelivery")?
         .ok_or_else(|| anyhow!("outbox redelivery stream closed"))?;
-    if redelivery.message.id.as_str() != event_id {
+    if redelivery.message.id().as_str() != event_id {
         bail!(
             "outbox redelivery id = {}, expected {event_id}",
-            redelivery.message.id.as_str()
+            redelivery.message.id().as_str()
         );
     }
     redelivery.acker.settle(AckAction::Ack).await?;
@@ -734,10 +734,10 @@ async fn outbox_publish_before_settle_redelivers(
         .await
         .context("timeout waiting for outbox recovery publish")?
         .ok_or_else(|| anyhow!("outbox recovery stream closed"))?;
-    if recovered.message.id.as_str() != event_id {
+    if recovered.message.id().as_str() != event_id {
         bail!(
             "outbox recovery id = {}, expected {event_id}",
-            recovered.message.id.as_str()
+            recovered.message.id().as_str()
         );
     }
     recovered.acker.settle(AckAction::Ack).await?;
@@ -924,12 +924,12 @@ fn run_outbox_confirm_lost_channel_close<'a>(
                         .await
                         .context("timeout waiting for confirm-lost duplicate delivery")?
                         .ok_or_else(|| anyhow!("confirm-lost delivery stream closed"))?;
-                    if delivery.message.id.as_str() == event_id {
+                    if delivery.message.id().as_str() == event_id {
                         break delivery;
                     }
                     delivery.acker.settle(AckAction::Ack).await?;
                 };
-                delivered_ids.push(delivery.message.id.as_str().to_string());
+                delivered_ids.push(delivery.message.id().as_str().to_string());
                 let observed = pg
                     .harness
                     .consume_session_created_delivery(scope.tenant, &group, delivery.message)

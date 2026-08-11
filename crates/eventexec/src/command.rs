@@ -6,7 +6,7 @@
 //! event authoring 旁路。
 //!
 //! **consumer**：[`register_command_handler`] 复用 [`run_consumer`] + [`InboxStore`] claimer 两阶段
-//! 去重（同 canonical command id 已 durable done 后二次投递 → `Message.id` 同键 → `try_claim` 返 `Duplicate` → handler 不调、幂等短路 =
+//! 去重（同 canonical command id 已 durable done 后二次投递 → `Message::id()` 同键 → `try_claim` 返 `Duplicate` → handler 不调、幂等短路 =
 //! claimer 拒）；零新去重原语。
 //!
 //! INVARIANT: COMMAND-ALIAS-PROBE-SEAL-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary", facet = "alias-probe-type" }—— raw business key 只在本模块内进入 mandatory keyed blind-index keyring；
@@ -783,7 +783,7 @@ fn map_journal_store_error(error: CommandStoreError) -> CommandJournalError {
 /// Runtime 命令消费注册 —— 复用 [`run_consumer`] 驱动 + [`InboxStore`] claimer 两阶段去重。
 ///
 /// 消息 `payload` 经 `serde_json` 解码为 typed `R` 后交 `handler`；解码失败 = 永久 `reject`（坏 wire 不可
-/// 恢复 → DLX，不 Requeue 无限重投）。同 canonical command id（`Message.id` = dispatch key）二次投递 → claimer
+/// 恢复 → DLX，不 Requeue 无限重投）。同 canonical command id（`Message::id()` = dispatch key）二次投递 → claimer
 /// durable done 时 `try_claim` 返 `Duplicate` → handler 不调、幂等短路；active claim 返
 /// transient 并 Requeue。claim→handle→commit/dlx 全复用
 /// `run_consumer`，零新去重原语。`contract` 同时提供 contract id 与 expected schema fingerprint，命令路径
@@ -838,11 +838,11 @@ pub async fn register_command_handler<S, R, H, Fut>(
             let contract_id_s = Arc::clone(&contract_id_s);
             let topic_s = Arc::clone(&topic_s);
             Box::pin(async move {
-                match serde_json::from_slice::<R>(msg.payload.as_bytes()) {
+                match serde_json::from_slice::<R>(msg.payload().as_bytes()) {
                     Ok(req) => handler(req).await,
                     Err(_) => {
                         // 坏 wire = 永久 reject（不可恢复 → DLX）；warn 记录解码失败原因（无 payload 字节，PII 边界）。
-                        log_decode_failed(msg.id.as_str(), &contract_id_s, &topic_s);
+                        log_decode_failed(msg.id().as_str(), &contract_id_s, &topic_s);
                         HandleResult::reject(PermanentError::new(PermanentErrorKind::Permanent))
                     }
                 }

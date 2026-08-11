@@ -69,7 +69,7 @@ const RSS_APP_PASSWORD: &str = "rss_app_test_pw";
 const RSS_APP_READ_ROLE: &str = "rss_app_read";
 const RSS_APP_READ_PASSWORD: &str = "rss_app_read_test_pw";
 /// #1160：注入的 correlation——经 diagctx ambient → PgAuthGrantLifecycle emit → outbox.metadata 列 → relay
-/// hydrate → MemBus → consumer `Message.metadata` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
+/// hydrate → MemBus → consumer `Message::metadata()` 端到端保真断言（白名单字符，CorrelationId::parse 必通）。
 const JOURNEY_CORR: &str = "journey-corr-1160";
 
 fn login_producer_receipt() -> LoginProducerReceipt {
@@ -201,9 +201,9 @@ fn consumer_handler(
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .push(CapturedBrokerMessage {
-                    event_id: message.id.as_str().to_string(),
-                    payload: message.payload.as_bytes().to_vec(),
-                    metadata: message.metadata.clone(),
+                    event_id: message.id().as_str().to_string(),
+                    payload: message.payload().as_bytes().to_vec(),
+                    metadata: message.metadata().clone(),
                 });
             let record =
                 match audit_record_from_event_message(AuditEventKind::SessionCreated, &message) {

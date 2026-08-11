@@ -5281,12 +5281,12 @@ impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynSubscriber<'dyn
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynSubscriber<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynSubscriber<'dynosaur_struct>
 pub struct diport::subscriber::Message
-pub diport::subscriber::Message::id: diport::subscriber::MessageId
-pub diport::subscriber::Message::metadata: diport::envelope::EnvelopeMetadata
-pub diport::subscriber::Message::payload: diport::RedactedBytes
 impl diport::subscriber::Message
+pub fn diport::subscriber::Message::id(&self) -> &diport::subscriber::MessageId
+pub fn diport::subscriber::Message::metadata(&self) -> &diport::envelope::EnvelopeMetadata
 pub fn diport::subscriber::Message::new(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>) -> Self
 pub fn diport::subscriber::Message::new_with_metadata(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::subscriber::Message::payload(&self) -> &diport::RedactedBytes
 pub fn diport::subscriber::Message::try_envelope(&self) -> core::result::Result<diport::envelope::MessageEnvelope, diport::envelope::EnvelopeHeaderError>
 pub fn diport::subscriber::Message::try_header(&self) -> core::result::Result<diport::envelope::EnvelopeHeader, diport::envelope::EnvelopeHeaderError>
 impl core::clone::Clone for diport::subscriber::Message
@@ -8608,12 +8608,12 @@ impl core::marker::UnsafeUnpin for diport::lock_store::LockStoreKey
 impl core::panic::unwind_safe::RefUnwindSafe for diport::lock_store::LockStoreKey
 impl core::panic::unwind_safe::UnwindSafe for diport::lock_store::LockStoreKey
 pub struct diport::Message
-pub diport::Message::id: diport::subscriber::MessageId
-pub diport::Message::metadata: diport::envelope::EnvelopeMetadata
-pub diport::Message::payload: diport::RedactedBytes
 impl diport::subscriber::Message
+pub fn diport::subscriber::Message::id(&self) -> &diport::subscriber::MessageId
+pub fn diport::subscriber::Message::metadata(&self) -> &diport::envelope::EnvelopeMetadata
 pub fn diport::subscriber::Message::new(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>) -> Self
 pub fn diport::subscriber::Message::new_with_metadata(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<u8>, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::subscriber::Message::payload(&self) -> &diport::RedactedBytes
 pub fn diport::subscriber::Message::try_envelope(&self) -> core::result::Result<diport::envelope::MessageEnvelope, diport::envelope::EnvelopeHeaderError>
 pub fn diport::subscriber::Message::try_header(&self) -> core::result::Result<diport::envelope::EnvelopeHeader, diport::envelope::EnvelopeHeaderError>
 impl core::clone::Clone for diport::subscriber::Message

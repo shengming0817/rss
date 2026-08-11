@@ -9,7 +9,7 @@
 //!   refresh + outbox
 //!   fact（demo 拓扑）；audit 经注入的链 `MacVerifier`（journey 捕获 verifier）落**域内哈希链**（W：无外部
 //!   sink）；幂等 store 经 `memory::InMemClaimer` 注入、DLX 经 `memory::MemDeadLetterStore` 注入。
-//! - 跨域事件：identity emit `identity.session-created` → MemBus（Message.id = EventId）→ audit 订阅消费。
+//! - 跨域事件：identity emit `identity.session-created` → MemBus（Message::id() = EventId）→ audit 订阅消费。
 //! - **消费（#1171 实交付）**：Registry 只声明 generated subscription identity；journey 的测试 handler
 //!   直接复用 audit wire decode + repo append，再经 `eventexec::ConsumerWorker`（专用线程驱动 `run_consumer`、
 //!   impl `ManagedResource`）接 `bootstrap::shutdown::ShutdownStack` 两阶段关闭——闭合「`run_consumer` 0 个

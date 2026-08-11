@@ -289,7 +289,7 @@ async fn consume_one_tx<S, P, H>(
 }
 
 fn tx_preflight(meta: &ConsumerMeta, msg: &Message) -> Result<TxPreflight, TxPreflightError> {
-    let key = IdemKey::parse(msg.id.as_str()).map_err(|_| TxPreflightError::MalformedId)?;
+    let key = IdemKey::parse(msg.id().as_str()).map_err(|_| TxPreflightError::MalformedId)?;
     let header = meta
         .verify_envelope_header(msg)
         .map_err(TxPreflightError::InvalidEnvelopeHeader)?;
@@ -331,7 +331,7 @@ async fn reject_tx_preflight(
         acker,
         diport::AckAction::Reject,
         meta.domain(),
-        msg.id.as_str(),
+        msg.id().as_str(),
     )
     .await;
 }
@@ -347,7 +347,7 @@ async fn settle_tx_try_claim_error(
         acker,
         tx_try_claim_error_action(error),
         meta.domain(),
-        msg.id.as_str(),
+        msg.id().as_str(),
     )
     .await;
 }
@@ -370,21 +370,21 @@ async fn ack_tx_duplicate(
         acker,
         diport::AckAction::Ack,
         meta.domain(),
-        msg.id.as_str(),
+        msg.id().as_str(),
     )
     .await;
 }
 
 fn log_tx_parse_failed(msg: &Message) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         "consumer-tx: IdemKey parse failed, rejected"
     );
 }
 
 fn log_tx_invalid_envelope_header(meta: &ConsumerMeta, msg: &Message, error: &EnvelopeHeaderError) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -399,7 +399,7 @@ fn log_tx_invalid_tenant_authority(
     error: eventexec::TenantAuthorityError,
 ) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -410,7 +410,7 @@ fn log_tx_invalid_tenant_authority(
 
 fn log_tx_invalid_receipt_context(meta: &ConsumerMeta, msg: &Message, reason: &'static str) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -425,7 +425,7 @@ fn log_tx_try_claim_failed(
     error: &consistency::error::EngineError,
 ) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -437,7 +437,7 @@ fn log_tx_try_claim_failed(
 
 fn log_tx_duplicate(msg: &Message, meta: &ConsumerMeta) {
     tracing::debug!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -462,8 +462,8 @@ async fn handle_fresh_tx<S, P, H>(
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
 {
-    let message_id = msg.id.as_str().to_owned();
-    let consume_span = build_consume_span(meta, &message_id, msg.metadata.get(diport::KEY_TRACE));
+    let message_id = msg.id().as_str().to_owned();
+    let consume_span = build_consume_span(meta, &message_id, msg.metadata().get(diport::KEY_TRACE));
     let terminal = tokio_util::sync::CancellationToken::new();
     tokio::select! {
         biased;
@@ -549,7 +549,7 @@ async fn run_tx_handler_loop<S, P, H>(
                     acker,
                     diport::AckAction::Ack,
                     meta.domain(),
-                    msg.id.as_str(),
+                    msg.id().as_str(),
                 )
                 .await;
                 return;
@@ -581,17 +581,17 @@ async fn run_tx_handler_loop<S, P, H>(
                         acker,
                         diport::AckAction::Requeue,
                         meta.domain(),
-                        msg.id.as_str(),
+                        msg.id().as_str(),
                     )
                     .await;
                     return;
                 }
             },
             ConsumerTxOutcome::LeaseLost { summary } => {
-                log_lease_lost(meta, msg.id.as_str());
+                log_lease_lost(meta, msg.id().as_str());
                 emit_lease_lost(meta.domain());
                 tracing::warn!(
-                    message_id = msg.id.as_str(),
+                    message_id = msg.id().as_str(),
                     summary,
                     "consumer-tx: lease lost in transaction, requeued without app dlx"
                 );
@@ -599,7 +599,7 @@ async fn run_tx_handler_loop<S, P, H>(
                     acker,
                     diport::AckAction::Requeue,
                     meta.domain(),
-                    msg.id.as_str(),
+                    msg.id().as_str(),
                 )
                 .await;
                 return;
@@ -611,14 +611,14 @@ async fn run_tx_handler_loop<S, P, H>(
         acker,
         diport::AckAction::Requeue,
         meta.domain(),
-        msg.id.as_str(),
+        msg.id().as_str(),
     )
     .await;
 }
 
 fn log_tx_commit_unknown(meta: &ConsumerMeta, msg: &Message, summary: &'static str) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),
@@ -630,7 +630,7 @@ fn log_tx_commit_unknown(meta: &ConsumerMeta, msg: &Message, summary: &'static s
 
 fn log_tx_handler_transient_exhausted(meta: &ConsumerMeta, msg: &Message, summary: &'static str) {
     tracing::warn!(
-        message_id = msg.id.as_str(),
+        message_id = msg.id().as_str(),
         domain = meta.domain(),
         contract_id = meta.contract_id(),
         topic = meta.topic(),

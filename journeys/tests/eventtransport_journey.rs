@@ -57,7 +57,7 @@ async fn demo_resolver_yields_inprocess_bus_roundtrip() {
         .next()
         .await
         .expect("message delivered via resolved demo bus");
-    assert_eq!(msg.payload.as_bytes(), b"session-evt");
+    assert_eq!(msg.payload().as_bytes(), b"session-evt");
 }
 
 /// durable 拓扑缺 broker URL ⇒ fail-closed（精确 `MissingBrokerUrl{domain}`），绝不降级回 demo/in-mem

@@ -1,0 +1,38 @@
+error[E0616]: field `id` of struct `Message` is private
+ --> tests/ui/message_private_fields_fail.rs:6:22
+  |
+6 |     let _ = &message.id;
+  |                      ^^ private field
+  |
+help: a method `id` also exists, call it with parentheses
+  |
+6 |     let _ = &message.id();
+  |                        ++
+
+error[E0616]: field `metadata` of struct `Message` is private
+ --> tests/ui/message_private_fields_fail.rs:7:22
+  |
+7 |     let _ = &message.metadata;
+  |                      ^^^^^^^^ private field
+  |
+help: a method `metadata` also exists, call it with parentheses
+  |
+7 |     let _ = &message.metadata();
+  |                              ++
+
+error[E0616]: field `payload` of struct `Message` is private
+ --> tests/ui/message_private_fields_fail.rs:8:22
+  |
+8 |     let _ = &message.payload;
+  |                      ^^^^^^^ private field
+  |
+help: a method `payload` also exists, call it with parentheses
+  |
+8 |     let _ = &message.payload();
+  |                             ++
+
+error[E0616]: field `metadata` of struct `Message` is private
+ --> tests/ui/message_private_fields_fail.rs:9:13
+  |
+9 |     message.metadata = EnvelopeMetadata::empty();
+  |             ^^^^^^^^ private field

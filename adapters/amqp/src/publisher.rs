@@ -1590,7 +1590,7 @@ impl Publisher for AmqpPublisher {
         // key。per-domain 隔离仍经 vhost，broker topic permission 额外封闭契约 routing key。
         // mandatory=true + publisher confirms：不可路由（无绑定 queue）消息被 broker **退回**而非静默丢弃，
         // 经 confirm 检测为失败——durable publish-ok 语义闭合（不再依赖「subscriber 先启动」运行顺序约定）。
-        // message_id = event_id（去重锚点）：经 broker envelope 流到订阅侧 `Message.id`（subscriber 的
+        // message_id = event_id（去重锚点）：经 broker envelope 流到订阅侧 `Message::id()`（subscriber 的
         // `pick_message_id` 优先读 message_id 再回退 delivery_tag），实现跨进程「至少一次 + 幂等去重」。
         // envelope metadata 透传：occurred_at → AMQP timestamp；其余 → FieldTable LongString headers。
         let event_id = request.event_id().as_str().to_string();
@@ -3019,7 +3019,7 @@ mod publisher_transport_replacement_integration_tests {
         let delivery = tokio::time::timeout(Duration::from_secs(5), deliveries.next())
             .await?
             .ok_or_else(|| anyhow!("identity roundtrip delivery missing"))?;
-        assert_eq!(delivery.message.id, event_id);
+        assert_eq!(delivery.message.id(), &event_id);
         delivery
             .acker
             .settle(AckAction::Ack)
@@ -3105,7 +3105,7 @@ mod publisher_transport_replacement_integration_tests {
             let delivery = tokio::time::timeout(Duration::from_secs(5), deliveries.next())
                 .await?
                 .ok_or_else(|| anyhow!("same-ID retry delivery missing"))?;
-            delivered_ids.push(delivery.message.id.as_str().to_string());
+            delivered_ids.push(delivery.message.id().as_str().to_string());
             delivery
                 .acker
                 .settle(AckAction::Ack)

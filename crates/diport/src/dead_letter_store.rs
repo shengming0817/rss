@@ -290,7 +290,8 @@ impl DeadLetterRecord {
 
     /// 借出原始 payload 的脱敏 newtype（#1259）。
     ///
-    /// 返回 [`RedactedBytes`]（Hard）：`Debug` 恒 `<redacted>`，对齐 `Message.payload` / ADR-013——
+    /// 返回 [`RedactedBytes`]（Hard）：`Debug` 恒 `<redacted>`，对齐 [`crate::Message`] 内部的
+    /// `RedactedBytes` 持有 / ADR-013——
     /// 调用方不得经本 accessor 直接取得 `&[u8]` 送进日志。provider 持久化收发须显式
     /// [`RedactedBytes::as_bytes`]（与全仓 payload 字节 egress 纪律一致）。
     ///
@@ -458,7 +459,7 @@ mod smoke {
 #[cfg(test)]
 mod pii_debug {
     //! `DeadLetterRecord.original_payload`（原始消息字节，可能含 PII）Debug 脱敏回归。
-    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（对标 `SignRequest.message` / `Message.payload`）。
+    //! INVARIANT: DIPORT-DTO-PII-DEBUG-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（对标 `SignRequest.message` / `Message` 内部的 `RedactedBytes` 持有）。
     use super::{DeadLetterProvenance, DeadLetterRecord, DeadLetterSummary};
     use crate::EnvelopeMetadata;
 

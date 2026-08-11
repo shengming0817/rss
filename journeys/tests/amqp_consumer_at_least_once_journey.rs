@@ -106,7 +106,7 @@ async fn run_consumer_ackable_drives_amqp_at_least_once() -> Result<(), FixtureE
             consumed
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .push(message.id.as_str().to_string());
+                .push(message.id().as_str().to_string());
             HandleResult::ack()
         })
     };

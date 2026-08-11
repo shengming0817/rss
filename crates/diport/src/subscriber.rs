@@ -3,7 +3,7 @@
 //! 自 `eventexec`（服务层）迁入（issue #1075，ADR-003 DI port 收敛）：订阅接缝是可替换-provider 的
 //! DI 注入端口，归属 DI-infra 单源；端口数据类型（[`Message`] 及 [`MessageStream`]）随端口一并落本层——
 //! 与 [`crate::Publisher`] 拥有 [`crate::PublishRequest`]/[`crate::Topic`] 对称（watermill `message` 包内聚）。
-//! ref: watermill message/message.go+pubsub.go@master
+//! ref: watermill message/message.go+message/pubsub.go@111c8b44efae3d528383f5669235c948127b87f4
 
 use std::pin::Pin;
 
@@ -40,6 +40,8 @@ impl MessageId {
 /// tenantAuthority）由 adapter subscriber 从 broker header 经 [`EnvelopeMetadata::insert_wire_pair`] 透传
 /// （来源已 sealed），业务不得伪造（writer 两层强度见 [`EnvelopeMetadata`] rustdoc + dylint
 /// DIPORT-ENVELOPE-WIRE-WRITER-01）。
+/// 三个字段均私有，只能经构造器写入、经只读 accessor 借出；消费侧无法整体替换或清空 adapter 注入的
+/// reserved metadata。该 visibility 边界是 Hard owner，trybuild 仅作防回退证明。
 /// PII 边界（类型层 Hard，对标 [`crate::Signature`]）：`payload`（消息体，可能含 PII）经 [`RedactedBytes`] 持有
 /// （`Debug` 恒 `<redacted>`、经 `as_bytes` 受控读取），故 struct `derive(Debug)` 即安全；`id`（路由）可观测；
 /// `metadata` 经 [`EnvelopeMetadata`] 自身 Debug（subjectId / principal 脱敏）。
@@ -52,11 +54,12 @@ impl MessageId {
 #[derive(Debug, Clone)]
 pub struct Message {
     /// 消息唯一标识。
-    pub id: MessageId,
+    id: MessageId,
     /// 统一 delivery envelope metadata（仅 transport-safe broker header 透传）。
-    pub metadata: EnvelopeMetadata,
-    /// provider-agnostic 消息字节（[`RedactedBytes`] 持有：`Debug` 恒 `<redacted>`，经 `payload.as_bytes()` 读取）。
-    pub payload: RedactedBytes,
+    metadata: EnvelopeMetadata,
+    /// provider-agnostic 消息字节（[`RedactedBytes`] 持有：`Debug` 恒 `<redacted>`，经
+    /// [`Self::payload`] 借出 wrapper、再显式调用 [`RedactedBytes::as_bytes`] 读取）。
+    payload: RedactedBytes,
 }
 
 impl Message {
@@ -80,6 +83,24 @@ impl Message {
             metadata,
             payload: RedactedBytes::new(payload),
         }
+    }
+
+    /// 消息唯一标识。
+    pub fn id(&self) -> &MessageId {
+        &self.id
+    }
+
+    /// 统一 delivery envelope metadata 的只读视图。
+    pub fn metadata(&self) -> &EnvelopeMetadata {
+        &self.metadata
+    }
+
+    /// provider-agnostic 消息字节的脱敏只读 wrapper。
+    ///
+    /// `Debug` / `Display` 恒为 `<redacted>`；确需解码或传输时显式调用
+    /// [`RedactedBytes::as_bytes`] 暴露原始字节。
+    pub fn payload(&self) -> &RedactedBytes {
+        &self.payload
     }
 
     /// 将订阅消息视为标准 delivery envelope；缺 tenant/schema header 时 fail-closed。
@@ -252,11 +273,11 @@ mod smoke {
     fn message_is_send_sync_and_constructible() {
         _assert_send_sync::<Message>();
         let msg = Message::new("m-1", b"payload".to_vec());
-        assert_eq!(msg.id.as_str(), "m-1");
+        assert_eq!(msg.id().as_str(), "m-1");
         // Message::new 默认空 envelope（无 metadata 路径）。
-        assert_eq!(msg.metadata.get("trace"), None);
-        assert!(msg.metadata.is_empty());
-        assert_eq!(msg.payload.as_bytes(), b"payload");
+        assert_eq!(msg.metadata().get("trace"), None);
+        assert!(msg.metadata().is_empty());
+        assert_eq!(msg.payload().as_bytes(), b"payload");
     }
 
     #[test]
@@ -267,8 +288,8 @@ mod smoke {
         md.insert_wire_pair(KEY_OCCURRED_AT, "1700000000");
         md.insert_wire_pair(KEY_CORRELATION, "corr-3");
         let msg = Message::new_with_metadata("m-2", b"p".to_vec(), md);
-        assert_eq!(msg.metadata.occurred_at_secs(), Some(1_700_000_000));
-        assert_eq!(msg.metadata.get(KEY_CORRELATION), Some("corr-3"));
+        assert_eq!(msg.metadata().occurred_at_secs(), Some(1_700_000_000));
+        assert_eq!(msg.metadata().get(KEY_CORRELATION), Some("corr-3"));
     }
 
     #[test]
@@ -306,7 +327,7 @@ mod smoke {
 
 #[cfg(test)]
 mod pii_debug {
-    //! `Message.payload`（消息体，可能含 PII）字节 Debug 脱敏回归。
+    //! [`Message::payload`]（消息体，可能含 PII）字节 Debug 脱敏回归。
     //! INVARIANT: DIPORT-DTO-BYTES-REDACT-01 { level = "Medium", exec = "manual/opt-in", source = "code" }（payload 经 `RedactedBytes` 脱敏；`derive(Debug)` 即安全）。
     use super::Message;
 
@@ -323,5 +344,12 @@ mod pii_debug {
         assert!(!dbg.contains("173"), "payload 字节泄漏(0xAD=173): {dbg}");
         assert!(dbg.contains("<redacted>"), "缺 <redacted>: {dbg}");
         assert!(dbg.contains("msg-1"), "id 应可见: {dbg}");
+    }
+
+    #[test]
+    fn message_payload_accessor_debug_is_redacted() {
+        let msg = Message::new("msg-1", vec![0xDE, 0xAD, 0xBE, 0xEF]);
+        let dbg = format!("{:?}", msg.payload());
+        assert_eq!(dbg, "<redacted>", "payload accessor Debug 泄漏: {dbg}");
     }
 }

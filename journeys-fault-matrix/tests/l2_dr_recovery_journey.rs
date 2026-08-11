@@ -241,7 +241,7 @@ async fn consume_committed_then_duplicate(
             .await
             .context("timeout waiting for L2 DR same-ID delivery")?
             .context("L2 DR same-ID delivery stream closed")?;
-        ensure!(delivery.message.id.as_str() == event_id);
+        ensure!(delivery.message.id().as_str() == event_id);
         let observed = harness
             .pg
             .consume_session_created_delivery(harness.tenant, consumer_group, delivery.message)

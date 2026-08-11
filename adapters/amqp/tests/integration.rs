@@ -169,7 +169,7 @@ async fn integration_tls_identities_enforce_publish_subscribe_acl() -> anyhow::R
     let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
         .ok_or_else(|| anyhow!("private-CA ACL stream closed without a delivery"))?;
-    assert_eq!(delivery.message.payload.as_bytes(), b"acl-roundtrip");
+    assert_eq!(delivery.message.payload().as_bytes(), b"acl-roundtrip");
     delivery.acker.settle(AckAction::Reject).await?;
     assert!(
         deps.subscriber_for_integration_test()
@@ -464,7 +464,7 @@ async fn integration_topic_isolation_same_vhost() -> Result<(), FixtureError> {
     let delivery_b = tokio::time::timeout(Duration::from_secs(5), stream_b.next())
         .await?
         .ok_or_else(|| anyhow!("b stream closed without a message"))?;
-    assert_eq!(delivery_b.message.payload.as_bytes(), b"to-b");
+    assert_eq!(delivery_b.message.payload().as_bytes(), b"to-b");
     // 负向：A 在短超时内无投递（隔离——B 的消息没串到 A）。timeout Err = 无消息。
     // 1s 余量（原 500ms 在 CI 高负载下偶发 flaky；正向已先成功，负向只需等隔离窗口）。
     let a_result = tokio::time::timeout(Duration::from_secs(1), stream_a.next()).await;
@@ -512,7 +512,7 @@ async fn integration_per_subscription_cancel_does_not_stop_others() -> Result<()
         .await?
         .ok_or_else(|| anyhow!("B 流在 A 取消后关闭（回归：共享 channel 被连带关闭）"))?;
     assert_eq!(
-        delivery_b.message.payload.as_bytes(),
+        delivery_b.message.payload().as_bytes(),
         b"to-b-after-a-cancel"
     );
     delivery_b
@@ -561,7 +561,7 @@ async fn integration_cross_vhost_isolation() -> Result<(), FixtureError> {
     let delivery_a = tokio::time::timeout(Duration::from_secs(5), stream_a.next())
         .await?
         .ok_or_else(|| anyhow!("vhost-a stream closed without a message"))?;
-    assert_eq!(delivery_a.message.payload.as_bytes(), b"only-a");
+    assert_eq!(delivery_a.message.payload().as_bytes(), b"only-a");
     // 负向：vhost-b 订阅者超时内无投递（vhost 硬命名空间边界——跨 vhost 不路由）。
     // 1s 余量（原 500ms 在 CI 高负载下偶发 flaky；正向已先成功，负向只需等隔离窗口）。
     let b_result = tokio::time::timeout(Duration::from_secs(1), stream_b.next()).await;
@@ -623,7 +623,7 @@ async fn integration_ackable_ack_removes_message() -> Result<(), FixtureError> {
         .await
         .map_err(|_| anyhow!("timeout waiting for ackable delivery"))?
         .ok_or_else(|| anyhow!("stream closed without delivery"))?;
-    assert_eq!(delivery.message.payload.as_bytes(), b"ack-payload");
+    assert_eq!(delivery.message.payload().as_bytes(), b"ack-payload");
     delivery
         .acker
         .settle(AckAction::Ack)
@@ -979,7 +979,7 @@ async fn integration_ackable_requeue_redelivers_message() -> Result<(), FixtureE
         .await
         .map_err(|_| anyhow!("timeout waiting for redelivery"))?
         .ok_or_else(|| anyhow!("redelivery stream closed without message"))?;
-    assert_eq!(redelivery.message.payload.as_bytes(), b"requeue-payload");
+    assert_eq!(redelivery.message.payload().as_bytes(), b"requeue-payload");
     // ack 清理，避免残留影响后续测试。
     redelivery
         .acker
@@ -1028,7 +1028,7 @@ async fn integration_test_queue_purge_removes_requeued_prior_run_delivery()
         .await
         .map_err(|_| anyhow!("timeout waiting for prior-run delivery"))?
         .ok_or_else(|| anyhow!("prior-run delivery stream closed"))?;
-    assert_eq!(prior.message.id.as_str(), "evt-prior-run");
+    assert_eq!(prior.message.id().as_str(), "evt-prior-run");
     drop(prior);
     first_token.cancel();
     AckableSubscriber::shutdown(&first_subscriber).await?;
@@ -1058,7 +1058,7 @@ async fn integration_test_queue_purge_removes_requeued_prior_run_delivery()
         .await
         .map_err(|_| anyhow!("timeout waiting for current-run delivery"))?
         .ok_or_else(|| anyhow!("current-run delivery stream closed"))?;
-    assert_eq!(current.message.id.as_str(), "evt-current-run");
+    assert_eq!(current.message.id().as_str(), "evt-current-run");
     current.acker.settle(AckAction::Ack).await?;
 
     next_token.cancel();
@@ -1112,7 +1112,7 @@ async fn integration_ackable_crash_without_settle_redelivers() -> Result<(), Fix
         .await
         .map_err(|_| anyhow!("timeout waiting for crash-redelivery (at-least-once)"))?
         .ok_or_else(|| anyhow!("crash-redelivery stream closed without message"))?;
-    assert_eq!(redelivery.message.payload.as_bytes(), b"crash-payload");
+    assert_eq!(redelivery.message.payload().as_bytes(), b"crash-payload");
     // ack 清理。
     redelivery
         .acker
@@ -1189,7 +1189,7 @@ async fn integration_ackable_token_cancel_drains_inflight_before_shutdown()
         .await
         .map_err(|_| anyhow!("timeout waiting for post-cancel delivery"))?
         .ok_or_else(|| anyhow!("replacement consumer stream closed"))?;
-    assert_eq!(next_delivery.message.id.as_str(), "evt-after-cancel-d");
+    assert_eq!(next_delivery.message.id().as_str(), "evt-after-cancel-d");
     next_delivery
         .acker
         .settle(AckAction::Ack)
@@ -1241,17 +1241,17 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
 
     // metadata 保真验证。
     assert_eq!(
-        delivery.message.metadata.occurred_at_secs(),
+        delivery.message.metadata().occurred_at_secs(),
         Some(1_700_000_001_i64),
         "occurred_at 应经 AMQP timestamp 字段透传"
     );
     assert_eq!(
-        delivery.message.metadata.get(KEY_CORRELATION),
+        delivery.message.metadata().get(KEY_CORRELATION),
         Some("corr-42"),
         "correlation 应经 AMQP FieldTable LongString 透传"
     );
     assert_eq!(
-        delivery.message.metadata.get(KEY_SUBJECT_ID),
+        delivery.message.metadata().get(KEY_SUBJECT_ID),
         None,
         "subjectId 是 persisted-only metadata，不应经 AMQP FieldTable LongString 透传"
     );
@@ -1303,7 +1303,7 @@ async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(),
     let delivery = tokio::time::timeout(Duration::from_secs(5), stream.next())
         .await?
         .ok_or_else(|| anyhow!("bundle stream closed without yielding a message"))?;
-    assert_eq!(delivery.message.payload.as_bytes(), b"hello-bundle");
+    assert_eq!(delivery.message.payload().as_bytes(), b"hello-bundle");
     delivery
         .acker
         .settle(AckAction::Ack)

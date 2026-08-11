@@ -263,11 +263,11 @@ async fn publish_config_emits_version_changed_end_to_end() -> Result<()> {
         .await?
         .ok_or_else(|| anyhow!("expected config-version-changed event"))?;
     assert!(
-        message.metadata.get(KEY_TENANT_AUTHORITY).is_some(),
+        message.metadata().get(KEY_TENANT_AUTHORITY).is_some(),
         "demo memory provider must carry signed tenantAuthority metadata"
     );
     let payload: SettingsConfigVersionChangedPayload =
-        serde_json::from_slice(message.payload.as_bytes())?;
+        serde_json::from_slice(message.payload().as_bytes())?;
     assert_eq!(payload.key, "app.timeout");
     assert_eq!(payload.version, 1);
     assert_eq!(payload.change_kind, SettingsConfigChangeKind::Published);
@@ -350,7 +350,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
             .await?
             .ok_or_else(|| anyhow!("expected config-version-changed event"))?;
         let payload: SettingsConfigVersionChangedPayload =
-            serde_json::from_slice(message.payload.as_bytes())?;
+            serde_json::from_slice(message.payload().as_bytes())?;
         last_payload = Some(payload);
     }
 
@@ -392,7 +392,7 @@ async fn rollback_emits_version_changed_rolled_back_end_to_end() -> Result<()> {
         .await?
         .ok_or_else(|| anyhow!("expected deleted event"))?;
     let deleted: SettingsConfigVersionChangedPayload =
-        serde_json::from_slice(deleted_message.payload.as_bytes())?;
+        serde_json::from_slice(deleted_message.payload().as_bytes())?;
     assert_eq!(deleted.change_kind, SettingsConfigChangeKind::Deleted);
     assert_eq!(deleted.version, 4);
     assert!(
