@@ -358,9 +358,9 @@ pub mod test_support {
     ) -> eventexec::event::ReviewedEvent {
         let payload =
             generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
-                session_id: grant.id().as_str().to_owned(),
+                session_id: grant.id().as_uuid(),
                 subject: grant.user_id().as_uuid(),
-                tenant_id: grant.tenant().to_string(),
+                tenant_id: grant.tenant().as_uuid(),
                 occurred_at: crate::application::unix_secs(grant.created_at()),
             };
         let subject = grant.user_id();

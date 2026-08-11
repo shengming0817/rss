@@ -2304,3 +2304,18 @@ hard cut：取得 `ACCESS EXCLUSIVE` 后，用即将安装的 versioned validato
 4. ledger 为 104 后只允许 forward migration；不得 `CREATE OR REPLACE` v1 validator 后假定既有行已
    重验。规则变化必须创建新版本函数、新 CHECK 并重新验证。旧 artifact 因 exact-head ledger 与新
    CHECK 不可恢复；数据库级回滚仅允许连同迁移前完整备份和旧 artifact 整体恢复。
+
+### 0105 Settings projection input-generation hard cut
+
+`0105` 将 Settings v3 worker/operator/reader 的固定函数身份推进到当前 generated projection-input
+generation。projection generation 覆盖全体输入，因此 audit 的 `identity.session-created` schema hash
+变化也会推进该值。Settings 派生状态可从保留的 `projection_events` 重放；迁移会删除旧 generation、
+active pointer、checkpoint、dedupe 和 projection rows，但不删除 source log 或 input binding registry。
+
+1. 停止 Settings projection worker/operator 与读取流量，备份数据库，并确认 ledger 精确为 104。
+2. 运行唯一的 `rss postgres migrate-all` Job。迁移以 5 秒 lock timeout 获取派生状态表的
+   `ACCESS EXCLUSIVE` 锁，并在同一事务中静态重装 6 个 generation-pinned 函数。
+3. 新 binary 通过 migration lane 注册当前 generated input bindings，worker 完整重放并由 operator
+   原子提升新 generation 后再恢复读取流量。不得手工恢复旧 pointer 或旧 generation。
+4. postflight 必须确认 ledger 为 105、旧 generation 不再出现在 6 个函数正文，且新 active pointer
+   只引用当前 generation。数据库级回滚只能连同迁移前备份和旧 artifact 整体恢复。

@@ -9,7 +9,7 @@
 
 - **`identity.login`**（http，**L2 OutboxFact**，`contracts/http/identity/v1/login/`）：`POST /api/v1/identity/login`，Public（opt_out）。tenant 来源 `X-Tenant-ID` header（body 禁 `tenantId`）。req `{username,password}` → resp `{data:{sessionId,expiresAt,accessToken,refreshToken,accessExpiresAt}}`——登录成功首发 access JWT（vault `Signer` 经 `authn::JwtIssuer` 签）+ refresh token bundle（#1252 Join 接线）。
 - **`identity.refresh`**（http，**L2 conditional OutboxFact**，`contracts/http/identity/v1/refresh/`）：`POST /api/v1/identity/refresh`，Public（opt_out；refresh token 自身即凭据）。tenant 来源 `X-Tenant-ID` header。req `{refreshToken}` → resp `{data:{accessToken,refreshToken,accessExpiresAt}}`。正常轮换在同一 producer transaction 中 consume old + insert child，使用 no-mutation fact outcome；检测 reuse 时才原子撤销 family、把 grant 提升为 Compromised 并精确产生一条 `identity.security-event`。只有 commit 确认后的不可伪造 receipt 能释放已 mint bearer；未知、重放、过期和 stale 对外保持统一拒绝。
-- **`identity.session-created`**（event，L2 OutboxFact）：payload `{sessionId, subject (UUID / canonical UserId), tenantId, occurredAt}`；订阅方 audit。
+- **`identity.session-created`**（event，L2 OutboxFact）：payload `{sessionId: UUID, subject: UUID / canonical UserId, tenantId: UUID, occurredAt}`；schema/codegen 将三个身份坐标生成为 typed UUID，订阅方 audit 再投影为私有 `SessionId` / `UserId` / `TenantId`。
 
 ## 新增（PR5）
 
@@ -46,6 +46,7 @@ schema（`*.schema.json`）→ contract.toml（id/kind/consistencyLevel/owner/en
 | `identity.password-change` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
 | `identity.account-status-get/set` | 新增 | 新增 | 新增 | producer assurance + contract test | 更新 |
 | `identity.logout` | 新增 | 新增 | 新增 | 新增 contract test | 更新 |
+| `identity.session-created` UUID 收口 | 三个身份坐标均为 `format:uuid` | 三字段均为 `uuid::Uuid` | metadata 不变；producer/consumer 走 typed ID funnel | raw wire decode + authn/vocab/audit 回归 | 本页更新 |
 
 ## 字段约定
 

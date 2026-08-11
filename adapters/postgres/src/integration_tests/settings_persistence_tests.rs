@@ -1808,9 +1808,9 @@ async fn producer_fact_binding_mismatch_rolls_back_business_write() -> TestResul
     let entry = generated_entry(
         generated::event::identity_v1::session_created::FACT,
         &generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
-            session_id: "mismatched-session".to_string(),
+            session_id: uuid::Uuid::from_u128(1),
             subject: uuid::Uuid::from_u128(2),
-            tenant_id: tenant.to_string(),
+            tenant_id: tenant.as_uuid(),
             occurred_at: i64::try_from(TEST_OCCURRED_SECS)?,
         },
         IdemKey::parse(&event_id)?,

@@ -44,7 +44,7 @@ string 上界不是 transport/domain 双单位：Common ABAC schema 的 `maxLeng
 > **[#1277 canonical subject 修订]** 登录查找键与 wire/audit actor 分层：`LoginIdentifier`
 > （username/email/UPN，准 PII，永不进 payload/outbox）∥ `ids::UserId`（canonical subject）；
 > `CredentialRepo::authenticate` → `AuthOutcome` 取代旧 `verify_password` / 分步 `record_failure`
-> 端口面；`identity.session-created.subject` 为 `format:uuid`（generated `uuid::Uuid`）。
+> 端口面；`identity.session-created` 的 `subject` / `sessionId` / `tenantId` 均为 `format:uuid`（generated `uuid::Uuid`）。
 > envelope subject/actor 经 `EnvelopeSubjectId`/`OpaqueActorId::from_user_id`（#1235）。
 
 ## 身份 / 凭据与账户安全子域（`domain/account.rs` + `domain/account_security.rs`）
@@ -113,7 +113,7 @@ string 上界不是 transport/domain 双单位：Common ABAC schema 的 `maxLeng
 
 | Topic | 一致性级 | payload | 当前 |
 |-------|---------|---------|------|
-| `identity.session-created` | L2 OutboxFact | `{session_id, subject: uuid (canonical UserId), tenant_id, occurred_at}` | ✓ active；schema `format:uuid` |
+| `identity.session-created` | L2 OutboxFact | `{session_id: uuid, subject: uuid (canonical UserId), tenant_id: uuid, occurred_at}` | ✓ active；三身份坐标由 schema → typify UUID DTO → private typed ID funnel 构成 Hard carrier |
 | `identity.role-assigned` | L2 OutboxFact | `{subject, role_id, tenant_id, assigned_by, occurred_at}`；此处 `subject` = RBAC 绑定目标（非 login） | 新增（PR5，lifecycle active） |
 | `identity.role-revoked` | L2 OutboxFact | `{subject, role_id, tenant_id, revoked_by, occurred_at}`；同上 RBAC 绑定目标 | 新增（PR5，lifecycle active） |
 | `identity.security-event` | L2 OutboxFact | `{kind,actor:{kind,keyId,ref},target:{kind,keyId,ref},tenantId,occurredAt}`；actor/target ref 均为版本化 tenant/domain-separated HMAC pseudonym | active；audit 消费十组合法映射（含 AccountReactivated）；epoch 前或 int64 溢出时间 fail-closed |

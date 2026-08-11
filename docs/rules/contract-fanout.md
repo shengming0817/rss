@@ -34,6 +34,9 @@ DI-infra port provider（如 `diport::RevocationStore` / `Signer` / `Pdp`）不�
 - INVARIANT: CONSISTENCY-EFFECT-BREAKING-REVIEW-01（carrier 在 `xtask/src/contract/breaking.rs`）：active 默认 deny；
   三条固定 review rule 未确认 fail-closed，且不提供 flag、环境变量、日期窗口或自由文本豁免。
 - generated diff 是一等审查材料。
+- durable event/command/saga/projection 的 resolved schema hash 旋转是一等 breaking identity；即使字段
+  集合论兼容也不得静默通过。`format` 新增会改变 generated scalar，必须与 hash 旋转分别进入精确
+  breaking findings，并由同一 base-bound authorization 完整覆盖。
 - 新增 contract kind 或 role 必须补 governance 与 codegen 测试。
 - 暂不支持的扇出项必须登记 GitHub Issue，不能写在 rules 中当计划占位。
 

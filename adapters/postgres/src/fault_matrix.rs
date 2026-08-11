@@ -118,8 +118,8 @@ impl FaultMatrixSessionCreatedInput {
         payload: FaultMatrixSessionCreatedPayload,
         idem_key: IdemKey,
     ) -> FaultMatrixResult<Self> {
-        let tenant = vocab::TenantId::parse(&payload.tenant_id)?;
-        let session_id = ids::SessionId::parse(&payload.session_id)?.as_uuid();
+        let tenant = vocab::TenantId::try_from(payload.tenant_id)?;
+        let session_id = ids::SessionId::new(payload.session_id).as_uuid();
         Ok(Self {
             tenant,
             session_id,
@@ -2427,9 +2427,9 @@ mod tests {
     ) -> FaultMatrixSessionCreatedPayload {
         FaultMatrixSessionCreatedPayload {
             occurred_at: 1_700_000_000,
-            session_id: session_id.to_string(),
+            session_id,
             subject: uuid::Uuid::from_u128(7),
-            tenant_id: tenant.to_string(),
+            tenant_id: tenant.as_uuid(),
         }
     }
 
@@ -2452,9 +2452,9 @@ mod tests {
     fn session_created_input_rejects_invalid_payload_tenant_identity() -> FaultMatrixResult<()> {
         let payload = FaultMatrixSessionCreatedPayload {
             occurred_at: 1_700_000_000,
-            session_id: uuid::Uuid::from_u128(9).to_string(),
+            session_id: uuid::Uuid::from_u128(9),
             subject: uuid::Uuid::from_u128(7),
-            tenant_id: "not-a-tenant".to_string(),
+            tenant_id: uuid::Uuid::nil(),
         };
         assert!(
             FaultMatrixSessionCreatedInput::new(
@@ -2467,20 +2467,17 @@ mod tests {
     }
 
     #[test]
-    fn session_created_input_rejects_invalid_payload_session_identity() -> FaultMatrixResult<()> {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
-        let payload = FaultMatrixSessionCreatedPayload {
-            occurred_at: 1_700_000_000,
-            session_id: "not-a-session".to_string(),
-            subject: uuid::Uuid::from_u128(7),
-            tenant_id: tenant.to_string(),
-        };
+    fn session_created_payload_rejects_non_uuid_session_before_fault_input() -> FaultMatrixResult<()>
+    {
+        let payload = serde_json::json!({
+            "occurredAt": 1_700_000_000_i64,
+            "sessionId": "not-a-session",
+            "subject": uuid::Uuid::from_u128(7),
+            "tenantId": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+        });
         assert!(
-            FaultMatrixSessionCreatedInput::new(
-                payload,
-                IdemKey::parse("fault-matrix-invalid-session")?,
-            )
-            .is_err()
+            serde_json::from_value::<FaultMatrixSessionCreatedPayload>(payload).is_err(),
+            "non-UUID session must fail at generated wire decode"
         );
         Ok(())
     }

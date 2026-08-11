@@ -528,9 +528,9 @@ fn session_created_payload(
 ) -> generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
     generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
         occurred_at: TEST_OCCURRED_AT,
-        session_id: session_id.to_string(),
+        session_id,
         subject: Uuid::new_v4(),
-        tenant_id: tenant.to_string(),
+        tenant_id: tenant.as_uuid(),
     }
 }
 

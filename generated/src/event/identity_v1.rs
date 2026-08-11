@@ -4029,16 +4029,21 @@ pub mod session_created {
     ///      "format": "int64"
     ///    },
     ///    "sessionId": {
+    ///      "description": "Canonical authentication grant/session UUID.",
     ///      "type": "string",
+    ///      "format": "uuid",
     ///      "x-redaction": "secret"
     ///    },
     ///    "subject": {
+    ///      "description": "Canonical identity UserId UUID; never a login identifier.",
     ///      "type": "string",
     ///      "format": "uuid",
     ///      "x-pii": "generic"
     ///    },
     ///    "tenantId": {
-    ///      "type": "string"
+    ///      "description": "Canonical non-nil TenantId UUID.",
+    ///      "type": "string",
+    ///      "format": "uuid"
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -4051,14 +4056,17 @@ pub mod session_created {
         #[serde(rename = "occurredAt")]
         #[redact(sensitivity = public)]
         pub occurred_at: i64,
+        ///Canonical authentication grant/session UUID.
         #[serde(rename = "sessionId")]
         #[redact(sensitivity = secret)]
-        pub session_id: ::std::string::String,
+        pub session_id: ::uuid::Uuid,
+        ///Canonical identity UserId UUID; never a login identifier.
         #[redact(sensitivity = pii)]
         pub subject: ::uuid::Uuid,
+        ///Canonical non-nil TenantId UUID.
         #[serde(rename = "tenantId")]
         #[redact(sensitivity = public)]
-        pub tenant_id: ::std::string::String,
+        pub tenant_id: ::uuid::Uuid,
     }
 
     /// 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -4077,7 +4085,7 @@ pub mod session_created {
         "identity",
         "identity.session-created",
         "v1",
-        "sha256:999d2b098e6c89de6d1841416099942cad21279843456dfc287b1fcaa67a7516",
+        "sha256:d8b29c5d222d32205fe78b194bc370eef300c6660a33f68e2ae7d15bebfb7288",
     );
 
     /// Generated contract + topic identity carried by this event payload.

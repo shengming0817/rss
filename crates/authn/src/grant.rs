@@ -148,33 +148,43 @@ impl CredentialSecurityEventKind {
 
 /// Stable server-side authentication-grant identifier.
 #[derive(Clone, PartialEq, Eq, Hash, secure::Redact)]
-pub struct AuthGrantId(#[redact(sensitivity = secret)] String);
+pub struct AuthGrantId(#[redact(sensitivity = secret)] ids::CanonicalUuidV4);
 
 impl AuthGrantId {
-    fn new(raw: String) -> Result<Self, AuthGrantIdError> {
-        ids::CanonicalUuidV4::parse(&raw).map_err(|_| AuthGrantIdError::Invalid)?;
-        Ok(Self(raw))
+    fn new(raw: &str) -> Result<Self, AuthGrantIdError> {
+        ids::CanonicalUuidV4::parse(raw)
+            .map(Self)
+            .map_err(|_| AuthGrantIdError::Invalid)
     }
 
     /// Generate the unique identifier for a newly authenticated grant.
     fn generate() -> Self {
-        Self(ids::CanonicalUuidV4::generate().to_string())
+        Self(ids::CanonicalUuidV4::generate())
     }
 
-    pub(crate) fn from_verified(value: ids::CanonicalUuidV4) -> Self {
-        Self(value.to_string())
+    /// Rewrap an already-verified canonical UUIDv4 without reopening a text boundary.
+    pub fn from_verified(value: ids::CanonicalUuidV4) -> Self {
+        Self(value)
     }
 
     /// Parse a canonical UUIDv4 obtained from persistence or an authenticated wire edge.
-    pub fn hydrate(raw: impl Into<String>) -> Result<Self, AuthGrantIdError> {
-        Self::new(raw.into())
+    pub fn hydrate(raw: impl AsRef<str>) -> Result<Self, AuthGrantIdError> {
+        Self::new(raw.as_ref())
     }
 
-    /// Opaque identifier used by persistence and the existing `sessionId` HTTP/event wire.
-    ///
-    /// The same value is bound into the RSS access JWT `sid` claim (#1835).
-    pub fn as_str(&self) -> &str {
-        &self.0
+    /// Return the already-verified UUID without reopening the string trust boundary.
+    pub fn as_uuid(&self) -> uuid::Uuid {
+        self.0.as_uuid()
+    }
+
+    /// Return the exact validated carrier for trusted in-repository evidence propagation.
+    pub fn as_verified(&self) -> ids::CanonicalUuidV4 {
+        self.0
+    }
+
+    /// Materialize the canonical lowercase-hyphenated persistence/wire representation.
+    pub fn to_wire(&self) -> String {
+        self.0.to_string()
     }
 }
 
@@ -533,14 +543,20 @@ mod tests {
         let second = AuthGrantId::generate();
 
         assert_ne!(first, second);
-        assert!(uuid::Uuid::parse_str(first.as_str()).is_ok());
-        assert!(uuid::Uuid::parse_str(second.as_str()).is_ok());
+        assert_eq!(first.to_wire(), first.as_uuid().hyphenated().to_string());
+        assert_eq!(second.to_wire(), second.as_uuid().hyphenated().to_string());
     }
 
     #[test]
-    fn hydration_accepts_only_lowercase_hyphenated_uuid_v4() {
+    fn hydration_accepts_only_lowercase_hyphenated_uuid_v4() -> Result<(), super::AuthGrantIdError>
+    {
         let canonical = "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8";
-        assert!(AuthGrantId::hydrate(canonical).is_ok());
+        let hydrated = AuthGrantId::hydrate(canonical)?;
+        assert_eq!(
+            hydrated.as_uuid(),
+            uuid::Uuid::from_u128(0x7d65e5f2_e716_4c4e_8e4c_6f7ab1754ef8)
+        );
+        assert_eq!(hydrated.to_wire(), canonical);
         for rejected in [
             "7D65E5F2-E716-4C4E-8E4C-6F7AB1754EF8",
             "7d65e5f2e7164c4e8e4c6f7ab1754ef8",
@@ -553,6 +569,7 @@ mod tests {
                 Err(super::AuthGrantIdError::Invalid)
             );
         }
+        Ok(())
     }
 
     #[test]
@@ -772,7 +789,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn debug_redacts_grant_and_user_ids() {
         let grant = active();
-        let id = grant.id().as_str().to_owned();
+        let id = grant.id().to_wire();
         let debug = format!("{grant:?}");
         assert_eq!(debug, "AuthGrant(<redacted>)");
         assert!(!debug.contains(&id));

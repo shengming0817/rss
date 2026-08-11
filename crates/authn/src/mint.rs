@@ -158,7 +158,7 @@ struct AccessClaims<'a> {
     sub: String,
     tenant_id: String,
     kind: &'static str,
-    sid: &'a str,
+    sid: String,
     jti: String,
     auth_time: i64,
     authn_epoch: u64,
@@ -263,7 +263,7 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<RssAccessProfile, S> {
             sub: grant.user_id().as_uuid().hyphenated().to_string(),
             tenant_id: grant.tenant().to_string(),
             kind: KIND_USER,
-            sid: grant.id().as_str(),
+            sid: grant.id().to_wire(),
             jti: uuid::Uuid::new_v4().to_string(),
             auth_time,
             authn_epoch: grant.authn_epoch_at_issue().get(),
@@ -567,7 +567,7 @@ mod tests {
         assert_eq!(claims["kind"], "user");
         assert_eq!(claims["sub"], "550e8400-e29b-41d4-a716-446655440000");
         assert_eq!(claims["tenant_id"], CANON_TENANT);
-        assert_eq!(claims["sid"], grant.id().as_str());
+        assert_eq!(claims["sid"], grant.id().to_wire());
         assert_eq!(claims["auth_time"].as_u64(), Some(NOW_SECS - 30));
         assert_eq!(claims["authn_epoch"].as_u64(), Some(7));
         let jti = claims["jti"].as_str().expect("jti");

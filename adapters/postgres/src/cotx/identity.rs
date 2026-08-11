@@ -795,7 +795,7 @@ impl IdentityRead<'_, '_> {
             "#,
         )
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(grant_id.as_str())
+        .bind(grant_id.to_wire())
         .bind(user_id.as_uuid().to_string())
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -824,7 +824,7 @@ impl IdentityRead<'_, '_> {
             "#,
         )
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(grant_id.as_str())
+        .bind(grant_id.to_wire())
         .bind(crate::outbox::unix_secs(observed_at))
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -1122,7 +1122,7 @@ impl IdentityWrite<'_, '_> {
              ORDER BY id FOR UPDATE",
         )
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(grant_id.as_str())
+        .bind(grant_id.to_wire())
         .fetch_all(&mut *self.tx.conn)
         .await
         .map_err(crate::tx_retry::identity_storage_error)?;
@@ -1146,7 +1146,7 @@ impl IdentityWrite<'_, '_> {
              FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2 FOR UPDATE",
         )
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(grant_id.as_str())
+        .bind(grant_id.to_wire())
         .fetch_optional(&mut *self.tx.conn)
         .await
         .map_err(crate::tx_retry::identity_storage_error)?;
@@ -1203,7 +1203,7 @@ impl IdentityWrite<'_, '_> {
              WHERE tenant_id = $1::uuid AND auth_grant_id = $2 AND status <> 'revoked'",
         )
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(grant_id.as_str())
+        .bind(grant_id.to_wire())
         .execute(&mut *self.tx.conn)
         .await
         .map(|done| done.rows_affected())
@@ -1223,7 +1223,7 @@ impl IdentityWrite<'_, '_> {
                AND status IN ('active', 'revoked')",
         )
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(grant_id.as_str())
+        .bind(grant_id.to_wire())
         .bind(database_now_micros)
         .execute(&mut *self.tx.conn)
         .await
@@ -1254,7 +1254,7 @@ impl IdentityWrite<'_, '_> {
         )
         .bind(record.id().as_str())
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(record.auth_grant_id().as_str())
+        .bind(record.auth_grant_id().to_wire())
         .bind(record.user_id().as_uuid().to_string())
         .bind(epoch)
         .bind(record.auth_grant_status().as_db_str())
@@ -1876,7 +1876,7 @@ impl IdentityWrite<'_, '_> {
             "#,
         )
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(grant.id().as_str())
+        .bind(grant.id().to_wire())
         .bind(grant.user_id().as_uuid().to_string())
         .bind(crate::outbox::unix_secs(grant.auth_time()))
         .bind(epoch)
@@ -1912,7 +1912,7 @@ impl IdentityWrite<'_, '_> {
         )
         .bind(record.id().as_str())
         .bind(self.tx.tenant.as_uuid().to_string())
-        .bind(record.auth_grant_id().as_str())
+        .bind(record.auth_grant_id().to_wire())
         .bind(record.user_id().as_uuid().to_string())
         .bind(epoch)
         .bind(record.auth_grant_status().as_db_str())

@@ -1137,9 +1137,9 @@ const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
 const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
     "sha256:418e6a58c9bc4c5fbcf9513b0beadbd3ece9b80acd617d56e9489fac5477c696";
 const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
-    "sha256:630d472191ed562717aec601d5f32d248e06c23c1b7bd1aa75d7707f4e7bfed7";
+    "sha256:c6c2ce0c13e194e5d7bb540b2fd8d10e79971e2c69d18c47634e71674b148bde";
 const EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT: &str =
-    "sha256:a4acf64119c15ed5a836550100fbff32c3c0eac3024b8349ea20c368dc060c9b";
+    "sha256:cbe6b6331140a2d08e39c065612ccbeaf78dbb99a2a17fac84823909808dd596";
 
 /// Sorted capability rows for custom `pg_default_acl` privileges targeting the current serving
 /// role or PUBLIC across all custom object types (`r`/`S`/`f`/`T`/`n`). Empty result set is the

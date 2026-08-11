@@ -472,11 +472,11 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
         let grant_id = grant.id().clone();
 
         let payload = IdentitySessionCreatedPayload {
-            session_id: grant_id.as_str().to_string(),
+            session_id: grant_id.as_uuid(),
             // typed canonical actor subject（generated `subject: uuid::Uuid`，#1277 F1：schema `format:uuid`
             // 收紧后非 UUID subject 在 wire decode 即不可表达，consumer 无需 parse）。
             subject: user_id.as_uuid(),
-            tenant_id: tenant.to_string(), // canonical hyphenated
+            tenant_id: tenant.as_uuid(),
             occurred_at: unix_secs(now),
         };
         // EventId 是独立 opaque 标识（非 session_id；session_id 敏感，不得进 broker metadata/日志）。
@@ -518,7 +518,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
 
         Ok(IdentityLoginResponse {
             data: IdentityLoginData {
-                session_id: grant_id.as_str().to_string(),
+                session_id: grant_id.to_wire(),
                 expires_at: unix_secs(expires_at),
                 access_token: bundle.access.as_str().to_string(),
                 refresh_token: bundle.refresh.as_str().to_string(),
@@ -805,8 +805,7 @@ impl CredentialSecurityService {
         evidence: &CurrentAuthGrant,
     ) -> Result<(), IdentityError> {
         let scope = tenant_repo_scope(evidence.tenant_id());
-        let grant_id = AuthGrantId::hydrate(evidence.grant_id().to_string())
-            .map_err(|error| IdentityError::Storage(Box::new(error)))?;
+        let grant_id = AuthGrantId::from_verified(evidence.grant_id());
         let now = self.clock.now();
         let grant = self
             .grants
@@ -6552,7 +6551,7 @@ mod tests {
         let envelope = event.envelope();
 
         // AuthGrant 字段正确。user_id = canonical user id（**非** 登录标识 "alice"）。
-        assert_eq!(grant.id().as_str(), resp.data.session_id);
+        assert_eq!(grant.id().to_wire(), resp.data.session_id);
         assert_eq!(
             grant.user_id(),
             uid(CANON_USER),
@@ -6586,8 +6585,8 @@ mod tests {
             uid(CANON_USER).as_uuid(),
             "payload.subject = canonical user id（typed uuid::Uuid），非登录标识 \"alice\""
         );
-        assert_eq!(payload.tenant_id, CANON_TENANT);
-        assert_eq!(payload.session_id, resp.data.session_id);
+        assert_eq!(payload.tenant_id, tid(CANON_TENANT).as_uuid());
+        assert_eq!(payload.session_id.to_string(), resp.data.session_id);
         assert_eq!(payload.occurred_at, 1_000);
 
         // envelope 携带 generated `CONTRACT` 绑定（domain + contract_id + version + schema_hash 同源，#1193/#1618）；

@@ -889,6 +889,8 @@ integration_shard_catalog! {
             PostgresMigration0103DeviceCommandExpiry => ("postgres-migration-0103-device-command-expiry", ReleaseCheck, "postgres", "migration_0103_device_command_expiry", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0104AbacPolicyOperatorValues => ("postgres-migration-0104-abac-policy-operator-values", ReleaseCheck, "postgres", "migration_0104_abac_policy_operator_values", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0104AbacPolicyOperatorValuesUpgrade => ("postgres-migration-0104-abac-policy-operator-values-upgrade", ReleaseCheck, "postgres", "migration_0104_abac_policy_operator_values_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
+            PostgresMigration0105ProjectionGeneration => ("postgres-migration-0105-projection-generation", ReleaseCheck, "postgres", "migration_0105_projection_generation", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
+            PostgresMigration0105ProjectionGenerationUpgrade => ("postgres-migration-0105-projection-generation-upgrade", ReleaseCheck, "postgres", "migration_0105_projection_generation_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
             IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
@@ -3067,6 +3069,37 @@ mod tests {
     }
 
     #[test]
+    fn migration_0105_projection_generation_carriers_preserve_execution_boundaries() {
+        let static_contract = IntegrationUnitId::PostgresMigration0105ProjectionGeneration.spec();
+        assert_eq!(static_contract.shard, IntegrationShard::PostgresDomain);
+        assert_eq!(static_contract.package, "postgres");
+        assert_eq!(
+            static_contract.target,
+            "migration_0105_projection_generation"
+        );
+        assert_eq!(static_contract.kind, TargetKind::Test);
+        assert_eq!(static_contract.scheduling, Scheduling::Parallel);
+        assert_eq!(
+            static_contract.local_eligibility,
+            LocalEligibility::Affected
+        );
+        assert!(static_contract.resources.is_empty());
+
+        let live_upgrade =
+            IntegrationUnitId::PostgresMigration0105ProjectionGenerationUpgrade.spec();
+        assert_eq!(live_upgrade.shard, IntegrationShard::PostgresDomain);
+        assert_eq!(live_upgrade.package, "postgres");
+        assert_eq!(
+            live_upgrade.target,
+            "migration_0105_projection_generation_upgrade"
+        );
+        assert_eq!(live_upgrade.kind, TargetKind::Test);
+        assert_eq!(live_upgrade.scheduling, Scheduling::Serial);
+        assert_eq!(live_upgrade.local_eligibility, LocalEligibility::RemoteOnly);
+        assert_eq!(live_upgrade.resources, &[Resource::Postgres]);
+    }
+
+    #[test]
     #[allow(clippy::expect_used)] // reason: registry fixture must retain security-provider closeout unit.
     fn settingsonly_vault_backend_is_unique_serial_and_feature_enabled() {
         let spec = IntegrationShard::RuntimeHttpAuth.spec();
@@ -3120,6 +3153,7 @@ mod tests {
                 "postgres",
                 "migration_0104_abac_policy_operator_values_upgrade",
             ),
+            ("postgres", "migration_0105_projection_generation_upgrade"),
             ("postgres-migration", "postgres_migration"),
             ("journeys", "audit_list_tenant_entries_localtx_journey"),
             ("journeys", "identity_password_security_event_journey"),

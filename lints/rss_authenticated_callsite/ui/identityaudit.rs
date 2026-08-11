@@ -14,7 +14,7 @@ mod auth_bridge {
         principal: &Principal,
         tenant: TenantId,
     ) -> Authenticated {
-        let current = validated.into_current_auth_grant().unwrap();
+        let current = validated.into_current_auth_grant();
         let _ = (current, principal);
         Authenticated::new_rss_user(
             authmint::AuthenticatedMint::capability(),
@@ -29,7 +29,7 @@ mod auth_bridge {
         principal: &Principal,
         tenant: TenantId,
     ) -> Authenticated {
-        let current = validated.into_current_auth_grant().unwrap();
+        let current = validated.into_current_auth_grant();
         let _ = current;
         Authenticated::new_rss_user(
             authmint::AuthenticatedMint::capability(),

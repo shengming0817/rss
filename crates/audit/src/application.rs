@@ -175,8 +175,6 @@ pub enum AuditEventRecordError {
     Tenant(#[source] vocab::TenantIdError),
     #[error("audit event action parse failed")]
     Action(#[source] vocab::ActionError),
-    #[error("audit event session parse failed")]
-    Session(#[source] ids::IdParseError),
     #[error("audit event id parse failed")]
     EventId(#[source] uuid::Error),
     #[error("audit event id must be a canonical UUID v4")]
@@ -341,10 +339,9 @@ fn session_created_record_from_message(
         serde_json::from_slice(message.payload().as_bytes())
             .map_err(AuditEventRecordError::Decode)?;
     let tenant =
-        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+        vocab::TenantId::try_from(payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
     let action = vocab::Action::parse(ACTION_LOGIN).map_err(AuditEventRecordError::Action)?;
-    let session =
-        ids::SessionId::parse(&payload.session_id).map_err(AuditEventRecordError::Session)?;
+    let session = ids::SessionId::new(payload.session_id);
     let resource_id = SessionAuditResourceId::from_message(message.id(), &session)?;
     Ok(AuditRecord {
         tenant,
@@ -1772,11 +1769,11 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn payload_bytes_with_session(subject: &str, tenant: &str, session_id: &str) -> Vec<u8> {
         let payload = IdentitySessionCreatedPayload {
-            session_id: session_id.to_string(),
+            session_id: uuid::Uuid::parse_str(session_id).expect("canonical session uuid"),
             // subject 是 typed `uuid::Uuid`（#1277 F1，schema `format:uuid`）——helper 入参为 canonical UUID 串，
             // 非 UUID 用例（rejects_non_canonical_subject）走 raw JSON、不经本构造器。
             subject: uuid::Uuid::parse_str(subject).expect("canonical subject uuid"),
-            tenant_id: tenant.to_string(),
+            tenant_id: uuid::Uuid::parse_str(tenant).expect("canonical tenant uuid"),
             occurred_at: 1_700_000_000,
         };
         serde_json::to_vec(&payload).expect("encode")
@@ -2265,13 +2262,30 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rejects_non_canonical_tenant() {
         let repo = repo();
+        let raw = format!(
+            r#"{{"sessionId":"{CANON_SESSION}","subject":"{CANON_SUBJECT}","tenantId":"NOT-A-UUID","occurredAt":1700000000}}"#
+        )
+        .into_bytes();
         let result = append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new("m", payload_bytes(CANON_SUBJECT, "NOT-A-UUID")),
+            Message::new("m", raw),
         )
         .await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_nil_tenant() {
+        let repo = repo();
+        let raw = format!(
+            r#"{{"sessionId":"{CANON_SESSION}","subject":"{CANON_SUBJECT}","tenantId":"00000000-0000-0000-0000-000000000000","occurredAt":1700000000}}"#
+        )
+        .into_bytes();
+        let result =
+            append_event_for_test(repo, AuditEventKind::SessionCreated, Message::new("m", raw))
+                .await;
+        assert!(result.is_err(), "nil tenant must fail the TenantId funnel");
     }
 
     /// #1277 F1：subject 是 typed `uuid::Uuid`（schema `format:uuid`）——非 UUID subject 在 payload **decode**
@@ -2301,13 +2315,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn rejects_non_canonical_session_id() {
         let repo = repo();
+        let raw = format!(
+            r#"{{"sessionId":"sess-not-uuid","subject":"{CANON_SUBJECT}","tenantId":"{CANON_TENANT}","occurredAt":1700000000}}"#
+        )
+        .into_bytes();
         let result = append_event_for_test(
             repo.clone(),
             AuditEventKind::SessionCreated,
-            Message::new(
-                "m",
-                payload_bytes_with_session(CANON_SUBJECT, CANON_TENANT, "sess-not-uuid"),
-            ),
+            Message::new("m", raw),
         )
         .await;
         assert!(result.is_err(), "非 canonical session_id 须拒绝");

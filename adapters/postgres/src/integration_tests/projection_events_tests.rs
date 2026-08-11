@@ -143,7 +143,7 @@ async fn projection_writer_runtime_setup_mirrors_reviewed_generated_event() -> T
         tenant,
         "projection-runtime-subject",
         actor_for(tenant),
-        "projection-runtime-session",
+        uuid::Uuid::from_u128(0x1001),
     )
     .await?;
 

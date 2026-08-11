@@ -101,7 +101,7 @@ impl identity::ports::AuthGrantValidator for RecordingGrantValidator {
     ) -> Result<bool, identity::ports::IdentityError> {
         self.calls.fetch_add(1, Ordering::AcqRel);
         self.binding_matched.store(
-            input.grant_id().as_str().len() == 36
+            input.grant_id().as_uuid().get_version() == Some(uuid::Version::Random)
                 && input.user_id().as_uuid().hyphenated().to_string() == USER_ID
                 && input.tenant().to_string() == TENANT
                 && scope.tenant() == input.tenant()
@@ -511,7 +511,7 @@ async fn rss_verified_evidence_handler(
     let Some(receipt) = verified.grant_receipt() else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
-    if receipt.grant_id().as_str().len() != 36
+    if receipt.grant_id().as_uuid().get_version() != Some(uuid::Version::Random)
         || receipt.token_id().to_string().len() != 36
         || receipt.auth_time_unix_secs() != (NOW - 30) as u64
         || receipt.authn_epoch() != 7

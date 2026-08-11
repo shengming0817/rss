@@ -163,7 +163,7 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         let login_fault = self
             .login_fault
             .as_ref()
-            .filter(|(grant_id, _)| grant_id == grant.id().as_str())
+            .filter(|(grant_id, _)| grant_id == &grant.id().to_wire())
             .map(|(_, fault)| *fault);
         #[cfg(all(test, feature = "integration"))]
         let login_lock_gate = self.login_lock_gate.clone();
@@ -237,7 +237,7 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
         observed_at: SystemTime,
     ) -> Result<Option<AuthGrant>, IdentityError> {
         let tenant = scope.tenant();
-        let grant_id_raw = grant_id.as_str().to_owned();
+        let grant_id_raw = grant_id.to_wire();
         let grant_id_query = grant_id.clone();
         let row = self
             .read_pool
@@ -360,7 +360,7 @@ impl TryFrom<(&AuthGrant, &AuthGrant)> for GrantCloseCas {
         }
         Ok(Self {
             tenant: next.tenant(),
-            grant_id: next.id().as_str().to_owned(),
+            grant_id: next.id().to_wire(),
             user_id: next.user_id().as_uuid().to_string(),
             epoch: i64::try_from(next.authn_epoch_at_issue().get())
                 .map_err(|_| corrupt("auth grant epoch exceeds PostgreSQL bigint"))?,

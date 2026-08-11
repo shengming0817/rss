@@ -172,7 +172,7 @@ pub(in super::super) async fn refresh_producer_snapshot(
           WHERE tenant_id = $1::uuid AND contract_id = $3)",
     )
     .bind(case.tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&owner.pool)
     .await
@@ -233,9 +233,9 @@ pub(in super::super) fn auth_grant_login_parts(
     let entry = generated_entry(
         generated::event::identity_v1::session_created::FACT,
         &generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
-            session_id: grant.id().as_str().to_owned(),
+            session_id: grant.id().as_uuid(),
             subject: grant.user_id().as_uuid(),
-            tenant_id: grant.tenant().to_string(),
+            tenant_id: grant.tenant().as_uuid(),
             occurred_at,
         },
         IdemKey::parse(event_id).expect("test event id must be a valid idempotency key"),

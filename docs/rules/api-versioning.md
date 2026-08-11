@@ -81,6 +81,11 @@ review finding，不直接否决 active 变更；但必须用命令给出的精�
 确认后才能通过。trailer fingerprint 绑定 base commit 与排序后的 rule/subject/detail，变更漂移后不可复用。
 该例外不授予其它 active wire 原地破坏权限，更不得先将 `active` 降级绕门。
 
+event、command、saga 与 projection 的 resolved schema hash 会进入 durable wire/instance identity；即使
+JSON Schema 集合论 diff 看似兼容，只要 hash 旋转也必须产生 `RESOLVED_SCHEMA_HASH_CHANGED`。`format`
+从无到有会改变 generated scalar，同样属于 `FIELD_FORMAT_CHANGED`，两者均服从上述精确 intentional
+breaking authorization，不接受“仅文档”或 pre-GA 作为隐式豁免。
+
 intentional breaking authorization 与 review ack 正交：前者只授权 fingerprint 中精确列出的 deny，
 后者只确认固定 review-only posture findings。两者都不接受 flag、环境变量、自由文本或 lifecycle 降级；
 任何 contract/schema/base 漂移都会改变 fingerprint 并要求重新授权。

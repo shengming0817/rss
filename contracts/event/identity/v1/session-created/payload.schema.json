@@ -4,9 +4,23 @@
   "type": "object",
   "required": ["sessionId", "subject", "tenantId", "occurredAt"],
   "properties": {
-    "sessionId": { "type": "string", "x-redaction": "secret" },
-    "subject": { "type": "string", "format": "uuid", "x-pii": "generic" },
-    "tenantId": { "type": "string" },
+    "sessionId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Canonical authentication grant/session UUID.",
+      "x-redaction": "secret"
+    },
+    "subject": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Canonical identity UserId UUID; never a login identifier.",
+      "x-pii": "generic"
+    },
+    "tenantId": {
+      "type": "string",
+      "format": "uuid",
+      "description": "Canonical non-nil TenantId UUID."
+    },
     "occurredAt": { "type": "integer", "format": "int64" }
   },
   "additionalProperties": false

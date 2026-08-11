@@ -531,14 +531,14 @@ pub(in super::super) async fn reviewed_session_event(
     tenant: vocab::TenantId,
     envelope_subject: &str,
     actor: diport::OutboxActor,
-    session_id: &str,
+    session_id: uuid::Uuid,
 ) -> Result<eventexec::event::ReviewedEvent, TestError> {
     Ok(generated::event::identity_v1::session_created::emit(
         &eventexec::event::GeneratedEventEncoder,
         generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
-            session_id: session_id.to_owned(),
+            session_id,
             subject: uuid::Uuid::from_u128(0x51),
-            tenant_id: tenant.to_string(),
+            tenant_id: tenant.as_uuid(),
             occurred_at: expected_occurred_at(),
         },
         tenant,

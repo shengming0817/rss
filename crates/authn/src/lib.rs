@@ -2229,8 +2229,8 @@ mod verify_bridge_tests {
         assert_eq!(principal.tenant(), Some(tenant()));
         let receipt = verified.grant_receipt().expect("RSS grant receipt");
         assert_eq!(
-            receipt.grant_id().as_str(),
-            "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8"
+            receipt.grant_id().to_wire(),
+            "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8".to_owned()
         );
         assert_eq!(
             receipt.token_id().to_string(),

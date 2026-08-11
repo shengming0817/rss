@@ -4966,8 +4966,14 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
 
     let event_id = unique_event_id("t10-emit");
     let tenant = test_tenant();
-    let event =
-        reviewed_session_event(&event_id, tenant, "subj-opaque-77", actor_for(tenant), "s").await?;
+    let event = reviewed_session_event(
+        &event_id,
+        tenant,
+        "subj-opaque-77",
+        actor_for(tenant),
+        uuid::Uuid::from_u128(0x2001),
+    )
+    .await?;
     crate::PgEmitter::new(&store, fixed_clock())
         .write(event)
         .await?;
@@ -5092,7 +5098,7 @@ async fn t10c_pg_emitter_persists_only_scoped_ambient_correlation() -> TestResul
         tenant,
         "subject-scoped-correlation",
         actor_for(tenant),
-        "scoped-session",
+        uuid::Uuid::from_u128(0x2002),
     )
     .await?;
     diagctx::scope(
@@ -5106,7 +5112,7 @@ async fn t10c_pg_emitter_persists_only_scoped_ambient_correlation() -> TestResul
         tenant,
         "subject-unscoped-correlation",
         actor_for(tenant),
-        "unscoped-session",
+        uuid::Uuid::from_u128(0x2003),
     )
     .await?;
     emitter.write(unscoped_event).await?;
@@ -5166,7 +5172,7 @@ async fn t10b_pg_emitter_persists_verified_consumer_causation() -> TestResult {
                 tenant,
                 "verified-consumer-child",
                 actor_for(tenant),
-                "child-session",
+                uuid::Uuid::from_u128(0x2004),
             )
             .await
             .expect("generated child event should encode");
@@ -5211,12 +5217,14 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
 
     let event_id = unique_event_id("outbox-cdc-emit");
     let tenant = test_tenant();
+    let session_id = uuid::Uuid::from_u128(0x2005);
+    let session_id_wire = session_id.hyphenated().to_string();
     let event = reviewed_session_event(
         &event_id,
         tenant,
         "cdc-subj-opaque-77",
         actor_for(tenant),
-        "cdc",
+        session_id,
     )
     .await?;
     let emitter = crate::PgOutboxCdcEmitter::new(&store, fixed_clock());
@@ -5250,7 +5258,7 @@ async fn outbox_cdc_emitter_appends_once_without_relay_outbox_fallback() -> Test
     let payload: serde_json::Value = serde_json::from_slice(&row.7)?;
     assert_eq!(
         payload.get("sessionId").and_then(serde_json::Value::as_str),
-        Some("cdc")
+        Some(session_id_wire.as_str())
     );
     assert_eq!(
         row.8.get("tenantId").and_then(serde_json::Value::as_str),
@@ -5302,12 +5310,16 @@ async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -
 
     let event_id = unique_event_id("outbox-cdc-conflict");
     let tenant = test_tenant();
+    let first_session_id = uuid::Uuid::from_u128(0x2006);
+    let second_session_id = uuid::Uuid::from_u128(0x2007);
+    let first_session_wire = first_session_id.hyphenated().to_string();
+    let second_session_wire = second_session_id.hyphenated().to_string();
     let first = reviewed_session_event(
         &event_id,
         tenant,
         "cdc-conflict-subject",
         actor_for(tenant),
-        "first",
+        first_session_id,
     )
     .await?;
     let second = reviewed_session_event(
@@ -5315,7 +5327,7 @@ async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -
         tenant,
         "cdc-conflict-subject",
         actor_for(tenant),
-        "second",
+        second_session_id,
     )
     .await?;
     let emitter = crate::PgOutboxCdcEmitter::new(&store, fixed_clock());
@@ -5326,9 +5338,14 @@ async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -
     };
     assert_eq!(conflict.kind(), OutboxEmitErrorKind::FactConflict);
     let rendered = format!("{conflict:?} {conflict}");
-    for secret in ["first", "second", "cdc-conflict-subject", "fingerprint"] {
+    for secret in [
+        first_session_wire.clone(),
+        second_session_wire,
+        "cdc-conflict-subject".to_owned(),
+        "fingerprint".to_owned(),
+    ] {
         assert!(
-            !rendered.contains(secret),
+            !rendered.contains(&secret),
             "typed CDC fact conflict must redact `{secret}`: {rendered}"
         );
     }
@@ -5342,7 +5359,7 @@ async fn outbox_cdc_emitter_rejects_event_id_conflict_with_different_payload() -
     let payload: serde_json::Value = serde_json::from_slice(&row.1)?;
     assert_eq!(
         payload.get("sessionId").and_then(serde_json::Value::as_str),
-        Some("first"),
+        Some(first_session_wire.as_str()),
         "event_id conflict must preserve the original immutable row"
     );
 

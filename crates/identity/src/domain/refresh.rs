@@ -358,8 +358,10 @@ mod tests {
     fn initial_record_derives_exact_grant_binding() {
         let record = initial();
         assert_eq!(record.tenant(), tenant());
-        let parsed = uuid::Uuid::parse_str(record.auth_grant_id().as_str()).expect("grant UUID");
-        assert_eq!(parsed.get_version(), Some(uuid::Version::Random));
+        assert_eq!(
+            record.auth_grant_id().as_uuid().get_version(),
+            Some(uuid::Version::Random)
+        );
         assert_eq!(record.user_id(), user());
         assert_eq!(record.issuance_epoch(), AuthnEpoch::ZERO);
         assert_eq!(record.auth_grant_status(), AuthGrantStatus::Active);

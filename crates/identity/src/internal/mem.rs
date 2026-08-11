@@ -1640,9 +1640,9 @@ mod tests {
         let payload =
             generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
                 occurred_at: 1,
-                session_id: "session-test".to_string(),
+                session_id: uuid::Uuid::from_u128(1),
                 subject: USER_ALICE.parse().expect("subject uuid"),
-                tenant_id: tenant.to_string(),
+                tenant_id: tenant.as_uuid(),
             };
         generated::event::identity_v1::session_created::emit(
             &eventexec::event::GeneratedEventEncoder,

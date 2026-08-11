@@ -72,14 +72,14 @@ impl std::fmt::Debug for ValidatedAuthGrant {
 
 impl ValidatedAuthGrant {
     /// Consume the proof into identity-owned evidence. Callers cannot substitute individual fields.
-    pub fn into_current_auth_grant(self) -> Option<CurrentAuthGrant> {
+    pub fn into_current_auth_grant(self) -> CurrentAuthGrant {
         let input = self._input;
-        Some(CurrentAuthGrant {
-            grant_id: ids::CanonicalUuidV4::parse(input.grant_id().as_str()).ok()?,
+        CurrentAuthGrant {
+            grant_id: input.grant_id().as_verified(),
             user_id: input.user_id(),
             tenant_id: input.tenant(),
             authn_epoch: input.authn_epoch().get(),
-        })
+        }
     }
 }
 

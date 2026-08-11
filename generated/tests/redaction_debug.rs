@@ -66,17 +66,24 @@ fn identity_event_debug_redacts_subject_and_session() {
         .parse()
         .expect("uuid literal");
     let payload = IdentitySessionCreatedPayload {
-        session_id: "sid-secret".to_string(),
+        session_id: "7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8"
+            .parse()
+            .expect("session UUID"),
         subject,
-        tenant_id: "tenant-a".to_string(),
+        tenant_id: "f47ac10b-58cc-4372-a567-0e02b2c3d479"
+            .parse()
+            .expect("tenant UUID"),
         occurred_at: 42,
     };
 
     let rendered = format!("{payload:?}");
-    assert!(rendered.contains("tenant_id: \"tenant-a\""), "{rendered}");
+    assert!(
+        rendered.contains("f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+        "{rendered}"
+    );
     assert!(rendered.contains("occurred_at: 42"), "{rendered}");
     assert!(
-        !rendered.contains("sid-secret"),
+        !rendered.contains("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8"),
         "session leaked: {rendered}"
     );
     assert!(

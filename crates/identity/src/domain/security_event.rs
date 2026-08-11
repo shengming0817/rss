@@ -79,7 +79,7 @@ impl CredentialSecurityTargetRef {
                 .current(
                     tenant,
                     "identity.security-event/target/grant",
-                    grant_id.as_str().as_bytes(),
+                    grant_id.as_uuid().as_bytes(),
                 )
                 .map(Self),
         }
@@ -842,8 +842,8 @@ mod tests {
             assert_eq!(command.event().tenant(), tenant());
             assert_eq!(command.event().user_id(), user());
             assert_eq!(
-                command.event().grant_id().map(AuthGrantId::as_str),
-                Some("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8")
+                command.event().grant_id().map(AuthGrantId::to_wire),
+                Some("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8".to_owned())
             );
             assert_eq!(command.mutation().next().status(), expected_status);
             assert_eq!(command.mutation().next().closed_at(), Some(at(20)));

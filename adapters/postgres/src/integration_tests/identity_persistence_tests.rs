@@ -742,7 +742,7 @@ async fn auth_grant_sweeper_and_refresh_family_use_one_lock_order() -> TestResul
          WHERE tenant_id = $1::uuid AND grant_id = $2",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .execute(&owner.pool)
     .await?;
 
@@ -755,7 +755,7 @@ async fn auth_grant_sweeper_and_refresh_family_use_one_lock_order() -> TestResul
          WHERE tenant_id = $1::uuid AND grant_id = $2 FOR UPDATE",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .fetch_one(&mut *root_blocker)
     .await?;
 
@@ -833,7 +833,7 @@ async fn auth_grant_sweeper_and_refresh_family_use_one_lock_order() -> TestResul
          (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(remaining, (0, 0));
@@ -1359,7 +1359,7 @@ async fn refresh_rotation_after_family_fault_rolls_back_and_can_retry_cleanly() 
           WHERE metadata ->> 'tenantId' = $1 AND contract_id = $5)",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .bind(case.old.id().as_str())
     .bind(case.rotation.new_record().id().as_str())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
@@ -1392,7 +1392,7 @@ async fn refresh_rotation_after_family_fault_rolls_back_and_can_retry_cleanly() 
           WHERE metadata ->> 'tenantId' = $1 AND contract_id = $5)",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .bind(case.old.id().as_str())
     .bind(case.rotation.new_record().id().as_str())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())

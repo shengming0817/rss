@@ -80,6 +80,17 @@ impl TenantId {
     }
 }
 
+impl TryFrom<uuid::Uuid> for TenantId {
+    type Error = TenantIdError;
+
+    fn try_from(uuid: uuid::Uuid) -> Result<Self, Self::Error> {
+        if uuid.is_nil() {
+            return Err(TenantIdError::Nil);
+        }
+        Ok(Self(uuid))
+    }
+}
+
 // 可观测标识：Display 输出 canonical lowercase-hyphenated（同 parse 接受形态），便于 span / audit 结构化字段，
 // 免消费方退回 `as_uuid().to_string()` 或 `{:?}`（后者带 `TenantId(..)` 前缀）。
 impl std::fmt::Display for TenantId {
@@ -395,6 +406,20 @@ mod tenant_id {
         // as_uuid 还原的 uuid 重新 canonical 化必须等于输入（无信息丢失）。
         let got = TenantId::parse(CANON).map(|id| id.as_uuid().hyphenated().to_string());
         assert_eq!(got, Ok(CANON.to_string()));
+    }
+
+    #[test]
+    fn try_from_uuid_preserves_tenant_invariants() {
+        let uuid = uuid::Uuid::from_u128(0xf47ac10b_58cc_4372_a567_0e02b2c3d479);
+        assert_eq!(uuid.hyphenated().to_string(), CANON);
+        assert_eq!(
+            TenantId::try_from(uuid).map(|tenant| tenant.as_uuid()),
+            Ok(uuid)
+        );
+        assert_eq!(
+            TenantId::try_from(uuid::Uuid::nil()),
+            Err(TenantIdError::Nil)
+        );
     }
 
     #[test]

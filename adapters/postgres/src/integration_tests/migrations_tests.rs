@@ -1564,7 +1564,7 @@ async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() ->
          WHERE tenant_id = $1::uuid AND grant_id = $2",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .execute(&owner.pool)
     .await?;
 
@@ -1576,7 +1576,7 @@ async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() ->
          (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(predecessor.0, 78);
@@ -1674,7 +1674,7 @@ async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() ->
          (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(retained_before_sweep, (1, 1));
@@ -1688,7 +1688,7 @@ async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() ->
          (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
     )
     .bind(tenant.as_uuid().to_string())
-    .bind(case.grant.id().as_str())
+    .bind(case.grant.id().to_wire())
     .fetch_one(&owner.pool)
     .await?;
     assert_eq!(remaining, (0, 0));

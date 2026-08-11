@@ -442,7 +442,7 @@ fn allow_evidence(
         (RequiredScheme::RssAccessToken, None, Some(tenant), Some(current))
             if kind == PrincipalKind::User =>
         {
-            let current = current.into_current_auth_grant()?;
+            let current = current.into_current_auth_grant();
             if !current.binds_principal(tenant, principal.audit_subject()) {
                 return None;
             }

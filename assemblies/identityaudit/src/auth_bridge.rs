@@ -151,7 +151,7 @@ fn allow_evidence(
     principal: &authn::Principal,
     tenant: vocab::TenantId,
 ) -> Option<(Authenticated, identity::CurrentAuthGrant)> {
-    let current = validated_grant.into_current_auth_grant()?;
+    let current = validated_grant.into_current_auth_grant();
     if !current.binds_principal(tenant, principal.audit_subject()) {
         return None;
     }

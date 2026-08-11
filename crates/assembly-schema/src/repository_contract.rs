@@ -1950,18 +1950,29 @@ pub fn path_segments(
 
 /// Preserve the existing schemaHash protocol while sharing it with AssemblyLock discovery.
 pub fn schema_hash(contract: &RepositoryContract) -> Result<String, RepositoryContractError> {
-    let mut hasher = Sha256::new();
-    hasher.update(SCHEMA_HASH_TAG);
+    let mut schemas = Vec::new();
     for file in contract.manifest().declared_schema_files() {
         validate_schema_filename(file)?;
-        let path = contract
-            .schema_path(file)
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| contract.dir().join(file));
         let value = contract.resolved_schema(file)?.into_value();
-        let canonical = serde_json::to_vec(&canonical_json(value)).map_err(|source| {
+        schemas.push((file, value));
+    }
+    resolved_schema_hash(schemas.iter().map(|(file, value)| (*file, value)))
+}
+
+/// Hash an already-resolved ordered schema set with the canonical contract binding protocol.
+///
+/// Git-ref consumers use this seam after resolving component references from immutable base
+/// bytes, so breaking detection and working-tree codegen cannot drift into parallel hash logic.
+pub fn resolved_schema_hash<'a>(
+    schemas: impl IntoIterator<Item = (&'a str, &'a Value)>,
+) -> Result<String, RepositoryContractError> {
+    let mut hasher = Sha256::new();
+    hasher.update(SCHEMA_HASH_TAG);
+    for (file, value) in schemas {
+        validate_schema_filename(file)?;
+        let canonical = serde_json::to_vec(&canonical_json(value.clone())).map_err(|source| {
             RepositoryContractError::SchemaJson {
-                path: path.clone(),
+                path: PathBuf::from(file),
                 source,
             }
         })?;

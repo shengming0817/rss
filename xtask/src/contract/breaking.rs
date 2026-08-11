@@ -14,6 +14,8 @@
 //!
 //! INVARIANT: WIRE-BREAKING-01 { level = "Medium", exec = "check", source = "code" }—— typed catalog 中的 schema breaking rules 对 base↔working
 //!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。
+//!   durable event/command/saga/projection 的 resolved schema hash 旋转单独 fail-closed，因为该
+//!   identity 会进入持久消息或实例并由 consumer 精确匹配；语义 diff 兼容不能绕过 identity 变更。
 //!   manifest wire 投影另覆盖 HTTP、L2 topology、L4 DeviceLatent topology、subscription 与
 //!   lifecycle 降级规则。当前不覆盖 `oneOf`/`anyOf`/`$ref` 嵌套构造（ADR §8 增量补）。
 //! INVARIANT: WIRE-BREAKING-WINDOW-01 { level = "Medium", exec = "check", source = "code" }——
@@ -473,23 +475,30 @@ fn type_accepted(old: &str, new_set: &BTreeSet<&str>) -> bool {
     new_set.contains(old) || (old == "integer" && new_set.contains("number"))
 }
 
-/// FIELD_FORMAT_CHANGED：old 有 `format` 而 new 删除或改为不同值。从无加有不报。
+/// FIELD_FORMAT_CHANGED：format 的新增、删除或改值都会改变 generated wire scalar semantics。
 fn check_format(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
-    let Some(of) = old.get("format").and_then(Value::as_str) else {
-        return;
-    };
-    match new.get("format").and_then(Value::as_str) {
-        None => out.push(RawBreak {
+    let old_format = old.get("format").and_then(Value::as_str);
+    let new_format = new.get("format").and_then(Value::as_str);
+    match (old_format, new_format) {
+        (None, Some(new_format)) => out.push(RawBreak {
             rule: BreakingRule::FieldFormatChanged,
             pointer: path.to_string(),
-            detail: format!("{} format `{of}` 被删除", show(path)),
+            detail: format!("{} format `{new_format}` 被新增", show(path)),
         }),
-        Some(nf) if nf != of => out.push(RawBreak {
+        (Some(old_format), None) => out.push(RawBreak {
             rule: BreakingRule::FieldFormatChanged,
             pointer: path.to_string(),
-            detail: format!("{} format 由 `{of}` 变更为 `{nf}`", show(path)),
+            detail: format!("{} format `{old_format}` 被删除", show(path)),
         }),
-        Some(_) => {}
+        (Some(old_format), Some(new_format)) if new_format != old_format => out.push(RawBreak {
+            rule: BreakingRule::FieldFormatChanged,
+            pointer: path.to_string(),
+            detail: format!(
+                "{} format 由 `{old_format}` 变更为 `{new_format}`",
+                show(path)
+            ),
+        }),
+        _ => {}
     }
 }
 
@@ -1162,6 +1171,7 @@ pub(crate) struct ContractDiff {
     pub(crate) label: String,
     pub(crate) lifecycle: Lifecycle,
     pub(crate) kind: ContractKind,
+    pub(crate) schema_hash: SchemaHashVersions,
     /// Existing identity moved between carrier kinds. This is a governed repository breaking
     /// finding rather than a planning error, so base lifecycle and exact authorization policy
     /// remain the single disposition mechanism.
@@ -1177,6 +1187,12 @@ pub(crate) struct ContractDiff {
 pub(crate) struct ManifestVersions {
     pub(crate) old: Option<ManifestProjection>,
     pub(crate) new: Option<ManifestProjection>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SchemaHashVersions {
+    pub(crate) old: Option<String>,
+    pub(crate) new: Option<String>,
 }
 
 /// 单个 logical schema slot 的两版本：`old=None` ⇒ base ref 无此 slot（新契约 / 新 slot，不报）；
@@ -1206,6 +1222,7 @@ pub(crate) struct ContractSide {
     pub(crate) label: String,
     pub(crate) lifecycle: Lifecycle,
     pub(crate) kind: ContractKind,
+    pub(crate) schema_hash: Option<String>,
     pub(crate) slots: BTreeMap<String, (SchemaDirection, Value)>,
     pub(crate) manifest: ManifestProjection,
 }
@@ -1295,6 +1312,10 @@ pub(crate) fn plan_diffs(
             label,
             lifecycle,
             kind,
+            schema_hash: SchemaHashVersions {
+                old: b.and_then(|side| side.schema_hash.clone()),
+                new: w.and_then(|side| side.schema_hash.clone()),
+            },
             kind_change,
             working_lifecycle: w.map(|s| s.lifecycle),
             schemas,
@@ -1352,12 +1373,41 @@ pub(crate) fn evaluate(contracts: &[ContractDiff]) -> EvalResult {
                     evaluate_manifest_changes(c, &mut result);
                 }
                 super::governance::BreakingDetector::Schema => {
+                    evaluate_schema_hash_change(c, &mut result);
                     evaluate_schema_changes(c, &mut result);
                 }
             }
         }
     }
     result
+}
+
+fn evaluate_schema_hash_change(c: &ContractDiff, result: &mut EvalResult) {
+    if !is_checked(c.lifecycle)
+        || !matches!(
+            c.kind,
+            ContractKind::Event
+                | ContractKind::Command
+                | ContractKind::Saga
+                | ContractKind::Projection
+        )
+    {
+        return;
+    }
+    let (Some(old), Some(new)) = (&c.schema_hash.old, &c.schema_hash.new) else {
+        return;
+    };
+    if old == new {
+        return;
+    }
+    push_finding(
+        result,
+        c.lifecycle,
+        rule_disposition(BreakingRule::ResolvedSchemaHashChanged, c.lifecycle),
+        BreakingRule::ResolvedSchemaHashChanged,
+        format!("{} resolved schema hash", c.label),
+        format!("durable wire schema hash 由 `{old}` 旋转为 `{new}`"),
+    );
 }
 
 fn evaluate_repository_changes(c: &ContractDiff, result: &mut EvalResult) {
@@ -2487,6 +2537,7 @@ fn working_sides(discovered: &[super::GovernedContract]) -> Result<Vec<ContractS
             label,
             lifecycle: c.manifest().lifecycle,
             kind: c.manifest().kind,
+            schema_hash: Some(c.schema_hash()?),
             slots,
             manifest: manifest_projection(c.manifest()).with_context(|| {
                 format!("project working contract {}", c.manifest_path().display())
@@ -2531,6 +2582,7 @@ fn base_contract_side(
             label,
             lifecycle: header.lifecycle,
             kind: header.kind,
+            schema_hash: None,
             slots: BTreeMap::new(),
             manifest: ManifestProjection::default(),
         }));
@@ -2541,8 +2593,9 @@ fn base_contract_side(
     let Some(dir_rel) = manifest_rel.strip_suffix("/contract.toml") else {
         return Ok(None);
     };
-    let mut slots = BTreeMap::new();
-    for (slot, file, direction) in base_slot_files(&manifest) {
+    let declared_files = base_declared_schema_files(&manifest);
+    let mut resolved_schemas = BTreeMap::new();
+    for file in &declared_files {
         let schema_rel = format!("{dir_rel}/{file}");
         let schema_text = require_git_text(
             read_text_at_ref(root, against, &schema_rel),
@@ -2575,7 +2628,23 @@ fn base_contract_side(
         })
         .map_err(anyhow::Error::new)?
         .into_value();
-        slots.insert(slot, (direction, v));
+        resolved_schemas.insert((*file).to_string(), v);
+    }
+    let mut hash_inputs = Vec::with_capacity(declared_files.len());
+    for file in &declared_files {
+        let value = resolved_schemas.get(*file).ok_or_else(|| {
+            anyhow::anyhow!("contract breaking: resolved base schema `{dir_rel}/{file}` missing")
+        })?;
+        hash_inputs.push((*file, value));
+    }
+    let schema_hash = assembly_schema::repository_contract::resolved_schema_hash(hash_inputs)
+        .map_err(anyhow::Error::new)?;
+    let mut slots = BTreeMap::new();
+    for (slot, file, direction) in base_slot_files(&manifest) {
+        let value = resolved_schemas.get(&file).cloned().ok_or_else(|| {
+            anyhow::anyhow!("contract breaking: resolved base schema `{dir_rel}/{file}` missing")
+        })?;
+        slots.insert(slot, (direction, value));
     }
     Ok(Some(ContractSide {
         identity: ContractIdentity {
@@ -2585,10 +2654,28 @@ fn base_contract_side(
         label,
         lifecycle: manifest.lifecycle,
         kind: manifest.kind,
+        schema_hash: Some(schema_hash),
         slots,
         manifest: base_manifest_projection(&manifest)
             .with_context(|| format!("project base contract {against}:{manifest_rel}"))?,
     }))
+}
+
+fn base_declared_schema_files(manifest: &BaseContractManifest) -> Vec<&str> {
+    let mut files = [
+        manifest.schemas.request.as_deref(),
+        manifest.schemas.response.as_deref(),
+        manifest.schemas.payload.as_deref(),
+        manifest.schemas.projection.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    files.extend(manifest.schemas.responses.values().map(String::as_str));
+    if let Some(saga) = &manifest.saga {
+        files.extend(saga.steps.iter().map(|step| step.schema.as_str()));
+    }
+    files
 }
 
 /// `git ls-tree -r --name-only {ref} -- contracts/` 列 base 侧所有 `contract.toml` 路径。
@@ -2765,7 +2852,7 @@ mod tests {
         assert!(compare_schemas(&single, &widen).is_empty());
     }
 
-    /// FIELD_FORMAT_CHANGED：format 变更 / 删除 red；新增 format green。
+    /// FIELD_FORMAT_CHANGED：format 新增 / 变更 / 删除均会改变 generated scalar，全部 red。
     #[test]
     fn field_format_changed_red_and_green() {
         let old = json!({"properties": {"ts": {"type":"string","format":"date"}}});
@@ -2780,10 +2867,13 @@ mod tests {
             vec![BreakingRule::FieldFormatChanged]
         );
 
-        // green：从无 format 加 format（向前兼容）不报。
+        // red：从无 format 加 format 会把 generated String 收紧为 typed scalar。
         let no_fmt = json!({"properties": {"ts": {"type":"string"}}});
         let add_fmt = json!({"properties": {"ts": {"type":"string","format":"date"}}});
-        assert!(compare_schemas(&no_fmt, &add_fmt).is_empty());
+        assert_eq!(
+            rules(&compare_schemas(&no_fmt, &add_fmt)),
+            vec![BreakingRule::FieldFormatChanged]
+        );
     }
 
     #[test]
@@ -3076,6 +3166,10 @@ mod tests {
             label: label.to_string(),
             lifecycle,
             kind: ContractKind::Http,
+            schema_hash: SchemaHashVersions {
+                old: None,
+                new: None,
+            },
             kind_change: None,
             working_lifecycle: Some(lifecycle),
             schemas: vec![SchemaVersions {
@@ -3144,6 +3238,10 @@ mod tests {
             label: "http/identity/v2".to_string(),
             lifecycle: Lifecycle::Active,
             kind: ContractKind::Http,
+            schema_hash: SchemaHashVersions {
+                old: None,
+                new: None,
+            },
             kind_change: None,
             working_lifecycle: Some(Lifecycle::Active),
             schemas: vec![SchemaVersions {
@@ -3162,6 +3260,42 @@ mod tests {
         let r = evaluate(&[c]);
         assert!(r.findings.is_empty());
         assert!(!r.any_deny);
+    }
+
+    #[test]
+    fn durable_resolved_schema_hash_rotation_is_denied_but_http_hash_is_not_wire_identity() {
+        let schema = json!({"type":"object","properties":{"id":{"type":"string"}}});
+        let mut durable = diff(
+            "event/identity/v1/session-created",
+            Lifecycle::Active,
+            schema.clone(),
+            schema.clone(),
+        );
+        durable.kind = ContractKind::Event;
+        durable.schema_hash = SchemaHashVersions {
+            old: Some("sha256:old".to_string()),
+            new: Some("sha256:new".to_string()),
+        };
+        let result = evaluate(&[durable]);
+        assert_eq!(result.findings.len(), 1);
+        assert_eq!(
+            result.findings[0].rule,
+            BreakingRule::ResolvedSchemaHashChanged
+        );
+        assert_eq!(result.findings[0].disposition, Disposition::Deny);
+        assert!(result.any_deny);
+
+        let mut http = diff(
+            "http/identity/v1/login",
+            Lifecycle::Active,
+            schema.clone(),
+            schema,
+        );
+        http.schema_hash = SchemaHashVersions {
+            old: Some("sha256:old".to_string()),
+            new: Some("sha256:new".to_string()),
+        };
+        assert!(evaluate(&[http]).findings.is_empty());
     }
 
     // ─────────── C1：base ∪ working 并集（删除类破坏不漏检）───────────
@@ -3194,6 +3328,7 @@ mod tests {
                 Some("projection") => ContractKind::Projection,
                 _ => ContractKind::Http,
             },
+            schema_hash: None,
             slots: slots
                 .iter()
                 .map(|(k, v)| {
@@ -3433,6 +3568,7 @@ effects = ["read"]
             label: "http/audit/v1/list-entries".to_string(),
             lifecycle: base.lifecycle,
             kind: base.kind,
+            schema_hash: None,
             slots: make_slots(base_slot_files(&base)),
             manifest: base_manifest_projection(&base)?,
         };
@@ -3444,6 +3580,7 @@ effects = ["read"]
             label: "http/audit/v1/list-entries".to_string(),
             lifecycle: working.lifecycle,
             kind: working.kind,
+            schema_hash: None,
             slots: make_slots(slot_files(&working)),
             manifest: manifest_projection(&working)?,
         };
@@ -4010,6 +4147,10 @@ steps = [
             label: "http/identity/v1".to_string(),
             lifecycle,
             kind: ContractKind::Http,
+            schema_hash: SchemaHashVersions {
+                old: None,
+                new: None,
+            },
             kind_change: None,
             working_lifecycle: Some(lifecycle),
             schemas: Vec::new(),

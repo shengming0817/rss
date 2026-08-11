@@ -163,6 +163,15 @@ name = "migration_0104_abac_policy_operator_values_upgrade"
 path = "tests/migration_0104_abac_policy_operator_values_upgrade.rs"
 required-features = ["integration"]
 
+[[test]]
+name = "migration_0105_projection_generation_upgrade"
+path = "tests/migration_0105_projection_generation_upgrade.rs"
+required-features = ["integration"]
+
+[[test]]
+name = "migration_0105_projection_generation"
+path = "tests/migration_0105_projection_generation.rs"
+
 # Affected（无 live PG 资源；默认可构建，不绑 RemoteOnly 调度身份）。
 [[test]]
 name = "migration_0087_device_command_fencing_contract"

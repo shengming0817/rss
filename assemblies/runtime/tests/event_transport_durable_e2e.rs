@@ -433,6 +433,7 @@ async fn outbox_session_event(
     topic: &str,
     session_id: &str,
 ) -> Result<Option<(String, Vec<u8>)>> {
+    let session_id = uuid::Uuid::parse_str(session_id)?;
     let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
         r#"
         SELECT event_id, payload
@@ -1248,7 +1249,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let tracer_id = uuid::Uuid::new_v4().to_string();
     let mut tracer_payload: IdentitySessionCreatedPayload =
         serde_json::from_slice(&captured_payload)?;
-    let tracer_session_id = uuid::Uuid::new_v4().to_string();
+    let tracer_session_id = uuid::Uuid::new_v4();
     tracer_payload.session_id.clone_from(&tracer_session_id);
     pubr.publish(
         PublishRequest::new(

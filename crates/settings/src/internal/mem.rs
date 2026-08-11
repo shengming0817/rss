@@ -668,11 +668,13 @@ mod tests {
         let payload =
             generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
                 occurred_at: 1,
-                session_id: "session-test".to_string(),
+                session_id: "00000000-0000-0000-0000-000000000001"
+                    .parse()
+                    .expect("session uuid"),
                 subject: "11111111-2222-4333-8444-555555555555"
                     .parse()
                     .expect("uuid"),
-                tenant_id: TENANT_A.to_string(),
+                tenant_id: tenant.as_uuid(),
             };
         generated::event::identity_v1::session_created::emit(
             &eventexec::event::GeneratedEventEncoder,
