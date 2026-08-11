@@ -30,6 +30,7 @@ distributed = { path = "../../crates/distributed" }
 diagctx = { package = "rss-diag-context", path = "../../crates/diagctx", version = "0.1.0" }
 tracewire = { package = "rss-trace-context", path = "../../crates/tracewire", version = "0.1.0" }
 vocab = { path = "../../crates/vocab" }
+secure = { path = "../../crates/secure" }
 axum = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls-manual-roots"] }
 rustls = { workspace = true }
@@ -44,7 +45,6 @@ tokio-rustls = { workspace = true }
 tower = { workspace = true }
 http-body = { workspace = true }
 metrics = { workspace = true }
-url = { workspace = true }
 rcgen = { workspace = true, optional = true }
 
 [dev-dependencies]

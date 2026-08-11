@@ -211,10 +211,24 @@ mod tests {
         ];
         if remote_identity {
             entries.push(("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD", "peer-cell"));
+            entries.push(("RSS_TOPOLOGY", "durable-shared"));
+            entries.push((
+                "RSS_IDENTITY_DOMAIN_TRANSPORT_URL",
+                "https://identity.internal/rpc",
+            ));
         }
         let snapshot = test_snapshot(&entries).expect("domain execution snapshot");
         let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
-        let placement = runtime_plan.placement_execution_plan(snapshot.view());
+        let placement = runtime_plan
+            .placement_execution_plan(
+                if remote_identity {
+                    bootstrap::Topology::DurableShared
+                } else {
+                    bootstrap::Topology::Demo
+                },
+                snapshot.view(),
+            )
+            .expect("placement execution plan");
         runtime_plan.domain_execution_plan(&placement)
     }
 
@@ -375,7 +389,9 @@ mod tests {
         .expect("live relation snapshot");
         let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
         let typed = runtime_plan.as_typed();
-        let placement = runtime_plan.placement_execution_plan(snapshot.view());
+        let placement = runtime_plan
+            .placement_execution_plan(bootstrap::Topology::Demo, snapshot.view())
+            .expect("placement execution plan");
 
         assert_relation_mutations(
             "placement",
@@ -436,7 +452,9 @@ mod tests {
         .expect("live closure snapshot");
         let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
         let typed = runtime_plan.as_typed();
-        let placement = runtime_plan.placement_execution_plan(snapshot.view());
+        let placement = runtime_plan
+            .placement_execution_plan(bootstrap::Topology::Demo, snapshot.view())
+            .expect("placement execution plan");
         exact_relation(
             "provider",
             typed

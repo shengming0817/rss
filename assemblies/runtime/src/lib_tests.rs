@@ -10,7 +10,6 @@ use super::{
     event_transport, plan, prepare_local_before_external, prepare_operator_local,
     prepare_serving_local, routes, run, safe_process_error_line, validate_domain_listener_evidence,
 };
-use crate::config::DOMAIN_TRANSPORT_SHARED_URL_ENV;
 use crate::infra::s3::S3DlxArchiveConfig;
 use crate::phase::PreparedRuntimeInputs;
 use crate::phase::test_support::{
@@ -254,7 +253,9 @@ fn generated_graph_evidence_matches_live_runtime_carriers() {
     let runtime_plan =
         plan::RuntimePlan::bundled(snapshot.view()).unwrap_or_else(|_| unreachable!());
     let listener_plan = runtime_plan.listener_execution_plan();
-    let placement_plan = runtime_plan.placement_execution_plan(snapshot.view());
+    let placement_plan = runtime_plan
+        .placement_execution_plan(bootstrap::Topology::Demo, snapshot.view())
+        .expect("placement execution plan");
     assert!(validate_domain_listener_evidence(&listener_plan, &placement_plan, &[]).is_err());
 }
 
@@ -1760,29 +1761,30 @@ fn rls_ready_probe_maps_flag_to_health() {
 #[test]
 #[allow(clippy::expect_used)]
 fn domain_transport_empty_remote_set_resolves_without_targets() {
-    let targets =
-        build_domain_transport_targets_from(bootstrap::Topology::DurableShared, &[], |_| None)
-            .expect("empty remote set is InProc-compatible");
+    let placement = crate::plan::PlacementExecutionPlan::from_specs_for_test(Vec::new());
+    let targets = build_domain_transport_targets_from(&placement, |_| None)
+        .expect("empty remote set is InProc-compatible");
     assert!(targets.is_empty());
 }
 
 #[test]
 #[allow(clippy::expect_used)]
 fn domain_transport_per_domain_allow_set_is_required() {
-    let remotes = vec!["IDENTITY".to_owned()];
-    let err =
-        build_domain_transport_targets_from(bootstrap::Topology::DurableShared, &remotes, |name| {
-            match name {
-                "RSS_IDENTITY_DOMAIN_TRANSPORT_URL" => {
-                    Some("https://identity.internal/rpc".to_string())
-                }
-                DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV => {
-                    Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
-                }
-                _ => None,
-            }
-        })
-        .expect_err("remote target requires exact server SPIFFE allow-set");
+    let placement = crate::plan::PlacementExecutionPlan::from_specs_for_test(vec![
+        crate::plan::PlacementExecutionSpec::remote_for_test(
+            assembly_schema::AssemblyDomain::Identity,
+            "peer-cell",
+            secure::DomainHttpEndpoint::parse("https://identity.internal/rpc")
+                .expect("valid endpoint"),
+        ),
+    ]);
+    let err = build_domain_transport_targets_from(&placement, |name| match name {
+        DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV => {
+            Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
+        }
+        _ => None,
+    })
+    .expect_err("remote target requires exact server SPIFFE allow-set");
     assert!(
         err.to_string()
             .contains("RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET"),
@@ -1792,41 +1794,25 @@ fn domain_transport_per_domain_allow_set_is_required() {
 
 #[test]
 #[allow(clippy::expect_used)]
-fn domain_transport_isolated_topology_forbids_shared_fallback() {
-    let remotes = vec!["IDENTITY".to_owned()];
-    let err = build_domain_transport_targets_from(
-        bootstrap::Topology::DurableIsolated,
-        &remotes,
-        |name| match name {
-            DOMAIN_TRANSPORT_SHARED_URL_ENV => Some("https://gateway.internal/rpc".to_string()),
-            _ => None,
-        },
-    )
-    .expect_err("isolated topology must not use shared domain transport fallback");
-    assert!(
-        format!("{err:#}").contains(DOMAIN_TRANSPORT_SHARED_URL_ENV),
-        "error should name shared fallback env: {err}"
-    );
-}
-
-#[test]
-#[allow(clippy::expect_used)]
 fn domain_transport_targets_build_typed_outbound_mtls_policy() {
-    let remotes = vec!["IDENTITY".to_owned()];
-    let targets =
-        build_domain_transport_targets_from(bootstrap::Topology::DurableShared, &remotes, |name| {
-            match name {
-                DOMAIN_TRANSPORT_SHARED_URL_ENV => Some("https://gateway.internal/rpc".to_string()),
-                DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV => {
-                    Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
-                }
-                "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET" => {
-                    Some("spiffe://example.org/ns/rss/sa/identity".to_string())
-                }
-                _ => None,
-            }
-        })
-        .expect("valid domain transport target config");
+    let placement = crate::plan::PlacementExecutionPlan::from_specs_for_test(vec![
+        crate::plan::PlacementExecutionSpec::remote_for_test(
+            assembly_schema::AssemblyDomain::Identity,
+            "peer-cell",
+            secure::DomainHttpEndpoint::parse("https://gateway.internal/rpc")
+                .expect("valid endpoint"),
+        ),
+    ]);
+    let targets = build_domain_transport_targets_from(&placement, |name| match name {
+        DOMAIN_TRANSPORT_LOCAL_SPIFFE_ID_ENV => {
+            Some("spiffe://example.org/ns/rss/sa/runtime".to_string())
+        }
+        "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET" => {
+            Some("spiffe://example.org/ns/rss/sa/identity".to_string())
+        }
+        _ => None,
+    })
+    .expect("valid domain transport target config");
     assert_eq!(targets.len(), 1);
 }
 

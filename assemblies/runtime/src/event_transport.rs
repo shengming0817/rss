@@ -2381,6 +2381,26 @@ mod tests {
     }
 
     #[test]
+    fn event_transport_typed_topology_rejects_missing_and_blank_snapshot_values() {
+        for (entries, expected) in [
+            (Vec::new(), "missing required env var: RSS_TOPOLOGY"),
+            (
+                vec![("RSS_TOPOLOGY", "   ")],
+                "unknown RSS_TOPOLOGY ''; expected demo | durable-shared | durable-isolated",
+            ),
+        ] {
+            let snapshot = crate::config::test_snapshot(&entries)
+                .unwrap_or_else(|_| unreachable!("topology snapshot fixture"));
+            let mapper = crate::config::ServingConfigMapper::for_test(snapshot.view());
+            let error = EventTransportConfig::from_mapper(&mapper)
+                .err()
+                .unwrap_or_else(|| unreachable!("invalid topology must fail"));
+
+            assert_eq!(error.to_string(), expected);
+        }
+    }
+
+    #[test]
     fn event_transport_durable_snapshot_missing_ca_fails_fast() {
         let snapshot = crate::config::test_snapshot(&[
             ("RSS_TOPOLOGY", "durable-shared"),

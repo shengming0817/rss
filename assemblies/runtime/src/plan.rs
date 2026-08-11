@@ -20,7 +20,7 @@ const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
 pub(crate) use domain_exec::DomainExecutionPlan;
 pub(crate) use placement_exec::PlacementExecutionPlan;
 #[cfg(test)]
-pub(crate) use placement_exec::{PlacementExecutionSpec, PlacementMode};
+pub(crate) use placement_exec::PlacementExecutionSpec;
 
 /// Runtime-owned entrypoint around the shared, sealed protocol value.
 pub struct RuntimePlan {
@@ -234,12 +234,13 @@ impl RuntimePlan {
 
     /// Project exclusive Local / Remote placement execution facts.
     ///
-    /// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private execution fields plus RuntimePlan-only mint and exclusive Local composition or Remote transport binding" } -- this is the sole mint for [`PlacementExecutionPlan`].
+    /// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private closed placement state with mandatory secure::DomainHttpEndpoint plus RuntimePlan-only fallible mint from typed topology" } -- this is the sole mint for [`PlacementExecutionPlan`].
     pub(crate) fn placement_execution_plan(
         &self,
+        topology: bootstrap::Topology,
         config: SnapshotConfig<'_>,
-    ) -> PlacementExecutionPlan {
-        placement_exec::mint(&self.plan, &self.assembly_identity, config)
+    ) -> anyhow::Result<PlacementExecutionPlan> {
+        placement_exec::mint(&self.plan, &self.assembly_identity, topology, config)
     }
 
     /// Project the exact locally composed domain sequence from plan declarations and placement.

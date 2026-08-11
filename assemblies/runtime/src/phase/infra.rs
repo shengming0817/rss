@@ -317,7 +317,6 @@ impl<'a> ProvidersBuilt<'a> {
                 ))
                 .context("record DLX provider output")?;
             let domain_transport_config = DomainTransportConfig::from_placement(
-                event_transport.topology(),
                 &placement_execution_plan,
                 &crate::config::ServingConfigMapper::new(config),
             )

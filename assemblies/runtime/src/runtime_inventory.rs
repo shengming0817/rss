@@ -39,7 +39,7 @@ impl RuntimeInventoryRoutes {
             plan.as_typed(),
             plan.workflow_runtime().activated_workflows(),
             provider_bindings,
-            plan.placement_execution_plan(config)
+            plan.placement_execution_plan(bootstrap::Topology::Demo, config)?
                 .inventory_observations()?,
         )?
         .with_build_metadata(model::BuildMetadata::parse(

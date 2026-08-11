@@ -1,16 +1,12 @@
 //! Placement-owned outbound domain transport construction.
 
-use crate::config::{
-    DOMAIN_TRANSPORT_SHARED_URL_ENV, ServingConfigMapper, domain_transport_mtls_allow_set_env,
-    domain_transport_url_env,
-};
+use crate::config::{ServingConfigMapper, domain_transport_mtls_allow_set_env};
 use crate::routes;
 use crate::support::SystemClock;
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
 use primitives::{HealthCheck, HealthStatus, ProbeName};
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// SPIFFE Workload API endpoint env var consumed by the upstream `spiffe` source.
@@ -45,21 +41,6 @@ pub(crate) fn required_spiffe_endpoint_from_value(raw: Option<&str>) -> anyhow::
     Ok(endpoint.to_owned())
 }
 
-fn domain_transport_config_from(
-    remote_domains: &[String],
-    get: &impl Fn(&str) -> Option<String>,
-) -> bootstrap::DomainTransportConfig {
-    let mut per_domain = BTreeMap::new();
-    for domain in remote_domains {
-        let env = domain_transport_url_env(domain);
-        if let Some(url) = get(&env) {
-            per_domain.insert(domain.clone(), bootstrap::DomainTransportUrl::new(url));
-        }
-    }
-    let shared = get(DOMAIN_TRANSPORT_SHARED_URL_ENV).map(bootstrap::DomainTransportUrl::new);
-    bootstrap::DomainTransportConfig::new(per_domain, shared)
-}
-
 fn outbound_mtls_policy_for_domain_from(
     domain: &str,
     get: &impl Fn(&str) -> Option<String>,
@@ -84,25 +65,15 @@ fn outbound_mtls_policy_for_domain_from(
 }
 
 pub(crate) fn build_domain_transport_targets_from(
-    topology: bootstrap::Topology,
-    remote_domains: &[String],
+    placement: &crate::plan::PlacementExecutionPlan,
     get: impl Fn(&str) -> Option<String>,
 ) -> anyhow::Result<Vec<httpd::DomainHttpTargetConfig>> {
-    let cfg = domain_transport_config_from(remote_domains, &get);
-    let required_refs = remote_domains
-        .iter()
-        .map(String::as_str)
-        .collect::<Vec<_>>();
-    let resolved = bootstrap::domaintransport::resolve(topology, cfg, &required_refs)
-        .context("resolve domain transport topology")?;
-    let bootstrap::ResolvedDomainTransport::Remote { per_domain } = resolved else {
-        return Ok(Vec::new());
-    };
-    let mut targets = Vec::with_capacity(per_domain.len());
-    for (domain, url) in per_domain {
+    let mut targets = Vec::new();
+    for (domain, endpoint) in placement.remote_targets() {
+        let domain = domain.as_str().to_ascii_uppercase();
         let policy = outbound_mtls_policy_for_domain_from(&domain, &get)?;
         targets.push(
-            httpd::DomainHttpTargetConfig::new(&domain, url.expose(), policy)
+            httpd::DomainHttpTargetConfig::new(&domain, endpoint.clone(), policy)
                 .with_context(|| format!("build outbound domain transport target {domain}"))?,
         );
     }
@@ -119,33 +90,13 @@ pub(crate) enum DomainTransportConfig {
 
 impl DomainTransportConfig {
     pub(crate) fn from_placement(
-        topology: bootstrap::Topology,
         placement: &crate::plan::PlacementExecutionPlan,
         mapper: &ServingConfigMapper<'_>,
     ) -> anyhow::Result<Self> {
         let config = mapper.config();
         let get = |name: &str| config.value(name).map(str::to_owned);
-        let remote_domains = placement
-            .remote_domains()
-            .map(|domain| domain.as_str().to_ascii_uppercase())
-            .collect::<Vec<_>>();
-        let targets = build_domain_transport_targets_from(topology, &remote_domains, get)?;
+        let targets = build_domain_transport_targets_from(placement, get)?;
         if targets.is_empty() {
-            // Demo (and any topology that resolves to InProc) must not silently collapse Remote
-            // placements into the InProc stub — fail closed when remotes were declared.
-            if !remote_domains.is_empty() {
-                if matches!(topology, bootstrap::Topology::Demo) {
-                    anyhow::bail!(
-                        "demo topology does not support remote-placed domains; remotes={}",
-                        remote_domains.join(",")
-                    );
-                }
-                anyhow::bail!(
-                    "remote-placed domains require outbound transport targets (topology={}); remotes={}",
-                    topology_label(topology),
-                    remote_domains.join(",")
-                );
-            }
             return Ok(Self::InProc);
         }
         let spiffe_endpoint =

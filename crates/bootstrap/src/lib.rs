@@ -20,7 +20,7 @@
 //!   TOPO-FAILCLOSED-01 / TOPO-INMEM-SEAL-01）。
 //!
 //! - [`domaintransport`]：topology-gated 同步 domain transport 选型——复用 [`Topology`]，但使用独立
-//!   typed config / URL newtype，防事件传输配置和同步 RPC endpoint 混用。
+//!   typed config / [`secure::DomainHttpEndpoint`]，防事件传输配置和同步 RPC endpoint 混用。
 //!
 //! - [`replaydeps`]：topology-gated 幂等 claimer 选型——demo 拓扑用 in-mem claimer，
 //!   durable 拓扑用 Redis claimer；[`replaydeps::resolve`] 是纯策略函数，不构造 adapter。
@@ -50,7 +50,7 @@ pub mod topology;
 
 pub use domain::{Domain, KernelError, compose};
 pub use domaintransport::{
-    DomainTransportConfig, DomainTransportResolveError, DomainTransportUrl, ResolvedDomainTransport,
+    DomainTransportConfig, DomainTransportResolveError, ResolvedDomainTransport,
 };
 pub use eventtransport::{AmqpUrl, ResolvedTransport, TransportConfig, TransportResolveError};
 pub use framework::{

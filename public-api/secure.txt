@@ -1039,6 +1039,8 @@ pub secure::transport_endpoint::TransportEndpointError::HostRequired::kind: &'st
 pub secure::transport_endpoint::TransportEndpointError::InsecureScheme
 pub secure::transport_endpoint::TransportEndpointError::InsecureScheme::kind: &'static str
 pub secure::transport_endpoint::TransportEndpointError::InsecureScheme::secure_scheme: &'static str
+pub secure::transport_endpoint::TransportEndpointError::InvalidPort
+pub secure::transport_endpoint::TransportEndpointError::InvalidPort::kind: &'static str
 pub secure::transport_endpoint::TransportEndpointError::InvalidUrl
 pub secure::transport_endpoint::TransportEndpointError::PlaintextNotDevContainer
 pub secure::transport_endpoint::TransportEndpointError::PlaintextNotDevContainer::kind: &'static str
@@ -1088,6 +1090,28 @@ impl core::marker::Unpin for secure::transport_endpoint::AmqpEndpoint
 impl core::marker::UnsafeUnpin for secure::transport_endpoint::AmqpEndpoint
 impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::AmqpEndpoint
 impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::AmqpEndpoint
+pub struct secure::transport_endpoint::DomainHttpEndpoint
+impl secure::transport_endpoint::DomainHttpEndpoint
+pub fn secure::transport_endpoint::DomainHttpEndpoint::as_url(&self) -> &url::Url
+pub fn secure::transport_endpoint::DomainHttpEndpoint::host(&self) -> &str
+pub fn secure::transport_endpoint::DomainHttpEndpoint::into_url(self) -> url::Url
+pub fn secure::transport_endpoint::DomainHttpEndpoint::parse(impl core::convert::AsRef<str>) -> core::result::Result<Self, secure::transport_endpoint::TransportEndpointError>
+pub fn secure::transport_endpoint::DomainHttpEndpoint::port(&self) -> core::num::nonzero::NonZeroU16
+impl core::clone::Clone for secure::transport_endpoint::DomainHttpEndpoint
+pub fn secure::transport_endpoint::DomainHttpEndpoint::clone(&self) -> secure::transport_endpoint::DomainHttpEndpoint
+impl core::cmp::Eq for secure::transport_endpoint::DomainHttpEndpoint
+impl core::cmp::PartialEq for secure::transport_endpoint::DomainHttpEndpoint
+pub fn secure::transport_endpoint::DomainHttpEndpoint::eq(&self, &secure::transport_endpoint::DomainHttpEndpoint) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::DomainHttpEndpoint
+pub fn secure::transport_endpoint::DomainHttpEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::Freeze for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::Send for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::Sync for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::Unpin for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::DomainHttpEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::DomainHttpEndpoint
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::DomainHttpEndpoint
 pub struct secure::transport_endpoint::RedisEndpoint(_)
 impl secure::transport_endpoint::RedisEndpoint
 pub fn secure::transport_endpoint::RedisEndpoint::expose(&self) -> &str
@@ -1542,6 +1566,8 @@ pub secure::TransportEndpointError::HostRequired::kind: &'static str
 pub secure::TransportEndpointError::InsecureScheme
 pub secure::TransportEndpointError::InsecureScheme::kind: &'static str
 pub secure::TransportEndpointError::InsecureScheme::secure_scheme: &'static str
+pub secure::TransportEndpointError::InvalidPort
+pub secure::TransportEndpointError::InvalidPort::kind: &'static str
 pub secure::TransportEndpointError::InvalidUrl
 pub secure::TransportEndpointError::PlaintextNotDevContainer
 pub secure::TransportEndpointError::PlaintextNotDevContainer::kind: &'static str
@@ -1712,6 +1738,28 @@ impl core::marker::Unpin for secure::password::DigestPasswordBlocklist
 impl core::marker::UnsafeUnpin for secure::password::DigestPasswordBlocklist
 impl core::panic::unwind_safe::RefUnwindSafe for secure::password::DigestPasswordBlocklist
 impl core::panic::unwind_safe::UnwindSafe for secure::password::DigestPasswordBlocklist
+pub struct secure::DomainHttpEndpoint
+impl secure::transport_endpoint::DomainHttpEndpoint
+pub fn secure::transport_endpoint::DomainHttpEndpoint::as_url(&self) -> &url::Url
+pub fn secure::transport_endpoint::DomainHttpEndpoint::host(&self) -> &str
+pub fn secure::transport_endpoint::DomainHttpEndpoint::into_url(self) -> url::Url
+pub fn secure::transport_endpoint::DomainHttpEndpoint::parse(impl core::convert::AsRef<str>) -> core::result::Result<Self, secure::transport_endpoint::TransportEndpointError>
+pub fn secure::transport_endpoint::DomainHttpEndpoint::port(&self) -> core::num::nonzero::NonZeroU16
+impl core::clone::Clone for secure::transport_endpoint::DomainHttpEndpoint
+pub fn secure::transport_endpoint::DomainHttpEndpoint::clone(&self) -> secure::transport_endpoint::DomainHttpEndpoint
+impl core::cmp::Eq for secure::transport_endpoint::DomainHttpEndpoint
+impl core::cmp::PartialEq for secure::transport_endpoint::DomainHttpEndpoint
+pub fn secure::transport_endpoint::DomainHttpEndpoint::eq(&self, &secure::transport_endpoint::DomainHttpEndpoint) -> bool
+impl core::fmt::Debug for secure::transport_endpoint::DomainHttpEndpoint
+pub fn secure::transport_endpoint::DomainHttpEndpoint::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::Freeze for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::Send for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::Sync for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::Unpin for secure::transport_endpoint::DomainHttpEndpoint
+impl core::marker::UnsafeUnpin for secure::transport_endpoint::DomainHttpEndpoint
+impl core::panic::unwind_safe::RefUnwindSafe for secure::transport_endpoint::DomainHttpEndpoint
+impl core::panic::unwind_safe::UnwindSafe for secure::transport_endpoint::DomainHttpEndpoint
 pub struct secure::FieldRedaction<'a>
 pub secure::FieldRedaction::mode: secure::redaction::RedactionMode
 pub secure::FieldRedaction::name: core::option::Option<&'static str>

@@ -270,7 +270,9 @@ mod listener_plan_tests {
         let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
         (
             runtime_plan.listener_execution_plan(),
-            runtime_plan.placement_execution_plan(snapshot.view()),
+            runtime_plan
+                .placement_execution_plan(bootstrap::Topology::Demo, snapshot.view())
+                .expect("local placement plan"),
         )
     }
 
@@ -284,12 +286,19 @@ mod listener_plan_tests {
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
             ("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD", "peer-cell"),
+            ("RSS_TOPOLOGY", "durable-shared"),
+            (
+                "RSS_IDENTITY_DOMAIN_TRANSPORT_URL",
+                "https://identity.internal/rpc",
+            ),
         ];
         let snapshot = test_snapshot(&merged).expect("remote identity snapshot");
         let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
         (
             runtime_plan.listener_execution_plan(),
-            runtime_plan.placement_execution_plan(snapshot.view()),
+            runtime_plan
+                .placement_execution_plan(bootstrap::Topology::DurableShared, snapshot.view())
+                .expect("remote placement plan"),
         )
     }
 

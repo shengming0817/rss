@@ -1,62 +1,32 @@
 //! Placement execution projection minted solely from [`super::RuntimePlan`].
 
 use crate::config::{DOMAIN_TRANSPORT_SHARED_URL_ENV, SnapshotConfig};
+use anyhow::Context as _;
 use assembly_schema::AssemblyDomain;
+use secure::DomainHttpEndpoint;
+use std::collections::BTreeMap;
 
-const TOPOLOGY_ENV: &str = "RSS_TOPOLOGY";
-
-/// Exclusive local composition vs remote contract-transport binding.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PlacementMode {
+#[derive(Clone, PartialEq, Eq)]
+enum PlacementState {
     Local,
-    Remote,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PlacementEndpoint {
-    scheme: String,
-    host: String,
-    port: u16,
-}
-
-impl PlacementEndpoint {
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
-    pub(crate) fn scheme(&self) -> &str {
-        &self.scheme
-    }
-
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
-    pub(crate) fn host(&self) -> &str {
-        &self.host
-    }
-
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
-    pub(crate) const fn port(&self) -> u16 {
-        self.port
-    }
+    Remote {
+        endpoint: DomainHttpEndpoint,
+        spiffe_identity: Option<String>,
+        readiness: runtimeexec::inventory::InventoryPlacementReadiness,
+    },
 }
 
 /// One domain's placement execution fact.
 ///
-/// Remote `endpoint` is minted from the same URL family as outbound transport resolve
-/// (per-domain first; `RSS_DOMAIN_TRANSPORT_URL` shared fallback only when
-/// `RSS_TOPOLOGY=durable-shared`). Mint-time remote `readiness` is fail-closed until the live
-/// outbound transport-owned readiness sampler is published.
+/// Remote state owns the validated endpoint selected by the bootstrap topology resolver. Because
+/// the state enum and all fields are private, a remote placement without an endpoint is
+/// unrepresentable. Inventory and the live HTTP adapter consume this same typed value.
 ///
-/// `spiffe_identity` is reserved for a future peer (server) SPIFFE projection; mint does not
-/// store the local outbound client SPIFFE id here (that material stays on the mTLS policy /
-/// `RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID` path). Until peer allow-set projection lands with
-/// tests, this field remains `None`.
-///
-/// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private execution fields plus RuntimePlan-only mint and exclusive Local composition or Remote transport binding" } -- domain placement crosses the composition root only through this plan-derived capability; Local domains compose in-process modules, Remote domains bind outbound contract transport and must not mount on local listeners.
+/// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private closed placement state with mandatory secure::DomainHttpEndpoint plus RuntimePlan-only fallible mint" } -- domain placement crosses the composition root only through this plan-derived capability; Local domains compose in-process modules, Remote domains bind outbound contract transport and must not mount on local listeners.
 pub(crate) struct PlacementExecutionSpec {
     domain: AssemblyDomain,
-    mode: PlacementMode,
-    #[allow(dead_code)] // reason: inventory DTO field; read via workload() for posture projection.
     workload: String,
-    endpoint: Option<PlacementEndpoint>,
-    spiffe_identity: Option<String>,
-    readiness: Option<runtimeexec::inventory::InventoryPlacementReadiness>,
+    state: PlacementState,
 }
 
 impl PlacementExecutionSpec {
@@ -64,73 +34,81 @@ impl PlacementExecutionSpec {
         self.domain
     }
 
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
-    pub(crate) const fn mode(&self) -> PlacementMode {
-        self.mode
-    }
-
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
     pub(crate) fn workload(&self) -> &str {
         &self.workload
     }
 
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
-    pub(crate) fn endpoint(&self) -> Option<&PlacementEndpoint> {
-        self.endpoint.as_ref()
+    pub(crate) fn endpoint(&self) -> Option<&DomainHttpEndpoint> {
+        match &self.state {
+            PlacementState::Local => None,
+            PlacementState::Remote { endpoint, .. } => Some(endpoint),
+        }
     }
 
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn spiffe_identity(&self) -> Option<&str> {
-        self.spiffe_identity.as_deref()
+        match &self.state {
+            PlacementState::Local => None,
+            PlacementState::Remote {
+                spiffe_identity, ..
+            } => spiffe_identity.as_deref(),
+        }
     }
 
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn readiness(&self) -> Option<runtimeexec::inventory::InventoryPlacementReadiness> {
-        self.readiness
+        match self.state {
+            PlacementState::Local => None,
+            PlacementState::Remote { readiness, .. } => Some(readiness),
+        }
     }
 
     pub(crate) const fn is_local(&self) -> bool {
-        matches!(self.mode, PlacementMode::Local)
+        matches!(self.state, PlacementState::Local)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) const fn is_remote(&self) -> bool {
-        matches!(self.mode, PlacementMode::Remote)
+        matches!(self.state, PlacementState::Remote { .. })
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(
+    pub(crate) fn local_for_test(domain: AssemblyDomain, workload: impl Into<String>) -> Self {
+        Self {
+            domain,
+            workload: workload.into(),
+            state: PlacementState::Local,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn remote_for_test(
         domain: AssemblyDomain,
-        mode: PlacementMode,
         workload: impl Into<String>,
+        endpoint: DomainHttpEndpoint,
     ) -> Self {
         Self {
             domain,
-            mode,
             workload: workload.into(),
-            endpoint: None,
-            spiffe_identity: None,
-            readiness: mode.is_remote().then_some(
-                runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable,
-            ),
+            state: PlacementState::Remote {
+                endpoint,
+                spiffe_identity: None,
+                readiness:
+                    runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable,
+            },
         }
-    }
-}
-
-impl PlacementMode {
-    pub(crate) const fn is_remote(self) -> bool {
-        matches!(self, Self::Remote)
     }
 }
 
 /// Validated placement projection that can only be minted from [`super::RuntimePlan`].
 ///
-/// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private execution fields plus RuntimePlan-only mint and exclusive Local composition or Remote transport binding" } -- runtime domain placement and remote transport required-domain set cross the composition root only through this plan-derived capability.
+/// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private closed placement state with mandatory secure::DomainHttpEndpoint plus RuntimePlan-only fallible mint" } -- runtime domain placement and remote transport required-domain set cross the composition root only through this plan-derived capability.
 pub(crate) struct PlacementExecutionPlan {
     placements: Vec<PlacementExecutionSpec>,
 }
 
 impl PlacementExecutionPlan {
-    #[allow(dead_code)] // reason: inventory DTO accessors for remote posture projection.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn placements(&self) -> &[PlacementExecutionSpec] {
         &self.placements
     }
@@ -142,11 +120,20 @@ impl PlacementExecutionPlan {
             .is_some_and(PlacementExecutionSpec::is_local)
     }
 
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn remote_domains(&self) -> impl Iterator<Item = AssemblyDomain> + '_ {
         self.placements
             .iter()
             .filter(|spec| spec.is_remote())
             .map(PlacementExecutionSpec::domain)
+    }
+
+    pub(crate) fn remote_targets(
+        &self,
+    ) -> impl Iterator<Item = (AssemblyDomain, &DomainHttpEndpoint)> + '_ {
+        self.placements
+            .iter()
+            .filter_map(|spec| spec.endpoint().map(|endpoint| (spec.domain(), endpoint)))
     }
 
     pub(crate) fn inventory_observations(
@@ -157,35 +144,27 @@ impl PlacementExecutionPlan {
     > {
         self.placements
             .iter()
-            .map(|placement| match placement.mode() {
-                PlacementMode::Local => Ok(runtimeexec::inventory::PlacementObservation::local(
+            .map(|placement| match &placement.state {
+                PlacementState::Local => Ok(runtimeexec::inventory::PlacementObservation::local(
                     placement.domain(),
                     placement.workload(),
                 )),
-                PlacementMode::Remote => {
-                    let endpoint = placement
-                        .endpoint()
-                        .map(|endpoint| {
-                            let scheme = match endpoint.scheme() {
-                                "https" => runtimeexec::inventory::InventoryEndpointScheme::Https,
-                                _ => return Err(runtimeexec::inventory::InventoryError::Endpoint),
-                            };
-                            runtimeexec::inventory::PlacementEndpoint::from_typed_parts(
-                                scheme,
-                                endpoint.host(),
-                                endpoint.port(),
-                            )
-                        })
-                        .transpose()?;
-                    let readiness = placement.readiness().unwrap_or(
-                        runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable,
-                    );
+                PlacementState::Remote {
+                    endpoint,
+                    spiffe_identity,
+                    readiness,
+                } => {
+                    let endpoint = runtimeexec::inventory::PlacementEndpoint::from_typed_parts(
+                        runtimeexec::inventory::InventoryEndpointScheme::Https,
+                        endpoint.host(),
+                        endpoint.port().get(),
+                    )?;
                     runtimeexec::inventory::PlacementObservation::remote(
                         placement.domain(),
                         placement.workload(),
-                        endpoint,
-                        placement.spiffe_identity().map(str::to_owned),
-                        readiness,
+                        Some(endpoint),
+                        spiffe_identity.clone(),
+                        *readiness,
                     )
                 }
             })
@@ -223,91 +202,97 @@ impl PlacementExecutionPlan {
 pub(super) fn mint(
     plan: &assembly_schema::RuntimePlan,
     assembly_identity: &str,
+    topology: bootstrap::Topology,
     config: SnapshotConfig<'_>,
-) -> PlacementExecutionPlan {
-    let topology = config
-        .value(TOPOLOGY_ENV)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .and_then(|raw| crate::event_transport::parse_topology(raw).ok());
-    let placements = plan
+) -> anyhow::Result<PlacementExecutionPlan> {
+    let declared = plan
         .placement_plans()
         .iter()
         .map(|placement| {
-            let domain = placement.domain();
-            let workload = placement.workload().to_owned();
-            let mode = if workload == assembly_identity {
-                PlacementMode::Local
-            } else {
-                PlacementMode::Remote
-            };
-            let (endpoint, readiness) = if mode.is_remote() {
-                let endpoint = resolve_remote_endpoint(domain, topology, config);
-                // Remote seed is fail-closed until the local outbound mTLS sampler is published.
-                (
-                    endpoint,
-                    Some(
-                        runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable,
-                    ),
-                )
-            } else {
-                (None, None)
-            };
-            PlacementExecutionSpec {
-                domain,
-                mode,
-                workload,
-                endpoint,
-                spiffe_identity: None,
-                readiness,
-            }
+            (
+                placement.domain(),
+                placement.workload().to_owned(),
+                placement.workload() == assembly_identity,
+            )
         })
-        .collect();
-    PlacementExecutionPlan { placements }
-}
+        .collect::<Vec<_>>();
+    let remote_domains = declared
+        .iter()
+        .filter(|(_, _, local)| !local)
+        .map(|(domain, _, _)| domain.as_str().to_ascii_uppercase())
+        .collect::<Vec<_>>();
 
-fn resolve_remote_endpoint(
-    domain: AssemblyDomain,
-    topology: Option<bootstrap::Topology>,
-    config: SnapshotConfig<'_>,
-) -> Option<PlacementEndpoint> {
-    let url_env = crate::config::domain_transport_url_env(domain.as_str());
-    if let Some(endpoint) = config
-        .value(&url_env)
-        .and_then(parse_endpoint_without_credentials)
-    {
-        return Some(endpoint);
+    if remote_domains.is_empty() {
+        return Ok(PlacementExecutionPlan {
+            placements: declared
+                .into_iter()
+                .map(|(domain, workload, _)| PlacementExecutionSpec {
+                    domain,
+                    workload,
+                    state: PlacementState::Local,
+                })
+                .collect(),
+        });
     }
-    // Mirror bootstrap::domaintransport::resolve: shared URL only for DurableShared.
-    if matches!(topology, Some(bootstrap::Topology::DurableShared)) {
-        return config
-            .value(DOMAIN_TRANSPORT_SHARED_URL_ENV)
-            .and_then(parse_endpoint_without_credentials);
-    }
-    None
-}
 
-/// Parse a remote peer endpoint for inventory posture.
-///
-/// Aligns with `httpd::parse_target_endpoint`: `https` only; reject userinfo, query, and
-/// fragment (return `None` — do not silently strip credentials into host/port).
-fn parse_endpoint_without_credentials(raw: &str) -> Option<PlacementEndpoint> {
-    let parsed = reqwest::Url::parse(raw.trim()).ok()?;
-    if parsed.scheme() != "https" {
-        return None;
+    let mut per_domain = BTreeMap::new();
+    for domain in &remote_domains {
+        let env = crate::config::domain_transport_url_env(domain);
+        if let Some(raw) = config.value(&env) {
+            let endpoint = DomainHttpEndpoint::parse(raw)
+                .with_context(|| format!("{env} is not a valid domain HTTP endpoint"))?;
+            per_domain.insert(domain.clone(), endpoint);
+        }
     }
-    if !parsed.username().is_empty()
-        || parsed.password().is_some()
-        || parsed.query().is_some()
-        || parsed.fragment().is_some()
-    {
-        return None;
-    }
-    let host = parsed.host_str()?.to_owned();
-    let port = parsed.port_or_known_default()?;
-    Some(PlacementEndpoint {
-        scheme: "https".to_owned(),
-        host,
-        port,
-    })
+    let shared_endpoint = config
+        .value(DOMAIN_TRANSPORT_SHARED_URL_ENV)
+        .map(|raw| {
+            DomainHttpEndpoint::parse(raw).with_context(|| {
+                format!("{DOMAIN_TRANSPORT_SHARED_URL_ENV} is not a valid domain HTTP endpoint")
+            })
+        })
+        .transpose()?;
+    let transport = bootstrap::DomainTransportConfig::new(per_domain, shared_endpoint);
+    let required = remote_domains
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let resolved = bootstrap::domaintransport::resolve(topology, transport, &required)?;
+    let bootstrap::ResolvedDomainTransport::Remote {
+        per_domain: mut endpoints,
+    } = resolved
+    else {
+        anyhow::bail!(
+            "demo topology does not support remote-placed domains; remotes={}",
+            remote_domains.join(",")
+        );
+    };
+
+    let placements = declared
+        .into_iter()
+        .map(|(domain, workload, local)| -> anyhow::Result<_> {
+            let state = if local {
+                PlacementState::Local
+            } else {
+                let key = domain.as_str().to_ascii_uppercase();
+                let endpoint = endpoints.remove(&key).ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "resolved domain transport omitted required placement domain {key}"
+                    )
+                })?;
+                PlacementState::Remote {
+                    endpoint,
+                    spiffe_identity: None,
+                    readiness:
+                        runtimeexec::inventory::InventoryPlacementReadiness::MtlsSourceUnavailable,
+                }
+            };
+            Ok(PlacementExecutionSpec {
+                domain,
+                workload,
+                state,
+            })
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok(PlacementExecutionPlan { placements })
 }

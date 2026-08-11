@@ -61,5 +61,6 @@ pub use saga_receipt_integrity::{
 pub use secret_text::SecretText;
 pub use securederive::Redact;
 pub use transport_endpoint::{
-    AmqpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint, TransportEndpointError,
+    AmqpEndpoint, DomainHttpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint,
+    TransportEndpointError,
 };

@@ -2913,6 +2913,7 @@ dependencies = [
  "rss-diag-context",
  "rss-trace-context",
  "rustls",
+ "secure",
  "spiffe",
  "spiffe-rustls",
  "spiffe-rustls-tokio",
@@ -2923,7 +2924,6 @@ dependencies = [
  "tower",
  "tracewiretest",
  "tracing",
- "url",
  "vocab",
 ]
 

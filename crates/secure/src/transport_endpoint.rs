@@ -1,4 +1,4 @@
-use std::net::IpAddr;
+use std::{net::IpAddr, num::NonZeroU16};
 
 use url::{Host, Url};
 
@@ -14,7 +14,7 @@ pub enum PlaintextEndpointPolicy {
     AllowDevContainer,
 }
 
-/// AMQP/Redis/S3 transport endpoint 构造失败。
+/// Transport endpoint 构造失败。
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum TransportEndpointError {
@@ -47,6 +47,113 @@ pub enum TransportEndpointError {
     QueryUnsupported { kind: &'static str },
     #[error("{kind} endpoint must not include URL fragment")]
     FragmentUnsupported { kind: &'static str },
+    #[error("{kind} endpoint must include a valid non-zero port")]
+    InvalidPort { kind: &'static str },
+}
+
+/// 已校验的 domain-to-domain HTTP endpoint。
+///
+/// 该类型是 domain HTTP endpoint 合法性的唯一 owner：只接受无 userinfo、query、fragment 的
+/// HTTPS URL，并保留 transport 所需的 base path。字段保持私有，消费方只能从已验证实例读取。
+#[derive(Clone, PartialEq, Eq)]
+pub struct DomainHttpEndpoint {
+    url: Url,
+    port: NonZeroU16,
+}
+
+impl DomainHttpEndpoint {
+    /// Parse one canonical domain HTTP endpoint.
+    ///
+    /// The URL must use the lowercase `https://` prefix, contain a host and a valid non-zero port
+    /// (defaulting to 443), and must not contain userinfo, query, fragment, surrounding whitespace,
+    /// or control characters. The parsed URL retains its complete base path.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TransportEndpointError`] for malformed or unsupported endpoint syntax. Errors
+    /// never include the raw endpoint value.
+    pub fn parse(raw: impl AsRef<str>) -> Result<Self, TransportEndpointError> {
+        const KIND: &str = "domain-http";
+        let raw = raw.as_ref();
+        if raw.trim() != raw || raw.chars().any(char::is_control) {
+            return Err(TransportEndpointError::InvalidUrl);
+        }
+
+        let url = Url::parse(raw).map_err(|_| TransportEndpointError::InvalidUrl)?;
+        if url.scheme() != "https" {
+            return Err(TransportEndpointError::InsecureScheme {
+                kind: KIND,
+                secure_scheme: "https",
+            });
+        }
+        let canonical = raw
+            .strip_prefix("https://")
+            .ok_or(TransportEndpointError::InvalidUrl)?;
+        let authority = canonical
+            .split(['/', '?', '#'])
+            .next()
+            .filter(|authority| !authority.is_empty())
+            .ok_or(TransportEndpointError::HostRequired { kind: KIND })?;
+        if authority.ends_with(':') {
+            return Err(TransportEndpointError::InvalidPort { kind: KIND });
+        }
+        if url.host_str().is_none() {
+            return Err(TransportEndpointError::HostRequired { kind: KIND });
+        }
+        if authority.contains('@') {
+            return Err(TransportEndpointError::UserInfoUnsupported { kind: KIND });
+        }
+        if url.query().is_some() {
+            return Err(TransportEndpointError::QueryUnsupported { kind: KIND });
+        }
+        if url.fragment().is_some() {
+            return Err(TransportEndpointError::FragmentUnsupported { kind: KIND });
+        }
+        let port = url
+            .port_or_known_default()
+            .and_then(NonZeroU16::new)
+            .ok_or(TransportEndpointError::InvalidPort { kind: KIND })?;
+
+        Ok(Self { url, port })
+    }
+
+    #[must_use]
+    /// Return the canonical host projected by the URL parser.
+    pub fn host(&self) -> &str {
+        self.url
+            .host_str()
+            .unwrap_or_else(|| unreachable!("validated domain HTTP endpoint always has a host"))
+    }
+
+    #[must_use]
+    /// Return the explicit port, or the HTTPS default port 443 when omitted.
+    pub fn port(&self) -> NonZeroU16 {
+        self.port
+    }
+
+    #[must_use]
+    /// Borrow the validated URL for transport construction.
+    ///
+    /// The returned URL may contain a deployment-sensitive host and path. Do not log or render it
+    /// in diagnostics; use this endpoint's redacted [`Debug`](std::fmt::Debug) implementation.
+    pub fn as_url(&self) -> &Url {
+        &self.url
+    }
+
+    #[must_use]
+    /// Consume the endpoint into its validated URL at the transport driver boundary.
+    ///
+    /// The returned URL may contain a deployment-sensitive host and path. Do not log or render it
+    /// in diagnostics.
+    pub fn into_url(self) -> Url {
+        self.url
+    }
+}
+
+impl std::fmt::Debug for DomainHttpEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DomainHttpEndpoint([REDACTED])")
+    }
 }
 
 /// 已校验 AMQP endpoint。默认生产路径只接受 `amqps://`。
@@ -262,7 +369,146 @@ fn render_redacted_url(raw: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{AmqpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint};
+    use super::{
+        AmqpEndpoint, DomainHttpEndpoint, PlaintextEndpointPolicy, RedisEndpoint, S3Endpoint,
+        TransportEndpointError,
+    };
+
+    #[test]
+    fn domain_http_endpoint_accepts_https_and_preserves_transport_path() {
+        let cases = [
+            ("https://identity.internal/rpc", "identity.internal", 443),
+            (
+                "https://identity.internal:8443/nested/rpc",
+                "identity.internal",
+                8443,
+            ),
+            ("https://127.0.0.1/rpc", "127.0.0.1", 443),
+        ];
+
+        for (raw, expected_host, expected_port) in cases {
+            let endpoint = DomainHttpEndpoint::parse(raw).expect("valid domain HTTP endpoint");
+            assert_eq!(endpoint.host(), expected_host);
+            assert_eq!(endpoint.port().get(), expected_port);
+            assert_eq!(
+                endpoint.as_url().path(),
+                url::Url::parse(raw).unwrap().path()
+            );
+        }
+    }
+
+    #[test]
+    fn domain_http_endpoint_acceptance_matrix_is_closed() {
+        for (raw, expected) in [
+            ("", TransportEndpointError::InvalidUrl),
+            ("not-a-url", TransportEndpointError::InvalidUrl),
+            (
+                "http://identity.internal/rpc",
+                TransportEndpointError::InsecureScheme {
+                    kind: "domain-http",
+                    secure_scheme: "https",
+                },
+            ),
+            (
+                "HTTPS://identity.internal/rpc",
+                TransportEndpointError::InvalidUrl,
+            ),
+            (
+                "https:///rpc",
+                TransportEndpointError::HostRequired {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://identity.internal:/rpc",
+                TransportEndpointError::InvalidPort {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://identity.internal:0/rpc",
+                TransportEndpointError::InvalidPort {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://identity.internal:65536/rpc",
+                TransportEndpointError::InvalidUrl,
+            ),
+            (
+                " https://identity.internal/rpc",
+                TransportEndpointError::InvalidUrl,
+            ),
+            (
+                "https://identity.internal/rpc ",
+                TransportEndpointError::InvalidUrl,
+            ),
+            (
+                "https://user@identity.internal/rpc",
+                TransportEndpointError::UserInfoUnsupported {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://user:pass@identity.internal/rpc",
+                TransportEndpointError::UserInfoUnsupported {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://@identity.internal/rpc",
+                TransportEndpointError::UserInfoUnsupported {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://identity.internal/rpc?",
+                TransportEndpointError::QueryUnsupported {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://identity.internal/rpc?token=secret",
+                TransportEndpointError::QueryUnsupported {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://identity.internal/rpc#",
+                TransportEndpointError::FragmentUnsupported {
+                    kind: "domain-http",
+                },
+            ),
+            (
+                "https://identity.internal/rpc#fragment",
+                TransportEndpointError::FragmentUnsupported {
+                    kind: "domain-http",
+                },
+            ),
+        ] {
+            assert_eq!(
+                DomainHttpEndpoint::parse(raw),
+                Err(expected),
+                "unexpected endpoint error for {raw:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn domain_http_endpoint_diagnostics_are_secret_free() {
+        let endpoint = DomainHttpEndpoint::parse("https://private.internal/secret/path").unwrap();
+        let debug = format!("{endpoint:?}");
+        assert!(!debug.contains("private.internal"));
+        assert!(!debug.contains("secret/path"));
+
+        let error = DomainHttpEndpoint::parse(
+            "https://private.internal/secret/path?access_token=top-secret",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("private.internal"));
+        assert!(!error.contains("top-secret"));
+    }
 
     #[test]
     fn amqp_endpoint_requires_amqps_by_default() {

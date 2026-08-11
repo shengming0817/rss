@@ -72,10 +72,14 @@ impl UncommittedListenerPdpLifecycle {
 
 impl<'a> Planned<'a> {
     pub(super) async fn build_providers(self) -> anyhow::Result<<Self as RuntimePhaseState>::Next> {
+        let serving_config =
+            RuntimeServingConfig::from_snapshot(self.runtime_inputs.config())?.into_parts();
         let runtime_plan = self.runtime_inputs.take_runtime_plan();
         let listener_execution_plan = runtime_plan.listener_execution_plan();
-        let placement_execution_plan =
-            runtime_plan.placement_execution_plan(self.runtime_inputs.config());
+        let placement_execution_plan = runtime_plan.placement_execution_plan(
+            serving_config.event_transport.topology(),
+            self.runtime_inputs.config(),
+        )?;
         placement_execution_plan
             .reject_remote_on_local_listeners(&listener_execution_plan)
             .context("validate placement against local listeners")?;
@@ -105,10 +109,6 @@ impl<'a> Planned<'a> {
         let result = async {
             let listener_pdp_constructor = provider_factories.listener_pdp()?;
 
-            let config = context.config();
-            let serving_config = RuntimeServingConfig::from_snapshot(config)
-                .context("build snapshot-backed serving config")?
-                .into_parts();
             let token_profiles = &serving_config.token_profiles;
             let (rss_key_isolation, federated_key_isolation) =
                 if token_profiles.rss_access().is_some()

@@ -96,19 +96,18 @@ pub enum HttpServeError {
 #[derive(Clone, Debug)]
 pub struct DomainHttpTargetConfig {
     domain: String,
-    endpoint: reqwest::Url,
+    endpoint: secure::DomainHttpEndpoint,
     policy: authn::OutboundMtlsPolicy,
 }
 
 impl DomainHttpTargetConfig {
-    /// Build one target config. Endpoint must be an HTTPS base URL without inline credentials.
+    /// Build one target config from the shared, already-validated endpoint type.
     pub fn new(
         domain: impl AsRef<str>,
-        endpoint: impl AsRef<str>,
+        endpoint: secure::DomainHttpEndpoint,
         policy: authn::OutboundMtlsPolicy,
     ) -> Result<Self, DomainHttpTransportBuildError> {
         let domain = canonical_domain_key(domain.as_ref())?;
-        let endpoint = parse_target_endpoint(endpoint.as_ref())?;
         Ok(Self {
             domain,
             endpoint,
@@ -312,15 +311,6 @@ pub enum DomainHttpTransportBuildError {
     /// Domain key was empty or non-canonical.
     #[error("domain http transport domain is invalid")]
     InvalidDomain,
-    /// Endpoint URL was syntactically invalid.
-    #[error("domain http transport endpoint url is invalid")]
-    InvalidEndpoint(#[source] url::ParseError),
-    /// Endpoint must be HTTPS.
-    #[error("domain http transport endpoint must use https")]
-    InsecureEndpoint,
-    /// Endpoint must not carry inline credentials, query, or fragment material.
-    #[error("domain http transport endpoint must not include credentials, query, or fragment")]
-    EndpointContainsCredentials,
     /// SPIFFE Workload API X.509 source could not be initialized or read.
     #[error("domain http transport spiffe source unavailable")]
     SpiffeSource(#[source] spiffe::X509SourceError),
@@ -343,24 +333,6 @@ fn canonical_domain_key(raw: &str) -> Result<String, DomainHttpTransportBuildErr
         return Err(DomainHttpTransportBuildError::InvalidDomain);
     }
     Ok(raw.to_uppercase())
-}
-
-fn parse_target_endpoint(raw: &str) -> Result<reqwest::Url, DomainHttpTransportBuildError> {
-    let url = reqwest::Url::parse(raw).map_err(DomainHttpTransportBuildError::InvalidEndpoint)?;
-    if url.scheme() != "https" {
-        return Err(DomainHttpTransportBuildError::InsecureEndpoint);
-    }
-    if url.host_str().is_none() {
-        return Err(DomainHttpTransportBuildError::InvalidDomain);
-    }
-    if !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(DomainHttpTransportBuildError::EndpointContainsCredentials);
-    }
-    Ok(url)
 }
 
 async fn x509_source(
@@ -407,7 +379,7 @@ where
         };
         mapped.insert(
             target.domain,
-            DomainHttpTarget::new(target.endpoint, client),
+            DomainHttpTarget::new(target.endpoint.into_url(), client),
         );
     }
     Ok((mapped, source))
@@ -2204,17 +2176,14 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn domain_transport_target_requires_https_endpoint() {
-        let err = DomainHttpTargetConfig::new(
-            "identity",
-            "http://identity.internal/rpc",
-            outbound_policy(),
-        )
-        .expect_err("production endpoint must be HTTPS");
-        assert!(matches!(
-            err,
-            DomainHttpTransportBuildError::InsecureEndpoint
-        ));
+    fn domain_transport_target_keeps_shared_typed_endpoint() {
+        let endpoint =
+            secure::DomainHttpEndpoint::parse("https://identity.internal:8443/nested/rpc")
+                .expect("valid endpoint");
+        let target = DomainHttpTargetConfig::new("identity", endpoint.clone(), outbound_policy())
+            .expect("target config");
+        assert_eq!(target.endpoint, endpoint);
+        assert_eq!(target.endpoint.as_url().path(), "/nested/rpc");
     }
 
     #[tokio::test]
@@ -2833,7 +2802,8 @@ mod tests {
     async fn domain_transport_invalid_spiffe_endpoint_fails_fast() {
         let target = DomainHttpTargetConfig::new(
             "identity",
-            "https://identity.internal/rpc",
+            secure::DomainHttpEndpoint::parse("https://identity.internal/rpc")
+                .expect("valid endpoint"),
             outbound_policy(),
         )
         .expect("target config");
@@ -2859,13 +2829,15 @@ mod tests {
             let targets = vec![
                 DomainHttpTargetConfig::new(
                     "identity",
-                    "https://identity.internal/rpc",
+                    secure::DomainHttpEndpoint::parse("https://identity.internal/rpc")
+                        .expect("valid endpoint"),
                     outbound_policy(),
                 )
                 .expect("identity target"),
                 DomainHttpTargetConfig::new(
                     "audit",
-                    "https://audit.internal/rpc",
+                    secure::DomainHttpEndpoint::parse("https://audit.internal/rpc")
+                        .expect("valid endpoint"),
                     outbound_policy(),
                 )
                 .expect("audit target"),
