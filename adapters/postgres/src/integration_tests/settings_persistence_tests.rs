@@ -1181,6 +1181,74 @@ async fn tc5_config_cotx_commits_config_and_outbox() -> TestResult {
     Ok(())
 }
 
+/// PG-CONFIG-AMBIENT-CORRELATION-01: the config co-transaction must persist ambient correlation
+/// only while `commit_publish` is polled inside the diagnostic scope.
+#[tokio::test(flavor = "multi_thread")]
+async fn tc5f_config_cotx_persists_only_scoped_ambient_correlation() -> TestResult {
+    const CORRELATION: &str = "pg-config-correlation-1399";
+
+    let (_pg, store) = connect_pg().await?;
+    setup_config(&store).await?;
+    let repo = PgConfigRepo::new(&store, fixed_clock_arc(), config_protection());
+    let tenant = config_tenant();
+    let scoped_event_id = unique_event_id("cfg-tc5f-scoped");
+    let unscoped_event_id = unique_event_id("cfg-tc5f-unscoped");
+
+    let scoped_commit = repo.commit_publish(
+        settings::config_publish_receipt_for_test(),
+        settings_scope(tenant),
+        ConfigMutation::Put(config_entry("app.correlation-scoped", "scoped", 1)),
+        reviewed_generated_event::<generated::event::settings_v1::Contract>(
+            config_outbox_entry(&scoped_event_id),
+            config_envelope("app.correlation-scoped"),
+        )
+        .await?,
+    );
+    diagctx::scope(
+        diagctx::DiagnosticCtx::new(diagctx::CorrelationId::parse(CORRELATION)?),
+        scoped_commit,
+    )
+    .await?;
+
+    repo.commit_publish(
+        settings::config_publish_receipt_for_test(),
+        settings_scope(tenant),
+        ConfigMutation::Put(config_entry("app.correlation-unscoped", "unscoped", 1)),
+        reviewed_generated_event::<generated::event::settings_v1::Contract>(
+            config_outbox_entry(&unscoped_event_id),
+            config_envelope("app.correlation-unscoped"),
+        )
+        .await?,
+    )
+    .await?;
+
+    let scoped_metadata: serde_json::Value =
+        sqlx::query_scalar("SELECT metadata FROM outbox WHERE event_id = $1")
+            .bind(&scoped_event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        scoped_metadata
+            .get("correlation")
+            .and_then(serde_json::Value::as_str),
+        Some(CORRELATION),
+        "scoped config co-transaction must persist the exact ambient correlation: {scoped_metadata}"
+    );
+
+    let unscoped_metadata: serde_json::Value =
+        sqlx::query_scalar("SELECT metadata FROM outbox WHERE event_id = $1")
+            .bind(&unscoped_event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        unscoped_metadata.get("correlation").is_none(),
+        "scope completion must not leak correlation into a later config co-transaction: {unscoped_metadata}"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// Delete 分支同样必须原子提交 tombstone 与唯一 deletion fact；CAS 失败时两者皆不落库。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]

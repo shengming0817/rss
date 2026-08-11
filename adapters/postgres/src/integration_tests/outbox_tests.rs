@@ -4924,7 +4924,8 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
         "metadata.actor.scope 应落库: {}",
         row.8
     );
-    // trace / correlation / principal 为后续 follow-up 空接缝，本 PR 不写。
+    // 本写入发生在 diagctx scope 外；ambient correlation 必须 fail-open 为省略。
+    // trace / principal 仍是尚未接入的 reserved key。
     for reserved in ["trace", "correlation", "principal"] {
         assert!(
             row.8.get(reserved).is_none(),
@@ -4932,6 +4933,72 @@ async fn t10_pg_emitter_commits_one_pending_with_eventid_and_subject() -> TestRe
             row.8
         );
     }
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+/// PG-EMITTER-AMBIENT-CORRELATION-01: `PgEmitter` must persist ambient correlation only while
+/// the write future is inside the diagnostic scope.
+#[tokio::test(flavor = "multi_thread")]
+async fn t10c_pg_emitter_persists_only_scoped_ambient_correlation() -> TestResult {
+    use eventexec::event::ReviewedEventWriter as _;
+
+    const CORRELATION: &str = "pg-emitter-correlation-1399";
+
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+
+    let tenant = test_tenant();
+    let scoped_event_id = unique_event_id("t10c-scoped");
+    let unscoped_event_id = unique_event_id("t10c-unscoped");
+    let emitter = crate::PgEmitter::new(&store, fixed_clock());
+    let scoped_event = reviewed_session_event(
+        &scoped_event_id,
+        tenant,
+        "subject-scoped-correlation",
+        actor_for(tenant),
+        "scoped-session",
+    )
+    .await?;
+    diagctx::scope(
+        diagctx::DiagnosticCtx::new(diagctx::CorrelationId::parse(CORRELATION)?),
+        emitter.write(scoped_event),
+    )
+    .await?;
+
+    let unscoped_event = reviewed_session_event(
+        &unscoped_event_id,
+        tenant,
+        "subject-unscoped-correlation",
+        actor_for(tenant),
+        "unscoped-session",
+    )
+    .await?;
+    emitter.write(unscoped_event).await?;
+
+    let scoped_metadata: serde_json::Value =
+        sqlx::query_scalar("SELECT metadata FROM outbox WHERE event_id = $1")
+            .bind(&scoped_event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert_eq!(
+        scoped_metadata
+            .get("correlation")
+            .and_then(serde_json::Value::as_str),
+        Some(CORRELATION),
+        "scoped PgEmitter write must persist the exact ambient correlation: {scoped_metadata}"
+    );
+
+    let unscoped_metadata: serde_json::Value =
+        sqlx::query_scalar("SELECT metadata FROM outbox WHERE event_id = $1")
+            .bind(&unscoped_event_id)
+            .fetch_one(&store.pool)
+            .await?;
+    assert!(
+        unscoped_metadata.get("correlation").is_none(),
+        "scope completion must not leak correlation into a later PgEmitter write: {unscoped_metadata}"
+    );
 
     store.shutdown().await?;
     Ok(())

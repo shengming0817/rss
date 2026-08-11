@@ -19,10 +19,16 @@ pub(crate) use projection_worker::ProjectionWorkerMint;
 #[cfg(feature = "domain-settings")]
 pub use projection_worker::{PgProjectionWorkerConfig, PgProjectionWorkerError};
 
-/// 默认连接池上限（与 sqlx 缺省同值）。tuning 参数（非安全必填依赖），故可有默认。
+/// 默认连接池下限（与 sqlx 0.8.6 缺省同值）。
+pub(crate) const DEFAULT_MIN_CONNECTIONS: u32 = 0;
+/// 默认连接池上限（与 sqlx 0.8.6 缺省同值）。tuning 参数（非安全必填依赖），故可有默认。
 pub(crate) const DEFAULT_MAX_CONNECTIONS: u32 = 10;
-/// 默认获取连接超时（与 sqlx 缺省同值）。
+/// 默认获取连接超时（与 sqlx 0.8.6 缺省同值）。
 pub(crate) const DEFAULT_ACQUIRE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 默认空闲连接回收时间（与 sqlx 0.8.6 缺省同值）。
+pub(crate) const DEFAULT_IDLE_TIMEOUT: Option<Duration> = Some(Duration::from_secs(600));
+/// 默认连接最大存活时间（与 sqlx 0.8.6 缺省同值）。
+pub(crate) const DEFAULT_MAX_LIFETIME: Option<Duration> = Some(Duration::from_secs(1_800));
 /// 默认 TLS 模式：`VerifyFull`（零信任 / MDM：强制 TLS **且**校验服务端证书链 + 主机名——杜绝静默明文
 /// 回退与 MITM）。sqlx 0.8 仅 `VerifyCa`/`VerifyFull` 拒无效证书、仅 `VerifyFull` 校验主机名；`Require`
 /// 只加密不验证身份（可被 MITM），`Prefer`（sqlx 缺省）更会回退明文，故均**不**用作 RSS 默认。内部 /
@@ -74,6 +80,15 @@ pub enum PgError {
     /// 配置校验：max_connections 为 0。
     #[error("postgres config: max_connections must be >= 1")]
     ZeroMaxConnections,
+    /// 配置校验：min_connections 超过 max_connections。
+    #[error("postgres config: min_connections must not exceed max_connections")]
+    MinConnectionsExceedsMaxConnections,
+    /// 配置校验：idle_timeout 为 0，会使 SQLx maintenance task 热循环。
+    #[error("postgres config: idle_timeout must be greater than zero when enabled")]
+    ZeroIdleTimeout,
+    /// 配置校验：max_lifetime 为 0，会使 SQLx maintenance task 热循环。
+    #[error("postgres config: max_lifetime must be greater than zero when enabled")]
+    ZeroMaxLifetime,
     /// 建池 / 连接失败。
     #[error("postgres {lane} connection failed")]
     Connect {
@@ -363,13 +378,16 @@ pub struct PgConfig {
     password: PgPassword,
     ssl_mode: PgSslMode,
     ssl_root_cert: Option<PathBuf>,
+    min_connections: u32,
     max_connections: u32,
     acquire_timeout: Duration,
+    idle_timeout: Option<Duration>,
+    max_lifetime: Option<Duration>,
 }
 
 impl PgConfig {
-    /// 由必填连接参数构造；TLS 默认 [`DEFAULT_SSL_MODE`]、池 tuning 取默认
-    /// （[`DEFAULT_MAX_CONNECTIONS`] / [`DEFAULT_ACQUIRE_TIMEOUT`]）。
+    /// 由必填连接参数构造；TLS 默认 [`DEFAULT_SSL_MODE`]，池 tuning 显式固定为 sqlx 0.8.6
+    /// 缺省值。连接借出前的健康检查恒为开启且不提供关闭开关。
     #[must_use]
     pub fn new(
         host: impl Into<String>,
@@ -386,8 +404,11 @@ impl PgConfig {
             password,
             ssl_mode: DEFAULT_SSL_MODE,
             ssl_root_cert: None,
+            min_connections: DEFAULT_MIN_CONNECTIONS,
             max_connections: DEFAULT_MAX_CONNECTIONS,
             acquire_timeout: DEFAULT_ACQUIRE_TIMEOUT,
+            idle_timeout: DEFAULT_IDLE_TIMEOUT,
+            max_lifetime: DEFAULT_MAX_LIFETIME,
         }
     }
 
@@ -407,6 +428,16 @@ impl PgConfig {
         self
     }
 
+    /// 调整每个池尽力维持的最小连接数（默认 0）。
+    ///
+    /// 该值会独立作用于 writer、reader 与各维护 lane，部署方须将多池连接预算相加。最终配置要求
+    /// `min_connections <= max_connections`，否则在连接前 fail-fast。
+    #[must_use]
+    pub fn with_min_connections(mut self, min: u32) -> Self {
+        self.min_connections = min;
+        self
+    }
+
     /// 调整连接池上限（累加式 builder；最终由 `PgStore::connect`（`pub(crate)` funnel）validate）。
     #[must_use]
     pub fn with_max_connections(mut self, max: u32) -> Self {
@@ -421,7 +452,21 @@ impl PgConfig {
         self
     }
 
-    /// fail-fast 校验：host / database / username / password 非空、port ≠ 0、max_connections ≥ 1。
+    /// 调整空闲连接回收时间（默认 10 分钟）；`None` 显式关闭按空闲时间回收，启用时必须大于 0。
+    #[must_use]
+    pub fn with_idle_timeout(mut self, timeout: Option<Duration>) -> Self {
+        self.idle_timeout = timeout;
+        self
+    }
+
+    /// 调整连接最大存活时间（默认 30 分钟）；`None` 显式关闭按存活时间回收，启用时必须大于 0。
+    #[must_use]
+    pub fn with_max_lifetime(mut self, lifetime: Option<Duration>) -> Self {
+        self.max_lifetime = lifetime;
+        self
+    }
+
+    /// fail-fast 校验：连接参数非空、port ≠ 0、连接数合法，启用的生命周期时长大于 0。
     pub(crate) fn validate(&self) -> Result<(), PgError> {
         if self.host.trim().is_empty() {
             return Err(PgError::EmptyHost);
@@ -441,7 +486,27 @@ impl PgConfig {
         if self.max_connections == 0 {
             return Err(PgError::ZeroMaxConnections);
         }
+        if self.min_connections > self.max_connections {
+            return Err(PgError::MinConnectionsExceedsMaxConnections);
+        }
+        if self.idle_timeout.is_some_and(|timeout| timeout.is_zero()) {
+            return Err(PgError::ZeroIdleTimeout);
+        }
+        if self.max_lifetime.is_some_and(|lifetime| lifetime.is_zero()) {
+            return Err(PgError::ZeroMaxLifetime);
+        }
         Ok(())
+    }
+
+    /// 单一连接池映射入口；生产建池与单测共享，避免 adapter 默认值和 sqlx builder 漂移。
+    fn pool_options(&self) -> PgPoolOptions {
+        PgPoolOptions::new()
+            .min_connections(self.min_connections)
+            .max_connections(self.max_connections)
+            .acquire_timeout(self.acquire_timeout)
+            .idle_timeout(self.idle_timeout)
+            .max_lifetime(self.max_lifetime)
+            .test_before_acquire(true)
     }
 
     /// 映射为 sqlx 连接描述（密码经 [`PgPassword::expose`] 仅在此传入 sqlx，不外泄；TLS 模式显式注入）。
@@ -3513,9 +3578,8 @@ impl PgStore {
         application_name: &'static str,
     ) -> Result<Self, PgError> {
         config.validate()?;
-        let pool = PgPoolOptions::new()
-            .max_connections(config.max_connections)
-            .acquire_timeout(config.acquire_timeout)
+        let pool = config
+            .pool_options()
             .connect_with(config.connect_options_for(application_name))
             .await
             .inspect_err(|err| {
@@ -3616,6 +3680,34 @@ mod tests {
     fn validate_rejects_zero_max_connections() {
         let cfg = sample().with_max_connections(0);
         assert!(matches!(cfg.validate(), Err(PgError::ZeroMaxConnections)));
+    }
+
+    #[test]
+    fn validate_rejects_min_connections_above_max() {
+        let cfg = sample().with_max_connections(2).with_min_connections(3);
+        assert!(matches!(
+            cfg.validate(),
+            Err(PgError::MinConnectionsExceedsMaxConnections)
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_zero_lifecycle_durations_but_accepts_disabled_values() {
+        assert!(matches!(
+            sample().with_idle_timeout(Some(Duration::ZERO)).validate(),
+            Err(PgError::ZeroIdleTimeout)
+        ));
+        assert!(matches!(
+            sample().with_max_lifetime(Some(Duration::ZERO)).validate(),
+            Err(PgError::ZeroMaxLifetime)
+        ));
+        assert!(
+            sample()
+                .with_idle_timeout(None)
+                .with_max_lifetime(None)
+                .validate()
+                .is_ok()
+        );
     }
 
     #[test]
@@ -3766,6 +3858,42 @@ mod tests {
         assert_eq!(DEFAULT_MAX_CONNECTIONS, 10);
         assert_eq!(DEFAULT_ACQUIRE_TIMEOUT, Duration::from_secs(30));
         assert!(matches!(DEFAULT_SSL_MODE, PgSslMode::VerifyFull));
+    }
+
+    #[test]
+    fn pool_options_preserve_connection_health_defaults() {
+        let options = sample().pool_options();
+
+        assert_eq!(options.get_max_connections(), DEFAULT_MAX_CONNECTIONS);
+        assert_eq!(options.get_acquire_timeout(), DEFAULT_ACQUIRE_TIMEOUT);
+        assert_eq!(options.get_min_connections(), DEFAULT_MIN_CONNECTIONS);
+        assert_eq!(options.get_idle_timeout(), DEFAULT_IDLE_TIMEOUT);
+        assert_eq!(options.get_max_lifetime(), DEFAULT_MAX_LIFETIME);
+        assert!(options.get_test_before_acquire());
+    }
+
+    #[test]
+    fn pool_options_apply_health_lifecycle_overrides() {
+        let options = sample()
+            .with_min_connections(3)
+            .with_idle_timeout(Some(Duration::from_secs(45)))
+            .with_max_lifetime(Some(Duration::from_secs(90)))
+            .pool_options();
+
+        assert_eq!(options.get_min_connections(), 3);
+        assert_eq!(options.get_idle_timeout(), Some(Duration::from_secs(45)));
+        assert_eq!(options.get_max_lifetime(), Some(Duration::from_secs(90)));
+        assert!(options.get_test_before_acquire());
+
+        let disabled = sample()
+            .with_idle_timeout(Some(Duration::from_secs(1)))
+            .with_idle_timeout(None)
+            .with_max_lifetime(Some(Duration::from_secs(1)))
+            .with_max_lifetime(None)
+            .pool_options();
+        assert_eq!(disabled.get_idle_timeout(), None);
+        assert_eq!(disabled.get_max_lifetime(), None);
+        assert!(disabled.get_test_before_acquire());
     }
 
     #[test]
