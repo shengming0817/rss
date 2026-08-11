@@ -8,8 +8,9 @@ use crate::contract_manifest::{
     Schemas, Subscription,
 };
 use crate::repository_contract::{
-    RepositoryContract, load_contract_repository, schema_hash, validate_workflow_activations,
-    verify_contract_repository_unchanged,
+    RepositoryContract, RepositoryContractSourceFile, capture_contract_repository_sources,
+    load_contract_repository, load_contract_repository_snapshot, schema_hash,
+    validate_workflow_activations, verify_contract_repository_unchanged,
 };
 use crate::{
     AssemblyManifest, AssemblyProfile, CanonicalAssemblyManifestV2,
@@ -30,6 +31,7 @@ const GENERATED_TAG: &str = "rss-assembly-generated-v2";
 const CONTRACTS_TAG: &str = "rss-assembly-contracts-v2";
 const CONTRACT_RUNTIME_SEMANTICS_TAG: &str = "rss-contract-runtime-semantics-v2";
 const SCHEMA_VERSION: u32 = 2;
+const SNAPSHOT_SCHEMA_VERSION: u32 = 2;
 #[cfg(test)]
 const NON_BLANK_NAME_PATTERN: &str = r"^.*\S.*$";
 
@@ -190,6 +192,207 @@ pub struct RepositoryAssemblyManifestV2 {
     source_text: String,
 }
 
+/// Immutable presented repository source universe that replays the complete AssemblyLock v2 join.
+///
+/// As with path-based repository discovery, verification proves completeness relative to the
+/// supplied source universe. The build capture owns binding that universe to a specific checkout.
+pub struct RepositoryAssemblySnapshotV2 {
+    wire: WireRepositoryAssemblySnapshotV2,
+    manifest: CanonicalAssemblyManifestV2,
+    lock: RepositoryVerifiedAssemblyLock,
+}
+
+impl RepositoryAssemblySnapshotV2 {
+    /// Capture and verify the exact repository sources consumed by one committed AssemblyLock.
+    pub fn capture_v2(
+        manifest: &RepositoryAssemblyManifestV2,
+        lock_bytes: &[u8],
+    ) -> Result<Self, AssemblyLockError> {
+        let current = manifest.rediscover_unchanged()?;
+        let lock_path = current.assembly_dir.join("assembly.lock.json");
+        verify_snapshot_file_unchanged(&lock_path, lock_bytes, "AssemblyLock")?;
+        let contracts = load_contract_repository(&current.repository_root.join("contracts"))
+            .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
+        validate_workflow_activations(current.canonical(), &contracts)
+            .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
+        let contract_files =
+            capture_contract_repository_sources(&current.repository_root, &contracts)
+                .map_err(|error| AssemblyLockError::contract(error.to_string()))?
+                .into_iter()
+                .map(|file| SnapshotSourceFileV2 {
+                    path: file.path,
+                    content: file.content,
+                })
+                .collect();
+        let generated_files = capture_generated_sources_v2(
+            &current.repository_root,
+            &current.assembly_dir.join("src/generated"),
+        )?;
+        let lock_content = std::str::from_utf8(lock_bytes)
+            .map_err(|error| {
+                AssemblyLockError::snapshot(format!("AssemblyLock is not UTF-8: {error}"))
+            })?
+            .to_owned();
+        let wire = WireRepositoryAssemblySnapshotV2 {
+            schema_version: SNAPSHOT_SCHEMA_VERSION,
+            assembly_manifest: SnapshotSourceFileV2 {
+                path: current.source_label.clone(),
+                content: current.source_text.clone(),
+            },
+            assembly_lock: SnapshotSourceFileV2 {
+                path: format!("assemblies/{}/assembly.lock.json", current.canonical.name()),
+                content: lock_content,
+            },
+            generated_files,
+            contract_files,
+        };
+        let snapshot = Self::verify_wire(wire)?;
+        verify_contract_repository_unchanged(
+            &current.repository_root.join("contracts"),
+            &contracts,
+        )
+        .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
+        verify_generated_sources_unchanged(
+            &current.repository_root,
+            &current.assembly_dir.join("src/generated"),
+            &snapshot.wire.generated_files,
+        )?;
+        verify_snapshot_file_unchanged(&lock_path, lock_bytes, "AssemblyLock")?;
+        current.rediscover_unchanged()?;
+        Ok(snapshot)
+    }
+
+    /// Parse a strict snapshot and replay every repository validation before minting the lock.
+    pub fn from_json_slice(bytes: &[u8]) -> Result<Self, AssemblyLockError> {
+        let wire = serde_json::from_slice(bytes).map_err(|source| {
+            AssemblyLockError::new(AssemblyLockErrorKind::StrictSnapshotJson(source))
+        })?;
+        Self::verify_wire(wire)
+    }
+
+    /// Serialize deterministic pretty JSON with exactly one trailing line feed.
+    pub fn to_pretty_json_vec(&self) -> Result<Vec<u8>, AssemblyLockError> {
+        let mut bytes = serde_json::to_vec_pretty(&self.wire).map_err(|source| {
+            AssemblyLockError::new(AssemblyLockErrorKind::SnapshotSerialization(source))
+        })?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    pub const fn manifest(&self) -> &CanonicalAssemblyManifestV2 {
+        &self.manifest
+    }
+
+    pub const fn lock(&self) -> &RepositoryVerifiedAssemblyLock {
+        &self.lock
+    }
+
+    fn verify_wire(wire: WireRepositoryAssemblySnapshotV2) -> Result<Self, AssemblyLockError> {
+        if wire.schema_version != SNAPSHOT_SCHEMA_VERSION {
+            return Err(AssemblyLockError::snapshot(format!(
+                "unsupported repository snapshot schemaVersion {}",
+                wire.schema_version
+            )));
+        }
+        let manifest_path = normalized_snapshot_path(&wire.assembly_manifest.path)?;
+        let components = manifest_path.components().collect::<Vec<_>>();
+        let [
+            Component::Normal(assemblies),
+            Component::Normal(directory),
+            Component::Normal(file),
+        ] = components.as_slice()
+        else {
+            return Err(AssemblyLockError::snapshot(
+                "assembly manifest path must be assemblies/<name>/assembly.toml",
+            ));
+        };
+        if assemblies.to_str() != Some("assemblies") || file.to_str() != Some("assembly.toml") {
+            return Err(AssemblyLockError::snapshot(
+                "assembly manifest path must be assemblies/<name>/assembly.toml",
+            ));
+        }
+        let directory = directory.to_str().ok_or_else(|| {
+            AssemblyLockError::snapshot("assembly snapshot directory is not UTF-8")
+        })?;
+        let manifest =
+            AssemblyManifest::from_toml_str(&wire.assembly_manifest.content).map_err(|source| {
+                AssemblyLockError::new(AssemblyLockErrorKind::AssemblyManifestToml {
+                    path: manifest_path.clone(),
+                    source,
+                })
+            })?;
+        let canonical = manifest.canonicalize_v2().map_err(|source| {
+            AssemblyLockError::new(AssemblyLockErrorKind::AssemblyManifestCanonicalization {
+                path: manifest_path.clone(),
+                source: Box::new(source),
+            })
+        })?;
+        if canonical.name() != directory {
+            return Err(AssemblyLockError::snapshot(format!(
+                "assembly directory basename `{directory}` does not match manifest name `{}`",
+                canonical.name()
+            )));
+        }
+        let expected_lock_path = format!("assemblies/{directory}/assembly.lock.json");
+        if wire.assembly_lock.path != expected_lock_path {
+            return Err(AssemblyLockError::snapshot(format!(
+                "AssemblyLock path must be {expected_lock_path}"
+            )));
+        }
+        normalized_snapshot_path(&wire.assembly_lock.path)?;
+
+        let generated = generated_digest_from_snapshot_v2(directory, &wire.generated_files)?;
+        if wire.contract_files.is_empty() {
+            return Err(AssemblyLockError::snapshot(
+                "contract snapshot universe is empty",
+            ));
+        }
+        let mut previous = None::<&str>;
+        let mut contract_sources = Vec::with_capacity(wire.contract_files.len());
+        for file in &wire.contract_files {
+            normalized_snapshot_path(&file.path)?;
+            if !file.path.starts_with("contracts/") {
+                return Err(AssemblyLockError::snapshot(format!(
+                    "contract snapshot path is outside contracts/: {}",
+                    file.path
+                )));
+            }
+            if previous.is_some_and(|value| value >= file.path.as_str()) {
+                return Err(AssemblyLockError::snapshot(
+                    "contract snapshot paths must be strictly sorted",
+                ));
+            }
+            previous = Some(&file.path);
+            contract_sources.push(RepositoryContractSourceFile {
+                path: file.path.clone(),
+                content: file.content.clone(),
+            });
+        }
+        let contracts = load_contract_repository_snapshot(&contract_sources)
+            .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
+        validate_workflow_activations(&canonical, &contracts)
+            .map_err(|error| AssemblyLockError::contract(error.to_string()))?;
+        let catalog = RepositoryContractCatalogV2::from_repository(&contracts)?;
+        let expected = RepositoryVerifiedAssemblyLock(compile_with_digests_v2(
+            &canonical, generated, &catalog,
+        )?);
+        let parsed = ParsedAssemblyLock::from_json_slice(wire.assembly_lock.content.as_bytes())?;
+        if parsed.fingerprint().as_str() != expected.fingerprint().as_str() {
+            return Err(AssemblyLockError::new(
+                AssemblyLockErrorKind::RepositoryMismatch {
+                    expected: expected.fingerprint().as_str().to_owned(),
+                    actual: parsed.fingerprint().as_str().to_owned(),
+                },
+            ));
+        }
+        Ok(Self {
+            wire,
+            manifest: canonical,
+            lock: expected,
+        })
+    }
+}
+
 impl RepositoryAssemblyManifestV2 {
     /// Discover, validate, and canonicalize `assemblies/<name>/assembly.toml` exactly once.
     pub fn discover_v2(
@@ -237,12 +440,6 @@ impl RepositoryAssemblyManifestV2 {
 #[serde(transparent)]
 pub struct RepositoryVerifiedAssemblyLock(AssemblyLock);
 
-/// Concrete provenance capability required by executable AssemblyLock consumers.
-///
-/// Its field is private and there is no downstream-implementable proof interface: values can only
-/// come from repository verification or the explicit Cargo build-attestation boundary.
-pub struct ExecutableAssemblyLock(AssemblyLock);
-
 impl RepositoryVerifiedAssemblyLock {
     /// Sole production compiler: discovers contracts itself and accepts no raw digest/catalog input.
     pub fn compile_v2(manifest: &RepositoryAssemblyManifestV2) -> Result<Self, AssemblyLockError> {
@@ -267,34 +464,6 @@ impl RepositoryVerifiedAssemblyLock {
 
     pub const fn as_lock(&self) -> &AssemblyLock {
         &self.0
-    }
-
-    pub const fn identity(&self) -> &AssemblyIdentity {
-        self.0.identity()
-    }
-
-    pub const fn digests(&self) -> &AssemblyDigests {
-        self.0.digests()
-    }
-
-    pub const fn fingerprint(&self) -> &AssemblyFingerprint {
-        self.0.fingerprint()
-    }
-
-    /// Promote a repository-verified lock into the sole executable capability.
-    pub fn into_executable(self) -> ExecutableAssemblyLock {
-        ExecutableAssemblyLock(self.0)
-    }
-}
-
-impl ExecutableAssemblyLock {
-    /// Promote the immutable lock artifact verified by the consuming crate's Cargo build script.
-    ///
-    /// This narrow trust-boundary constructor is for assembly crates whose build script fails
-    /// unless the exact `include_bytes!` artifact passes complete repository verification.
-    #[doc(hidden)]
-    pub fn from_build_attested(parsed: ParsedAssemblyLock) -> Self {
-        Self(parsed.0)
     }
 
     pub const fn identity(&self) -> &AssemblyIdentity {
@@ -372,11 +541,18 @@ pub enum AssemblyLockErrorStage {
     GeneratedUniverse,
     FileSystem,
     Serialization,
+    RepositorySnapshot,
 }
 #[derive(Debug, thiserror::Error)]
 enum AssemblyLockErrorKind {
     #[error("invalid strict AssemblyLock JSON: {0}")]
     StrictJson(#[source] serde_json::Error),
+    #[error("invalid strict repository assembly snapshot JSON: {0}")]
+    StrictSnapshotJson(#[source] serde_json::Error),
+    #[error("repository assembly snapshot: {0}")]
+    Snapshot(String),
+    #[error("repository assembly snapshot serialization failed: {0}")]
+    SnapshotSerialization(#[source] serde_json::Error),
     #[error("RFC8785 canonical serialization failed: {0}")]
     CanonicalJson(#[source] serde_json::Error),
     #[error("{context}: {source}")]
@@ -431,6 +607,12 @@ impl AssemblyLockError {
             AssemblyLockErrorKind::Generated(_) => AssemblyLockErrorStage::GeneratedUniverse,
             AssemblyLockErrorKind::Io { .. } => AssemblyLockErrorStage::FileSystem,
             AssemblyLockErrorKind::CanonicalJson(_) => AssemblyLockErrorStage::Serialization,
+            AssemblyLockErrorKind::SnapshotSerialization(_) => {
+                AssemblyLockErrorStage::Serialization
+            }
+            AssemblyLockErrorKind::StrictSnapshotJson(_) | AssemblyLockErrorKind::Snapshot(_) => {
+                AssemblyLockErrorStage::RepositorySnapshot
+            }
             _ => AssemblyLockErrorStage::LockFile,
         }
     }
@@ -453,6 +635,9 @@ impl AssemblyLockError {
     fn contract(message: impl Into<String>) -> Self {
         Self(AssemblyLockErrorKind::Contract(message.into()))
     }
+    fn snapshot(message: impl Into<String>) -> Self {
+        Self(AssemblyLockErrorKind::Snapshot(message.into()))
+    }
 }
 fn io_error(context: impl Into<String>) -> impl FnOnce(io::Error) -> AssemblyLockError {
     let context = context.into();
@@ -463,6 +648,21 @@ fn generated_path(reason: &str, path: &Path) -> AssemblyLockError {
 }
 fn assembly_path(reason: &str, path: &Path) -> AssemblyLockError {
     AssemblyLockError::assembly(format!("{reason}: {}", path.display()))
+}
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WireRepositoryAssemblySnapshotV2 {
+    schema_version: u32,
+    assembly_manifest: SnapshotSourceFileV2,
+    assembly_lock: SnapshotSourceFileV2,
+    generated_files: Vec<SnapshotSourceFileV2>,
+    contract_files: Vec<SnapshotSourceFileV2>,
+}
+#[derive(Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct SnapshotSourceFileV2 {
+    path: String,
+    content: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -544,6 +744,131 @@ fn generated_digest_v2(
         &discover_generated_files_v2(repository_root, generated_root)?,
     )
 }
+fn capture_generated_sources_v2(
+    repository_root: &Path,
+    generated_root: &Path,
+) -> Result<Vec<SnapshotSourceFileV2>, AssemblyLockError> {
+    discover_generated_files_v2(repository_root, generated_root)?
+        .into_iter()
+        .map(|entry| {
+            let path = repository_root.join(&entry.path);
+            let bytes =
+                fs::read(&path).map_err(io_error(format!("failed to read {}", path.display())))?;
+            let actual = digest_owned_bytes(&path, &bytes)?;
+            if actual != entry.digest {
+                return Err(AssemblyLockError::generated(format!(
+                    "generated file changed while snapshotting: {}",
+                    path.display()
+                )));
+            }
+            let content = String::from_utf8(bytes).map_err(|error| {
+                AssemblyLockError::generated(format!(
+                    "generated file is not UTF-8: {}: {error}",
+                    path.display()
+                ))
+            })?;
+            Ok(SnapshotSourceFileV2 {
+                path: entry.path,
+                content,
+            })
+        })
+        .collect()
+}
+
+fn verify_generated_sources_unchanged(
+    repository_root: &Path,
+    generated_root: &Path,
+    expected: &[SnapshotSourceFileV2],
+) -> Result<(), AssemblyLockError> {
+    let current = capture_generated_sources_v2(repository_root, generated_root)?;
+    if current != expected {
+        return Err(AssemblyLockError::generated(
+            "generated universe changed while snapshotting",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_snapshot_file_unchanged(
+    path: &Path,
+    expected: &[u8],
+    label: &str,
+) -> Result<(), AssemblyLockError> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(io_error(format!("failed to inspect {}", path.display())))?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(AssemblyLockError::snapshot(format!(
+            "{label} must be a non-symlink regular file: {}",
+            path.display()
+        )));
+    }
+    let current = fs::read(path).map_err(io_error(format!("failed to read {}", path.display())))?;
+    if current != expected {
+        return Err(AssemblyLockError::snapshot(format!(
+            "{label} changed while snapshotting: {}",
+            path.display()
+        )));
+    }
+    Ok(())
+}
+
+fn generated_digest_from_snapshot_v2(
+    assembly: &str,
+    files: &[SnapshotSourceFileV2],
+) -> Result<CanonicalSha256Digest, AssemblyLockError> {
+    if files.is_empty() {
+        return Err(AssemblyLockError::generated("file universe is empty"));
+    }
+    let expected_prefix = format!("assemblies/{assembly}/src/generated/");
+    let mut seen = BTreeSet::new();
+    let mut previous = None::<&str>;
+    let mut digests = Vec::with_capacity(files.len());
+    for file in files {
+        normalized_snapshot_path(&file.path)?;
+        if !file.path.starts_with(&expected_prefix) {
+            return Err(AssemblyLockError::generated(format!(
+                "snapshot path is outside {expected_prefix}: {}",
+                file.path
+            )));
+        }
+        if previous.is_some_and(|value| value >= file.path.as_str()) {
+            return Err(AssemblyLockError::generated(
+                "snapshot paths must be strictly sorted",
+            ));
+        }
+        previous = Some(&file.path);
+        if !seen.insert(file.path.as_str()) {
+            return Err(AssemblyLockError::generated(format!(
+                "duplicate generated path: {}",
+                file.path
+            )));
+        }
+        digests.push(GeneratedFileDigest {
+            path: file.path.clone(),
+            digest: digest_owned_bytes(Path::new(&file.path), file.content.as_bytes())?,
+        });
+    }
+    tagged_digest(GENERATED_TAG, &digests)
+}
+
+fn normalized_snapshot_path(label: &str) -> Result<PathBuf, AssemblyLockError> {
+    if label.is_empty() || label.contains('\\') {
+        return Err(AssemblyLockError::snapshot(format!(
+            "snapshot path is not normalized: {label:?}"
+        )));
+    }
+    let path = PathBuf::from(label);
+    if path.is_absolute()
+        || path
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(AssemblyLockError::snapshot(format!(
+            "snapshot path is not normalized: {label:?}"
+        )));
+    }
+    Ok(path)
+}
 fn discover_generated_files_v2(
     repository_root: &Path,
     generated_root: &Path,
@@ -620,17 +945,8 @@ fn digest_owned_file(path: &Path) -> Result<CanonicalSha256Digest, AssemblyLockE
     if !metadata.is_file() {
         return Err(generated_path("input is not a regular file", path));
     }
-    let markers = [
-        GENERATED_MODULE_OWNERSHIP_MARKER.as_bytes(),
-        GENERATED_PROVIDER_OWNERSHIP_MARKER.as_bytes(),
-    ];
-    let prefix_len = markers
-        .iter()
-        .map(|marker| marker.len() + 1)
-        .fold(0, usize::max);
-    let mut prefix = Vec::with_capacity(prefix_len);
     let mut buffer = [0_u8; 8192];
-    let mut hasher = Sha256::new();
+    let mut bytes = Vec::new();
     loop {
         let read = file
             .read(&mut buffer)
@@ -638,22 +954,29 @@ fn digest_owned_file(path: &Path) -> Result<CanonicalSha256Digest, AssemblyLockE
         if read == 0 {
             break;
         }
-        if prefix.len() < prefix_len {
-            let needed = prefix_len - prefix.len();
-            prefix.extend_from_slice(&buffer[..read.min(needed)]);
-        }
-        hasher.update(&buffer[..read]);
+        bytes.extend_from_slice(&buffer[..read]);
     }
-    let owned = markers.iter().any(|marker| {
-        prefix.starts_with(marker) && prefix.get(marker.len()).copied() == Some(b'\n')
-    });
+    digest_owned_bytes(path, &bytes)
+}
+
+fn digest_owned_bytes(
+    path: &Path,
+    bytes: &[u8],
+) -> Result<CanonicalSha256Digest, AssemblyLockError> {
+    let markers = [
+        GENERATED_MODULE_OWNERSHIP_MARKER.as_bytes(),
+        GENERATED_PROVIDER_OWNERSHIP_MARKER.as_bytes(),
+    ];
+    let owned = markers
+        .iter()
+        .any(|marker| bytes.starts_with(marker) && bytes.get(marker.len()).copied() == Some(b'\n'));
     if !owned {
         return Err(generated_path(
             "generated file lacks ownership marker",
             path,
         ));
     }
-    CanonicalSha256Digest::parse(format!("sha256:{:x}", hasher.finalize()))
+    CanonicalSha256Digest::parse(format!("sha256:{:x}", Sha256::digest(bytes)))
         .map_err(|_| AssemblyLockError::new(AssemblyLockErrorKind::InvalidDigest("computed")))
 }
 fn ensure_path_below_repository(
@@ -1050,13 +1373,22 @@ fn compile_with_catalog_v2(
     assembly_dir: &Path,
     catalog: &RepositoryContractCatalogV2,
 ) -> Result<AssemblyLock, AssemblyLockError> {
+    let generated = generated_digest_v2(repository_root, &assembly_dir.join("src/generated"))?;
+    compile_with_digests_v2(manifest, generated, catalog)
+}
+
+fn compile_with_digests_v2(
+    manifest: &CanonicalAssemblyManifestV2,
+    generated: CanonicalSha256Digest,
+    catalog: &RepositoryContractCatalogV2,
+) -> Result<AssemblyLock, AssemblyLockError> {
     let identity = AssemblyIdentity {
         name: manifest.name().to_owned(),
         profile: manifest.profile(),
     };
     let digests = AssemblyDigests {
         manifest: manifest.manifest_digest().clone(),
-        generated: generated_digest_v2(repository_root, &assembly_dir.join("src/generated"))?,
+        generated,
         contracts: contracts_digest_v2(manifest, catalog)?,
     };
     let fingerprint = AssemblyFingerprint(fingerprint_for(&identity, &digests)?);
@@ -1364,6 +1696,39 @@ mod tests {
             &root.join("assemblies/runtime/src/generated"),
         ));
         fs::remove_dir_all(root).expect("remove file root");
+    }
+
+    #[test]
+    fn repository_snapshot_final_check_rejects_generated_and_lock_mutation() {
+        let root = root("snapshot-final-check");
+        let assembly = root.join("assemblies/runtime");
+        let generated = assembly.join("src/generated");
+        owned(
+            &generated.join("modules_gen.rs"),
+            "pub const MODULES: u8 = 1;",
+        );
+        let expected = capture_generated_sources_v2(&root, &generated).expect("capture generated");
+        verify_generated_sources_unchanged(&root, &generated, &expected)
+            .expect("unchanged generated universe");
+        provider_owned(
+            &generated.join("providers_gen.rs"),
+            "pub const PROVIDERS: u8 = 1;",
+        );
+        rejected(verify_generated_sources_unchanged(
+            &root, &generated, &expected,
+        ));
+
+        let lock_path = assembly.join("assembly.lock.json");
+        fs::write(&lock_path, b"old lock").expect("write lock");
+        verify_snapshot_file_unchanged(&lock_path, b"old lock", "AssemblyLock")
+            .expect("unchanged lock");
+        fs::write(&lock_path, b"new lock").expect("mutate lock");
+        rejected(verify_snapshot_file_unchanged(
+            &lock_path,
+            b"old lock",
+            "AssemblyLock",
+        ));
+        fs::remove_dir_all(root).expect("remove snapshot fixture");
     }
 
     #[cfg(unix)]

@@ -21,7 +21,7 @@ note: if you're trying to build a new `RuntimePlan`, consider using `RuntimePlan
   |
   | /     pub fn compile_v3(
   | |         manifest: &CanonicalAssemblyManifestV2,
-  | |         lock: &ExecutableAssemblyLock,
+  | |         lock: &RepositoryVerifiedAssemblyLock,
   | |         input: RuntimePlanV3Input,
   | |     ) -> Result<Self, RuntimePlanError> {
   | |_______________________________________^
@@ -30,7 +30,7 @@ help: there is an associated function `compile_v3` with a similar name
   |
   | /     pub fn compile_v3(
   | |         manifest: &CanonicalAssemblyManifestV2,
-  | |         lock: &ExecutableAssemblyLock,
+  | |         lock: &RepositoryVerifiedAssemblyLock,
   | |         input: RuntimePlanV3Input,
   | |     ) -> Result<Self, RuntimePlanError> {
   | |_______________________________________^

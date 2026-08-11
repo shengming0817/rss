@@ -10,7 +10,7 @@ note: if you're trying to build a new `ParsedRuntimePlan`, consider using `Parse
   | /     pub fn from_json_slice_bound(
   | |         bytes: &[u8],
   | |         manifest: &CanonicalAssemblyManifestV2,
-  | |         lock: &ExecutableAssemblyLock,
+  | |         lock: &RepositoryVerifiedAssemblyLock,
   | |     ) -> Result<Self, RuntimePlanError> {
   | |_______________________________________^
 help: there is an associated function `from_json_slice_bound` with a similar name
@@ -19,6 +19,6 @@ help: there is an associated function `from_json_slice_bound` with a similar nam
   | /     pub fn from_json_slice_bound(
   | |         bytes: &[u8],
   | |         manifest: &CanonicalAssemblyManifestV2,
-  | |         lock: &ExecutableAssemblyLock,
+  | |         lock: &RepositoryVerifiedAssemblyLock,
   | |     ) -> Result<Self, RuntimePlanError> {
   | |_______________________________________^

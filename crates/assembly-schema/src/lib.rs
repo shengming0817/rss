@@ -11,8 +11,8 @@ mod runtime_plan;
 pub use contract_owner::ContractOwner;
 pub use lock::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, AssemblyLock, AssemblyLockError,
-    AssemblyLockErrorStage, ExecutableAssemblyLock, GENERATED_MODULE_OWNERSHIP_MARKER,
-    GENERATED_PROVIDER_OWNERSHIP_MARKER, ParsedAssemblyLock, RepositoryAssemblyManifestV2,
+    AssemblyLockErrorStage, GENERATED_MODULE_OWNERSHIP_MARKER, GENERATED_PROVIDER_OWNERSHIP_MARKER,
+    ParsedAssemblyLock, RepositoryAssemblyManifestV2, RepositoryAssemblySnapshotV2,
     RepositoryVerifiedAssemblyLock,
 };
 pub use provider::{

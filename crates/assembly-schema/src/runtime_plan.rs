@@ -4,8 +4,8 @@
 
 use crate::{
     AssemblyDomain, AssemblyFingerprint, AssemblyListenerKind, CanonicalAssemblyManifestV2,
-    ExecutableAssemblyLock, LifecycleChannel, ProviderActivation, ProviderConstructor,
-    ProviderLifecycle, ProviderRole, WorkflowActivation,
+    LifecycleChannel, ProviderActivation, ProviderConstructor, ProviderLifecycle, ProviderRole,
+    RepositoryVerifiedAssemblyLock, WorkflowActivation,
 };
 use schemars::JsonSchema;
 use schemars::schema::{RootSchema, Schema};
@@ -63,7 +63,7 @@ impl RuntimePlan {
     /// Validate candidate facts against the exact canonical manifest and a provenance proof.
     pub fn compile_v3(
         manifest: &CanonicalAssemblyManifestV2,
-        lock: &ExecutableAssemblyLock,
+        lock: &RepositoryVerifiedAssemblyLock,
         input: RuntimePlanV3Input,
     ) -> Result<Self, RuntimePlanError> {
         validate_manifest_lock(manifest, lock)?;
@@ -192,11 +192,11 @@ pub struct ParsedRuntimePlan(RuntimePlan);
 
 impl ParsedRuntimePlan {
     /// Parse an executable RuntimePlan and bind it to its canonical manifest and a
-    /// repository-verified or build-attested AssemblyLock.
+    /// repository-verified AssemblyLock.
     pub fn from_json_slice_bound(
         bytes: &[u8],
         manifest: &CanonicalAssemblyManifestV2,
-        lock: &ExecutableAssemblyLock,
+        lock: &RepositoryVerifiedAssemblyLock,
     ) -> Result<Self, RuntimePlanError> {
         let candidate = parse_unbound_runtime_plan(bytes)?;
         validate_manifest_lock(manifest, lock)?;
@@ -835,7 +835,7 @@ struct UnsignedRuntimePlan<'a> {
 
 fn validate_manifest_lock(
     manifest: &CanonicalAssemblyManifestV2,
-    lock: &ExecutableAssemblyLock,
+    lock: &RepositoryVerifiedAssemblyLock,
 ) -> Result<(), RuntimePlanError> {
     if manifest.name() != lock.identity().name() || manifest.profile() != lock.identity().profile()
     {
@@ -853,7 +853,7 @@ fn validate_manifest_lock(
 
 fn validate_candidates(
     manifest: &CanonicalAssemblyManifestV2,
-    _lock: &ExecutableAssemblyLock,
+    _lock: &RepositoryVerifiedAssemblyLock,
     input: &RuntimePlanV3Input,
 ) -> Result<(), RuntimePlanError> {
     let expected_workflows = manifest.workflow_activations();
@@ -1333,8 +1333,7 @@ outputs = ["resources"]
         let lock = crate::ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../../../assemblies/runtime/assembly.lock.json"
         ))?
-        .verify_repository_v2(&source)?
-        .into_executable();
+        .verify_repository_v2(&source)?;
         let candidate = parse_unbound_runtime_plan(include_bytes!(
             "../../../assemblies/runtime/runtime-plan.json"
         ))?;

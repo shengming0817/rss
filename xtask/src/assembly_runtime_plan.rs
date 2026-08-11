@@ -73,8 +73,7 @@ fn plan_target(assembly: &crate::assembly_governance::GovernedAssembly) -> Resul
     let lock = ParsedAssemblyLock::from_json_slice(&lock_source)
         .with_context(|| format!("解析 {} 失败", lock_path.display()))?
         .verify_repository_v2(assembly.source())
-        .with_context(|| format!("repository 验证 {} 失败", lock_path.display()))?
-        .into_executable();
+        .with_context(|| format!("repository 验证 {} 失败", lock_path.display()))?;
     let input = compiler_input(manifest)?;
     let plan = RuntimePlan::compile_v3(manifest, &lock, input)
         .with_context(|| format!("编译 {directory_name} RuntimePlan 失败"))?;

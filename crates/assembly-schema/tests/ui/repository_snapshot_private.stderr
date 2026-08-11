@@ -1,0 +1,5 @@
+error: cannot construct `RepositoryAssemblySnapshotV2` with struct literal syntax due to private fields
+ --> tests/ui/repository_snapshot_private.rs:4:13
+  |
+4 |     let _ = RepositoryAssemblySnapshotV2 {};
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^

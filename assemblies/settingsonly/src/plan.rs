@@ -2,13 +2,19 @@
 
 use anyhow::Context as _;
 use assembly_schema::{
-    AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyManifest, AssemblyProfile,
-    AssemblyTopology, CanonicalAssemblyManifestV2, DomainLifecyclePhase, ExecutableAssemblyLock,
-    ListenerAuth, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
+    AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyProfile, AssemblyTopology,
+    CanonicalAssemblyManifestV2, DomainLifecyclePhase, ListenerAuth, RepositoryAssemblySnapshotV2,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
 };
 
+#[cfg(test)]
+use assembly_schema::{AssemblyManifest, ParsedAssemblyLock};
+#[cfg(test)]
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
+#[cfg(test)]
 const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
+const BUNDLED_REPOSITORY_SNAPSHOT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/repository-assembly-v2.json"));
 const ASSEMBLY_NAME: &str = "settingsonly";
 const SETTINGS_WORKLOAD: &str = "settingsonly";
 const INVENTORY_CONTRACT: &str = "runtime.inventory";
@@ -46,18 +52,14 @@ pub struct SettingsProjectionMaintenancePlan {
 
 impl SettingsOnlyPlan {
     pub(crate) fn bundled() -> anyhow::Result<Self> {
-        let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
-            .context("parse bundled settingsonly assembly manifest")?
-            .canonicalize_v2()
-            .context("canonicalize bundled settingsonly assembly manifest")?;
-        let lock = ExecutableAssemblyLock::from_build_attested(
-            ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
-                .context("parse bundled settingsonly AssemblyLock")?,
-        );
+        let repository = RepositoryAssemblySnapshotV2::from_json_slice(BUNDLED_REPOSITORY_SNAPSHOT)
+            .context("verify bundled settingsonly repository snapshot")?;
+        let manifest = repository.manifest();
+        let lock = repository.lock();
 
-        validate_manifest_closure(&manifest, lock.identity())?;
-        let input = compiler_input(&manifest)?;
-        let typed = TypedRuntimePlan::compile_v3(&manifest, &lock, input)
+        validate_manifest_closure(manifest, lock.identity())?;
+        let input = compiler_input(manifest)?;
+        let typed = TypedRuntimePlan::compile_v3(manifest, lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
         let workflow_activation = eventexec::WorkflowActivationPlan::select(&typed)

@@ -2,8 +2,8 @@
 // reason: protocol fixtures should fail at the exact local assertion when their frozen bytes drift.
 
 use assembly_schema::{
-    AssemblyManifest, CanonicalAssemblyManifestV2, ExecutableAssemblyLock, ParsedAssemblyLock,
-    ParsedRuntimePlan, RuntimePlan, RuntimePlanErrorStage, RuntimePlanJsonCategory,
+    AssemblyManifest, CanonicalAssemblyManifestV2, ParsedAssemblyLock, ParsedRuntimePlan,
+    RepositoryVerifiedAssemblyLock, RuntimePlan, RuntimePlanErrorStage, RuntimePlanJsonCategory,
     validate_runtime_plan_json_slice,
 };
 use serde::Serialize;
@@ -67,8 +67,11 @@ fn assembly_lock_wire_from_vector() -> Value {
     unsigned
 }
 
-fn manifest_bound_workflow_fixture() -> (CanonicalAssemblyManifestV2, ExecutableAssemblyLock, Value)
-{
+fn manifest_bound_workflow_fixture() -> (
+    CanonicalAssemblyManifestV2,
+    RepositoryVerifiedAssemblyLock,
+    Value,
+) {
     let manifest =
         AssemblyManifest::from_toml_str(include_str!("../../../assemblies/runtime/assembly.toml"))
             .expect("bound fixture manifest")
@@ -91,7 +94,7 @@ fn manifest_bound_workflow_fixture() -> (CanonicalAssemblyManifestV2, Executable
     (manifest, lock, plan_wire)
 }
 
-fn repository_verified_lock(name: &str, bytes: &[u8]) -> ExecutableAssemblyLock {
+fn repository_verified_lock(name: &str, bytes: &[u8]) -> RepositoryVerifiedAssemblyLock {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
@@ -105,7 +108,6 @@ fn repository_verified_lock(name: &str, bytes: &[u8]) -> ExecutableAssemblyLock 
         .expect("parsed AssemblyLock")
         .verify_repository_v2(&source)
         .expect("repository-verified AssemblyLock")
-        .into_executable()
 }
 
 fn seal_unsigned(mut unsigned: Value) -> Value {

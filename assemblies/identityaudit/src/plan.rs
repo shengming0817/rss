@@ -2,13 +2,13 @@
 
 use anyhow::Context as _;
 use assembly_schema::{
-    AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyManifest, AssemblyProfile,
-    AssemblyTopology, CanonicalAssemblyManifestV2, DomainLifecyclePhase, ExecutableAssemblyLock,
-    ListenerAuth, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
+    AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyProfile, AssemblyTopology,
+    CanonicalAssemblyManifestV2, DomainLifecyclePhase, ListenerAuth, RepositoryAssemblySnapshotV2,
+    RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
 };
 
-const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
-const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
+const BUNDLED_REPOSITORY_SNAPSHOT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/repository-assembly-v2.json"));
 const ASSEMBLY_NAME: &str = "identityaudit";
 const WORKLOAD: &str = "identityaudit";
 
@@ -20,16 +20,12 @@ pub(crate) struct IdentityAuditPlan {
 
 impl IdentityAuditPlan {
     pub(crate) fn bundled() -> anyhow::Result<Self> {
-        let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
-            .context("parse bundled identityaudit assembly manifest")?
-            .canonicalize_v2()
-            .context("canonicalize bundled identityaudit assembly manifest")?;
-        let lock = ExecutableAssemblyLock::from_build_attested(
-            ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
-                .context("parse bundled identityaudit AssemblyLock")?,
-        );
-        validate_manifest(&manifest, lock.identity())?;
-        let typed = TypedRuntimePlan::compile_v3(&manifest, &lock, compiler_input(&manifest)?)
+        let repository = RepositoryAssemblySnapshotV2::from_json_slice(BUNDLED_REPOSITORY_SNAPSHOT)
+            .context("verify bundled identityaudit repository snapshot")?;
+        let manifest = repository.manifest();
+        let lock = repository.lock();
+        validate_manifest(manifest, lock.identity())?;
+        let typed = TypedRuntimePlan::compile_v3(manifest, lock, compiler_input(manifest)?)
             .context("compile bundled identityaudit RuntimePlan")?;
         validate_typed(&typed)?;
         let workflow_runtime = eventexec::WorkflowActivationPlan::select(&typed)

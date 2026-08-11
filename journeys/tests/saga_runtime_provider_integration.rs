@@ -164,7 +164,7 @@ impl FixtureRepository {
     fn runtime_plan(&self) -> Result<RuntimePlan> {
         let assembly = self.root.join("assemblies").join(FIXTURE_ASSEMBLY_ID);
         let manifest = RepositoryAssemblyManifestV2::discover_v2(&self.root, &assembly)?;
-        let lock = RepositoryVerifiedAssemblyLock::compile_v2(&manifest)?.into_executable();
+        let lock = RepositoryVerifiedAssemblyLock::compile_v2(&manifest)?;
         let mut input = RuntimePlanV3Input::from_manifest(manifest.canonical());
         input.listener(
             AssemblyListenerKind::Admin,

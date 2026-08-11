@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 
@@ -24,6 +25,7 @@ const CONFIG_CAPTURE_OWNER: &str = "prepare_runtime_kernel";
 const CONFIG_CAPTURE_METHOD: &str = "capture_process_snapshot";
 const CONFIG_PATH: &str = "assemblies/runtime/src/config.rs";
 const LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
+const PLAN_PATH: &str = "assemblies/runtime/src/plan.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -1176,6 +1178,17 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
         self.owner = prior;
     }
 
+    fn visit_item_const(&mut self, item: &'ast syn::ItemConst) {
+        if self.path == PLAN_PATH
+            && self.module_depth == 0
+            && self.function_depth == 0
+            && is_exact_repository_snapshot_include(item)
+        {
+            return;
+        }
+        syn::visit::visit_item_const(self, item);
+    }
+
     fn visit_item_impl(&mut self, item: &'ast syn::ItemImpl) {
         let self_name = type_last_ident(&item.self_ty).unwrap_or_else(|| "impl".to_owned());
         for entry in &item.items {
@@ -1480,6 +1493,59 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
     }
 }
 
+fn is_exact_repository_snapshot_include(item: &syn::ItemConst) -> bool {
+    if !item.attrs.is_empty()
+        || !matches!(item.vis, syn::Visibility::Inherited)
+        || item.ident != "BUNDLED_REPOSITORY_SNAPSHOT"
+        || !is_immutable_u8_slice(&item.ty)
+    {
+        return false;
+    }
+    let syn::Expr::Macro(include) = item.expr.as_ref() else {
+        return false;
+    };
+    if !include.mac.path.is_ident("include_bytes") {
+        return false;
+    }
+    let Ok(syn::Expr::Macro(concat)) = syn::parse2::<syn::Expr>(include.mac.tokens.clone()) else {
+        return false;
+    };
+    if !concat.mac.path.is_ident("concat") {
+        return false;
+    }
+    let Ok(arguments) = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated
+        .parse2(concat.mac.tokens.clone())
+    else {
+        return false;
+    };
+    let mut arguments = arguments.iter();
+    let (Some(syn::Expr::Macro(out_dir)), Some(syn::Expr::Lit(suffix)), None) =
+        (arguments.next(), arguments.next(), arguments.next())
+    else {
+        return false;
+    };
+    out_dir.mac.path.is_ident("env")
+        && syn::parse2::<syn::LitStr>(out_dir.mac.tokens.clone())
+            .is_ok_and(|value| value.value() == "OUT_DIR")
+        && matches!(&suffix.lit, syn::Lit::Str(value) if value.value() == "/repository-assembly-v2.json")
+}
+
+fn is_immutable_u8_slice(ty: &syn::Type) -> bool {
+    let syn::Type::Reference(reference) = ty else {
+        return false;
+    };
+    let syn::Type::Slice(slice) = reference.elem.as_ref() else {
+        return false;
+    };
+    let syn::Type::Path(element) = slice.elem.as_ref() else {
+        return false;
+    };
+    reference.lifetime.is_none()
+        && reference.mutability.is_none()
+        && element.qself.is_none()
+        && element.path.is_ident("u8")
+}
+
 #[derive(Debug)]
 enum Token {
     Ident(String),
@@ -1747,6 +1813,11 @@ mod tests {
                 LIB_PATH.to_owned(),
                 include_str!("../fixtures/runtime-env-guard/canonical-lib.rs").to_owned(),
             ),
+            (
+                PLAN_PATH.to_owned(),
+                "const BUNDLED_REPOSITORY_SNAPSHOT: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/repository-assembly-v2.json\"));"
+                    .to_owned(),
+            ),
         ];
         for grant in GRANTS {
             let (support, owner_parameters, read, caller_parameter, caller_arguments) = match grant
@@ -1883,6 +1954,24 @@ mod tests {
             ),
             Rule::AmbientRead,
         )?;
+        Ok(())
+    }
+
+    #[test]
+    fn repository_snapshot_build_include_exception_is_exact() -> Result<()> {
+        for (needle, replacement) in [
+            ("env!(\"OUT_DIR\")", "env!(\"RSS_X\")"),
+            (
+                "/repository-assembly-v2.json",
+                "/unverified-repository.json",
+            ),
+            ("BUNDLED_REPOSITORY_SNAPSHOT", "UNBOUND_REPOSITORY_SNAPSHOT"),
+        ] {
+            assert_rule(
+                &with_mutated(PLAN_PATH, needle, replacement)?,
+                Rule::AmbientRead,
+            )?;
+        }
         Ok(())
     }
 

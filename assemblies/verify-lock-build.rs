@@ -1,13 +1,19 @@
-use assembly_schema::{ParsedAssemblyLock, RepositoryAssemblyManifestV2};
+use assembly_schema::{ParsedAssemblyLock, RepositoryAssemblyManifestV2, RepositoryAssemblySnapshotV2};
 use std::path::PathBuf;
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
-    verify_bundled_lock()
+#[allow(dead_code)]
+fn verify_bundled_lock() -> Result<(), Box<dyn std::error::Error>> {
+    verify_bundled_lock_inner(false)
 }
 
-fn verify_bundled_lock() -> Result<(), Box<dyn std::error::Error>> {
+#[allow(dead_code)]
+fn emit_bundled_repository_snapshot() -> Result<(), Box<dyn std::error::Error>> {
+    verify_bundled_lock_inner(true)
+}
+
+fn verify_bundled_lock_inner(emit_snapshot: bool) -> Result<(), Box<dyn std::error::Error>> {
     let assembly_dir = PathBuf::from(std::env::var_os("CARGO_MANIFEST_DIR").ok_or(
-        "CARGO_MANIFEST_DIR is required for AssemblyLock build attestation",
+        "CARGO_MANIFEST_DIR is required for AssemblyLock repository verification",
     )?);
     let repository_root = assembly_dir
         .parent()
@@ -27,7 +33,18 @@ fn verify_bundled_lock() -> Result<(), Box<dyn std::error::Error>> {
     );
 
     let manifest = RepositoryAssemblyManifestV2::discover_v2(repository_root, &assembly_dir)?;
-    ParsedAssemblyLock::from_json_slice(&std::fs::read(lock_path)?)?
-        .verify_repository_v2(&manifest)?;
+    let lock_bytes = std::fs::read(lock_path)?;
+    if emit_snapshot {
+        let snapshot = RepositoryAssemblySnapshotV2::capture_v2(&manifest, &lock_bytes)?;
+        let out_dir = PathBuf::from(
+            std::env::var_os("OUT_DIR").ok_or("OUT_DIR is required for repository snapshot")?,
+        );
+        std::fs::write(
+            out_dir.join("repository-assembly-v2.json"),
+            snapshot.to_pretty_json_vec()?,
+        )?;
+    } else {
+        ParsedAssemblyLock::from_json_slice(&lock_bytes)?.verify_repository_v2(&manifest)?;
+    }
     Ok(())
 }

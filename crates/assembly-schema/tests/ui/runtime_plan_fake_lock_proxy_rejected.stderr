@@ -2,11 +2,11 @@ error[E0308]: mismatched types
   --> tests/ui/runtime_plan_fake_lock_proxy_rejected.rs:28:47
    |
 28 |     let _ = RuntimePlan::compile_v3(manifest, &fake, input);
-   |             -----------------------           ^^^^^ expected `&ExecutableAssemblyLock`, found `&FakeExecutionProof<'_>`
+   |             -----------------------           ^^^^^ expected `&RepositoryVerifiedAssemblyLock`, found `&FakeExecutionProof<'_>`
    |             |
    |             arguments to this function are incorrect
    |
-   = note: expected reference `&ExecutableAssemblyLock`
+   = note: expected reference `&RepositoryVerifiedAssemblyLock`
               found reference `&FakeExecutionProof<'_>`
 note: associated function defined here
   --> src/runtime_plan.rs

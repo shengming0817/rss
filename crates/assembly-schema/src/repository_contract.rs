@@ -670,6 +670,135 @@ pub fn load_contract_repository(
     Ok(contracts)
 }
 
+/// Exact UTF-8 source owned by the governed contract repository snapshot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RepositoryContractSourceFile {
+    pub(crate) path: String,
+    pub(crate) content: String,
+}
+
+/// Capture precisely the contract sources consumed by repository verification.
+pub(crate) fn capture_contract_repository_sources(
+    repository_root: &Path,
+    contracts: &[RepositoryContract],
+) -> Result<Vec<RepositoryContractSourceFile>, RepositoryContractError> {
+    let mut files = BTreeMap::<String, String>::new();
+    for contract in contracts {
+        let sources = std::iter::once(&contract.source.manifest)
+            .chain(
+                contract
+                    .source
+                    .schemas
+                    .values()
+                    .filter_map(|source| match source {
+                        SchemaSourceSnapshot::Present(source) => Some(source),
+                        SchemaSourceSnapshot::Missing { .. } | SchemaSourceSnapshot::UnsafeName => {
+                            None
+                        }
+                    }),
+            )
+            .chain(contract.source.components.values());
+        for source in sources {
+            let path = source.path.strip_prefix(repository_root).map_err(|_| {
+                RepositoryContractError::Invalid(format!(
+                    "contract snapshot path escapes repository root: {}",
+                    source.path.display()
+                ))
+            })?;
+            if path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+            {
+                return Err(RepositoryContractError::Invalid(format!(
+                    "contract snapshot path is not normalized: {}",
+                    path.display()
+                )));
+            }
+            let label = path
+                .to_str()
+                .ok_or_else(|| {
+                    RepositoryContractError::Invalid(format!(
+                        "contract snapshot path is not UTF-8: {}",
+                        path.display()
+                    ))
+                })?
+                .replace('\\', "/");
+            let content = std::str::from_utf8(&source.bytes).map_err(|error| {
+                RepositoryContractError::io(
+                    format!("failed to decode {} as UTF-8", source.path.display()),
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error),
+                )
+            })?;
+            match files.insert(label.clone(), content.to_owned()) {
+                Some(previous) if previous != content => {
+                    return Err(RepositoryContractError::Invalid(format!(
+                        "contract snapshot path has conflicting content: {label}"
+                    )));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(files
+        .into_iter()
+        .map(|(path, content)| RepositoryContractSourceFile { path, content })
+        .collect())
+}
+
+/// Replay complete contract discovery from an immutable repository-relative source universe.
+pub(crate) fn load_contract_repository_snapshot(
+    files: &[RepositoryContractSourceFile],
+) -> Result<Vec<RepositoryContract>, RepositoryContractError> {
+    let contracts_root = Path::new("contracts");
+    let mut sources = BTreeMap::<PathBuf, Arc<[u8]>>::new();
+    for file in files {
+        let path = PathBuf::from(&file.path);
+        if !path.starts_with(contracts_root)
+            || path
+                .components()
+                .any(|component| !matches!(component, Component::Normal(_)))
+        {
+            return Err(RepositoryContractError::Invalid(format!(
+                "contract snapshot path must be normalized below contracts/: {:?}",
+                file.path
+            )));
+        }
+        if sources
+            .insert(path, Arc::from(file.content.as_bytes()))
+            .is_some()
+        {
+            return Err(RepositoryContractError::Invalid(format!(
+                "duplicate contract snapshot path: {:?}",
+                file.path
+            )));
+        }
+    }
+
+    let mut manifests = sources
+        .keys()
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("contract.toml"))
+        .cloned()
+        .collect::<Vec<_>>();
+    manifests.sort();
+    if manifests.is_empty() {
+        return Err(RepositoryContractError::Invalid(
+            "contract snapshot manifest universe is empty".to_owned(),
+        ));
+    }
+    let mut consumed = BTreeSet::new();
+    let contracts = manifests
+        .into_iter()
+        .map(|path| load_contract_snapshot(contracts_root, &path, &sources, &mut consumed))
+        .collect::<Result<Vec<_>, _>>()?;
+    let actual = sources.keys().cloned().collect::<BTreeSet<_>>();
+    if consumed != actual {
+        return Err(RepositoryContractError::Invalid(format!(
+            "contract snapshot universe differs: consumed={consumed:?} actual={actual:?}"
+        )));
+    }
+    Ok(contracts)
+}
+
 /// Verify both the closed manifest universe and every captured contract source snapshot.
 pub fn verify_contract_repository_unchanged<'a>(
     contracts_root: &Path,
@@ -975,6 +1104,139 @@ fn load_contract(
         manifest,
         source,
     })
+}
+
+fn load_contract_snapshot(
+    contracts_root: &Path,
+    manifest_path: &Path,
+    files: &BTreeMap<PathBuf, Arc<[u8]>>,
+    consumed: &mut BTreeSet<PathBuf>,
+) -> Result<RepositoryContract, RepositoryContractError> {
+    let dir = manifest_path.parent().ok_or_else(|| {
+        RepositoryContractError::Invalid(format!(
+            "contract.toml has no parent: {}",
+            manifest_path.display()
+        ))
+    })?;
+    let manifest_bytes = files.get(manifest_path).ok_or_else(|| {
+        RepositoryContractError::Invalid(format!(
+            "contract snapshot omits {}",
+            manifest_path.display()
+        ))
+    })?;
+    consumed.insert(manifest_path.to_path_buf());
+    let manifest_source =
+        synthetic_source_file(manifest_path.to_path_buf(), manifest_bytes.clone());
+    let text = std::str::from_utf8(manifest_bytes).map_err(|source| {
+        RepositoryContractError::io(
+            format!("failed to decode {} as UTF-8", manifest_path.display()),
+            std::io::Error::new(std::io::ErrorKind::InvalidData, source),
+        )
+    })?;
+    let manifest = ContractManifest::from_toml_str(text).map_err(|source| {
+        RepositoryContractError::Manifest {
+            path: manifest_path.to_path_buf(),
+            source,
+        }
+    })?;
+    let (path_kind, path_domain, path_version, slug) = path_segments(contracts_root, dir)
+        .ok_or_else(|| {
+            RepositoryContractError::Invalid(format!(
+                "contract directory must be contracts/{{kind}}/{{domain}}/{{version}}/[<slug>/]: {}",
+                dir.display()
+            ))
+        })?;
+    let owner = promote_contract_owner(&manifest.owner)?;
+    let mut schemas = BTreeMap::new();
+    for file in manifest.declared_schema_files() {
+        if schemas.contains_key(file) {
+            continue;
+        }
+        validate_schema_filename(file)?;
+        let path = dir.join(file);
+        let bytes = files.get(&path).ok_or_else(|| {
+            RepositoryContractError::Invalid(format!(
+                "contract snapshot omits declared schema {}",
+                path.display()
+            ))
+        })?;
+        consumed.insert(path.clone());
+        schemas.insert(
+            file.to_owned(),
+            SchemaSourceSnapshot::Present(synthetic_source_file(path, bytes.clone())),
+        );
+    }
+    let components = capture_component_snapshot_sources(contracts_root, &schemas, files, consumed)?;
+    let digest = source_snapshot_digest(&manifest_source, &schemas, &components);
+    let source = Arc::new(ContractSourceSnapshot {
+        contracts_root: contracts_root.to_path_buf(),
+        manifest: manifest_source,
+        schemas,
+        components,
+        digest,
+        repository_backed: false,
+    });
+    Ok(RepositoryContract {
+        dir: dir.to_path_buf(),
+        path_kind,
+        path_domain,
+        path_version,
+        slug,
+        owner,
+        manifest,
+        source,
+    })
+}
+
+fn capture_component_snapshot_sources(
+    contracts_root: &Path,
+    schemas: &BTreeMap<String, SchemaSourceSnapshot>,
+    files: &BTreeMap<PathBuf, Arc<[u8]>>,
+    consumed: &mut BTreeSet<PathBuf>,
+) -> Result<BTreeMap<String, SourceFileSnapshot>, RepositoryContractError> {
+    let mut pending = BTreeSet::new();
+    for schema in schemas.values() {
+        let SchemaSourceSnapshot::Present(source) = schema else {
+            continue;
+        };
+        let value: Value = serde_json::from_slice(&source.bytes).map_err(|source_error| {
+            RepositoryContractError::SchemaJson {
+                path: source.path.clone(),
+                source: source_error,
+            }
+        })?;
+        collect_component_refs(&value, &mut pending)?;
+    }
+    let mut captured = BTreeMap::new();
+    while let Some(id) = pending.pop_first() {
+        if captured.contains_key(id.as_str()) {
+            continue;
+        }
+        let path = contracts_root.join(id.relative_path()?);
+        let bytes = files.get(&path).ok_or_else(|| {
+            RepositoryContractError::Invalid(format!(
+                "contract snapshot omits component {}",
+                path.display()
+            ))
+        })?;
+        consumed.insert(path.clone());
+        let source = synthetic_source_file(path.clone(), bytes.clone());
+        let value: Value = serde_json::from_slice(bytes).map_err(|source_error| {
+            RepositoryContractError::SchemaJson {
+                path: path.clone(),
+                source: source_error,
+            }
+        })?;
+        if value.get("$id").and_then(Value::as_str) != Some(id.as_str()) {
+            return Err(RepositoryContractError::Invalid(format!(
+                "component {} must declare exact $id {id:?}",
+                path.display()
+            )));
+        }
+        collect_component_refs(&value, &mut pending)?;
+        captured.insert(id.to_string(), source);
+    }
+    Ok(captured)
 }
 
 fn capture_schema_sources(
@@ -1345,7 +1607,6 @@ fn capture_synthetic_schema_sources(
     Ok(schemas)
 }
 
-#[cfg(feature = "test-support")]
 fn synthetic_source_file(path: PathBuf, bytes: Arc<[u8]>) -> SourceFileSnapshot {
     let len = bytes.len() as u64;
     SourceFileSnapshot {

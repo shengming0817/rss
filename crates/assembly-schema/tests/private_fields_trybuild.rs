@@ -11,6 +11,7 @@ fn assembly_lock_construction_is_sealed() {
     cases.compile_fail("tests/ui/raw_contract_owner_private.rs");
     cases.compile_fail("tests/ui/repository_contract_private.rs");
     cases.compile_fail("tests/ui/repository_manifest_private.rs");
+    cases.compile_fail("tests/ui/repository_snapshot_private.rs");
 }
 
 #[test]
@@ -20,6 +21,7 @@ fn runtime_plan_construction_is_sealed() {
     cases.compile_fail("tests/ui/runtime_plan_private.rs");
     cases.compile_fail("tests/ui/runtime_plan_fingerprint_private.rs");
     cases.compile_fail("tests/ui/runtime_plan_fake_lock_proxy_rejected.rs");
+    cases.compile_fail("tests/ui/runtime_plan_build_attested_constructor_rejected.rs");
     cases.compile_fail("tests/ui/runtime_plan_parsed_lock_compile_rejected.rs");
     cases.compile_fail("tests/ui/runtime_plan_parsed_lock_reader_rejected.rs");
     cases.compile_fail("tests/ui/runtime_plan_unbound_reader_private.rs");

@@ -311,8 +311,7 @@ pub mod test_support {
         let lock = assembly_schema::ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../assembly.lock.json"
         ))?
-        .verify_repository_v2(&repository_manifest)?
-        .into_executable();
+        .verify_repository_v2(&repository_manifest)?;
         let parsed = assembly_schema::ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../runtime-plan.json"),
             &manifest,

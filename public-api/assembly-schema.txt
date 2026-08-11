@@ -439,6 +439,7 @@ pub assembly_schema::AssemblyLockErrorStage::FileSystem
 pub assembly_schema::AssemblyLockErrorStage::GeneratedUniverse
 pub assembly_schema::AssemblyLockErrorStage::LockFile
 pub assembly_schema::AssemblyLockErrorStage::Manifest
+pub assembly_schema::AssemblyLockErrorStage::RepositorySnapshot
 pub assembly_schema::AssemblyLockErrorStage::Serialization
 impl core::clone::Clone for assembly_schema::AssemblyLockErrorStage
 pub fn assembly_schema::AssemblyLockErrorStage::clone(&self) -> assembly_schema::AssemblyLockErrorStage
@@ -1583,18 +1584,6 @@ impl core::marker::Unpin for assembly_schema::DomainPlan
 impl core::marker::UnsafeUnpin for assembly_schema::DomainPlan
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::DomainPlan
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::DomainPlan
-pub struct assembly_schema::ExecutableAssemblyLock(_)
-impl assembly_schema::ExecutableAssemblyLock
-pub const fn assembly_schema::ExecutableAssemblyLock::digests(&self) -> &assembly_schema::AssemblyDigests
-pub const fn assembly_schema::ExecutableAssemblyLock::fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
-pub const fn assembly_schema::ExecutableAssemblyLock::identity(&self) -> &assembly_schema::AssemblyIdentity
-impl core::marker::Freeze for assembly_schema::ExecutableAssemblyLock
-impl core::marker::Send for assembly_schema::ExecutableAssemblyLock
-impl core::marker::Sync for assembly_schema::ExecutableAssemblyLock
-impl core::marker::Unpin for assembly_schema::ExecutableAssemblyLock
-impl core::marker::UnsafeUnpin for assembly_schema::ExecutableAssemblyLock
-impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::ExecutableAssemblyLock
-impl core::panic::unwind_safe::UnwindSafe for assembly_schema::ExecutableAssemblyLock
 pub struct assembly_schema::FrameworkContractMount
 pub assembly_schema::FrameworkContractMount::id: alloc::string::String
 pub assembly_schema::FrameworkContractMount::listener: assembly_schema::AssemblyListenerKind
@@ -1695,7 +1684,7 @@ impl assembly_schema::ParsedRuntimePlan
 pub const fn assembly_schema::ParsedRuntimePlan::as_plan(&self) -> &assembly_schema::RuntimePlan
 pub const fn assembly_schema::ParsedRuntimePlan::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
 pub fn assembly_schema::ParsedRuntimePlan::domain_plans(&self) -> &[assembly_schema::DomainPlan]
-pub fn assembly_schema::ParsedRuntimePlan::from_json_slice_bound(&[u8], &assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::ExecutableAssemblyLock) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
+pub fn assembly_schema::ParsedRuntimePlan::from_json_slice_bound(&[u8], &assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::RepositoryVerifiedAssemblyLock) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
 pub fn assembly_schema::ParsedRuntimePlan::listener_plans(&self) -> &[assembly_schema::ListenerPlan]
 pub fn assembly_schema::ParsedRuntimePlan::placement_plans(&self) -> &[assembly_schema::PlacementPlan]
 pub fn assembly_schema::ParsedRuntimePlan::provider_plans(&self) -> &[assembly_schema::ProviderPlan]
@@ -1805,6 +1794,20 @@ impl core::marker::Unpin for assembly_schema::RepositoryAssemblyManifestV2
 impl core::marker::UnsafeUnpin for assembly_schema::RepositoryAssemblyManifestV2
 impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RepositoryAssemblyManifestV2
 impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RepositoryAssemblyManifestV2
+pub struct assembly_schema::RepositoryAssemblySnapshotV2
+impl assembly_schema::RepositoryAssemblySnapshotV2
+pub fn assembly_schema::RepositoryAssemblySnapshotV2::capture_v2(&assembly_schema::RepositoryAssemblyManifestV2, &[u8]) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
+pub fn assembly_schema::RepositoryAssemblySnapshotV2::from_json_slice(&[u8]) -> core::result::Result<Self, assembly_schema::AssemblyLockError>
+pub const fn assembly_schema::RepositoryAssemblySnapshotV2::lock(&self) -> &assembly_schema::RepositoryVerifiedAssemblyLock
+pub const fn assembly_schema::RepositoryAssemblySnapshotV2::manifest(&self) -> &assembly_schema::CanonicalAssemblyManifestV2
+pub fn assembly_schema::RepositoryAssemblySnapshotV2::to_pretty_json_vec(&self) -> core::result::Result<alloc::vec::Vec<u8>, assembly_schema::AssemblyLockError>
+impl core::marker::Freeze for assembly_schema::RepositoryAssemblySnapshotV2
+impl core::marker::Send for assembly_schema::RepositoryAssemblySnapshotV2
+impl core::marker::Sync for assembly_schema::RepositoryAssemblySnapshotV2
+impl core::marker::Unpin for assembly_schema::RepositoryAssemblySnapshotV2
+impl core::marker::UnsafeUnpin for assembly_schema::RepositoryAssemblySnapshotV2
+impl core::panic::unwind_safe::RefUnwindSafe for assembly_schema::RepositoryAssemblySnapshotV2
+impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RepositoryAssemblySnapshotV2
 pub struct assembly_schema::RepositoryVerifiedAssemblyLock(_)
 impl assembly_schema::RepositoryVerifiedAssemblyLock
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::as_lock(&self) -> &assembly_schema::AssemblyLock
@@ -1812,7 +1815,6 @@ pub fn assembly_schema::RepositoryVerifiedAssemblyLock::compile_v2(&assembly_sch
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::digests(&self) -> &assembly_schema::AssemblyDigests
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
 pub const fn assembly_schema::RepositoryVerifiedAssemblyLock::identity(&self) -> &assembly_schema::AssemblyIdentity
-pub fn assembly_schema::RepositoryVerifiedAssemblyLock::into_executable(self) -> assembly_schema::ExecutableAssemblyLock
 impl serde_core::ser::Serialize for assembly_schema::RepositoryVerifiedAssemblyLock
 pub fn assembly_schema::RepositoryVerifiedAssemblyLock::serialize<__S>(&self, __S) -> core::result::Result<<__S as serde_core::ser::Serializer>::Ok, <__S as serde_core::ser::Serializer>::Error> where __S: serde_core::ser::Serializer
 impl core::marker::Freeze for assembly_schema::RepositoryVerifiedAssemblyLock
@@ -1825,7 +1827,7 @@ impl core::panic::unwind_safe::UnwindSafe for assembly_schema::RepositoryVerifie
 pub struct assembly_schema::RuntimePlan
 impl assembly_schema::RuntimePlan
 pub const fn assembly_schema::RuntimePlan::assembly_fingerprint(&self) -> &assembly_schema::AssemblyFingerprint
-pub fn assembly_schema::RuntimePlan::compile_v3(&assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::ExecutableAssemblyLock, assembly_schema::RuntimePlanV3Input) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
+pub fn assembly_schema::RuntimePlan::compile_v3(&assembly_schema::CanonicalAssemblyManifestV2, &assembly_schema::RepositoryVerifiedAssemblyLock, assembly_schema::RuntimePlanV3Input) -> core::result::Result<Self, assembly_schema::RuntimePlanError>
 pub fn assembly_schema::RuntimePlan::domain_plans(&self) -> &[assembly_schema::DomainPlan]
 pub fn assembly_schema::RuntimePlan::listener_plans(&self) -> &[assembly_schema::ListenerPlan]
 pub fn assembly_schema::RuntimePlan::placement_plans(&self) -> &[assembly_schema::PlacementPlan]

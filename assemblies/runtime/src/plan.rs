@@ -9,14 +9,17 @@ mod placement_exec;
 use crate::config::SnapshotConfig;
 use anyhow::Context as _;
 use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, AssemblyManifest, ExecutableAssemblyLock, ListenerAuth,
-    ParsedAssemblyLock, ProviderActivation, ProviderCatalogEntry, RuntimePlan as TypedRuntimePlan,
-    RuntimePlanV3Input,
+    AssemblyDomain, AssemblyListenerKind, ListenerAuth, ProviderActivation, ProviderCatalogEntry,
+    RepositoryAssemblySnapshotV2, RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
 };
 use primitives::{AuthScheme, ListenerKind};
 use std::fmt;
 
+const BUNDLED_REPOSITORY_SNAPSHOT: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/repository-assembly-v2.json"));
+#[cfg(test)]
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
+#[cfg(test)]
 const BUNDLED_ASSEMBLY_LOCK: &[u8] = include_bytes!("../assembly.lock.json");
 
 pub(crate) use domain_exec::DomainExecutionPlan;
@@ -238,31 +241,24 @@ impl ListenerExecutionSpec {
 impl RuntimePlan {
     /// Build the exact bundled plan from the committed manifest, lock and captured configuration.
     pub(crate) fn bundled(config: SnapshotConfig<'_>) -> Result<Self, RuntimePlanError> {
-        Self::from_bundled_artifacts(BUNDLED_ASSEMBLY_TOML, BUNDLED_ASSEMBLY_LOCK, config)
+        Self::from_bundled_snapshot(BUNDLED_REPOSITORY_SNAPSHOT, config)
     }
 
-    fn from_bundled_artifacts(
-        manifest_toml: &str,
-        assembly_lock_json: &[u8],
+    fn from_bundled_snapshot(
+        repository_snapshot: &[u8],
         config: SnapshotConfig<'_>,
     ) -> Result<Self, RuntimePlanError> {
-        let manifest = AssemblyManifest::from_toml_str(manifest_toml)
-            .map_err(RuntimePlanError::ManifestParse)?
-            .canonicalize_v2()
-            .map_err(RuntimePlanError::ManifestCanonicalization)?;
-        let parsed = ParsedAssemblyLock::from_json_slice(assembly_lock_json)
-            .map_err(RuntimePlanError::AssemblyLock)?;
-        if assembly_lock_json != BUNDLED_ASSEMBLY_LOCK {
-            return Err(RuntimePlanError::UnattestedAssemblyLock);
-        }
-        let lock = ExecutableAssemblyLock::from_build_attested(parsed);
+        let repository = RepositoryAssemblySnapshotV2::from_json_slice(repository_snapshot)
+            .map_err(RuntimePlanError::RepositorySnapshot)?;
+        let manifest = repository.manifest();
+        let lock = repository.lock();
 
-        let mut input = RuntimePlanV3Input::from_manifest(&manifest);
-        listener::append(&manifest, config, &mut input)?;
-        domain::append(&manifest, &mut input);
-        placement::append(&manifest, &lock, config, &mut input)?;
+        let mut input = RuntimePlanV3Input::from_manifest(manifest);
+        listener::append(manifest, config, &mut input)?;
+        domain::append(manifest, &mut input);
+        placement::append(manifest, lock, config, &mut input)?;
 
-        let plan = TypedRuntimePlan::compile_v3(&manifest, &lock, input)
+        let plan = TypedRuntimePlan::compile_v3(manifest, lock, input)
             .map_err(RuntimePlanError::Protocol)?;
         let workflow_activation = eventexec::WorkflowActivationPlan::select(&plan)
             .map_err(RuntimePlanError::WorkflowRuntime)?;
@@ -578,18 +574,12 @@ pub(crate) fn is_kebab_case_workload(value: &str) -> bool {
 pub(crate) fn fixture_listener_spec(
     kind: AssemblyListenerKind,
 ) -> anyhow::Result<ListenerExecutionSpec> {
-    let manifest = AssemblyManifest::from_toml_str(BUNDLED_ASSEMBLY_TOML)
-        .map_err(|error| anyhow::anyhow!("parse bundled fixture manifest: {error}"))?
-        .canonicalize_v2()
-        .map_err(|error| anyhow::anyhow!("canonicalize bundled fixture manifest: {error}"))?;
-    let lock = ExecutableAssemblyLock::from_build_attested(
-        ParsedAssemblyLock::from_json_slice(BUNDLED_ASSEMBLY_LOCK)
-            .map_err(|error| anyhow::anyhow!("parse bundled fixture lock: {error}"))?,
-    );
+    let repository = RepositoryAssemblySnapshotV2::from_json_slice(BUNDLED_REPOSITORY_SNAPSHOT)
+        .map_err(|error| anyhow::anyhow!("verify bundled fixture repository: {error}"))?;
     let parsed = assembly_schema::ParsedRuntimePlan::from_json_slice_bound(
         include_bytes!("../runtime-plan.json"),
-        &manifest,
-        &lock,
+        repository.manifest(),
+        repository.lock(),
     )
     .map_err(|error| anyhow::anyhow!("parse fingerprint-verified RuntimePlan fixture: {error}"))?;
     listener_execution_plan_from_typed(parsed.as_plan(), None)
@@ -626,14 +616,8 @@ impl fmt::Debug for RuntimePlan {
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum RuntimePlanError {
-    #[error("parse bundled runtime assembly manifest failed")]
-    ManifestParse(#[source] toml::de::Error),
-    #[error("canonicalize bundled runtime assembly manifest failed")]
-    ManifestCanonicalization(#[source] assembly_schema::AssemblyManifestCanonicalizationError),
-    #[error("parse bundled runtime AssemblyLock failed")]
-    AssemblyLock(#[source] assembly_schema::AssemblyLockError),
-    #[error("bundled runtime AssemblyLock is not the build-attested artifact")]
-    UnattestedAssemblyLock,
+    #[error("verify bundled runtime repository snapshot failed")]
+    RepositorySnapshot(#[source] assembly_schema::AssemblyLockError),
     #[error(
         "resolve RSS_PRIMARY_TOKEN_PROFILE, RSS_ADMIN_TOKEN_PROFILE, or RSS_INTERNAL_AUTH_SCHEME failed; expected rss-access/federated-access and mtls/service-token"
     )]
@@ -661,8 +645,9 @@ mod tests {
     use super::*;
     use crate::config::test_snapshot;
     use assembly_schema::{
-        AssemblyDomain, AssemblyListenerKind, CanonicalAssemblyManifestV2, DomainLifecyclePhase,
-        ExecutableAssemblyLock, ListenerAuth, ProviderLifecycle, RuntimePlanErrorStage,
+        AssemblyDomain, AssemblyListenerKind, AssemblyManifest, CanonicalAssemblyManifestV2,
+        DomainLifecyclePhase, ListenerAuth, ParsedAssemblyLock, ProviderLifecycle,
+        RepositoryVerifiedAssemblyLock, RuntimePlanErrorStage,
     };
     use std::collections::BTreeMap;
     use std::error::Error as _;
@@ -705,7 +690,14 @@ mod tests {
 
     fn artifact_error(manifest_toml: &str, assembly_lock_json: &[u8]) -> RuntimePlanError {
         let snapshot = profile_snapshot(&[("RSS_VAULT_TOKEN", SECRET_BAIT)]);
-        RuntimePlan::from_bundled_artifacts(manifest_toml, assembly_lock_json, snapshot.view())
+        let mut value: serde_json::Value =
+            serde_json::from_slice(BUNDLED_REPOSITORY_SNAPSHOT).expect("repository snapshot");
+        value["assemblyManifest"]["content"] = manifest_toml.into();
+        value["assemblyLock"]["content"] = std::str::from_utf8(assembly_lock_json)
+            .unwrap_or("{")
+            .into();
+        let bytes = serde_json::to_vec(&value).expect("mutated snapshot");
+        RuntimePlan::from_bundled_snapshot(&bytes, snapshot.view())
             .expect_err("invalid bundled artifact must fail")
     }
 
@@ -729,7 +721,7 @@ mod tests {
         repository_root().join("assemblies").join(name)
     }
 
-    fn verified_lock(source: &[u8], assembly: &str) -> ExecutableAssemblyLock {
+    fn verified_lock(source: &[u8], assembly: &str) -> RepositoryVerifiedAssemblyLock {
         let assembly_dir = assembly_dir(assembly);
         let manifest = assembly_schema::RepositoryAssemblyManifestV2::discover_v2(
             repository_root(),
@@ -740,12 +732,11 @@ mod tests {
             .expect("AssemblyLock")
             .verify_repository_v2(&manifest)
             .expect("repository-verified AssemblyLock")
-            .into_executable()
     }
 
     fn compile_error(
         manifest: &CanonicalAssemblyManifestV2,
-        lock: &ExecutableAssemblyLock,
+        lock: &RepositoryVerifiedAssemblyLock,
     ) -> assembly_schema::RuntimePlanError {
         TypedRuntimePlan::compile_v3(manifest, lock, compiler_input(manifest, lock, None))
             .expect_err("mismatched manifest/lock must fail")
@@ -753,7 +744,7 @@ mod tests {
 
     fn compiler_input(
         manifest: &CanonicalAssemblyManifestV2,
-        lock: &ExecutableAssemblyLock,
+        lock: &RepositoryVerifiedAssemblyLock,
         mutation: Option<Mutation>,
     ) -> RuntimePlanV3Input {
         let mut input = RuntimePlanV3Input::from_manifest(manifest);
@@ -838,7 +829,7 @@ mod tests {
 
     fn append_candidate_placements(
         manifest: &CanonicalAssemblyManifestV2,
-        lock: &ExecutableAssemblyLock,
+        lock: &RepositoryVerifiedAssemblyLock,
         mutation: Option<Mutation>,
         input: &mut RuntimePlanV3Input,
     ) {
@@ -1068,10 +1059,12 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "parse bundled runtime assembly manifest failed"
+            "verify bundled runtime repository snapshot failed"
         );
+        let source = error.source().expect("repository snapshot source");
+        assert!(source.is::<assembly_schema::AssemblyLockError>());
         assert!(
-            error
+            source
                 .source()
                 .is_some_and(|source| source.is::<toml::de::Error>())
         );
@@ -1089,11 +1082,15 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "canonicalize bundled runtime assembly manifest failed"
+            "verify bundled runtime repository snapshot failed"
         );
-        assert!(error.source().is_some_and(|source| {
-            source.is::<assembly_schema::AssemblyManifestCanonicalizationError>()
-        }));
+        let source = error.source().expect("repository snapshot source");
+        assert!(source.is::<assembly_schema::AssemblyLockError>());
+        assert!(
+            source.source().is_some_and(
+                |source| format!("{source:?}").contains("Empty { field: \"domains\" }")
+            )
+        );
         assert!(!format!("{error:?}").contains(SECRET_BAIT));
     }
 
@@ -1103,7 +1100,7 @@ mod tests {
 
         assert_eq!(
             error.to_string(),
-            "parse bundled runtime AssemblyLock failed"
+            "verify bundled runtime repository snapshot failed"
         );
         let source = error.source().expect("AssemblyLock source");
         assert!(source.is::<assembly_schema::AssemblyLockError>());

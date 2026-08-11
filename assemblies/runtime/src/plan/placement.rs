@@ -2,11 +2,13 @@ use crate::{
     config::SnapshotConfig,
     plan::{RuntimePlanError, is_kebab_case_workload},
 };
-use assembly_schema::{CanonicalAssemblyManifestV2, ExecutableAssemblyLock, RuntimePlanV3Input};
+use assembly_schema::{
+    CanonicalAssemblyManifestV2, RepositoryVerifiedAssemblyLock, RuntimePlanV3Input,
+};
 
 pub(super) fn append(
     manifest: &CanonicalAssemblyManifestV2,
-    lock: &ExecutableAssemblyLock,
+    lock: &RepositoryVerifiedAssemblyLock,
     config: SnapshotConfig<'_>,
     input: &mut RuntimePlanV3Input,
 ) -> Result<(), RuntimePlanError> {

@@ -1,0 +1,5 @@
+error[E0432]: unresolved import `assembly_schema::ExecutableAssemblyLock`
+ --> tests/ui/runtime_plan_build_attested_constructor_rejected.rs:1:23
+  |
+1 | use assembly_schema::{ExecutableAssemblyLock, ParsedAssemblyLock};
+  |                       ^^^^^^^^^^^^^^^^^^^^^^ no `ExecutableAssemblyLock` in the root

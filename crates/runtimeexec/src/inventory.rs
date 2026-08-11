@@ -886,8 +886,7 @@ mod tests {
         let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../../../assemblies/identityaudit/assembly.lock.json"
         ))?
-        .verify_repository_v2(&source)?
-        .into_executable();
+        .verify_repository_v2(&source)?;
         Ok(ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../../../assemblies/identityaudit/runtime-plan.json"),
             source.canonical(),
@@ -914,8 +913,7 @@ mod tests {
         let lock = ParsedAssemblyLock::from_json_slice(include_bytes!(
             "../../../assemblies/runtime/assembly.lock.json"
         ))?
-        .verify_repository_v2(&source)?
-        .into_executable();
+        .verify_repository_v2(&source)?;
         Ok(ParsedRuntimePlan::from_json_slice_bound(
             include_bytes!("../../../assemblies/runtime/runtime-plan.json"),
             source.canonical(),

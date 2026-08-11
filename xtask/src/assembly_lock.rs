@@ -409,7 +409,9 @@ impl fmt::Display for CommandError {
                 AssemblyLockErrorStage::ContractCatalog => write!(formatter, "assembly lock: `{path}` contract catalog 编译失败；运行 `cargo xtask contract validate`"),
                 AssemblyLockErrorStage::GeneratedUniverse => write!(formatter, "assembly lock: `{path}` generated universe 无效；检查 src/generated ownership 与文件类型"),
                 AssemblyLockErrorStage::FileSystem => write!(formatter, "assembly lock: `{path}` repository filesystem 无效；检查路径类型与权限"),
-                AssemblyLockErrorStage::Serialization | AssemblyLockErrorStage::LockFile => write!(formatter, "assembly lock: `{path}` compiler 内部失败；检查实现"),
+                AssemblyLockErrorStage::Serialization
+                | AssemblyLockErrorStage::LockFile
+                | AssemblyLockErrorStage::RepositorySnapshot => write!(formatter, "assembly lock: `{path}` compiler 内部失败；检查实现"),
             },
             Self::Serialize(path) => write!(
                 formatter,
