@@ -63,11 +63,15 @@ If that complete run fails, collect the full failure set, repair it as one batch
 
 ## Current repository contract commands
 
-These existing canonical commands validate live repository contracts and generated output. The proposal files above remain outside the live `contracts/**` funnel until their owner PBIs materialize them.
+These canonical commands validate the live Draft contracts and generated output. They prove repository closure only; they do not activate a production path.
 
 ```sh
 cargo xtask contract validate
 cargo xtask codegen --check
+
+# #1909 existing verification-path closure: six Draft candidates plus typed evidence/impact joins
+./hack/cargo.sh xtask public-api internal --layer curated --check
+./hack/cargo.sh xtask verify --only contract-validate --only codegen-check --only contract-binding-guard
 
 # #1902 standalone broker T2: always hermetic Docker, no RSS_MQTT_TEST_URL fallback
 ./hack/cargo.sh test -p mqtt --features broker-tests --test integration
@@ -105,11 +109,8 @@ The following are placeholders for delivery discoverability, not commands that e
 # #1896/#1897/#1898/#1900, after their PostgreSQL conformance targets exist
 cargo nextest run -E 'test(device_certificate)'
 
-# #1909, after existing verification and CI-impact registries include DeviceLatent
-cargo xtask verify
-
-# #1910, after the production activation receipt/assembly target exists
-cargo nextest run -E 'test(device_certificate_production_activation)'
+# #1910 remains dormant behind the External-PKI `flag-cond` trigger. It has no production
+# activation command or repository target until that trigger is satisfied and separately implemented.
 ```
 
 Later PBIs must replace a placeholder if the repository exposes a different canonical target. They must not add a second command surface solely to preserve this example.

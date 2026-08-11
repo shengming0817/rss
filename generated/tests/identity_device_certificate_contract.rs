@@ -2,6 +2,7 @@
 
 #![allow(clippy::expect_used)]
 
+use assembly_schema::contract_manifest::{ConsistencyLevel, ContractKind, Lifecycle};
 use generated::http::identity_v2::{
     device_certificate_policy_put::{
         IdentityDeviceCertificatePolicyPutConflictResponse,
@@ -17,24 +18,10 @@ use generated::{
     },
 };
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 fn schema(source: &str) -> Value {
     serde_json::from_str(source).expect("committed contract schema must be valid JSON")
-}
-
-fn manifest_string_field<'a>(source: &'a str, field: &str) -> Option<&'a str> {
-    for line in source.lines() {
-        let Some((key, value)) = line.split_once('=') else {
-            continue;
-        };
-        if key.trim() == field {
-            return value
-                .trim()
-                .strip_prefix('"')
-                .and_then(|value| value.strip_suffix('"'));
-        }
-    }
-    None
 }
 
 fn assert_fenced_command(command: &Value) {
@@ -81,34 +68,36 @@ fn assert_fenced_contract_has_no_ordinary_producer() {
 }
 
 #[test]
-fn device_command_and_fact_contracts_remain_draft_until_activation() {
-    let manifests = [
-        (
-            include_str!("../../contracts/command/identity/v1/contract.toml"),
-            "identity.apply-device-certificate",
-        ),
-        (
-            include_str!("../../contracts/event/identity/v1/device-command-acked/contract.toml"),
-            "identity.device-command-acked",
-        ),
-        (
-            include_str!(
-                "../../contracts/event/identity/v1/device-certificate-reported/contract.toml"
-            ),
-            "identity.device-certificate-reported",
-        ),
-        (
-            include_str!(
-                "../../contracts/event/identity/v1/device-ingress-receipted/contract.toml"
-            ),
-            "identity.device-ingress-receipted",
-        ),
-    ];
-
-    assert_eq!(manifests.len(), 4);
-    for (manifest, contract_id) in manifests {
-        assert_eq!(manifest_string_field(manifest, "id"), Some(contract_id));
-        assert_eq!(manifest_string_field(manifest, "lifecycle"), Some("draft"));
+fn device_certificate_candidate_registry_is_the_exact_draft_projection() {
+    let candidates = generated::device_certificate::CANDIDATE_CONTRACTS;
+    let identities = candidates
+        .iter()
+        .map(|candidate| candidate.binding().contract_id())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(candidates.len(), 6);
+    assert_eq!(identities.len(), candidates.len());
+    assert!(candidates.iter().all(|candidate| {
+        candidate.lifecycle() == Lifecycle::Draft
+            && candidate.binding().domain() == "identity"
+            && matches!(candidate.binding().version(), "v1" | "v2")
+    }));
+    for kind in [
+        ContractKind::Http,
+        ContractKind::Command,
+        ContractKind::Event,
+    ] {
+        assert!(candidates.iter().any(|candidate| candidate.kind() == kind));
+    }
+    for consistency in [
+        ConsistencyLevel::LocalOnly,
+        ConsistencyLevel::OutboxFact,
+        ConsistencyLevel::DeviceLatent,
+    ] {
+        assert!(
+            candidates
+                .iter()
+                .any(|candidate| candidate.consistency_level() == consistency)
+        );
     }
 }
 

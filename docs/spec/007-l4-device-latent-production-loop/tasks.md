@@ -113,11 +113,11 @@ This PBI closes static library composition and bounded worker-control observatio
 
 ## #1905 — Operations, metrics, and inspection
 
-- [ ] Project closed condition/operation/reason labels and bounded numeric observations for generation lag, drift age, queue age, ACK latency, and lease churn.
-- [ ] Apply authenticated tenant scope and typed permission to the read-only inspection surface defined by the six-contract proposal.
-- [ ] Keep any future operator mutation out of this contract set until it has a separately reviewed ingress, authorization, audit, and receipt owner.
-- [ ] Keep status, logs, traces, metrics, audit, and CLI output payload-free and redacted.
-- [ ] Prove cross-tenant inspection denial, redaction, and label closure at their canonical owners.
+- [x] Project closed condition/operation/reason labels and bounded numeric observations for generation lag, drift age, queue age, ACK latency, and lease churn.
+- [x] Apply authenticated tenant scope and typed permission to the read-only inspection surface defined by the six-contract proposal.
+- [x] Keep any future operator mutation out of this contract set until it has a separately reviewed ingress, authorization, audit, and receipt owner.
+- [x] Keep status, logs, traces, metrics, audit, and CLI output payload-free and redacted.
+- [x] Prove cross-tenant inspection denial, redaction, and label closure at their canonical owners.
 
 ## #1906 — Programmable device simulator and journeys
 
@@ -142,12 +142,12 @@ This PBI closes static library composition and bounded worker-control observatio
 
 ## #1909 — Existing verification-path closure
 
-- [ ] Extend the existing typed registry/code-generation exact-set with the active-candidate contract and evidence identities.
-- [ ] Extend existing contract validation, verification, CI-impact selection, and receipt aggregation for the new owners.
-- [ ] Add synthetic-red and anti-vacuity coverage at those existing machine carriers.
-- [ ] Prove missing/extra identities and missing affected evidence fail in their canonical owner.
-- [ ] Own the six-contract identity/kind/consistency exact-set proof before activation.
-- [ ] Do not introduce a subsystem-specific parallel gate, required job, or duplicated evidence inventory.
+- [x] Extend the existing typed registry/code-generation exact-set with the Draft-candidate contract and evidence identities.
+- [x] Extend existing contract validation, verification, CI-impact selection, and typed evidence binding for the new owners without claiming static registration as execution success.
+- [x] Add synthetic-red and anti-vacuity coverage at those existing machine carriers.
+- [x] Prove missing/extra identities and missing affected evidence fail in their canonical owner.
+- [x] Own the six-contract identity/kind/consistency exact-set proof before activation.
+- [x] Do not introduce a subsystem-specific parallel gate, required job, or duplicated evidence inventory.
 
 ## #1910 — Conditional production activation
 

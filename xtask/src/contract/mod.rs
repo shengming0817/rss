@@ -13,6 +13,91 @@ pub(crate) mod validate;
 use assembly_schema::repository_contract::path_segments;
 pub(crate) use governance::GovernedContract;
 
+/// Closed DeviceLatent device-certificate draft candidate identities.
+///
+/// This is the sole handwritten candidate set. Validation, deterministic code generation,
+/// CI-impact projection, and evidence binding consume this typed catalog instead of repeating
+/// contract IDs or repository paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum DeviceCertificateCandidateId {
+    PolicyPut,
+    StatusGet,
+    ApplyCommand,
+    CommandAcked,
+    CertificateReported,
+    IngressReceipted,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DeviceCertificateCandidateSpec {
+    pub(crate) id: &'static str,
+    pub(crate) kind: manifest::ContractKind,
+    pub(crate) consistency_level: manifest::ConsistencyLevel,
+    pub(crate) lifecycle: manifest::Lifecycle,
+    pub(crate) source_dir: &'static str,
+}
+
+macro_rules! device_certificate_candidate_catalog {
+    ($( $variant:ident => ($id:literal, $kind:ident, $consistency:ident, $source:literal), )+) => {
+        impl DeviceCertificateCandidateId {
+            pub(crate) const ALL: [Self; [$(stringify!($variant)),+].len()] = [
+                $(Self::$variant),+
+            ];
+
+            pub(crate) const fn spec(self) -> DeviceCertificateCandidateSpec {
+                match self {
+                    $(Self::$variant => DeviceCertificateCandidateSpec {
+                        id: $id,
+                        kind: manifest::ContractKind::$kind,
+                        consistency_level: manifest::ConsistencyLevel::$consistency,
+                        lifecycle: manifest::Lifecycle::Draft,
+                        source_dir: $source,
+                    }),+
+                }
+            }
+        }
+    };
+}
+
+device_certificate_candidate_catalog! {
+    PolicyPut => (
+        "identity.device-certificate-policy-put",
+        Http,
+        DeviceLatent,
+        "contracts/http/identity/v2/device-certificate-policy-put"
+    ),
+    StatusGet => (
+        "identity.device-certificate-status-get",
+        Http,
+        LocalOnly,
+        "contracts/http/identity/v2/device-certificate-status-get"
+    ),
+    ApplyCommand => (
+        "identity.apply-device-certificate",
+        Command,
+        OutboxFact,
+        "contracts/command/identity/v1"
+    ),
+    CommandAcked => (
+        "identity.device-command-acked",
+        Event,
+        OutboxFact,
+        "contracts/event/identity/v1/device-command-acked"
+    ),
+    CertificateReported => (
+        "identity.device-certificate-reported",
+        Event,
+        OutboxFact,
+        "contracts/event/identity/v1/device-certificate-reported"
+    ),
+    IngressReceipted => (
+        "identity.device-ingress-receipted",
+        Event,
+        OutboxFact,
+        "contracts/event/identity/v1/device-ingress-receipted"
+    ),
+}
+
 pub(crate) const TENANT_SCOPE_SOURCE_RULE: &str = "认证上下文、声明式 populate-only header 或 service-token exact-one header challenger（与 signed typed tenant claim equality）";
 
 /// JSON Schema 文档是否在任意 object schema 的 `properties` 中声明指定字段。

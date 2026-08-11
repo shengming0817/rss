@@ -59,6 +59,7 @@ pub enum ProtectionAadDim {
     SchemaVersion,
 }
 pub mod command;
+pub mod device_certificate;
 pub mod event;
 pub mod http;
 pub mod projection;

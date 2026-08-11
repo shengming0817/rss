@@ -7,6 +7,7 @@
 
 use crate::ci_lanes::{GateId, LocalImpactDomain, LocalMetaPolicy, REGISTRY};
 use crate::cmd::{CargoSubcommand, ExternalProgram, cargo_cmd, external_cmd};
+use crate::execution_profiles::{DeviceLatentEvidenceId, ExecutionUnitId};
 use crate::integration_shards::{
     self, AdapterPackage, AdapterProjection, ChangedIntegrationSource, ImpactMarker,
     IntegrationSelection, IntegrationShard, IntegrationUnitId, Resource,
@@ -3123,6 +3124,9 @@ fn impact_with_facts_and_owners(
     }
     let mut direct = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     for entry in entries {
+        if device_latent_candidate_impact_path(&entry.path) {
+            continue;
+        }
         // Same documentation gate as classify_selective_entry: governance docs under
         // contracts/ (e.g. README.md) must not enter contract.toml manifest impact.
         if entry.path.starts_with("contracts/") && !documentation(&entry.path) {
@@ -3158,7 +3162,16 @@ fn impact_with_facts_and_owners(
         }
     }
     let mut impacted = direct.keys().cloned().collect::<BTreeSet<_>>();
-    impacted.extend(path_packages);
+    impacted.extend(
+        entries
+            .iter()
+            .filter(|entry| !device_latent_candidate_impact_path(&entry.path))
+            .map(|entry| facts.package_for_repo_path(Path::new(&entry.path)))
+            .collect::<std::result::Result<Vec<_>, _>>()?
+            .into_iter()
+            .flatten()
+            .map(|package| package.as_str().to_owned()),
+    );
     let closure = reverse_closure(facts, &impacted)?;
     let public_api_packages = affected_internal(&impacted)?;
     let mut impact = try_impact_entries(entries, Some(facts), &closure, &direct)?;
@@ -3174,6 +3187,9 @@ fn changed_integration_sources(
     let mut units = BTreeSet::new();
     let mut exact_paths = BTreeSet::new();
     for entry in entries {
+        if device_latent_candidate_impact_path(&entry.path) {
+            continue;
+        }
         match integration_shards::changed_integration_source(&entry.path) {
             Some(ChangedIntegrationSource::Exact(selected)) => {
                 units.extend(selected);
@@ -3238,6 +3254,7 @@ fn try_impact_entries(
     let mut markers = BTreeSet::new();
     let mut resources = BTreeSet::new();
     let mut providers = BTreeSet::new();
+    add_device_certificate_candidate_impact(entries, facts, &mut packages, &mut markers)?;
     for (package, reasons) in &packages {
         let has_structured_relation = reasons.iter().any(|impact| {
             matches!(
@@ -3338,6 +3355,40 @@ fn try_impact_entries(
     }))
 }
 
+fn add_device_certificate_candidate_impact(
+    entries: &[DiffEntry],
+    facts: Option<&WorkspaceFacts>,
+    packages: &mut BTreeMap<String, BTreeSet<PackageImpact>>,
+    markers: &mut BTreeSet<ImpactMarker>,
+) -> Result<()> {
+    if !entries
+        .iter()
+        .any(|entry| device_latent_semantic_impact_path(&entry.path))
+    {
+        return Ok(());
+    }
+    markers.insert(ImpactMarker::DeviceCertificateCandidate);
+    for evidence in DeviceLatentEvidenceId::ALL
+        .into_iter()
+        .map(DeviceLatentEvidenceId::spec)
+        .filter(|spec| spec.owner == ExecutionUnitId::Gate(GateId::ComponentTests))
+    {
+        let package = match facts {
+            Some(facts) => facts
+                .package_for_repo_path(Path::new(evidence.source_path))?
+                .map(|package| package.as_str().to_owned()),
+            None => path_package(evidence.source_path),
+        };
+        if let Some(package) = package {
+            packages
+                .entry(package)
+                .or_default()
+                .insert(PackageImpact::Test);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used)] // reason: callers provide validated synthetic facts and repo-relative paths.
 fn impact_entries(
@@ -3360,6 +3411,9 @@ fn classify_selective_entry(
 ) -> Result<bool> {
     let path = entry.path.as_str();
     local_meta_domains.extend(local_impact_domains(path));
+    if device_latent_candidate_impact_path(path) {
+        return Ok(false);
+    }
     if let Some(impact) = governance_impact(path) {
         governance.insert(impact);
         return Ok(true);
@@ -3605,6 +3659,28 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         domains.insert(Domain::CommandSymmetry);
     }
     domains
+}
+
+fn device_latent_candidate_impact_path(path: &str) -> bool {
+    path == "generated/src/device_certificate.rs"
+        || crate::contract::DeviceCertificateCandidateId::ALL
+            .into_iter()
+            .map(crate::contract::DeviceCertificateCandidateId::spec)
+            .any(|candidate| {
+                path == candidate.source_dir
+                    || path.starts_with(&format!("{}/", candidate.source_dir))
+            })
+}
+
+fn device_latent_evidence_impact_path(path: &str) -> bool {
+    DeviceLatentEvidenceId::ALL
+        .into_iter()
+        .map(DeviceLatentEvidenceId::spec)
+        .any(|evidence| path == evidence.source_path)
+}
+
+fn device_latent_semantic_impact_path(path: &str) -> bool {
+    device_latent_candidate_impact_path(path) || device_latent_evidence_impact_path(path)
 }
 
 fn coverage_closure_for(
@@ -4235,6 +4311,20 @@ fn policy_semantic_catalog_with_selector_overrides(
                 marker.label()
             ));
         }
+    }
+    for candidate in crate::contract::DeviceCertificateCandidateId::ALL {
+        let spec = candidate.spec();
+        catalog.push(format!(
+            "device-certificate-candidate={}:{}:{:?}:{:?}:{:?}",
+            spec.source_dir, spec.id, spec.kind, spec.consistency_level, spec.lifecycle
+        ));
+    }
+    for evidence in DeviceLatentEvidenceId::ALL {
+        let spec = evidence.spec();
+        catalog.push(format!(
+            "device-latent-evidence={evidence:?}:{}:{:?}:{:?}:{}:{}",
+            spec.issue, spec.tier, spec.owner, spec.source_path, spec.selector
+        ));
     }
     catalog.extend(
         crate::layers::BASIS_CRATES
@@ -7244,6 +7334,174 @@ mod tests {
                 .iter()
                 .all(|id| id.spec().shard != IntegrationShard::ProductionRuntime)
         );
+        Ok(())
+    }
+
+    #[test]
+    fn device_latent_candidate_selects_only_declared_pr_critical_carriers() -> Result<()> {
+        use IntegrationUnitId as Id;
+
+        let root = crate::workspace_root()?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let ImpactSet::Selective(impact) = impact_with_facts(
+            &root,
+            &[DiffEntry::modified(
+                "contracts/http/identity/v2/device-certificate-policy-put/contract.toml",
+            )],
+            command_facts.get()?,
+            UNKNOWN_REVISION,
+        )?
+        else {
+            bail!("device-certificate candidate must remain selectively planned");
+        };
+
+        assert_eq!(
+            impact.integration_units,
+            BTreeSet::from([Id::PostgresLib, Id::DeviceCertificateConvergenceJourney])
+        );
+        assert!(impact.packages.contains_key("observ"));
+        for release_only in [
+            Id::DeviceIdentityLib,
+            Id::RuntimeLib,
+            Id::MqttBackpressureFaultJourney,
+        ] {
+            assert!(!impact.integration_units.contains(&release_only));
+            assert_eq!(
+                release_only.spec().primary_owner,
+                crate::execution_profiles::ExecutionProfile::ReleaseCheck
+            );
+        }
+        assert!(
+            impact
+                .local_meta_domains
+                .contains(&LocalImpactDomain::ContractBinding)
+        );
+        let local_gates = local_meta_gates(Some(&impact.local_meta_domains));
+        for gate in [
+            GateId::ContractValidate,
+            GateId::CodegenCheck,
+            GateId::ContractBindingGuard,
+        ] {
+            assert!(
+                local_gates.contains(&gate),
+                "missing candidate gate {gate:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn device_latent_candidate_and_evidence_paths_are_typed_and_non_vacuous() -> Result<()> {
+        use IntegrationUnitId as Id;
+
+        let root = crate::workspace_root()?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let mut candidate_paths = BTreeSet::new();
+        for candidate in crate::contract::DeviceCertificateCandidateId::ALL {
+            let source_dir = candidate.spec().source_dir;
+            candidate_paths.insert(format!("{source_dir}/contract.toml"));
+            for entry in std::fs::read_dir(root.join(source_dir))? {
+                let path = entry?.path();
+                if path.extension() == Some(OsStr::new("json")) {
+                    candidate_paths
+                        .insert(path.strip_prefix(&root)?.to_string_lossy().into_owned());
+                }
+            }
+        }
+        let evidence_paths = DeviceLatentEvidenceId::ALL
+            .into_iter()
+            .map(DeviceLatentEvidenceId::spec)
+            .map(|spec| spec.source_path)
+            .collect::<BTreeSet<_>>();
+
+        assert!(candidate_paths.len() > 6);
+        assert_eq!(evidence_paths.len(), 6);
+        assert!(device_latent_candidate_impact_path(
+            "generated/src/device_certificate.rs"
+        ));
+        for path in candidate_paths
+            .iter()
+            .map(String::as_str)
+            .chain(["generated/src/device_certificate.rs"])
+        {
+            assert!(
+                device_latent_candidate_impact_path(path),
+                "missing typed impact edge for {path}"
+            );
+            let ImpactSet::Selective(impact) =
+                impact_with_facts(&root, &[DiffEntry::modified(path)], facts, UNKNOWN_REVISION)?
+            else {
+                bail!("typed DeviceLatent path {path} must remain selective");
+            };
+            assert_eq!(
+                impact.integration_units,
+                BTreeSet::from([Id::PostgresLib, Id::DeviceCertificateConvergenceJourney]),
+                "unexpected PR-critical projection for {path}"
+            );
+            assert!(
+                !impact
+                    .integration_units
+                    .contains(&Id::MqttBackpressureFaultJourney),
+                "ReleaseCheck-only MQTT evidence leaked for {path}"
+            );
+        }
+        for path in evidence_paths {
+            assert!(
+                device_latent_evidence_impact_path(path),
+                "missing typed evidence impact edge for {path}"
+            );
+            assert!(device_latent_semantic_impact_path(path));
+            assert!(!device_latent_candidate_impact_path(path));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn device_latent_evidence_paths_preserve_owner_first_selection_red() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let evidence_paths = DeviceLatentEvidenceId::ALL
+            .into_iter()
+            .map(DeviceLatentEvidenceId::spec)
+            .map(|spec| spec.source_path)
+            .collect::<BTreeSet<_>>();
+
+        for path in evidence_paths {
+            let impact =
+                impact_with_facts(&root, &[DiffEntry::modified(path)], facts, UNKNOWN_REVISION)?;
+            match integration_shards::changed_integration_source(path) {
+                Some(ChangedIntegrationSource::ReleaseCheck) => assert!(
+                    matches!(
+                        impact,
+                        ImpactSet::Escalated {
+                            cause: EscalationCause::GlobalImpact,
+                            ..
+                        }
+                    ),
+                    "release-owned evidence must retain its ordinary fail-closed selection: {path}"
+                ),
+                exact => {
+                    let ImpactSet::Selective(impact) = impact else {
+                        bail!("affected evidence owner must remain selectively planned: {path}");
+                    };
+                    let package = facts
+                        .package_for_repo_path(Path::new(path))?
+                        .context("DeviceLatent evidence package")?;
+                    assert!(
+                        impact.packages.contains_key(package.as_str()),
+                        "evidence owner package was swallowed for {path}"
+                    );
+                    if let Some(ChangedIntegrationSource::Exact(units)) = exact {
+                        assert!(
+                            units.is_subset(&impact.integration_units),
+                            "exact evidence target was swallowed for {path}"
+                        );
+                    }
+                }
+            }
+        }
         Ok(())
     }
 

@@ -156,6 +156,7 @@ pub(crate) enum ImpactMarker {
     FrameworkContract,
     RuntimeSurface,
     LocalTxContract,
+    DeviceCertificateCandidate,
     OidcProvider,
 }
 
@@ -211,6 +212,7 @@ impl ImpactMarker {
             Self::FrameworkContract => "contract:_framework",
             Self::RuntimeSurface => "runtime-surface",
             Self::LocalTxContract => "localtx-contract",
+            Self::DeviceCertificateCandidate => "device-certificate-candidate",
             Self::OidcProvider => "security-provider:oidc",
         }
     }
@@ -864,7 +866,7 @@ integration_shard_catalog! {
         name: "postgres-domain",
         local_feature_scopes: [Postgres, PostgresMigration, Journeys, Runtime],
         units: [
-            PostgresLib => ("postgres-lib", IntegrationCritical, "postgres", "postgres", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresPackage], capabilities: []),
+            PostgresLib => ("postgres-lib", IntegrationCritical, "postgres", "postgres", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresPackage, DeviceCertificateCandidate], capabilities: []),
             PostgresMigrationLib => ("postgres-migration-lib", IntegrationCritical, "postgres-migration", "postgres_migration", Lib, Serial, Affected, resources: [Postgres], impact_packages: [PostgresMigrationPackage], capabilities: []),
             PostgresFeatureManifest => ("postgres-feature-manifest", ReleaseCheck, "postgres", "feature_manifest", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresDomainFeatureSurfaceTrybuild => ("postgres-domain-feature-surface-trybuild", ReleaseCheck, "postgres", "domain_feature_surface_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -908,9 +910,9 @@ integration_shard_catalog! {
             AmqpIntegration => ("amqp-integration", IntegrationCritical, "amqp", "integration", Test, Serial, RemoteOnly, resources: [Amqp], impact_packages: [AmqpPackage], capabilities: []),
             MqttLib => ("mqtt-lib", ReleaseCheck, "mqtt", "mqtt", Lib, Parallel, Affected, resources: [Mqtt], impact_packages: [], capabilities: [Docker]),
             MqttIntegration => ("mqtt-integration", IntegrationCritical, "mqtt", "integration", Test, Serial, RemoteOnly, resources: [Mqtt], impact_packages: [MqttPackage], capabilities: [Docker]),
-            DeviceIdentityLib => ("deviceidentity-lib", ReleaseCheck, "deviceidentity", "deviceidentity", Lib, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            DeviceCertificateConvergenceJourney => ("device-certificate-convergence-journey", IntegrationCritical, "journeys", "device_certificate_convergence_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [IotDevicePackage, IdentityCompositionPackage, DeviceIdentityPackage, EventexecPackage, IdentityPackage, MqttPackage, PostgresPackage], capabilities: [Docker]),
-            MqttBackpressureFaultJourney => ("mqtt-backpressure-fault-journey", ReleaseCheck, "journeys", "mqtt_backpressure_fault_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [], capabilities: [Docker]),
+            DeviceIdentityLib => ("deviceidentity-lib", ReleaseCheck, "deviceidentity", "deviceidentity", Lib, Parallel, Affected, resources: [], impact_packages: [DeviceCertificateCandidate], capabilities: []),
+            DeviceCertificateConvergenceJourney => ("device-certificate-convergence-journey", IntegrationCritical, "journeys", "device_certificate_convergence_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [IotDevicePackage, IdentityCompositionPackage, DeviceIdentityPackage, EventexecPackage, IdentityPackage, MqttPackage, PostgresPackage, DeviceCertificateCandidate], capabilities: [Docker]),
+            MqttBackpressureFaultJourney => ("mqtt-backpressure-fault-journey", ReleaseCheck, "journeys", "mqtt_backpressure_fault_journey", Test, Serial, RemoteOnly, resources: [Postgres, Mqtt], impact_packages: [DeviceCertificateCandidate], capabilities: [Docker]),
             MqttAssertionContract => ("mqtt-assertion-contract", ReleaseCheck, "mqtt", "assertion_contract", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttConfigTopic => ("mqtt-config-topic", ReleaseCheck, "mqtt", "config_topic", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             MqttOwnershipGate => ("mqtt-ownership-gate", ReleaseCheck, "mqtt", "ownership_gate", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -936,7 +938,7 @@ integration_shard_catalog! {
             IdentityAuditLib => ("identity-audit-lib", ReleaseCheck, "identityaudit", "identityaudit", Lib, Serial, Affected, resources: [], impact_packages: [], capabilities: []),
             IdentityAuditArtifactAcceptance => ("identity-audit-artifact-acceptance", ReleaseCheck, "identityaudit", "artifact_acceptance", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             IdentityAuditRuntimeImageAcceptance => ("identity-audit-runtime-image-acceptance", ReleaseCheck, "identityaudit", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
-            RuntimeLib => ("runtime-lib", ReleaseCheck, "runtime", "runtime", Lib, Serial, Affected, resources: [Postgres, Redis, Vault], impact_packages: [], capabilities: []),
+            RuntimeLib => ("runtime-lib", ReleaseCheck, "runtime", "runtime", Lib, Serial, Affected, resources: [Postgres, Redis, Vault], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             AuthE2e => ("auth-e2e", ReleaseCheck, "runtime", "auth_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             AuthBridgeStructure => ("auth-bridge-structure", ReleaseCheck, "runtime", "auth_bridge_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             ServerBudgetStructure => ("server-budget-structure", ReleaseCheck, "runtime", "server_budget_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),

@@ -400,6 +400,30 @@ pub fn generated::command::identity_v1::FencedReconcileCommand::intent_digest(&s
 pub fn generated::command::identity_v1::FencedReconcileCommand::request(&self) -> &<Self::Contract as generated::command::CommandContract>::Request
 pub trait generated::command::JournaledCommandContract: generated::command::CommandContract
 impl generated::command::JournaledCommandContract for generated::command::_seed_v1::Contract
+pub mod generated::device_certificate
+pub struct generated::device_certificate::DeviceCertificateCandidateSpec
+impl generated::device_certificate::DeviceCertificateCandidateSpec
+pub const fn generated::device_certificate::DeviceCertificateCandidateSpec::binding(self) -> vocab::contract::binding::ContractBinding
+pub const fn generated::device_certificate::DeviceCertificateCandidateSpec::consistency_level(self) -> assembly_schema::contract_manifest::ConsistencyLevel
+pub const fn generated::device_certificate::DeviceCertificateCandidateSpec::kind(self) -> assembly_schema::contract_manifest::ContractKind
+pub const fn generated::device_certificate::DeviceCertificateCandidateSpec::lifecycle(self) -> assembly_schema::contract_manifest::Lifecycle
+impl core::clone::Clone for generated::device_certificate::DeviceCertificateCandidateSpec
+pub fn generated::device_certificate::DeviceCertificateCandidateSpec::clone(&self) -> generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::cmp::Eq for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::cmp::PartialEq for generated::device_certificate::DeviceCertificateCandidateSpec
+pub fn generated::device_certificate::DeviceCertificateCandidateSpec::eq(&self, &generated::device_certificate::DeviceCertificateCandidateSpec) -> bool
+impl core::fmt::Debug for generated::device_certificate::DeviceCertificateCandidateSpec
+pub fn generated::device_certificate::DeviceCertificateCandidateSpec::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::marker::StructuralPartialEq for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::marker::Freeze for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::marker::Send for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::marker::Sync for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::marker::Unpin for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::marker::UnsafeUnpin for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::panic::unwind_safe::RefUnwindSafe for generated::device_certificate::DeviceCertificateCandidateSpec
+impl core::panic::unwind_safe::UnwindSafe for generated::device_certificate::DeviceCertificateCandidateSpec
+pub const generated::device_certificate::CANDIDATE_CONTRACTS: &[generated::device_certificate::DeviceCertificateCandidateSpec]
 pub mod generated::event
 pub mod generated::event::_seed_v1
 pub mod generated::event::_seed_v1::error
@@ -2385,9 +2409,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::session_created::Contract
 pub struct generated::event::identity_v1::session_created::IdentitySessionCreatedPayload
 pub generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::occurred_at: i64
-pub generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::session_id: alloc::string::String
+pub generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::session_id: uuid::Uuid
 pub generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::subject: uuid::Uuid
-pub generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::tenant_id: alloc::string::String
+pub generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::tenant_id: uuid::Uuid
 impl core::clone::Clone for generated::event::identity_v1::session_created::IdentitySessionCreatedPayload
 pub fn generated::event::identity_v1::session_created::IdentitySessionCreatedPayload::clone(&self) -> generated::event::identity_v1::session_created::IdentitySessionCreatedPayload
 impl core::fmt::Debug for generated::event::identity_v1::session_created::IdentitySessionCreatedPayload

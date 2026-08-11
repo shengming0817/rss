@@ -39,7 +39,10 @@ use crate::contract::manifest::{
 };
 use crate::contract::protection::{self, AadDim, AtRest, ProtectionMode, StructProtectionPolicies};
 use crate::contract::redaction::{self, FieldPolicy, PiiKind, Sensitivity, StructPolicies};
-use crate::contract::{GovernedContract, TENANT_SCOPE_SOURCE_RULE, schema_declares_property};
+use crate::contract::{
+    DeviceCertificateCandidateId, GovernedContract, TENANT_SCOPE_SOURCE_RULE,
+    schema_declares_property,
+};
 use crate::pathsafe;
 use assembly_schema::repository_contract::validate_schema_filename;
 
@@ -463,7 +466,7 @@ fn load_contract_fixtures(contracts_root: &Path) -> Result<Vec<GovernedContract>
 
 #[cfg(test)]
 fn generate_contracts(contracts: &[GovernedContract], gen_src: &Path, check: bool) -> Result<()> {
-    let files = render_all(contracts)?;
+    let files = render_all_with_device_certificate_requirement(contracts, false)?;
     for (rel, code) in &files {
         let formatted = format_rust(code)?; // rustfmt-canonical（同 cargo fmt），见模块 doc
         ensure_file_contents(&gen_src.join(rel), &formatted, check)?;
@@ -591,6 +594,13 @@ impl GeneratedCarrier {
 /// 扁平 / 嵌套不可混用（同 module 既裸常量又子模块语义二义）；validate R21 守 authoring 面，此处 codegen
 /// 自守（独立于 validate 运行）。
 fn render_all(contracts: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> {
+    render_all_with_device_certificate_requirement(contracts, true)
+}
+
+fn render_all_with_device_certificate_requirement(
+    contracts: &[GovernedContract],
+    require_device_certificate: bool,
+) -> Result<Vec<(PathBuf, String)>> {
     let mut files: Vec<(PathBuf, String)> = Vec::new();
     // group: (kind_dir, module) → (mod_kind, 同 module 的契约切片)。BTreeMap 保确定性序。
     let mut groups: BTreeMap<(String, String), (ModKind, Vec<&GovernedContract>)> = BTreeMap::new();
@@ -662,8 +672,120 @@ fn render_all(contracts: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> 
         }
         files.push((PathBuf::from(kind_dir).join("mod.rs"), mod_rs));
     }
-    files.push((PathBuf::from("lib.rs"), render_lib_rs(kinds.keys())));
+    let device_certificate =
+        render_device_certificate_candidates(contracts, require_device_certificate)?;
+    let has_device_certificate = device_certificate.is_some();
+    if let Some(source) = device_certificate {
+        files.push((PathBuf::from("device_certificate.rs"), source));
+    }
+    files.push((
+        PathBuf::from("lib.rs"),
+        render_lib_rs(kinds.keys(), has_device_certificate),
+    ));
     Ok(files)
+}
+
+fn render_device_certificate_candidates(
+    contracts: &[GovernedContract],
+    required: bool,
+) -> Result<Option<String>> {
+    let candidate_ids = DeviceCertificateCandidateId::ALL
+        .into_iter()
+        .map(|candidate| candidate.spec().id)
+        .collect::<BTreeSet<_>>();
+    if !contracts
+        .iter()
+        .any(|contract| candidate_ids.contains(contract.id()))
+    {
+        if required {
+            bail!("device-certificate candidate set is entirely missing from production codegen");
+        }
+        return Ok(None);
+    }
+
+    let mut entries = Vec::new();
+    for candidate in DeviceCertificateCandidateId::ALL {
+        let expected = candidate.spec();
+        let matches = contracts
+            .iter()
+            .filter(|contract| contract.id() == expected.id)
+            .collect::<Vec<_>>();
+        let [contract] = matches.as_slice() else {
+            bail!(
+                "device-certificate candidate id={} must occur exactly once for codegen; found {}",
+                expected.id,
+                matches.len()
+            );
+        };
+        let manifest = contract.manifest();
+        if manifest.kind != expected.kind
+            || manifest.consistency_level != expected.consistency_level
+            || manifest.lifecycle != expected.lifecycle
+            || manifest.domain != "identity"
+            || contract.owner().domain().map(|owner| owner.as_str()) != Some("identity")
+            || !contract.dir().ends_with(expected.source_dir)
+        {
+            bail!(
+                "device-certificate candidate id={} metadata/source drifted from the typed catalog",
+                expected.id
+            );
+        }
+        let symbol = GeneratedCarrier::from_contract(contract)?
+            .item(GeneratedItem::Contract)?
+            .symbol
+            .replacen("generated::", "crate::", 1);
+        entries.push(format!(
+            "    DeviceCertificateCandidateSpec::new({symbol}, \
+             ::assembly_schema::contract_manifest::ContractKind::{kind:?}, \
+             ::assembly_schema::contract_manifest::ConsistencyLevel::{consistency:?}, \
+             ::assembly_schema::contract_manifest::Lifecycle::Draft),",
+            kind = expected.kind,
+            consistency = expected.consistency_level,
+        ));
+    }
+
+    Ok(Some(format!(
+        r#"//! Device-certificate draft activation candidates generated from the canonical contract set.
+//!
+//! This registry is governance metadata only. Draft candidates are deliberately excluded from
+//! active HTTP/event registries, L2 assurance, runtime wiring, and production artifacts.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Typed governance metadata for one device-certificate Draft candidate.
+pub struct DeviceCertificateCandidateSpec {{
+    binding: ::vocab::ContractBinding,
+    kind: ::assembly_schema::contract_manifest::ContractKind,
+    consistency_level: ::assembly_schema::contract_manifest::ConsistencyLevel,
+    lifecycle: ::assembly_schema::contract_manifest::Lifecycle,
+}}
+
+impl DeviceCertificateCandidateSpec {{
+    const fn new(
+        binding: ::vocab::ContractBinding,
+        kind: ::assembly_schema::contract_manifest::ContractKind,
+        consistency_level: ::assembly_schema::contract_manifest::ConsistencyLevel,
+        lifecycle: ::assembly_schema::contract_manifest::Lifecycle,
+    ) -> Self {{
+        Self {{ binding, kind, consistency_level, lifecycle }}
+    }}
+
+    /// Return the canonical contract binding.
+    pub const fn binding(self) -> ::vocab::ContractBinding {{ self.binding }}
+    /// Return the governed contract kind.
+    pub const fn kind(self) -> ::assembly_schema::contract_manifest::ContractKind {{ self.kind }}
+    /// Return the governed consistency level.
+    pub const fn consistency_level(self) -> ::assembly_schema::contract_manifest::ConsistencyLevel {{ self.consistency_level }}
+    /// Return the governed lifecycle.
+    pub const fn lifecycle(self) -> ::assembly_schema::contract_manifest::Lifecycle {{ self.lifecycle }}
+}}
+
+/// Exact generated projection of the six device-certificate Draft candidates.
+pub const CANDIDATE_CONTRACTS: &[DeviceCertificateCandidateSpec] = &[
+{}
+];
+"#,
+        entries.join("\n")
+    )))
 }
 
 fn render_saga_test_support(fixtures: &[GovernedContract]) -> Result<Vec<(PathBuf, String)>> {
@@ -5000,13 +5122,19 @@ pub const PRODUCER_DOMAINS: &[ProducerDomain] = &[
     ))
 }
 
-fn render_lib_rs<'a>(kinds: impl Iterator<Item = &'a String>) -> String {
+fn render_lib_rs<'a>(
+    kinds: impl Iterator<Item = &'a String>,
+    has_device_certificate: bool,
+) -> String {
     let mut s = String::new();
     s.push_str("//! generated — 契约派生 wire 类型（committed，一等审查材料）。\n");
     s.push_str("//! 由 `cargo xtask codegen` 生成；勿手改。漂移由 `cargo xtask codegen --check` 守（CI 门）。\n");
     s.push_str(FIELD_PROTECTION_METADATA_DEF);
     for k in kinds {
         s.push_str(&format!("pub mod {k};\n"));
+    }
+    if has_device_certificate {
+        s.push_str("pub mod device_certificate;\n");
     }
     s
 }
@@ -5134,6 +5262,7 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contract::DeviceCertificateCandidateId;
     use crate::testutil::unique_tmp;
 
     const BUSINESS_LOCAL_TX_EFFECT_PROFILE: &str = concat!(
@@ -8671,5 +8800,119 @@ mod tests {
         assert_eq!(std::fs::read(&sentinel)?, b"preserve me\n");
         std::fs::remove_dir_all(root)?;
         Ok(())
+    }
+
+    #[test]
+    fn device_certificate_candidate_registry_is_exact_draft_projection() -> anyhow::Result<()> {
+        let root = crate::workspace_root()?;
+        let governance = ContractGovernanceIr::load_consumer_workspace(&root)?;
+        governance.read(|contracts| {
+            let rendered = render_all(contracts)?;
+            let source = rendered
+                .iter()
+                .find_map(|(path, source)| {
+                    (path == Path::new("device_certificate.rs")).then_some(source.as_str())
+                })
+                .context("codegen must emit device_certificate.rs")?;
+
+            for candidate in DeviceCertificateCandidateId::ALL {
+                let spec = candidate.spec();
+                let contract = contracts
+                    .iter()
+                    .find(|contract| contract.id() == spec.id)
+                    .with_context(|| format!("missing governed candidate {}", spec.id))?;
+                let symbol = GeneratedCarrier::from_contract(contract)?
+                    .item(GeneratedItem::Contract)?
+                    .symbol
+                    .replacen("generated::", "crate::", 1);
+                assert!(
+                    source.contains(&symbol),
+                    "missing candidate symbol {symbol}"
+                );
+            }
+            assert_eq!(
+                source
+                    .matches("DeviceCertificateCandidateSpec::new(")
+                    .count(),
+                DeviceCertificateCandidateId::ALL.len()
+            );
+            assert!(
+                source.contains("::assembly_schema::contract_manifest::Lifecycle::Draft"),
+                "candidate registry must carry typed draft lifecycle"
+            );
+            assert!(source.contains("pub const CANDIDATE_CONTRACTS"));
+
+            let mut all_missing = contracts.to_vec();
+            all_missing.retain(|contract| {
+                !DeviceCertificateCandidateId::ALL
+                    .into_iter()
+                    .any(|candidate| contract.id() == candidate.spec().id)
+            });
+            assert!(
+                render_all(&all_missing)
+                    .expect_err("entirely missing candidate set must fail closed")
+                    .to_string()
+                    .contains("entirely missing")
+            );
+
+            let mut missing = contracts.to_vec();
+            missing.retain(|contract| {
+                contract.id() != DeviceCertificateCandidateId::CommandAcked.spec().id
+            });
+            assert!(
+                render_device_certificate_candidates(&missing, true)
+                    .expect_err("missing candidate must fail closed")
+                    .to_string()
+                    .contains("must occur exactly once")
+            );
+
+            let mut duplicate = contracts.to_vec();
+            duplicate.push(
+                contracts
+                    .iter()
+                    .find(|contract| {
+                        contract.id() == DeviceCertificateCandidateId::CertificateReported.spec().id
+                    })
+                    .context("reported candidate exists")?
+                    .clone(),
+            );
+            assert!(
+                render_device_certificate_candidates(&duplicate, true)
+                    .expect_err("duplicate candidate must fail closed")
+                    .to_string()
+                    .contains("must occur exactly once")
+            );
+
+            for candidate in DeviceCertificateCandidateId::ALL {
+                let spec = candidate.spec();
+                if !matches!(spec.kind, ContractKind::Http | ContractKind::Event) {
+                    continue;
+                }
+                let contract = contracts
+                    .iter()
+                    .find(|contract| contract.id() == spec.id)
+                    .with_context(|| format!("missing governed candidate {}", spec.id))?;
+                let kind_dir = spec.kind.as_dir();
+                let registry_path = format!("{kind_dir}/mod.rs");
+                let root_registry = rendered
+                    .iter()
+                    .find_map(|(path, source)| {
+                        (path == Path::new(&registry_path)).then_some(source)
+                    })
+                    .with_context(|| format!("missing generated {registry_path}"))?;
+                let symbol = GeneratedCarrier::from_contract(contract)?
+                    .item(GeneratedItem::Contract)?
+                    .symbol
+                    .strip_prefix(&format!("generated::{kind_dir}::"))
+                    .context("root registry symbol must be kind-relative")?
+                    .replace("::CONTRACT", "::SPEC");
+                assert!(
+                    !root_registry.contains(&symbol),
+                    "Draft candidate {} leaked into active {registry_path} as {symbol}",
+                    spec.id
+                );
+            }
+            Ok(())
+        })
     }
 }
