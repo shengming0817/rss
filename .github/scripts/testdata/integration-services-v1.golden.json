@@ -4,10 +4,16 @@
       "owned-a",
       "owned-b"
     ],
+    "attemptedNetworkIds": [
+      "ownednet"
+    ],
     "errors": [],
     "removedContainerIds": [
       "owned-a",
       "owned-b"
+    ],
+    "removedNetworkIds": [
+      "ownednet"
     ]
   },
   "collection": {

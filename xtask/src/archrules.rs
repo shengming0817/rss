@@ -1959,7 +1959,6 @@ fn scan_record_granular_xtask_invariants(
         "xtask/src/integration_shards.rs" => INTEGRATION_SHARD_INVARIANT_BINDINGS,
         "xtask/src/nextest.rs" => NEXTEST_INVARIANT_BINDINGS,
         "xtask/src/ci_impact.rs" => CI_IMPACT_INVARIANT_BINDINGS,
-        "xtask/src/ci_gate.rs" => CI_GATE_INVARIANT_BINDINGS,
         "xtask/src/localtx_coverage.rs" => LOCALTX_COVERAGE_INVARIANT_BINDINGS,
         "xtask/src/localtx_evidence.rs" => LOCALTX_EVIDENCE_INVARIANT_BINDINGS,
         "xtask/src/localonly_evidence.rs" => LOCALONLY_EVIDENCE_INVARIANT_BINDINGS,
@@ -2164,25 +2163,6 @@ const CI_IMPACT_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     },
 ];
 
-const CI_GATE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
-    InvariantCarrierBinding {
-        path: "xtask/src/ci_gate.rs",
-        id: "CI-RESULT-GATE-01",
-        facet: Some("typed-result-gate"),
-        carrier: "native-hard",
-        evidence: "closed result enum, strict parser, and exhaustive fail-closed result match",
-        binding: CarrierExecutionBinding::NativeCompile,
-    },
-    InvariantCarrierBinding {
-        path: "xtask/src/ci_gate.rs",
-        id: "CI-RESULT-GATE-01",
-        facet: Some("workflow-parameter-binding"),
-        carrier: "xtask",
-        evidence: "exact workflow result parameter binding synthetic red and committed anti-vacuity",
-        binding: CHECK_UNIT_BINDING,
-    },
-];
-
 const LOCALTX_COVERAGE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
     InvariantCarrierBinding {
         path: "xtask/src/localtx_coverage.rs",
@@ -2265,6 +2245,14 @@ const LOCALONLY_EVIDENCE_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
 ];
 
 const INTEGRATION_SHARD_INVARIANT_BINDINGS: &[InvariantCarrierBinding] = &[
+    InvariantCarrierBinding {
+        path: "xtask/src/integration_shards.rs",
+        id: "CI-INTEGRATION-GROUP-01",
+        facet: None,
+        carrier: "native-hard",
+        evidence: "closed group enum and exhaustive shard-to-group projection",
+        binding: CarrierExecutionBinding::NativeCompile,
+    },
     InvariantCarrierBinding {
         path: "xtask/src/integration_shards.rs",
         id: "INTEGRATION-SHARD-REGISTRY-01",
@@ -5976,37 +5964,27 @@ fn unrelated_green_accepted() { assert!(true); }
     }
 
     #[test]
-    fn ci_result_gate_registers_hard_and_workflow_binding_facets() -> Result<()> {
+    fn ci_result_gate_is_a_single_medium_external_runtime_carrier() -> Result<()> {
         let index = build_index(&crate::workspace_root()?)?;
         let records = index
             .records
             .iter()
             .filter(|record| record.id == "CI-RESULT-GATE-01")
             .collect::<Vec<_>>();
-        assert_eq!(records.len(), 2, "{records:?}");
-
-        let hard = records
-            .iter()
-            .find(|record| record.facet.as_deref() == Some("typed-result-gate"))
-            .context("missing typed-result-gate facet")?;
-        assert_eq!(hard.level, RuleLevel::Hard);
-        assert_eq!(hard.carrier, "native-hard");
-        assert_eq!(hard.gate, "native-compile");
-
-        let workflow = records
-            .iter()
-            .find(|record| record.facet.as_deref() == Some("workflow-parameter-binding"))
-            .context("missing workflow-parameter-binding facet")?;
+        let [workflow] = records.as_slice() else {
+            bail!("CI result gate must have exactly one workflow carrier: {records:?}");
+        };
+        assert_eq!(workflow.facet, None);
         assert_eq!(workflow.level, RuleLevel::Medium);
         assert_eq!(workflow.carrier, "xtask");
-        assert_eq!(workflow.gate, "check");
+        assert_eq!(workflow.gate, "check,test");
         assert_eq!(
             workflow.synthetic_red.as_deref(),
-            Some("workflow_parameter_binding_rejects_drift")
+            Some("fixed_ci_workflow_guard_rejects_structural_weakening")
         );
         assert_eq!(
             workflow.anti_vacuity.as_deref(),
-            Some("committed_workflow_binds_every_result_parameter")
+            Some("committed_fixed_ci_workflow_is_closed")
         );
         Ok(())
     }

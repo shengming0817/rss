@@ -34,7 +34,7 @@ As a reviewer, I can determine from generated evidence and machine checks whethe
 
 As a domain developer or operator, I can trace every active `LocalTx` contract through generated evidence, route ownership, tests, adapter behavior, and bounded metrics; contracts admitted by the status board additionally close through the live Postgres validation journey.
 
-**Independent test**: Run `localtx-coverage` for static closure and `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'` for the selected real Postgres matrices and the #1706 journey.
+**Independent test**: Run `localtx-coverage` for static closure and `cargo xtask ci run --job integration-critical --integration-group postgres --selection '<canonical SelectionPlan JSON>'` for the selected real Postgres matrices and the #1706 journey.
 
 **Acceptance scenarios**:
 

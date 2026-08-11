@@ -6,7 +6,7 @@
 //! external opt-in 会在任何 SQL 前返回 `OwnedPostgresRequired`，避免外部 cluster role/schema 变更。
 //! **fail-closed**：`PGDATABASE` 不含 `test` → 测试失败（破坏性 DDL 防护；容器路径 db=`rss_test` 恒满足）。
 //! 本地运行：`cargo nextest run -p journeys --features integration`（docker 在场自起容器）或复制 selector
-//! 输出并运行 `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`。
+//! 输出并运行 `cargo xtask ci run --job integration-critical --integration-group transport --selection '<canonical SelectionPlan JSON>'`。
 //!
 //! 拓扑：relay 用进程内 `MemBus` 作 in-test broker（per-broker amqp 隔离由 amqp adapter 集成测试覆盖；
 //! 本 journey 聚焦 producer durable 落库 + relay CAS + 消费侧 PgInbox 幂等的端到端贯通）。

@@ -11,7 +11,6 @@ mod assembly_lock;
 mod assembly_runtime_plan;
 mod cdc_config;
 mod ci_entry_guard;
-mod ci_gate;
 mod ci_impact;
 mod ci_lanes;
 mod cli;
@@ -29,6 +28,7 @@ mod diagnostic;
 mod diffcov;
 mod dlx_lifecycle_funnel;
 mod event_transport_guard;
+mod evidence_file;
 mod execution_profiles;
 mod generated_file;
 mod graph;
@@ -250,8 +250,35 @@ fn dispatch(command: Command) -> Result<()> {
         Command::Ci(CiCommand::Local(options)) => {
             ci_impact::run_local(&workspace_root()?, &options)
         }
-        Command::Ci(CiCommand::Run { job, selection }) => {
-            verify::run_fixed_job(job, selection.as_ref())
+        Command::Ci(CiCommand::Run {
+            job,
+            selection,
+            integration_group,
+        }) => {
+            let invocation = ci_lanes::FixedCiInvocation::new(job, integration_group)?;
+            verify::run_fixed_job(invocation, selection.as_ref())
+        }
+        Command::Ci(CiCommand::Preflight { selection }) => {
+            verify::run_remote_preflight(selection.as_ref())
+        }
+        Command::Ci(CiCommand::ValidateEvidence {
+            kind,
+            input,
+            output,
+        }) => {
+            let root = workspace_root()?;
+            let command_facts = workspace_facts::CommandWorkspaceFacts::new(&root);
+            let facts = command_facts
+                .get()
+                .context("validate-evidence: load command-scoped workspace facts")?;
+            match kind {
+                cli::RequiredEvidenceKind::Localonly => {
+                    localonly_evidence::validate_upload_snapshot(&input, &output, &root, facts)
+                }
+                cli::RequiredEvidenceKind::Localtx => {
+                    localtx_evidence::validate_upload_snapshot(&input, &output, &root, facts)
+                }
+            }
         }
         Command::Ci(CiCommand::LocalonlyEvidence { output }) => {
             let root = workspace_root()?;
@@ -270,7 +297,6 @@ fn dispatch(command: Command) -> Result<()> {
         }
         Command::Ci(CiCommand::Audit) => verify::run_audit(false),
         Command::Ci(CiCommand::Plan(options)) => ci_impact::run(&workspace_root()?, &options),
-        Command::Ci(CiCommand::Gate(options)) => ci_gate::run(&options),
         Command::NextestEvidence(NextestEvidenceCommand::Stage) => {
             nextest::stage(&workspace_root()?)
         }

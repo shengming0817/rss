@@ -40,17 +40,19 @@
 //! aggregate scope with bounded diagnostics and always-cleanup, while LocalTx/LocalOnly reports
 //! are validated by their producers rather than reconciled by a central receipt gate.
 //! INVARIANT: CI-SELFTEST-TEMP-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "ci_selftest_temp_root_guard_rejects_unsafe_fixtures", anti_vacuity = "committed_ci_selftest_temp_roots_are_atomic" }—— 所有 GitHub shell selftest 必须递归自动发现；可执行源码中的 PID 临时路径与非原子 TMP_ROOT 均 fail-closed，实际 TMP_ROOT 必须以带 `.XXXXXX` 模板的原子 `mktemp -d` 创建独占根目录；注释不能充当合规证据或触发误报。
+//! INVARIANT: CI-RESULT-GATE-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixed_ci_workflow_guard_rejects_structural_weakening", anti_vacuity = "committed_fixed_ci_workflow_is_closed" }—— external GitHub job results are aggregated by two checkout-free, Cargo-free exact result gates; every non-success state fails closed.
 
 #[cfg(test)]
 use crate::ci_lanes::CompileKind;
-use crate::ci_lanes::{EvidenceKind, FixedCiJob};
+use crate::ci_lanes::{EvidenceKind, FixedCiInvocation, FixedCiJob};
 use crate::ci_lanes::{
     GateExecutor, GateGroup, GateId, LocalMetaPolicy, REGISTRY, ToolRequirement,
 };
 use crate::diagnostic::run_check;
 use crate::execution_profiles::{ExecutionProfile, ExecutionUnitSpec};
 use crate::integration_shards::{
-    self, IntegrationSelection, IntegrationShard, IntegrationUnitId, Scheduling,
+    self, IntegrationJobGroup, IntegrationSelection, IntegrationShard, IntegrationUnitId,
+    Scheduling,
 };
 use crate::workspace_root;
 use crate::{
@@ -1871,6 +1873,63 @@ pub(crate) fn run(
     Ok(())
 }
 
+/// Remote bounded preflight. It is a scheduling prerequisite, never a canonical proof owner.
+pub(crate) fn run_remote_preflight(selection: &crate::ci_impact::SelectionPlan) -> Result<()> {
+    let root = workspace_root()?;
+    let opts = VerifyOpts {
+        fast: true,
+        allow_missing_tools: false,
+        partition: None,
+        nextest_lane: crate::nextest::NextestLane::Verify,
+        core_test_selection: crate::nextest::CoreTestSelection::workspace(),
+        contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
+        coverage_typed_job: false,
+        execution_policy: crate::cmd::ExecutionPolicy::FailFast,
+    };
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+    run_labeled_plan(
+        "ci-preflight-governance",
+        &[step_for_id(GateId::Fmt)],
+        &opts,
+        &root,
+        &command_facts,
+    )?;
+    let Some(owned_args) = remote_preflight_check_args(selection) else {
+        eprintln!("ci-preflight: no affected Rust packages; compile screen is empty");
+        return Ok(());
+    };
+    let args = owned_args.iter().map(String::as_str).collect::<Vec<_>>();
+    run_step(
+        "ci-preflight",
+        "selection-scoped all-targets check",
+        crate::cmd::CargoSubcommand::Check,
+        &args,
+        &[],
+        &root,
+        crate::cmd::ExecutionPolicy::FailFast,
+    )
+}
+
+fn remote_preflight_check_args(selection: &crate::ci_impact::SelectionPlan) -> Option<Vec<String>> {
+    let mut owned_args = vec!["--locked".to_owned(), "--all-targets".to_owned()];
+    match selection.mode() {
+        crate::ci_impact::SelectionMode::Adaptive if selection.affected_packages().is_empty() => {
+            return None;
+        }
+        crate::ci_impact::SelectionMode::Adaptive => {
+            for package in selection.affected_packages() {
+                owned_args.push("--package".to_owned());
+                owned_args.push(package.clone());
+            }
+        }
+        crate::ci_impact::SelectionMode::PrComplete
+        | crate::ci_impact::SelectionMode::ReleaseCheck => {
+            owned_args.extend(["--workspace".to_owned(), "--all-features".to_owned()]);
+        }
+    }
+    Some(owned_args)
+}
+
 /// `ci full` 本地 release-check 薄入口（issue #1132）：按 [`plan_for`] 的 typed profile 顺序跑每步，
 /// 默认 keep-going，显式 fail-fast。GitHub Actions 不调此聚合，而是分别调用四条 [`GateGroup`]。本地完整
 /// canonical 入口是 `make ci-full`；`make ci` 仅执行 10 分钟有界 adaptive preflight，不调用本聚合。
@@ -1951,10 +2010,6 @@ fn release_check_integration_shards() -> Vec<IntegrationShard> {
         .collect()
 }
 
-/// Unforgeable proof that the required LocalTx baseline within the passed postgres selection
-/// completed successfully. The private field keeps construction inside this execution module.
-pub(crate) struct PostgresDomainPassed(());
-
 fn validate_localtx_required_selection(selection: &IntegrationSelection) -> Result<()> {
     let required = integration_shards::localtx_required_selection()?;
     if !required.unit_ids().is_subset(selection.unit_ids()) {
@@ -1991,6 +2046,21 @@ fn validate_integration_selection_for_shard(
         }
     }
     Ok(())
+}
+
+fn execution_selection_for_shard(
+    selection: &IntegrationSelection,
+    shard: IntegrationShard,
+) -> Result<IntegrationSelection> {
+    match selection.profile() {
+        ExecutionProfile::IntegrationCritical => {
+            IntegrationSelection::critical(selection.unit_ids_for_shard(shard))
+        }
+        ExecutionProfile::ReleaseCheck => Ok(selection.clone()),
+        ExecutionProfile::Check | ExecutionProfile::Test => {
+            unreachable!("IntegrationSelection excludes non-integration profiles")
+        }
+    }
 }
 
 fn fixed_job_owns_gate(job: FixedCiJob, spec: crate::ci_lanes::GateSpec) -> bool {
@@ -2075,43 +2145,73 @@ fn run_fixed_gate_job(job: FixedCiJob, selection: &crate::ci_impact::SelectionPl
     run_labeled_plan(job.as_str(), &plan, &opts, &root, &command_facts)
 }
 
-fn run_fixed_integrations(selection: &crate::ci_impact::SelectionPlan) -> Result<()> {
-    let integration = selection.integration_selection()?;
-    validate_localtx_required_selection(&integration)?;
+fn execute_fixed_integration_shards(
+    integration: &IntegrationSelection,
+    group: IntegrationJobGroup,
+) -> Result<()> {
     let root = workspace_root()?;
     let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
-    let selected_shards = IntegrationShard::ALL
-        .iter()
-        .copied()
+    let selected_shards = group
+        .shards()
         .filter(|shard| !integration.unit_ids_for_shard(*shard).is_empty())
         .collect::<Vec<_>>();
-    let postgres_passed = std::cell::Cell::new(false);
     integration_shards::with_validated_workspace(&command_facts, |workspace| {
         execute_labeled_items(
-            "integration-critical",
+            &format!("integration-critical/{group}"),
             &selected_shards,
-            crate::cmd::ExecutionPolicy::KeepGoing,
+            crate::cmd::ExecutionPolicy::FailFast,
             &SystemAggregateClock,
             |shard| shard.as_str().to_owned(),
             |shard| {
+                let shard_selection = execution_selection_for_shard(integration, *shard)?;
                 run_ci_integration_with_policy(
                     workspace,
                     *shard,
-                    &integration,
+                    &shard_selection,
                     false,
                     None,
                     crate::cmd::ExecutionPolicy::FailFast,
-                )?;
-                if *shard == IntegrationShard::PostgresDomain {
-                    postgres_passed.set(true);
-                }
-                Ok(())
+                )
             },
         )
-    })?;
-    if !postgres_passed.get() {
-        bail!("fixed integration selection did not execute the LocalTx postgres owner");
+    })
+}
+
+mod postgres_group {
+    use super::*;
+
+    /// Capability created only by the postgres carrier after its owned shards pass.
+    pub(crate) struct Passed(());
+
+    pub(super) fn execute(integration: &IntegrationSelection) -> Result<Passed> {
+        validate_localtx_required_selection(integration)?;
+        execute_fixed_integration_shards(integration, IntegrationJobGroup::Postgres)?;
+        Ok(Passed(()))
     }
+}
+
+pub(crate) use postgres_group::Passed as PostgresDomainPassed;
+
+fn execute_non_producer_integration_group(
+    integration: &IntegrationSelection,
+    group: IntegrationJobGroup,
+) -> Result<()> {
+    match group {
+        IntegrationJobGroup::Postgres => {
+            bail!("postgres integration must execute through its typed producer funnel")
+        }
+        IntegrationJobGroup::Transport
+        | IntegrationJobGroup::Runtime
+        | IntegrationJobGroup::Artifact => execute_fixed_integration_shards(integration, group),
+    }
+}
+
+fn publish_localtx_after_postgres_group(
+    integration: &IntegrationSelection,
+    passed: PostgresDomainPassed,
+) -> Result<()> {
+    let root = workspace_root()?;
+    let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
     let verified = crate::localtx_coverage::verify_required_evidence_set(
         &root,
         command_facts
@@ -2120,16 +2220,43 @@ fn run_fixed_integrations(selection: &crate::ci_impact::SelectionPlan) -> Result
     )?;
     let request =
         crate::localtx_evidence::prepare_request(FixedCiJob::IntegrationCritical, None, &root)?;
-    request.publish(PostgresDomainPassed(()), verified)
+    let required = integration_shards::localtx_required_selection()?;
+    if !required.unit_ids().is_subset(integration.unit_ids()) {
+        bail!("postgres group passed without the required LocalTx selection");
+    }
+    request.publish(passed, verified)
+}
+
+fn run_fixed_integration_group(
+    selection: &crate::ci_impact::SelectionPlan,
+    group: IntegrationJobGroup,
+) -> Result<()> {
+    let integration = selection.integration_selection()?;
+    if integration.unit_ids_for_group(group).is_empty() {
+        eprintln!("integration-critical/{group}: selection is empty; fixed carrier succeeds");
+        return Ok(());
+    }
+    match group {
+        IntegrationJobGroup::Postgres => {
+            let passed = postgres_group::execute(&integration)?;
+            publish_localtx_after_postgres_group(&integration, passed)
+        }
+        IntegrationJobGroup::Transport
+        | IntegrationJobGroup::Runtime
+        | IntegrationJobGroup::Artifact => {
+            execute_non_producer_integration_group(&integration, group)
+        }
+    }
 }
 
 pub(crate) fn run_fixed_job(
-    job: FixedCiJob,
+    invocation: FixedCiInvocation,
     selection: &crate::ci_impact::SelectionPlan,
 ) -> Result<()> {
-    match job {
-        FixedCiJob::Check | FixedCiJob::TestAffected => run_fixed_gate_job(job, selection),
-        FixedCiJob::IntegrationCritical => run_fixed_integrations(selection),
+    match invocation {
+        FixedCiInvocation::Check => run_fixed_gate_job(FixedCiJob::Check, selection),
+        FixedCiInvocation::TestAffected => run_fixed_gate_job(FixedCiJob::TestAffected, selection),
+        FixedCiInvocation::Integration { group } => run_fixed_integration_group(selection, group),
     }
 }
 
@@ -2559,6 +2686,36 @@ mod tests {
     }
 
     #[test]
+    fn integration_group_projects_an_exact_selection_for_each_owned_shard() -> anyhow::Result<()> {
+        let transport = IntegrationSelection::critical([
+            IntegrationUnitId::AmqpLib,
+            IntegrationUnitId::RedisIntegrationClaimer,
+        ])?;
+        let event = execution_selection_for_shard(&transport, IntegrationShard::EventTransport)?;
+        let fault = execution_selection_for_shard(&transport, IntegrationShard::ConsistencyFault)?;
+        assert_eq!(
+            event.unit_ids(),
+            &std::collections::BTreeSet::from([IntegrationUnitId::AmqpLib])
+        );
+        assert_eq!(
+            fault.unit_ids(),
+            &std::collections::BTreeSet::from([IntegrationUnitId::RedisIntegrationClaimer])
+        );
+        validate_integration_selection_for_shard(&event, IntegrationShard::EventTransport)?;
+        validate_integration_selection_for_shard(&fault, IntegrationShard::ConsistencyFault)?;
+        assert!(
+            validate_integration_selection_for_shard(&event, IntegrationShard::ConsistencyFault)
+                .is_err()
+        );
+        let release = IntegrationSelection::release_check();
+        assert_eq!(
+            execution_selection_for_shard(&release, IntegrationShard::ProductionRuntime)?,
+            release
+        );
+        Ok(())
+    }
+
+    #[test]
     fn fixed_jobs_partition_release_check_without_duplicates() -> anyhow::Result<()> {
         let selection = crate::ci_impact::test_selection_plan()?;
         let check = fixed_gate_plan(FixedCiJob::Check, &selection);
@@ -2588,6 +2745,44 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(actual, expected);
         assert!(fixed_gate_plan(FixedCiJob::IntegrationCritical, &selection).is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn remote_preflight_compile_screen_is_selection_scoped() -> anyhow::Result<()> {
+        let adaptive = crate::ci_impact::test_adaptive_selection_plan()?;
+        assert_eq!(remote_preflight_check_args(&adaptive), None);
+
+        let mut affected_wire = serde_json::to_value(&adaptive)?;
+        affected_wire["selection"]["affected_packages"] =
+            serde_json::json!(["application-services", "domain-core"]);
+        let affected = serde_json::to_string(&affected_wire)?.parse()?;
+        assert_eq!(
+            remote_preflight_check_args(&affected),
+            Some(vec![
+                "--locked".to_owned(),
+                "--all-targets".to_owned(),
+                "--package".to_owned(),
+                "application-services".to_owned(),
+                "--package".to_owned(),
+                "domain-core".to_owned(),
+            ])
+        );
+
+        for selection in [
+            crate::ci_impact::test_pr_complete_selection_plan()?,
+            crate::ci_impact::test_selection_plan()?,
+        ] {
+            assert_eq!(
+                remote_preflight_check_args(&selection),
+                Some(vec![
+                    "--locked".to_owned(),
+                    "--all-targets".to_owned(),
+                    "--workspace".to_owned(),
+                    "--all-features".to_owned(),
+                ])
+            );
+        }
         Ok(())
     }
 
@@ -5562,12 +5757,31 @@ mod tests {
             && mapping.len() == expected.len()
     }
 
+    fn yaml_keys_exact_owned(mapping: &serde_yaml_ng::Mapping, expected: &[String]) -> bool {
+        mapping
+            .keys()
+            .filter_map(serde_yaml_ng::Value::as_str)
+            .collect::<std::collections::BTreeSet<_>>()
+            == expected.iter().map(String::as_str).collect()
+            && mapping.len() == expected.len()
+    }
+
     fn yaml_sequence_exact(value: &serde_yaml_ng::Value, expected: &[&str]) -> bool {
         value.as_sequence().is_some_and(|items| {
             items
                 .iter()
                 .filter_map(serde_yaml_ng::Value::as_str)
                 .eq(expected.iter().copied())
+                && items.len() == expected.len()
+        })
+    }
+
+    fn yaml_sequence_exact_owned(value: &serde_yaml_ng::Value, expected: &[String]) -> bool {
+        value.as_sequence().is_some_and(|items| {
+            items
+                .iter()
+                .filter_map(serde_yaml_ng::Value::as_str)
+                .eq(expected.iter().map(String::as_str))
                 && items.len() == expected.len()
         })
     }
@@ -5588,7 +5802,12 @@ mod tests {
         })
     }
 
-    fn fixed_caller_job_is_exact(jobs: &serde_yaml_ng::Mapping, identity: &str) -> bool {
+    fn fixed_caller_job_is_exact(
+        jobs: &serde_yaml_ng::Mapping,
+        identity: &str,
+        job_identity: &str,
+        group: Option<&str>,
+    ) -> bool {
         let Some(job) = yaml_field(jobs, identity).and_then(yaml_map) else {
             return false;
         };
@@ -5596,12 +5815,19 @@ mod tests {
             return false;
         };
         yaml_keys_exact(job, &["name", "needs", "uses", "with"])
-            && yaml_scalar(job, "name") == Some(identity)
-            && yaml_scalar(job, "needs") == Some("selector")
+            && yaml_scalar(job, "needs") == Some("preflight")
             && yaml_scalar(job, "uses") == Some("./.github/workflows/rss-rust-job.yml")
-            && yaml_keys_exact(with, &["job", "selection", "source-revision"])
-            && yaml_scalar(with, "job") == Some(identity)
-            && yaml_scalar(with, "selection") == Some("${{ needs.selector.outputs.selection }}")
+            && yaml_keys_exact(
+                with,
+                if group.is_some() {
+                    &["integration-group", "job", "selection", "source-revision"]
+                } else {
+                    &["job", "selection", "source-revision"]
+                },
+            )
+            && yaml_scalar(with, "job") == Some(job_identity)
+            && yaml_scalar(with, "integration-group") == group
+            && yaml_scalar(with, "selection") == Some("${{ needs.preflight.outputs.selection }}")
             && yaml_scalar(with, "source-revision") == Some("${{ github.sha }}")
     }
 
@@ -5614,6 +5840,33 @@ mod tests {
             .iter()
             .filter_map(serde_yaml_ng::Value::as_mapping)
             .find(|step| yaml_scalar(step, "id") == Some(id))
+    }
+
+    fn result_gate_step_is_exact(
+        step: &serde_yaml_ng::Mapping,
+        expected_env: &[(&str, &str)],
+        dependencies: &[(&str, &str)],
+    ) -> bool {
+        let dependency_lines = dependencies
+            .iter()
+            .map(|(name, variable)| format!("  \"{name}={variable}\""))
+            .collect::<Vec<_>>()
+            .join(" \\\n");
+        let expected_run = format!(
+            "set -euo pipefail\nfailed=false\nfor dependency in \\\n{dependency_lines}; do\n  printf '%s\\n' \"$dependency\"\n  case \"$dependency\" in *=success) ;; *) failed=true ;; esac\ndone\n[ \"$failed\" = false ]"
+        );
+        yaml_keys_exact(step, &["env", "id", "name", "run"])
+            && yaml_field(step, "env")
+                .and_then(yaml_map)
+                .is_some_and(|env| {
+                    yaml_keys_exact(
+                        env,
+                        &expected_env.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+                    ) && expected_env
+                        .iter()
+                        .all(|(key, value)| yaml_scalar(env, key) == Some(*value))
+                })
+            && yaml_scalar(step, "run").is_some_and(|run| run.trim_end() == expected_run)
     }
 
     fn step_ids_are_ordered(job: &serde_yaml_ng::Mapping, expected: &[&str]) -> bool {
@@ -5659,9 +5912,9 @@ mod tests {
         schedule_is_utc
             && yaml_scalar(job, "if")
                 == Some(
-                    "${{ always() && github.event_name == 'schedule' && needs.selector.result != 'success' }}",
+                    "${{ always() && github.event_name == 'schedule' && needs.preflight.result != 'success' }}",
                 )
-            && yaml_scalar(job, "needs") == Some("selector")
+            && yaml_scalar(job, "needs") == Some("preflight")
             && checkout.is_some_and(|step| {
                 yaml_scalar(step, "uses") == Some("actions/checkout@v4")
                     && yaml_field(step, "with")
@@ -5679,9 +5932,10 @@ mod tests {
                         .and_then(yaml_map)
                         .is_some_and(|with| {
                             yaml_scalar(with, "lane") == Some("audit")
-                                && yaml_scalar(with, "download-cache-epoch") == Some("v5")
+                                && yaml_scalar(with, "compiler-partition") == Some("audit")
+                                && yaml_scalar(with, "download-cache-epoch") == Some("v7")
                                 && yaml_scalar(with, "tool-cache-epoch") == Some("v4")
-                                && yaml_scalar(with, "compiler-cache-epoch") == Some("v3")
+                                && yaml_scalar(with, "compiler-cache-epoch") == Some("v4")
                         })
             })
             && audit.and_then(|step| yaml_scalar(step, "run"))
@@ -5778,6 +6032,25 @@ mod tests {
         finalize: &str,
         cache_policy: &str,
     ) -> bool {
+        let groups = IntegrationJobGroup::ALL.map(IntegrationJobGroup::as_str);
+        fixed_ci_workflow_is_closed_for_groups(
+            caller,
+            reusable,
+            setup,
+            finalize,
+            cache_policy,
+            &groups,
+        )
+    }
+
+    fn fixed_ci_workflow_is_closed_for_groups(
+        caller: &str,
+        reusable: &str,
+        setup: &str,
+        finalize: &str,
+        cache_policy: &str,
+        groups: &[&str],
+    ) -> bool {
         let Ok(caller_value) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(caller) else {
             return false;
         };
@@ -5793,14 +6066,21 @@ mod tests {
         let Some(jobs) = yaml_field(caller_root, "jobs").and_then(yaml_map) else {
             return false;
         };
-        let expected_jobs = [
-            "selector",
-            "check",
-            "test-affected",
-            "integration-critical",
-            "scheduled-audit-fallback",
-            "ci-gate",
+        let integration_jobs = groups
+            .iter()
+            .map(|group| format!("integration-{group}"))
+            .collect::<Vec<_>>();
+        let mut expected_jobs = vec![
+            "preflight".to_owned(),
+            "check".to_owned(),
+            "test-affected".to_owned(),
         ];
+        expected_jobs.extend(integration_jobs.iter().cloned());
+        expected_jobs.extend([
+            "integration-critical".to_owned(),
+            "scheduled-audit-fallback".to_owned(),
+            "ci-gate".to_owned(),
+        ]);
         let Some(reusable_jobs) = yaml_field(reusable_root, "jobs").and_then(yaml_map) else {
             return false;
         };
@@ -5822,7 +6102,7 @@ mod tests {
                     .keys()
                     .filter_map(serde_yaml_ng::Value::as_str)
                     .collect::<std::collections::BTreeSet<_>>()
-                    == ["job", "selection", "source-revision"]
+                    == ["integration-group", "job", "selection", "source-revision"]
                         .into_iter()
                         .collect()
             });
@@ -5834,43 +6114,157 @@ mod tests {
             "generic-success-artifact",
             "/usr/bin/time",
         ];
-        let fixed_calls = ["check", "test-affected", "integration-critical"]
-            .into_iter()
-            .all(|job| fixed_caller_job_is_exact(jobs, job));
+        let fixed_calls = fixed_caller_job_is_exact(jobs, "check", "check", None)
+            && fixed_caller_job_is_exact(jobs, "test-affected", "test-affected", None)
+            && groups.iter().all(|group| {
+                let job = format!("integration-{group}");
+                fixed_caller_job_is_exact(jobs, &job, "integration-critical", Some(group))
+            });
+        let group_case = groups
+            .iter()
+            .map(|group| format!("integration-critical:{group}"))
+            .collect::<Vec<_>>()
+            .join("|");
         let push_is_develop_only = yaml_field(caller_root, "on")
             .and_then(yaml_map)
             .and_then(|on| yaml_field(on, "push"))
             .and_then(yaml_map)
             .and_then(|push| yaml_field(push, "branches"))
             .is_some_and(|branches| yaml_sequence_exact(branches, &["develop"]));
-        let gate = yaml_field(jobs, "ci-gate").and_then(yaml_map);
-        let exact_gate = gate.is_some_and(|gate| {
+        let integration_gate = yaml_field(jobs, "integration-critical").and_then(yaml_map);
+        let exact_integration_gate = integration_gate.is_some_and(|gate| {
             yaml_scalar(gate, "if") == Some("${{ always() }}")
-                && yaml_field(gate, "needs").is_some_and(|needs| {
-                    yaml_sequence_exact(
-                        needs,
-                        &["selector", "check", "test-affected", "integration-critical"],
-                    )
+                && yaml_field(gate, "needs")
+                    .is_some_and(|needs| yaml_sequence_exact_owned(needs, &integration_jobs))
+                && step_by_id(gate, "integration-result-gate").is_some_and(|step| {
+                    let env = groups
+                        .iter()
+                        .map(|group| {
+                            let key = format!("{}_RESULT", group.to_ascii_uppercase());
+                            let value = format!("${{{{ needs.integration-{group}.result }}}}");
+                            (key, value)
+                        })
+                        .collect::<Vec<_>>();
+                    let env_refs = env
+                        .iter()
+                        .map(|(key, value)| (key.as_str(), value.as_str()))
+                        .collect::<Vec<_>>();
+                    let dependencies = groups
+                        .iter()
+                        .map(|group| {
+                            let variable = format!("${}_RESULT", group.to_ascii_uppercase());
+                            (*group, variable)
+                        })
+                        .collect::<Vec<_>>();
+                    let dependency_refs = dependencies
+                        .iter()
+                        .map(|(name, variable)| (*name, variable.as_str()))
+                        .collect::<Vec<_>>();
+                    result_gate_step_is_exact(step, &env_refs, &dependency_refs)
                 })
-                && step_by_id(gate, "fixed-job-gate")
-                    .and_then(|step| yaml_scalar(step, "run"))
-                    .is_some_and(|run| {
-                        [
-                            "--selector-result \"${{ needs.selector.result }}\"",
-                            "--check-result \"${{ needs.check.result }}\"",
-                            "--test-affected-result \"${{ needs.test-affected.result }}\"",
-                            "--integration-critical-result \"${{ needs.integration-critical.result }}\"",
-                        ]
-                        .into_iter()
-                        .all(|binding| run.contains(binding))
+        });
+        let exact_gate = yaml_field(jobs, "ci-gate")
+            .and_then(yaml_map)
+            .is_some_and(|gate| {
+                yaml_scalar(gate, "if") == Some("${{ always() }}")
+                    && yaml_field(gate, "needs").is_some_and(|needs| {
+                        yaml_sequence_exact(
+                            needs,
+                            &[
+                                "preflight",
+                                "check",
+                                "test-affected",
+                                "integration-critical",
+                            ],
+                        )
                     })
+                    && step_by_id(gate, "fixed-job-gate").is_some_and(|step| {
+                        result_gate_step_is_exact(
+                            step,
+                            &[
+                                ("PREFLIGHT_RESULT", "${{ needs.preflight.result }}"),
+                                ("CHECK_RESULT", "${{ needs.check.result }}"),
+                                ("TEST_RESULT", "${{ needs.test-affected.result }}"),
+                                (
+                                    "INTEGRATION_RESULT",
+                                    "${{ needs.integration-critical.result }}",
+                                ),
+                            ],
+                            &[
+                                ("preflight", "$PREFLIGHT_RESULT"),
+                                ("check", "$CHECK_RESULT"),
+                                ("test-affected", "$TEST_RESULT"),
+                                ("integration-critical", "$INTEGRATION_RESULT"),
+                            ],
+                        )
+                    })
+            });
+        let preflight = yaml_field(jobs, "preflight").and_then(yaml_map);
+        let exact_preflight = preflight.is_some_and(|job| {
+            yaml_field(job, "timeout-minutes").and_then(serde_yaml_ng::Value::as_i64) == Some(10)
+                && step_ids_are_ordered(
+                    job,
+                    &[
+                        "preflight-budget",
+                        "preflight-setup",
+                        "select",
+                        "preflight-run",
+                        "preflight-finalize",
+                    ],
+                )
+                && step_by_id(job, "preflight-budget").is_some_and(|step| {
+                    yaml_scalar(step, "run")
+                        == Some(
+                            "echo \"deadline-epoch=$(( $(date +%s) + 540 ))\" >> \"$GITHUB_OUTPUT\"",
+                        )
+                })
+                && cache_caller_is_exact(
+                    job,
+                    "preflight-setup",
+                    "preflight-run",
+                    "preflight-finalize",
+                )
+                && step_by_id(job, "select")
+                    .and_then(|step| yaml_scalar(step, "run"))
+                    .is_some_and(|run| run.contains("$CARGO_TARGET_DIR/debug/xtask\" ci plan"))
+                && step_by_id(job, "preflight-run").is_some_and(|step| {
+                    yaml_field(step, "env")
+                        .and_then(yaml_map)
+                        .is_some_and(|env| {
+                            yaml_keys_exact(
+                                env,
+                                &["RSS_PREFLIGHT_DEADLINE_EPOCH", "RSS_SELECTION"],
+                            ) && yaml_scalar(env, "RSS_PREFLIGHT_DEADLINE_EPOCH")
+                                == Some(
+                                    "${{ steps.preflight-budget.outputs.deadline-epoch }}",
+                                )
+                                && yaml_scalar(env, "RSS_SELECTION")
+                                    == Some("${{ steps.select.outputs.selection }}")
+                        })
+                        && yaml_scalar(step, "run").is_some_and(|run| {
+                            run.contains(
+                                "remaining=$(( RSS_PREFLIGHT_DEADLINE_EPOCH - $(date +%s) ))",
+                            ) && run.contains("--kill-after=15s \"${remaining}s\"")
+                                && run.contains(
+                                    "$CARGO_TARGET_DIR/debug/xtask\" ci preflight --selection \"$RSS_SELECTION\"",
+                                )
+                                && !run.contains(" 8m ")
+                        })
+                })
         });
         let cleanup_is_always = step_by_id(execute, "integration-cleanup")
             .is_some_and(|step| {
                 yaml_scalar(step, "if")
                     == Some("${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}")
             });
-        let cache_lifecycle = yaml_field(jobs, "scheduled-audit-fallback")
+        let cache_lifecycle = preflight.is_some_and(|job| {
+            cache_caller_is_exact(
+                job,
+                "preflight-setup",
+                "preflight-run",
+                "preflight-finalize",
+            )
+        }) && yaml_field(jobs, "scheduled-audit-fallback")
             .and_then(yaml_map)
             .is_some_and(|job| {
                 cache_caller_is_exact(job, "audit-setup", "audit-run", "audit-finalize")
@@ -5901,6 +6295,8 @@ mod tests {
                 "standalone-consumer",
                 "integration-prepare",
                 "xtask",
+                "validate-localonly",
+                "validate-localtx",
                 "integration-collect",
                 "integration-snapshot",
                 "integration-cleanup",
@@ -5911,44 +6307,72 @@ mod tests {
         ) && step_by_id(execute, "xtask")
             .and_then(|step| yaml_scalar(step, "run"))
             .is_some_and(|run| {
-                run.contains("ci run --job \"$RSS_FIXED_JOB\" --selection \"$RSS_SELECTION\"")
+                run.contains(
+                    "args=(ci run --job \"$RSS_FIXED_JOB\" --selection \"$RSS_SELECTION\")",
+                ) && run.contains("args+=(--integration-group \"$RSS_INTEGRATION_GROUP\")")
             })
             && artifact_step_is_exact(
                 execute,
                 "upload-localonly",
-                "${{ always() && inputs.job == 'test-affected' }}",
+                "${{ steps.validate-localonly.outcome == 'success' }}",
                 "localonly-execution-${{ github.run_id }}-${{ github.run_attempt }}",
-                "target/localonly-execution/localonly-execution.json",
+                "${{ runner.temp }}/validated-localonly-execution.json",
                 "error",
             )
             && artifact_step_is_exact(
                 execute,
                 "upload-localtx",
-                "${{ always() && inputs.job == 'integration-critical' }}",
-                "localtx-required-${{ github.run_id }}-${{ github.run_attempt }}",
-                "target/required-evidence/localtx-required.json",
+                "${{ steps.validate-localtx.outcome == 'success' }}",
+                "localtx-required-${{ github.run_id }}-${{ github.run_attempt }}-postgres",
+                "${{ runner.temp }}/validated-localtx-required.json",
                 "error",
             )
             && artifact_step_is_exact(
                 execute,
                 "upload-integration-failure",
-                "${{ failure() && inputs.job == 'integration-critical' }}",
-                "integration-failure-${{ github.run_id }}-${{ github.run_attempt }}",
-                "${{ runner.temp }}/integration-lifecycle.json\n${{ runner.temp }}/integration-service-logs.tar.gz\n",
+                "${{ failure() && inputs.job == 'integration-critical' && steps.policy.outcome == 'success' }}",
+                "integration-failure-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.policy.outputs.artifact-suffix }}",
+                "${{ runner.temp }}/integration-lifecycle-${{ steps.policy.outputs.artifact-suffix }}.json\n${{ runner.temp }}/integration-service-logs-${{ steps.policy.outputs.artifact-suffix }}.tar.gz\n",
                 "warn",
-            );
-        yaml_keys_exact(jobs, &expected_jobs)
+            )
+            && reusable.contains("case \"$RSS_FIXED_JOB:$RSS_INTEGRATION_GROUP\"")
+            && reusable.contains("invalid fixed invocation: job=%s integration-group=%s; allowed:")
+            && reusable.contains(&group_case)
+            && cache_policy.contains(&group_case)
+            && reusable
+                .contains("compiler-partition: ${{ steps.policy.outputs.compiler-partition }}")
+            && reusable.contains("log_dir=\"$RUNNER_TEMP/integration-service-logs-$RSS_SCOPE\"")
+            && reusable.matches("ci validate-evidence").count() == 2
+            && reusable.matches("${{ inputs.integration-group }}").count() == 2
+            && !reusable.contains("${{ inputs.integration-group }}.tar.gz")
+            && setup
+                .find("ci-cache-maintain.sh derive-keys")
+                .is_some_and(|validated| {
+                    [
+                        "ci-cache-maintain.sh prepare-roots",
+                        "ci-cache-maintain.sh reset-descendant",
+                        "mkdir -p \"$RSS_JOB_TARGET\"",
+                    ]
+                    .into_iter()
+                    .all(|operation| setup.find(operation).is_some_and(|index| index > validated))
+                });
+        yaml_keys_exact_owned(jobs, &expected_jobs)
             && yaml_keys_exact(reusable_jobs, &["execute"])
             && exact_permissions
             && exact_inputs
             && fixed_calls
             && push_is_develop_only
             && scheduled_audit_is_exact(caller_root, jobs)
+            && exact_preflight
+            && exact_integration_gate
             && exact_gate
             && cleanup_is_always
             && cache_lifecycle
             && standalone_consumer_is_exact
             && lifecycle
+            && caller.matches("cargo build --locked -p xtask").count() == 1
+            && !caller.contains("cargo run --locked -p xtask -- ci gate")
+            && !caller.contains("  selector:")
             && banned
                 .into_iter()
                 .all(|needle| !caller.contains(needle) && !reusable.contains(needle))
@@ -5973,27 +6397,29 @@ mod tests {
         let finalize = include_str!("../../.github/actions/finalize-rss-ci/action.yml");
         let cache_policy = include_str!("../../.github/scripts/ci-cache-maintain.sh");
         let reds = [
-            (caller.replacen("  check:\n", "  check-removed:\n", 1), reusable.to_owned()),
+            (caller.replacen("  integration-postgres:\n", "  integration-postgres-removed:\n", 1), reusable.to_owned()),
             (caller.replacen("  check:\n", "  check:\n    strategy:\n      matrix: { shard: [one] }\n", 1), reusable.to_owned()),
             (caller.replacen("contents: read", "contents: write", 1), reusable.to_owned()),
-            (caller.replacen("  check:\n", "  check:\n    permissions:\n      contents: write\n", 1), reusable.to_owned()),
-            (caller.to_owned(), reusable.replacen("  execute:\n", "  execute:\n    permissions:\n      contents: write\n", 1)),
-            (caller.replacen("if: ${{ always() }}", "if: ${{ success() }}", 1), reusable.to_owned()),
-            (caller.replacen("      job: check\n", "      job: test-affected\n", 1), reusable.to_owned()),
-            (caller.replacen("    uses: ./.github/workflows/rss-rust-job.yml\n", "    runs-on: ubuntu-latest\n", 1), reusable.to_owned()),
-            (caller.replacen("--check-result \"${{ needs.check.result }}\"", "--check-result \"${{ needs.test-affected.result }}\"", 1), reusable.to_owned()),
-            (caller.replace("    branches: [develop]\n", "    branches: [develop, refactor/**]\n"), reusable.to_owned()),
+            (caller.replacen("needs: preflight", "needs: check", 1), reusable.to_owned()),
+            (caller.replacen("integration-group: postgres", "integration-group: transport", 1), reusable.to_owned()),
+            (caller.replacen("INTEGRATION_RESULT: ${{ needs.integration-critical.result }}", "INTEGRATION_RESULT: success", 1), reusable.to_owned()),
+            (caller.replacen("POSTGRES_RESULT: ${{ needs.integration-postgres.result }}", "POSTGRES_RESULT: success", 1), reusable.to_owned()),
+            (caller.replacen("+ 540", "+ 600", 1), reusable.to_owned()),
+            (caller.replacen("ci preflight --selection \"$RSS_SELECTION\"", "ci preflight", 1), reusable.to_owned()),
+            (caller.replacen("--kill-after=15s \"${remaining}s\"", "--kill-after=30s 8m", 1), reusable.to_owned()),
+            (caller.replace("case \"$dependency\" in *=success) ;; *) failed=true ;; esac", "true"), reusable.to_owned()),
+            (caller.replace("*=success) ;;", "*=failure) ;;"), reusable.to_owned()),
+            (caller.replacen("            \"artifact=$ARTIFACT_RESULT\"; do\n", "            ; do\n", 1), reusable.to_owned()),
+            (caller.replace("    branches: [develop]\n", "    branches: [develop, feature/**]\n"), reusable.to_owned()),
             (caller.to_owned(), reusable.replacen("      source-revision:\n", "      legacy-lane:\n        required: false\n        type: string\n      source-revision:\n", 1)),
-            (caller.replacen("  schedule:\n    - cron: \"0 6 * * *\"\n", "", 1), reusable.to_owned()),
-            (caller.replacen("always() && github.event_name == 'schedule' && needs.selector.result != 'success'", "false", 1), reusable.to_owned()),
-            (caller.replacen("cargo run --locked -p xtask -- ci audit", "cargo run --locked -p xtask -- ci plan", 1), reusable.to_owned()),
-            (caller.to_owned(), reusable.replacen("        id: integration-cleanup\n", "        id: integration-cleanup-removed\n", 1)),
-            (caller.to_owned(), reusable.replacen("        id: integration-cleanup\n        if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}", "        id: integration-cleanup\n        if: ${{ success() && inputs.job == 'integration-critical' }}", 1)),
-            (caller.to_owned(), reusable.replacen("name: integration-failure-${{ github.run_id }}-${{ github.run_attempt }}", "name: generic-success-artifact", 1)),
-            (caller.to_owned(), reusable.replacen("        id: standalone-consumer\n", "        id: standalone-consumer-removed\n", 1)),
-            (caller.to_owned(), reusable.replacen("steps.policy.outputs.standalone-consumer == 'true'", "always()", 1)),
-            (caller.to_owned(), reusable.replacen("git submodule update --init -- consumers/standalone", "git submodule update --init --recursive", 1)),
-            (caller.to_owned(), reusable.replacen(".selection.mode == \"release-check\"", "true", 1)),
+            (caller.to_owned(), reusable.replacen("steps.validate-localtx.outcome == 'success'", "always()", 1)),
+            (caller.to_owned(), reusable.replacen("steps.validate-localonly.outcome == 'success'", "always()", 1)),
+            (caller.to_owned(), reusable.replacen("compiler-partition: ${{ steps.policy.outputs.compiler-partition }}", "compiler-partition: integration-critical", 1)),
+            (caller.to_owned(), reusable.replacen("ci validate-evidence", "jq -e .", 1)),
+            (caller.to_owned(), reusable.replacen("integration-service-logs-$RSS_SCOPE", "integration-service-logs-$RSS_GROUP", 1)),
+            (caller.to_owned(), reusable.replacen("invalid fixed invocation: job=%s integration-group=%s; allowed:", "invalid invocation:", 1)),
+            (caller.to_owned(), reusable.replacen("steps.policy.outputs.artifact-suffix", "inputs.integration-group", 1)),
+            (caller.replacen("cargo build --locked -p xtask", "cargo run --locked -p xtask -- ci gate", 1), reusable.to_owned()),
         ];
         for (index, (red_caller, red_reusable)) in reds.into_iter().enumerate() {
             assert!(red_caller != caller || red_reusable != reusable);
@@ -6082,6 +6508,15 @@ mod tests {
                 finalize.to_owned(),
             ),
             (
+                "input-derived path before identity validation",
+                setup.replacen(
+                    "        # derive-keys is the closed identity validator and must run before any\n        # input-derived path is created or reset.\n        .github/scripts/ci-cache-maintain.sh derive-keys",
+                    "        mkdir -p \"$RSS_JOB_TARGET\"\n        # derive-keys is the closed identity validator and must run before any\n        # input-derived path is created or reset.\n        .github/scripts/ci-cache-maintain.sh derive-keys",
+                    1,
+                ),
+                finalize.to_owned(),
+            ),
+            (
                 "matched key used for save",
                 setup.to_owned(),
                 finalize.replace(
@@ -6124,40 +6559,22 @@ mod tests {
                 "fixed workflow action synthetic red `{label}` was accepted"
             );
         }
-
-        let mut reordered: serde_yaml_ng::Value = serde_yaml_ng::from_str(caller).unwrap();
-        let steps = reordered
-            .as_mapping_mut()
-            .and_then(|root| root.get_mut("jobs"))
-            .and_then(serde_yaml_ng::Value::as_mapping_mut)
-            .and_then(|jobs| jobs.get_mut("scheduled-audit-fallback"))
-            .and_then(serde_yaml_ng::Value::as_mapping_mut)
-            .and_then(|job| job.get_mut("steps"))
-            .and_then(serde_yaml_ng::Value::as_sequence_mut)
-            .unwrap();
-        let execution = steps
-            .iter()
-            .position(|step| {
-                step.as_mapping().and_then(|step| yaml_scalar(step, "id")) == Some("audit-run")
-            })
-            .unwrap();
-        let finalizer = steps
-            .iter()
-            .position(|step| {
-                step.as_mapping().and_then(|step| yaml_scalar(step, "id")) == Some("audit-finalize")
-            })
-            .unwrap();
-        steps.swap(execution, finalizer);
-        assert!(
-            !fixed_ci_workflow_is_closed(
-                &serde_yaml_ng::to_string(&reordered).unwrap(),
-                reusable,
-                setup,
-                finalize,
-                cache_policy,
-            ),
-            "fixed workflow accepted a finalizer before its execution step"
-        );
+        assert!(!fixed_ci_workflow_is_closed_for_groups(
+            caller,
+            reusable,
+            setup,
+            finalize,
+            cache_policy,
+            &["postgres", "transport", "runtime"],
+        ));
+        assert!(!fixed_ci_workflow_is_closed_for_groups(
+            caller,
+            reusable,
+            setup,
+            finalize,
+            cache_policy,
+            &["postgres", "transport", "runtime", "artifact", "future"],
+        ));
     }
 
     /// INVARIANT: CI-TOOL-ADAPTER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "fixed_tool_adapter_rejects_policy_weakening", anti_vacuity = "committed_fixed_tool_adapter_is_closed" }.
@@ -6219,7 +6636,7 @@ mod tests {
                             && yaml_scalar(with, "key") == Some("${{ steps.cache-keys.outputs.tools-primary-key }}")
                     })
             });
-        adapter.contains("all|check|test-affected|integration-critical|audit)")
+        adapter.contains("all|preflight|check|test-affected|integration-critical|audit)")
             && action.contains(".github/scripts/ci-tool-adapters.sh specs --lane \"$RSS_LANE\"")
             && !action.contains("compiler-cache-identity:")
             && !action.contains("  profile:")

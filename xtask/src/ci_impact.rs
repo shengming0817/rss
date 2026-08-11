@@ -5676,11 +5676,7 @@ mod tests {
             vec![step.clone()],
             "mixed manifest input must keep the complete bin target"
         );
-        for path in [
-            "xtask/src/testutil.rs",
-            "xtask/src/ci_gate.rs",
-            "xtask/src/main.rs",
-        ] {
+        for path in ["xtask/src/testutil.rs", "xtask/src/main.rs"] {
             assert_eq!(
                 scope_xtask_unit_test_steps(
                     vec![step.clone()],

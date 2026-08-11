@@ -8,7 +8,7 @@
 | 入口 | 投影 | Coverage 行为 |
 |------|------|----------------|
 | `make ci` / `ci local` | `LocalProjection` | 不跑 coverage（preflight 门集不含插桩门；见 DEFERRED） |
-| PR `check` / `test-affected` / `integration-critical` | `PrComplete` 上限 | 不跑 coverage；selector 失败或高影响根也不扩大为完整事件 |
+| PR `preflight` / `check` / `test-affected` / integration carriers | `PrComplete` 上限 | 不跑 coverage；preflight 选择失败或高影响根也不扩大为完整事件 |
 | `make ci-full` / `ci full` | `release-check` typed subsumption | 恒 `CoverageScope::Workspace`，不再重复 component nextest |
 
 普通 PR 的固定图不拥有 coverage。affected package 闭包只供 `test-affected` 选择组件测试；workspace

@@ -9,8 +9,7 @@ use crate::consistency_effects::LocalOnlyExecutionInventory;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use std::fs::{self, File, OpenOptions};
-use std::io::{Read as _, Write as _};
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -216,6 +215,44 @@ impl ValidatedLocalOnlyReport {
     }
 }
 
+pub(crate) fn validate_upload_snapshot(
+    input: &Path,
+    output: &Path,
+    root: &Path,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> Result<()> {
+    let bytes = read_ordinary_file(
+        input,
+        "LocalOnly execution evidence",
+        MAX_REPORT_BYTES,
+        "report",
+    )?;
+    let source =
+        std::str::from_utf8(&bytes).context("LocalOnly execution evidence must be UTF-8")?;
+    let wire: ReportWire =
+        serde_json::from_str(source).context("invalid LocalOnly execution evidence")?;
+    validate_wire(&wire)?;
+    if wire.source_revision != crate::cmd::source_revision(root)? {
+        bail!("LocalOnly evidence revision does not match checked-out HEAD");
+    }
+    let inventory = crate::consistency_effects::local_only_execution_inventory(root, facts)?;
+    let active = inventory
+        .active_contract_ids
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    let receipts = inventory
+        .source_receipt_contract_ids
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
+    if wire.active_contract_ids != active || wire.source_receipt_contract_ids != receipts {
+        bail!("LocalOnly evidence does not match the current canonical inventory");
+    }
+    prepare_output_slot(output)?;
+    atomic_publish(output, &bytes)
+}
+
 fn reconcile_execution_sets(
     inventory: &LocalOnlyExecutionInventory,
     executed: Vec<String>,
@@ -364,14 +401,6 @@ fn ensure_size(size: u64, limit: u64, label: &str) -> Result<()> {
     Ok(())
 }
 
-fn ordinary_file_metadata(path: &Path, label: &str) -> Result<fs::Metadata> {
-    let metadata = fs::symlink_metadata(path).with_context(|| format!("inspect {label}"))?;
-    if metadata.file_type().is_symlink() || !metadata.is_file() {
-        bail!("{label} must be an ordinary file");
-    }
-    Ok(metadata)
-}
-
 fn ordinary_directory_metadata(path: &Path, label: &str) -> Result<fs::Metadata> {
     let metadata = fs::symlink_metadata(path).with_context(|| format!("inspect {label}"))?;
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
@@ -396,39 +425,13 @@ fn read_ordinary_file_with_hook(
     size_label: &str,
     after_precheck: impl FnOnce() -> Result<()>,
 ) -> Result<Vec<u8>> {
-    let path_before = ordinary_file_metadata(path, label)?;
-    after_precheck()?;
-
-    let mut file = File::open(path).with_context(|| format!("open {label}"))?;
-    let opened_before = file
-        .metadata()
-        .with_context(|| format!("inspect opened {label}"))?;
-    if !opened_before.is_file() {
-        bail!("{label} opened as a non-ordinary file");
-    }
-    ensure_same_path_identity(&path_before, &opened_before, label)?;
-    ensure_size(opened_before.len(), size_limit, size_label)?;
-
-    let read_limit = size_limit
-        .checked_add(1)
-        .context("LocalOnly execution read limit overflow")?;
-    let mut contents = Vec::new();
-    std::io::Read::by_ref(&mut file)
-        .take(read_limit)
-        .read_to_end(&mut contents)
-        .with_context(|| format!("read {label}"))?;
-
-    let opened_after = file
-        .metadata()
-        .with_context(|| format!("reinspect opened {label}"))?;
-    let path_after = ordinary_file_metadata(path, label)?;
-    ensure_same_path_identity(&opened_before, &opened_after, label)?;
-    ensure_same_path_identity(&opened_before, &path_after, label)?;
-    ensure_size(contents.len() as u64, size_limit, size_label)?;
-    if contents.len() as u64 != opened_before.len() || opened_before.len() != opened_after.len() {
-        bail!("{label} changed while being read");
-    }
-    Ok(contents)
+    let _ = size_label;
+    crate::evidence_file::read_stable_ordinary_file_with_hook(
+        path,
+        label,
+        size_limit,
+        after_precheck,
+    )
 }
 
 #[cfg(unix)]
@@ -462,24 +465,7 @@ fn ensure_same_path_identity(
 }
 
 fn prepare_output_slot(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .filter(|value| !value.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    fs::create_dir_all(parent).context("create LocalOnly execution evidence directory")?;
-    let metadata =
-        fs::symlink_metadata(parent).context("inspect LocalOnly execution evidence directory")?;
-    if metadata.file_type().is_symlink() || !metadata.is_dir() {
-        bail!("LocalOnly execution evidence parent must be an ordinary directory");
-    }
-    match fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
-            bail!("LocalOnly execution evidence output must be absent or an ordinary file")
-        }
-        Ok(_) => fs::remove_file(path).context("remove stale LocalOnly execution evidence")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
+    crate::evidence_file::prepare_output_slot(path, "LocalOnly execution evidence")?;
     Ok(())
 }
 
@@ -525,24 +511,7 @@ fn create_owner_only_directory(_path: &Path) -> Result<()> {
 }
 
 fn atomic_publish(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let temporary = parent.join(format!(".{FILE_NAME}.tmp-{}", std::process::id()));
-    match fs::symlink_metadata(&temporary) {
-        Ok(_) => fs::remove_file(&temporary).context("remove stale LocalOnly report temporary")?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error.into()),
-    }
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .context("create LocalOnly execution report temporary")?;
-    file.write_all(contents)
-        .context("write LocalOnly execution report temporary")?;
-    file.sync_all()
-        .context("sync LocalOnly execution report temporary")?;
-    drop(file);
-    fs::rename(&temporary, path).context("publish LocalOnly execution report atomically")
+    crate::evidence_file::atomic_publish(path, contents, "LocalOnly execution report", FILE_NAME)
 }
 
 #[cfg(test)]

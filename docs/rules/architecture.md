@@ -264,8 +264,8 @@ binding、exact-set 与 anti-vacuity。细则见 [`localtx.md`](./localtx.md) �
 [`consistency-l0.md`](./consistency-l0.md)，本文不复制闭表。
 
 这些 Medium gate 的 **GitHub Actions typed CI** carrier 由 `.github/workflows/ci.yml` 定义。
-**PR job 拓扑固定**（selector 只传规范 `SelectionPlan`、执行 Job 不重列路径策略、result-only gate
-只聚合执行结果）：具体 Job 名与闭集以 `.github/workflows/ci.yml` 为真源，运维激活状态见
+**PR job 拓扑固定**（`preflight` 生成规范 `SelectionPlan` 并早筛、执行 Job 不重列路径策略、两级
+result-only gate 只聚合执行结果）：具体 Job 名与闭集以 `.github/workflows/ci.yml` 为真源，运维激活状态见
 [CI 运维状态](../ops/202607130824-1765-diff-adaptive-ci.md) 与
 [`202606231530-001-ci-lane.md`](../ops/202606231530-001-ci-lane.md)；本文不手抄 Job 名单。
 `test-affected` 除 affected 组件测试外始终持有并生产 LocalOnly required evidence；其唯一公开直接入口是
@@ -293,7 +293,7 @@ L0/L1 验证沿用同一 typed policy，不在规则文档维护第二份 gate i
 Consistency domain 选择声明、codegen 与静态证据；`verify --fast` 门集以 `xtask/src/verify.rs` 为真源，
 不拥有 L0/L1 证明。完整 `verify` 增加编译和默认行为测试并仅编译 integration targets，真实 Postgres
 LocalTx matrix 与 active L1 journey 由
-`cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`
+`cargo xtask ci run --job integration-critical --integration-group postgres --selection '<canonical SelectionPlan JSON>'`
 执行；selection 必须包含其稳定 integration unit ID。具体采用顺序与失败边界分别见
 [`consistency-l0.md`](./consistency-l0.md) 和 [`localtx.md`](./localtx.md)。
 

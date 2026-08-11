@@ -5,6 +5,9 @@ inputs:
   lane:
     description: Closed fixed-job lane and cache profile.
     required: true
+  compiler-partition:
+    description: Closed compiler target/cache partition derived from the validated invocation.
+    required: true
   toolchain:
     description: Pinned stable Rust toolchain identity used in cache keys.
     required: true
@@ -24,7 +27,7 @@ inputs:
 
 outputs:
   cache-context:
-    description: Closed v1 cache lifecycle context consumed only by finalize-rss-ci.
+    description: Closed v2 cache lifecycle context consumed only by finalize-rss-ci.
     value: ${{ steps.cache-context.outputs.value }}
 
 runs:
@@ -35,6 +38,7 @@ runs:
       shell: bash
       env:
         RSS_LANE: ${{ inputs.lane }}
+        RSS_COMPILER_PARTITION: ${{ inputs.compiler-partition }}
       run: |
         set -euo pipefail
         install_action_tools="$(.github/scripts/ci-tool-adapters.sh specs --lane "$RSS_LANE" --backend install-action)"
@@ -58,6 +62,7 @@ runs:
       shell: bash
       env:
         RSS_LANE: ${{ inputs.lane }}
+        RSS_COMPILER_PARTITION: ${{ inputs.compiler-partition }}
         RSS_TOOLCHAIN: ${{ inputs.toolchain }}
         RSS_NIGHTLY: ${{ inputs.nightly }}
         RSS_INSTALL_ACTION_TOOLS: ${{ steps.tool-policy.outputs.install-action-tools }}
@@ -70,11 +75,37 @@ runs:
         RSS_COMPILER_CACHE_EPOCH: ${{ inputs.compiler-cache-epoch }}
         RSS_TOOL_ROOT: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.lane }}
         RSS_FALLBACK_TARGET: ${{ runner.temp }}/rss-tool-build-target
-        RSS_JOB_TARGET: ${{ runner.temp }}/rss-cargo-target/${{ inputs.lane }}
+        RSS_JOB_TARGET: ${{ runner.temp }}/rss-cargo-target/${{ inputs.lane }}/${{ inputs.compiler-partition }}
         RSS_DOWNLOAD_ROOT: ${{ runner.temp }}/rss-cargo-home
         RSS_COMPILER_ROOT: ${{ runner.temp }}/rss-sccache-cache
       run: |
         set -euo pipefail
+        input_hash="$(sha256sum Cargo.lock .cargo/config.toml rust-toolchain.toml | sha256sum | cut -d' ' -f1)"
+        tools_hash="$(printf '%s\n' \
+          'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' \
+          'cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65@1.20.1' \
+          "$RSS_ADAPTER_SHA256" \
+          "$RSS_CATALOG_SHA256" \
+          "$RSS_INSTALL_ACTION_TOOLS" \
+          "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
+        # derive-keys is the closed identity validator and must run before any
+        # input-derived path is created or reset.
+        .github/scripts/ci-cache-maintain.sh derive-keys \
+          --os "$RUNNER_OS" \
+          --arch "$RUNNER_ARCH" \
+          --toolchain "$RSS_TOOLCHAIN" \
+          --nightly "$RSS_NIGHTLY" \
+          --lane "$RSS_LANE" \
+          --profile "$RSS_LANE" \
+          --compiler-partition "$RSS_COMPILER_PARTITION" \
+          --download-cache-epoch "$RSS_DOWNLOAD_CACHE_EPOCH" \
+          --tool-cache-epoch "$RSS_TOOL_CACHE_EPOCH" \
+          --compiler-cache-epoch "$RSS_COMPILER_CACHE_EPOCH" \
+          --sccache-version "$RSS_SCCACHE_VERSION" \
+          --input-hash "$input_hash" \
+          --tools-hash "$tools_hash" \
+          --run-id "$GITHUB_RUN_ID" \
+          --run-attempt "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
         .github/scripts/ci-cache-maintain.sh prepare-roots \
           --workspace "$GITHUB_WORKSPACE" \
           --tool-root "$RSS_TOOL_ROOT" \
@@ -87,29 +118,6 @@ runs:
           --parent "$RUNNER_TEMP" \
           --path "$RSS_COMPILER_ROOT"
         mkdir -p "$RSS_JOB_TARGET"
-        input_hash="$(sha256sum Cargo.lock .cargo/config.toml rust-toolchain.toml | sha256sum | cut -d' ' -f1)"
-        tools_hash="$(printf '%s\n' \
-          'taiki-e/install-action@b8cecb83565409bcc297b2df6e77f030b2a468d5' \
-          'cargo-bins/cargo-binstall@732870f031d2fb36309d0deaf36abcc704a7be65@1.20.1' \
-          "$RSS_ADAPTER_SHA256" \
-          "$RSS_CATALOG_SHA256" \
-          "$RSS_INSTALL_ACTION_TOOLS" \
-          "$RSS_BINSTALL_TOOLS" | sha256sum | cut -d' ' -f1)"
-        .github/scripts/ci-cache-maintain.sh derive-keys \
-          --os "$RUNNER_OS" \
-          --arch "$RUNNER_ARCH" \
-          --toolchain "$RSS_TOOLCHAIN" \
-          --nightly "$RSS_NIGHTLY" \
-          --lane "$RSS_LANE" \
-          --profile "$RSS_LANE" \
-          --download-cache-epoch "$RSS_DOWNLOAD_CACHE_EPOCH" \
-          --tool-cache-epoch "$RSS_TOOL_CACHE_EPOCH" \
-          --compiler-cache-epoch "$RSS_COMPILER_CACHE_EPOCH" \
-          --sccache-version "$RSS_SCCACHE_VERSION" \
-          --input-hash "$input_hash" \
-          --tools-hash "$tools_hash" \
-          --run-id "$GITHUB_RUN_ID" \
-          --run-attempt "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
         {
           echo "CARGO_HOME=$RSS_DOWNLOAD_ROOT"
           echo "CARGO_TARGET_DIR=$RSS_JOB_TARGET"
@@ -183,6 +191,7 @@ runs:
       shell: bash
       env:
         RSS_LANE: ${{ inputs.lane }}
+        RSS_COMPILER_PARTITION: ${{ inputs.compiler-partition }}
         RSS_TOOL_ROOT: ${{ github.workspace }}/.cache/ci-tools/${{ inputs.lane }}
       run: .github/scripts/ci-tool-adapters.sh verify --mode cache --lane "$RSS_LANE" --root "$RSS_TOOL_ROOT"
 
@@ -314,6 +323,7 @@ runs:
       shell: bash
       env:
         RSS_LANE: ${{ inputs.lane }}
+        RSS_COMPILER_PARTITION: ${{ inputs.compiler-partition }}
         RSS_DOWNLOAD_PRIMARY: ${{ steps.cache-keys.outputs.download-primary-key }}
         RSS_DOWNLOAD_OUTCOME: ${{ steps.download-cache.outcome }}
         RSS_DOWNLOAD_HIT: ${{ steps.download-cache.outputs.cache-hit }}
@@ -327,8 +337,9 @@ runs:
       run: |
         set -euo pipefail
         context="$(jq -cn \
-          --arg schema rss-ci-cache-context-v1 \
+          --arg schema rss-ci-cache-context-v2 \
           --arg lane "$RSS_LANE" \
+          --arg partition "$RSS_COMPILER_PARTITION" \
           --arg download_primary "$RSS_DOWNLOAD_PRIMARY" \
           --arg download_outcome "$RSS_DOWNLOAD_OUTCOME" \
           --arg download_hit "$RSS_DOWNLOAD_HIT" \
@@ -339,5 +350,5 @@ runs:
           --arg compiler_hit "$RSS_COMPILER_HIT" \
           --arg compiler_matched "$RSS_COMPILER_MATCHED" \
           --arg compiler_enabled "$RSS_COMPILER_ENABLED" \
-          '{schema:$schema,lane:$lane,download:{primary:$download_primary,restore_outcome:$download_outcome,hit:$download_hit,matched:$download_matched,enabled:$download_enabled},compiler:{primary:$compiler_primary,restore_outcome:$compiler_outcome,hit:$compiler_hit,matched:$compiler_matched,enabled:$compiler_enabled}}')"
+          '{schema:$schema,lane:$lane,partition:$partition,download:{primary:$download_primary,restore_outcome:$download_outcome,hit:$download_hit,matched:$download_matched,enabled:$download_enabled},compiler:{primary:$compiler_primary,restore_outcome:$compiler_outcome,hit:$compiler_hit,matched:$compiler_matched,enabled:$compiler_enabled}}')"
         echo "value=$context" >> "$GITHUB_OUTPUT"

@@ -102,7 +102,7 @@ generated `EventFactBinding` 派生，不再平行手写 topic。
 lane，不进入默认快测：
 
 ```bash
-cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci run --job integration-critical --integration-group postgres --selection '<canonical SelectionPlan JSON>'
 ```
 
 ## 证据边界

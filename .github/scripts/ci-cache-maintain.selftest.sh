@@ -47,6 +47,7 @@ hash_a=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 hash_b=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 derive_keys() {
   lane=${4:-check}
+  partition=${5:-$lane}
   "$MAINTAIN" derive-keys \
     --os Linux \
     --arch X64 \
@@ -54,9 +55,10 @@ derive_keys() {
     --nightly nightly-2026-04-16 \
     --lane "$lane" \
     --profile "$lane" \
+    --compiler-partition "$partition" \
     --download-cache-epoch v5 \
     --tool-cache-epoch v4 \
-    --compiler-cache-epoch v3 \
+    --compiler-cache-epoch v4 \
     --sccache-version 0.15.0 \
     --input-hash "$1" \
     --tools-hash "$hash_b" \
@@ -66,13 +68,13 @@ derive_keys() {
 
 expect_success 'derive keys emits the closed cache policy' derive_keys "$hash_a" 42 1
 expected_keys=$(cat <<EOF
-download-primary-key=rss-download-v5-Linux-X64-1.96.0-nightly-2026-04-16-check-$hash_a-42-1
+download-primary-key=rss-download-v5-Linux-X64-1.96.0-nightly-2026-04-16-check-$hash_a-check-42-1
 download-input-restore-prefix=rss-download-v5-Linux-X64-1.96.0-nightly-2026-04-16-check-$hash_a-
 download-restore-prefix=rss-download-v5-Linux-X64-1.96.0-nightly-2026-04-16-check-
 tools-primary-key=rss-tools-v4-Linux-X64-1.96.0-nightly-2026-04-16-check-$hash_b
-compiler-primary-key=rss-sccache-v3-Linux-X64-1.96.0-nightly-2026-04-16-0.15.0-check-$hash_a-42-1
-compiler-input-restore-prefix=rss-sccache-v3-Linux-X64-1.96.0-nightly-2026-04-16-0.15.0-check-$hash_a-
-compiler-broad-restore-prefix=rss-sccache-v3-Linux-X64-1.96.0-nightly-2026-04-16-0.15.0-check-
+compiler-primary-key=rss-sccache-v4-Linux-X64-1.96.0-nightly-2026-04-16-0.15.0-check-check-$hash_a-42-1
+compiler-input-restore-prefix=rss-sccache-v4-Linux-X64-1.96.0-nightly-2026-04-16-0.15.0-check-check-$hash_a-
+compiler-broad-restore-prefix=rss-sccache-v4-Linux-X64-1.96.0-nightly-2026-04-16-0.15.0-check-check-
 EOF
 )
 if [ "$(cat "$TMP_ROOT/stdout")" = "$expected_keys" ]; then pass 'derived key dimensions are exact'; else fail 'derived key dimensions are exact'; fi
@@ -104,19 +106,32 @@ tools_key_a=$(sed -n 's/^tools-primary-key=//p' "$TMP_ROOT/keys-a")
 tools_key_b=$(sed -n 's/^tools-primary-key=//p' "$TMP_ROOT/keys-b")
 if [ "$tools_key_a" = "$tools_key_b" ]; then pass 'tool key ignores lock and compiler input changes'; else fail 'tool key ignores lock and compiler input changes'; fi
 
-expect_success 'empty nightly normalizes to none' "$MAINTAIN" derive-keys --os Linux --arch ARM64 --toolchain 1.96.0 --nightly '' --lane audit --profile audit --download-cache-epoch v5 --tool-cache-epoch v4 --compiler-cache-epoch v3 --sccache-version 0.15.0 --input-hash "$hash_b" --tools-hash "$hash_a" --run-id 9 --run-attempt 1
+expect_success 'empty nightly normalizes to none' "$MAINTAIN" derive-keys --os Linux --arch ARM64 --toolchain 1.96.0 --nightly '' --lane audit --profile audit --compiler-partition audit --download-cache-epoch v6 --tool-cache-epoch v4 --compiler-cache-epoch v4 --sccache-version 0.15.0 --input-hash "$hash_b" --tools-hash "$hash_a" --run-id 9 --run-attempt 1
 if grep -q -- '-none-' "$TMP_ROOT/stdout"; then pass 'normalized nightly is represented in every applicable namespace'; else fail 'normalized nightly is represented in every applicable namespace'; fi
-expect_failure 'derive keys rejects an open lane' "$MAINTAIN" derive-keys --os Linux --arch X64 --toolchain 1.96.0 --nightly '' --lane legacy --profile legacy --download-cache-epoch v5 --tool-cache-epoch v4 --compiler-cache-epoch v3 --sccache-version 0.15.0 --input-hash "$hash_b" --tools-hash "$hash_a" --run-id 9 --run-attempt 1
-expect_failure 'derive keys rejects lane and profile drift' "$MAINTAIN" derive-keys --os Linux --arch X64 --toolchain 1.96.0 --nightly '' --lane check --profile audit --download-cache-epoch v5 --tool-cache-epoch v4 --compiler-cache-epoch v3 --sccache-version 0.15.0 --input-hash "$hash_b" --tools-hash "$hash_a" --run-id 9 --run-attempt 1
-expect_failure 'derive keys rejects malformed hashes' "$MAINTAIN" derive-keys --os Linux --arch X64 --toolchain 1.96.0 --nightly '' --lane check --profile check --download-cache-epoch v5 --tool-cache-epoch v4 --compiler-cache-epoch v3 --sccache-version 0.15.0 --input-hash short --tools-hash "$hash_a" --run-id 9 --run-attempt 1
-expect_failure 'derive keys rejects unknown arguments' "$MAINTAIN" derive-keys --os Linux --arch X64 --toolchain 1.96.0 --nightly '' --lane check --profile check --download-cache-epoch v5 --tool-cache-epoch v4 --compiler-cache-epoch v3 --sccache-version 0.15.0 --input-hash "$hash_b" --tools-hash "$hash_a" --run-id 9 --run-attempt 1 --unknown value
+expect_failure 'derive keys rejects an open lane' "$MAINTAIN" derive-keys --os Linux --arch X64 --toolchain 1.96.0 --nightly '' --lane legacy --profile legacy --compiler-partition legacy --download-cache-epoch v6 --tool-cache-epoch v4 --compiler-cache-epoch v4 --sccache-version 0.15.0 --input-hash "$hash_b" --tools-hash "$hash_a" --run-id 9 --run-attempt 1
+expect_failure 'derive keys rejects lane and profile drift' "$MAINTAIN" derive-keys --os Linux --arch X64 --toolchain 1.96.0 --nightly '' --lane check --profile audit --compiler-partition check --download-cache-epoch v6 --tool-cache-epoch v4 --compiler-cache-epoch v4 --sccache-version 0.15.0 --input-hash "$hash_b" --tools-hash "$hash_a" --run-id 9 --run-attempt 1
+expect_failure 'derive keys rejects malformed hashes' "$MAINTAIN" derive-keys --os Linux --arch X64 --toolchain 1.96.0 --nightly '' --lane check --profile check --compiler-partition check --download-cache-epoch v6 --tool-cache-epoch v4 --compiler-cache-epoch v4 --sccache-version 0.15.0 --input-hash short --tools-hash "$hash_a" --run-id 9 --run-attempt 1
+expect_failure 'derive keys rejects unknown arguments' "$MAINTAIN" derive-keys --os Linux --arch X64 --toolchain 1.96.0 --nightly '' --lane check --profile check --compiler-partition check --download-cache-epoch v6 --tool-cache-epoch v4 --compiler-cache-epoch v4 --sccache-version 0.15.0 --input-hash "$hash_b" --tools-hash "$hash_a" --run-id 9 --run-attempt 1 --unknown value
 
-download_primary="rss-download-v5-Linux-X64-1.96.0-none-check-$hash_a-42-1"
-compiler_primary="rss-sccache-v3-Linux-X64-1.96.0-none-0.15.0-check-$hash_b-42-1"
+expect_success 'integration compiler partitions are isolated' derive_keys "$hash_a" 42 1 integration-critical postgres
+postgres_compiler=$(sed -n 's/^compiler-primary-key=//p' "$TMP_ROOT/stdout")
+postgres_download=$(sed -n 's/^download-primary-key=//p' "$TMP_ROOT/stdout")
+postgres_download_restore=$(sed -n 's/^download-input-restore-prefix=//p' "$TMP_ROOT/stdout")
+expect_success 'second integration compiler partition is valid' derive_keys "$hash_a" 42 1 integration-critical transport
+transport_compiler=$(sed -n 's/^compiler-primary-key=//p' "$TMP_ROOT/stdout")
+transport_download=$(sed -n 's/^download-primary-key=//p' "$TMP_ROOT/stdout")
+transport_download_restore=$(sed -n 's/^download-input-restore-prefix=//p' "$TMP_ROOT/stdout")
+if [ "$postgres_compiler" != "$transport_compiler" ]; then pass 'integration compiler partitions are isolated'; else fail 'integration compiler partitions are isolated'; fi
+if [ "$postgres_download" != "$transport_download" ]; then pass 'integration download writers use immutable partitioned primaries'; else fail 'integration download writers use immutable partitioned primaries'; fi
+if [ "$postgres_download_restore" = "$transport_download_restore" ]; then pass 'integration download readers retain shared input restore'; else fail 'integration download readers retain shared input restore'; fi
+expect_failure 'integration rejects unpartitioned compiler identity' derive_keys "$hash_a" 42 1 integration-critical integration-critical
+
+download_primary="rss-download-v5-Linux-X64-1.96.0-none-check-$hash_a-check-42-1"
+compiler_primary="rss-sccache-v4-Linux-X64-1.96.0-none-0.15.0-check-check-$hash_b-42-1"
 jq -cn \
   --arg download "$download_primary" \
   --arg compiler "$compiler_primary" \
-  '{schema:"rss-ci-cache-context-v1",lane:"check",download:{primary:$download,restore_outcome:"success",hit:"false",matched:"rss-download-v5-Linux-X64-1.96.0-none-check-old",enabled:"true"},compiler:{primary:$compiler,restore_outcome:"success",hit:"",matched:"",enabled:"true"}}' >"$TMP_ROOT/context.json"
+  '{schema:"rss-ci-cache-context-v2",lane:"check",partition:"check",download:{primary:$download,restore_outcome:"success",hit:"false",matched:"rss-download-v5-Linux-X64-1.96.0-none-check-old",enabled:"true"},compiler:{primary:$compiler,restore_outcome:"success",hit:"",matched:"",enabled:"true"}}' >"$TMP_ROOT/context.json"
 expect_success 'failed repository execution remains cache-save eligible' "$MAINTAIN" finalize-policy --context "$TMP_ROOT/context.json" --execution-outcome failure --save-eligible true
 expected_policy=$(cat <<EOF
 download-primary-key=$download_primary

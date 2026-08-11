@@ -3,14 +3,14 @@
 ## 代码载体与完成边界
 
 LocalTx 静态 inventory 由 affected `make ci` 选择的 `localtx-coverage`（或显式直接运行该 gate）证明；固定
-repository-fast 门不拥有 LocalTx 证据。真实 Postgres 行为由 `integration-critical` 固定 Job 根据 canonical
-`SelectionPlan` 选中 `postgres-domain` units 后执行：
+repository-fast 门不拥有 LocalTx 证据。真实 Postgres 行为由 postgres integration carrier 根据 canonical
+`SelectionPlan` 选中 `postgres-domain` units 后执行；稳定 `integration-critical` 只聚合四组结果：
 
 ```bash
-cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci run --job integration-critical --integration-group postgres --selection '<canonical SelectionPlan JSON>'
 ```
 
-selection 必须来自 selector 并包含所需稳定 unit ID。全部 typed batches、active/journey/backend-profile
+selection 必须来自 preflight 并包含所需稳定 unit ID；只有 `postgres` group 能构造 LocalTx 发布资格。全部 typed batches、active/journey/backend-profile
 exact-set 和真实后端断言在该执行单元内 fail-closed。PR 的 result-only gate 只读取固定 Job 最终结果，不下载
 或核对额外报告；诊断 artifact 不能把失败执行改写为通过。
 

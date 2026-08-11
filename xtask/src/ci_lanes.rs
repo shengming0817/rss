@@ -13,6 +13,7 @@ use std::fmt;
 use std::str::FromStr;
 
 use crate::execution_profiles::ExecutionProfile;
+use crate::integration_shards::IntegrationJobGroup;
 #[cfg(test)]
 use crate::integration_shards::IntegrationShard;
 
@@ -72,6 +73,30 @@ impl<'de> Deserialize<'de> for FixedCiJob {
         String::deserialize(deserializer)?
             .parse()
             .map_err(serde::de::Error::custom)
+    }
+}
+
+/// Validated fixed-executor invocation. Invalid job/group combinations cannot reach dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum FixedCiInvocation {
+    Check,
+    TestAffected,
+    Integration { group: IntegrationJobGroup },
+}
+
+impl FixedCiInvocation {
+    pub(crate) fn new(job: FixedCiJob, group: Option<IntegrationJobGroup>) -> Result<Self> {
+        match (job, group) {
+            (FixedCiJob::Check, None) => Ok(Self::Check),
+            (FixedCiJob::TestAffected, None) => Ok(Self::TestAffected),
+            (FixedCiJob::IntegrationCritical, Some(group)) => Ok(Self::Integration { group }),
+            (FixedCiJob::IntegrationCritical, None) => {
+                anyhow::bail!("integration-critical requires --integration-group")
+            }
+            (FixedCiJob::Check | FixedCiJob::TestAffected, Some(_)) => {
+                anyhow::bail!("--integration-group is only valid for integration-critical")
+            }
+        }
     }
 }
 
@@ -1313,6 +1338,27 @@ pub(crate) fn specs_for_lane(lane: GateGroup) -> impl Iterator<Item = &'static G
 mod tests {
     use super::*;
     use std::collections::BTreeSet;
+
+    #[test]
+    fn fixed_ci_invocation_rejects_every_job_group_mismatch() {
+        assert_eq!(
+            FixedCiInvocation::new(FixedCiJob::Check, None).unwrap(),
+            FixedCiInvocation::Check
+        );
+        assert_eq!(
+            FixedCiInvocation::new(FixedCiJob::TestAffected, None).unwrap(),
+            FixedCiInvocation::TestAffected
+        );
+        for group in IntegrationJobGroup::ALL {
+            assert_eq!(
+                FixedCiInvocation::new(FixedCiJob::IntegrationCritical, Some(group)).unwrap(),
+                FixedCiInvocation::Integration { group }
+            );
+            assert!(FixedCiInvocation::new(FixedCiJob::Check, Some(group)).is_err());
+            assert!(FixedCiInvocation::new(FixedCiJob::TestAffected, Some(group)).is_err());
+        }
+        assert!(FixedCiInvocation::new(FixedCiJob::IntegrationCritical, None).is_err());
+    }
 
     #[test]
     fn ci_lane_registry_accepts_canonical_green() {

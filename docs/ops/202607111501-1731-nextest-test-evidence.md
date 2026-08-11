@@ -14,11 +14,11 @@ integration batch 仍使用 300 秒 profile。#1883 使 component nextest 与 co
 
 ## CI topology
 
-- `check`、`test-affected`、`integration-critical` 是普通 PR 的三个固定执行 Job。component nextest 只由
-  `test-affected` 消费 selector 的 package selection；critical nextest 只由 `integration-critical` 消费稳定
-  integration unit ID。
-- `event-transport`、`runtime-http-auth` 在固定 integration Job 内各运行 `1/2` 与 `2/2`；单个 hash bucket 可以合法为空，
-  两个 bucket 的并集才是完整验收面。
+- `preflight` 生成 package selection；component nextest 只由 `test-affected` 消费。critical nextest 由
+  `postgres`、`transport`、`runtime`、`artifact` 四个闭合 carrier 消费各自拥有的稳定 integration unit ID；
+  `integration-critical` 只聚合四组结果。
+- shard 内部 partition 仍由 typed integration catalog 决定；carrier 只承载 shard 归组，不成为新的 proof owner。
+  空投影 carrier 显式成功，固定图不随 selection 漂移。
 - `postgres-domain`、`consistency-fault`、`cdc-projection-saga`、`object-storage` 不带 partition。fault matrix 当前只有
   一个顶层测试，使用独立 600 秒 `fault-matrix` profile，不伪装成可均衡拆分。
 

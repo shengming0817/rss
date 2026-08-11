@@ -1005,6 +1005,81 @@ integration_shard_catalog! {
     },
 }
 
+/// Closed execution carriers for the fixed remote integration topology.
+///
+/// INVARIANT: CI-INTEGRATION-GROUP-01 { level = "Hard", exec = "native-compile", source = "code", native = "IntegrationJobGroup is closed and IntegrationShard::execution_group exhaustively assigns every canonical shard" }.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) enum IntegrationJobGroup {
+    Postgres,
+    Transport,
+    Runtime,
+    Artifact,
+}
+
+impl IntegrationJobGroup {
+    #[cfg(test)]
+    pub(crate) const ALL: [Self; 4] = [
+        Self::Postgres,
+        Self::Transport,
+        Self::Runtime,
+        Self::Artifact,
+    ];
+
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::Transport => "transport",
+            Self::Runtime => "runtime",
+            Self::Artifact => "artifact",
+        }
+    }
+
+    pub(crate) fn shards(self) -> impl Iterator<Item = IntegrationShard> {
+        IntegrationShard::ALL
+            .iter()
+            .copied()
+            .filter(move |shard| shard.execution_group() == self)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn owns_localtx_evidence(self) -> bool {
+        matches!(self, Self::Postgres)
+    }
+}
+
+impl IntegrationShard {
+    pub(crate) const fn execution_group(self) -> IntegrationJobGroup {
+        match self {
+            Self::PostgresDomain => IntegrationJobGroup::Postgres,
+            Self::EventTransport | Self::ConsistencyFault => IntegrationJobGroup::Transport,
+            Self::RuntimeHttpAuth | Self::CdcProjectionSaga => IntegrationJobGroup::Runtime,
+            Self::ObjectStorage | Self::ProductionRuntime => IntegrationJobGroup::Artifact,
+        }
+    }
+}
+
+impl fmt::Display for IntegrationJobGroup {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for IntegrationJobGroup {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "postgres" => Ok(Self::Postgres),
+            "transport" => Ok(Self::Transport),
+            "runtime" => Ok(Self::Runtime),
+            "artifact" => Ok(Self::Artifact),
+            other => bail!(
+                "unknown integration job group `{other}`; expected postgres, transport, runtime, or artifact"
+            ),
+        }
+    }
+}
+
 fn validate_integration_unit_catalog(
     specs: &[IntegrationUnitSpec],
     shard_specs: &[ShardSpec],
@@ -1281,6 +1356,17 @@ impl IntegrationSelection {
             .iter()
             .copied()
             .filter(|id| id.spec().shard == shard)
+            .collect()
+    }
+
+    pub(crate) fn unit_ids_for_group(
+        &self,
+        group: IntegrationJobGroup,
+    ) -> BTreeSet<IntegrationUnitId> {
+        self.unit_ids
+            .iter()
+            .copied()
+            .filter(|id| id.spec().shard.execution_group() == group)
             .collect()
     }
 
@@ -2739,6 +2825,62 @@ mod tests {
                 .iter()
                 .all(|id| { id.spec().primary_owner == ExecutionProfile::IntegrationCritical })
         );
+    }
+
+    #[test]
+    fn integration_job_groups_partition_shards_exactly_once() -> Result<()> {
+        let flattened = IntegrationJobGroup::ALL
+            .into_iter()
+            .flat_map(IntegrationJobGroup::shards)
+            .collect::<Vec<_>>();
+        let unique = flattened.iter().copied().collect::<BTreeSet<_>>();
+        assert_eq!(IntegrationJobGroup::ALL.len(), 4);
+        assert!(
+            IntegrationJobGroup::ALL
+                .into_iter()
+                .all(|group| group.shards().next().is_some())
+        );
+        assert_eq!(flattened.len(), unique.len());
+        assert_eq!(unique, IntegrationShard::ALL.iter().copied().collect());
+        for group in IntegrationJobGroup::ALL {
+            assert_eq!(group.as_str().parse::<IntegrationJobGroup>()?, group);
+        }
+        assert!("all".parse::<IntegrationJobGroup>().is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn integration_job_group_projection_preserves_selected_units_exactly_once() -> Result<()> {
+        for selection in [
+            IntegrationSelection::for_profile(ExecutionProfile::IntegrationCritical)?,
+            IntegrationSelection::release_check(),
+        ] {
+            let flattened = IntegrationJobGroup::ALL
+                .into_iter()
+                .flat_map(|group| selection.unit_ids_for_group(group))
+                .collect::<Vec<_>>();
+            let unique = flattened.iter().copied().collect::<BTreeSet<_>>();
+            assert_eq!(flattened.len(), unique.len());
+            assert_eq!(&unique, selection.unit_ids());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn localtx_required_evidence_has_exactly_one_producer_group() -> Result<()> {
+        let owners = IntegrationJobGroup::ALL
+            .into_iter()
+            .filter(|group| group.owns_localtx_evidence())
+            .collect::<Vec<_>>();
+        assert_eq!(owners, [IntegrationJobGroup::Postgres]);
+        let required = localtx_required_selection()?;
+        assert!(
+            required
+                .unit_ids()
+                .iter()
+                .all(|unit| unit.spec().shard.execution_group() == IntegrationJobGroup::Postgres)
+        );
+        Ok(())
     }
 
     #[test]

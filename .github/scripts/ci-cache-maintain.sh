@@ -10,7 +10,7 @@ usage() {
     "       $0 prepare-roots --workspace <path> --tool-root <path> --runner-temp <path> --fallback-target <path>" \
     "       $0 reset-descendant --parent <path> --path <path>" \
     "       $0 snapshot --parent <path> --path <path> --max-bytes <positive-integer>" \
-    "       $0 derive-keys --os <id> --arch <id> --toolchain <semver> --nightly <nightly-date|empty> --lane <lane> --profile <profile> --download-cache-epoch <vN> --tool-cache-epoch <vN> --compiler-cache-epoch <vN> --sccache-version <semver> --input-hash <sha256> --tools-hash <sha256> --run-id <integer> --run-attempt <positive-integer>" \
+    "       $0 derive-keys --os <id> --arch <id> --toolchain <semver> --nightly <nightly-date|empty> --lane <lane> --profile <profile> --compiler-partition <partition> --download-cache-epoch <vN> --tool-cache-epoch <vN> --compiler-cache-epoch <vN> --sccache-version <semver> --input-hash <sha256> --tools-hash <sha256> --run-id <integer> --run-attempt <positive-integer>" \
     "       $0 finalize-policy --context <absolute-json> --execution-outcome <success|failure|cancelled|skipped> --save-eligible <true|false>" >&2
   exit 2
 }
@@ -182,6 +182,7 @@ derive_keys() {
   nightly=''
   lane=''
   profile=''
+  compiler_partition=''
   download_epoch=''
   tool_epoch=''
   compiler_epoch=''
@@ -190,7 +191,7 @@ derive_keys() {
   tools_hash=''
   run_id=''
   run_attempt=''
-  os_set=false arch_set=false toolchain_set=false nightly_set=false lane_set=false profile_set=false
+  os_set=false arch_set=false toolchain_set=false nightly_set=false lane_set=false profile_set=false compiler_partition_set=false
   download_epoch_set=false tool_epoch_set=false compiler_epoch_set=false sccache_version_set=false
   input_hash_set=false tools_hash_set=false run_id_set=false run_attempt_set=false
   while [ "$#" -gt 0 ]; do
@@ -201,6 +202,7 @@ derive_keys() {
       --nightly) [ "$#" -ge 2 ] || usage; set_once "$nightly_set"; nightly=$2; nightly_set=true; shift 2 ;;
       --lane) [ "$#" -ge 2 ] || usage; set_once "$lane_set"; lane=$2; lane_set=true; shift 2 ;;
       --profile) [ "$#" -ge 2 ] || usage; set_once "$profile_set"; profile=$2; profile_set=true; shift 2 ;;
+      --compiler-partition) [ "$#" -ge 2 ] || usage; set_once "$compiler_partition_set"; compiler_partition=$2; compiler_partition_set=true; shift 2 ;;
       --download-cache-epoch) [ "$#" -ge 2 ] || usage; set_once "$download_epoch_set"; download_epoch=$2; download_epoch_set=true; shift 2 ;;
       --tool-cache-epoch) [ "$#" -ge 2 ] || usage; set_once "$tool_epoch_set"; tool_epoch=$2; tool_epoch_set=true; shift 2 ;;
       --compiler-cache-epoch) [ "$#" -ge 2 ] || usage; set_once "$compiler_epoch_set"; compiler_epoch=$2; compiler_epoch_set=true; shift 2 ;;
@@ -212,23 +214,27 @@ derive_keys() {
       *) usage ;;
     esac
   done
-  for present in "$os_set" "$arch_set" "$toolchain_set" "$nightly_set" "$lane_set" "$profile_set" "$download_epoch_set" "$tool_epoch_set" "$compiler_epoch_set" "$sccache_version_set" "$input_hash_set" "$tools_hash_set" "$run_id_set" "$run_attempt_set"; do
+  for present in "$os_set" "$arch_set" "$toolchain_set" "$nightly_set" "$lane_set" "$profile_set" "$compiler_partition_set" "$download_epoch_set" "$tool_epoch_set" "$compiler_epoch_set" "$sccache_version_set" "$input_hash_set" "$tools_hash_set" "$run_id_set" "$run_attempt_set"; do
     [ "$present" = true ] || usage
   done
   if ! valid_identity "$os" || ! valid_identity "$arch"; then die 'invalid runner identity'; fi
   if ! valid_semver "$toolchain" || ! valid_semver "$sccache_version"; then die 'invalid tool version'; fi
   [[ -z "$nightly" || "$nightly" =~ ^nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || die 'invalid nightly identity'
-  case "$lane" in check|test-affected|integration-critical|audit) ;; *) die 'invalid lane' ;; esac
+  case "$lane" in preflight|check|test-affected|integration-critical|audit) ;; *) die 'invalid lane' ;; esac
   [ "$profile" = "$lane" ] || die 'profile must match lane'
+  case "$lane:$compiler_partition" in
+    preflight:preflight|check:check|test-affected:test-affected|audit:audit|integration-critical:postgres|integration-critical:transport|integration-critical:runtime|integration-critical:artifact) ;;
+    *) die 'invalid compiler partition for lane' ;;
+  esac
   if ! valid_epoch "$download_epoch" || ! valid_epoch "$tool_epoch" || ! valid_epoch "$compiler_epoch"; then die 'invalid cache epoch'; fi
   if ! valid_hash "$input_hash" || ! valid_hash "$tools_hash"; then die 'invalid cache digest'; fi
   [[ "$run_id" =~ ^[0-9]+$ ]] && [[ "$run_attempt" =~ ^[1-9][0-9]*$ ]] || die 'invalid run identity'
   nightly_id=${nightly:-none}
   download_base="rss-download-$download_epoch-$os-$arch-$toolchain-$nightly_id-$lane"
   tools_base="rss-tools-$tool_epoch-$os-$arch-$toolchain-$nightly_id-$profile"
-  compiler_base="rss-sccache-$compiler_epoch-$os-$arch-$toolchain-$nightly_id-$sccache_version-$lane"
+  compiler_base="rss-sccache-$compiler_epoch-$os-$arch-$toolchain-$nightly_id-$sccache_version-$lane-$compiler_partition"
   printf '%s\n' \
-    "download-primary-key=$download_base-$input_hash-$run_id-$run_attempt" \
+    "download-primary-key=$download_base-$input_hash-$compiler_partition-$run_id-$run_attempt" \
     "download-input-restore-prefix=$download_base-$input_hash-" \
     "download-restore-prefix=$download_base-" \
     "tools-primary-key=$tools_base-$tools_hash" \
@@ -261,9 +267,11 @@ finalize_policy() {
   command -v jq >/dev/null 2>&1 || die 'required command unavailable: jq'
   jq -e '
     type == "object"
-    and (keys | sort) == ["compiler","download","lane","schema"]
-    and .schema == "rss-ci-cache-context-v1"
-    and (.lane | type == "string" and test("^(check|test-affected|integration-critical|audit)$"))
+    and (keys | sort) == ["compiler","download","lane","partition","schema"]
+    and .schema == "rss-ci-cache-context-v2"
+    and (.lane | type == "string" and test("^(preflight|check|test-affected|integration-critical|audit)$"))
+    and (.partition | type == "string" and test("^(preflight|check|test-affected|postgres|transport|runtime|artifact|audit)$"))
+    and ((.lane == "integration-critical" and (.partition | test("^(postgres|transport|runtime|artifact)$"))) or (.lane != "integration-critical" and .lane == .partition))
     and (.download |
       type == "object"
       and (keys | sort) == ["enabled","hit","matched","primary","restore_outcome"]

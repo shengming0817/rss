@@ -17,7 +17,7 @@ Canonical commands:
 make verify-fast
 make ci CI_BASE=origin/develop
 ./hack/cargo.sh xtask verify
-cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci run --job integration-critical --integration-group postgres --selection '<canonical SelectionPlan JSON>'
 ```
 
 Do not use `--allow-missing-tools` for closeout acceptance. `cargo xtask ci full` is a local full aggregation; it is not a claim that GitHub Shadow, Azure, or every live Integration job ran locally.

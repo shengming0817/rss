@@ -5,13 +5,16 @@
 
 ## 入口与闭集
 
-普通 PR 的唯一 integration executor 是固定 Job：
+普通 PR 使用四个固定、显式且非 matrix 的 integration group carrier；直接复现必须选择一个 group：
 
 ```bash
-cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci run --job integration-critical --integration-group postgres --selection '<canonical SelectionPlan JSON>'
 ```
 
-selector 通过 plan 中的稳定 unit ID 选择 shard、batch 和 partition。`event-transport` 与
+preflight 通过 plan 中的稳定 unit ID 选择 shard、batch 和 partition。闭合 group 映射为
+`postgres = postgres-domain`、`transport = event-transport + consistency-fault`、
+`runtime = runtime-http-auth + cdc-projection-saga`、`artifact = object-storage + production-runtime`。
+`event-transport` 与
 `runtime-http-auth` 分别登记 `1-of-2`、`2-of-2` 两个 partition；其余 shard 不分区。每次 invocation 的
 JUnit/JSON、空 bucket 与重放语义见
 [`202607111501-1731-nextest-test-evidence.md`](./202607111501-1731-nextest-test-evidence.md)。
@@ -19,7 +22,7 @@ JUnit/JSON、空 bucket 与重放语义见
 `<shard>` 只能是 `postgres-domain`、`event-transport`、`runtime-http-auth`、
 `consistency-fault`、`cdc-projection-saga`、`object-storage`、`production-runtime`。缺失、重复、未知 shard、
 SelectionPlan 缺失、跨 owner、重复、乱序、未知 ID、额外尾参、自由 filter 和 `--all` 均 fail-closed。
-旧的 shard-as-job 与平铺 integration 入口均已删除，不提供 alias 或兼容 shim。
+旧的 shard-as-job、单进程全 shard 与无 group 入口均已删除，不提供 `all`、alias 或兼容 shim。
 
 `ci run` 不提供缺工具宽限；缺少 nextest、Docker 或目标 shard 资源时 fail-closed。
 
@@ -115,10 +118,10 @@ MQTT broker T2 的唯一直接复现命令是：
 
 该命令构建并启动 repository Dockerfile 所定义的 Mosquitto mTLS/plugin fixture，不读取外部 broker URL。
 
-精确复现关键 PR 选择时，直接复制 selector 输出的完整 canonical JSON：
+精确复现关键 PR 选择时，直接复制 preflight 输出的完整 canonical JSON，并选择 owning group：
 
 ```bash
-cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci run --job integration-critical --integration-group transport --selection '<canonical SelectionPlan JSON>'
 ```
 
 定位顺序：
@@ -131,7 +134,7 @@ cargo xtask ci run --job integration-critical --selection '<canonical SelectionP
 4. `docker daemon 不可达，且缺少 ...`：只补齐消息列出的 shard 资源，或启动 Docker；不要为无关资源设占位值。
 5. nextest 的 `[n/m] serial|parallel` 失败：用输出中的精确 package/binary filter 定位 target；共享状态类失败先看
    serial 批次，hermetic 失败看 parallel 批次。
-6. 固定 `integration-critical` Job 失败：按 selection 中的 unit ID 查 nextest sidecar 与对应
-   shard/partition 日志。其它被选 batch 的执行与汇总由同一 Job 管理，最终失败不可由诊断 artifact 覆盖。
+6. 固定 integration group 失败：按 group、selection 中的 unit ID 查 nextest sidecar 与独立
+   lifecycle/log artifact；其它 group 并行执行，稳定 `integration-critical` aggregate 不会用诊断 artifact 覆盖失败。
 
 缓存命中只影响耗时，不改变 catalog coverage、测试结论或 result-only gate verdict。

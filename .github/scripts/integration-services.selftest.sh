@@ -56,9 +56,9 @@ assert_ci_push_only_develop() {
   fi
 }
 assert_failure_diagnostics_bundle() {
-  failure_condition="if: \${{ failure() && inputs.job == 'integration-critical' }}"
-  lifecycle_path="\${{ runner.temp }}/integration-lifecycle.json"
-  log_archive_path="\${{ runner.temp }}/integration-service-logs.tar.gz"
+  failure_condition="if: \${{ failure() && inputs.job == 'integration-critical' && steps.policy.outcome == 'success' }}"
+  lifecycle_path="\${{ runner.temp }}/integration-lifecycle-\${{ steps.policy.outputs.artifact-suffix }}.json"
+  log_archive_path="\${{ runner.temp }}/integration-service-logs-\${{ steps.policy.outputs.artifact-suffix }}.tar.gz"
   block=$(awk '
     /- name: Upload integration diagnostics on failure/ { capture=1 }
     capture { print }
@@ -70,6 +70,14 @@ assert_failure_diagnostics_bundle() {
     pass 'failure diagnostics bundle keeps lifecycle evidence when logs are absent'
   else
     fail 'failure diagnostics bundle keeps lifecycle evidence when logs are absent'
+  fi
+}
+assert_workflow_log_dir_is_scope_derived() {
+  if grep -F 'log_dir="$RUNNER_TEMP/integration-service-logs-$RSS_SCOPE"' "$FIXED_JOB_WORKFLOW" >/dev/null 2>&1 &&
+    ! grep -F 'log_dir="$RUNNER_TEMP/integration-service-logs-$RSS_GROUP"' "$FIXED_JOB_WORKFLOW" >/dev/null 2>&1; then
+    pass 'workflow lifecycle log directory is derived from the full owned scope'
+  else
+    fail 'workflow lifecycle log directory is derived from the full owned scope'
   fi
 }
 directory_mode() {
@@ -93,9 +101,12 @@ directory_is_private() {
 FAKE_BIN="$TMP_ROOT/fake-bin"
 STATE="$TMP_ROOT/docker-state"
 REMOVED="$TMP_ROOT/docker-removed"
+NETWORK_STATE="$TMP_ROOT/docker-network-state"
+NETWORK_REMOVED="$TMP_ROOT/docker-network-removed"
 TRACE="$TMP_ROOT/docker.trace"
 mkdir -p "$FAKE_BIN"
 : >"$REMOVED"
+: >"$NETWORK_REMOVED"
 : >"$TRACE"
 
 for command_name in awk bash cat chmod cp date dd df dirname du find grep gzip head jq mkdir mkfifo mktemp mv pwd rm sed sleep sort stat tar tr wc; do
@@ -109,7 +120,9 @@ set -eu
 printf '%s\n' "$*" >>"$FAKE_DOCKER_TRACE"
 
 is_removed() { grep -Fx -- "$1" "$FAKE_DOCKER_REMOVED" >/dev/null 2>&1; }
+is_network_removed() { grep -Fx -- "$1" "$FAKE_DOCKER_NETWORK_REMOVED" >/dev/null 2>&1; }
 state_row() { awk -F '|' -v wanted="$1" '$1 == wanted { print; found=1; exit } END { if (!found) exit 1 }' "$FAKE_DOCKER_STATE"; }
+network_row() { awk -F '|' -v wanted="$1" '$1 == wanted { print; found=1; exit } END { if (!found) exit 1 }' "$FAKE_DOCKER_NETWORK_STATE"; }
 field() { printf '%s\n' "$1" | awk -F '|' -v number="$2" '{ print $number }'; }
 fail_if_requested() {
   operation=$1
@@ -206,6 +219,34 @@ case "${1:-}" in
     printf '%s\n' "$id" >>"$FAKE_DOCKER_REMOVED"
     printf '%s\n' "$id"
     ;;
+  network)
+    case "${2:-}" in
+      ls)
+        while IFS='|' read -r id _; do
+          [ -n "$id" ] || continue
+          is_network_removed "$id" || printf '%s\n' "$id"
+        done <"$FAKE_DOCKER_NETWORK_STATE"
+        ;;
+      inspect)
+        nid=${5:-}
+        row=$(network_row "$nid") || exit 1
+        jq -nc \
+          --arg managed "$(field "$row" 2)" \
+          --arg scope "$(field "$row" 3)" \
+          --arg shard "$(field "$row" 4)" \
+          --arg partition "$(field "$row" 5)" \
+          --arg kind "$(field "$row" 6)" \
+          --arg service "$(field "$row" 7)" \
+          '{"io.rss.integration.managed":$managed,"io.rss.integration.scope":$scope,"io.rss.integration.shard":$shard,"io.rss.integration.partition":$partition,"io.rss.integration.resource-kind":$kind,"io.rss.integration.service":$service}'
+        ;;
+      rm)
+        nid=${4:-}
+        network_row "$nid" >/dev/null || exit 1
+        printf '%s\n' "$nid" >>"$FAKE_DOCKER_NETWORK_REMOVED"
+        ;;
+      *) exit 64 ;;
+    esac
+    ;;
   system|image|volume)
     [ "${2:-}" = prune ] && exit 99
     exit 64
@@ -223,6 +264,13 @@ other-partition|true|repo-42-3-integration-db-2of2|db|2/2|postgres|ok|partition-
 testcontainers-only||repo-42-3-integration-db-1of2|db|1/2|postgres|ok|testcontainers-canary
 EOF
 
+cat >"$NETWORK_STATE" <<'EOF'
+ownednet|true|repo-42-3-integration-db-1of2|db|1/2|network|bridge
+othernetshard|true|repo-42-3-integration-db-1of2|other|1/2|network|bridge
+othernetpartition|true|repo-42-3-integration-db-1of2|db|2/2|network|bridge
+othernetservice|true|repo-42-3-integration-db-1of2|db|1/2|network|not-bridge
+EOF
+
 SCOPE=repo-42-3-integration-db-1of2
 SHARD=db
 PARTITION=1/2
@@ -233,6 +281,7 @@ ARCHIVE="$TMP_ROOT/service-logs.tar.gz"
 run_lifecycle() {
   env -i PATH="$FAKE_BIN" HOME="$TMP_ROOT" \
     FAKE_DOCKER_STATE="$STATE" FAKE_DOCKER_REMOVED="$REMOVED" FAKE_DOCKER_TRACE="$TRACE" \
+    FAKE_DOCKER_NETWORK_STATE="$NETWORK_STATE" FAKE_DOCKER_NETWORK_REMOVED="$NETWORK_REMOVED" \
     FAKE_DOCKER_BLOCK_OPERATION="${FAKE_DOCKER_BLOCK_OPERATION:-}" \
     FAKE_DOCKER_INVALID_INSPECT_ID="${FAKE_DOCKER_INVALID_INSPECT_ID:-}" \
     FAKE_DOCKER_FAIL_OPERATION="${FAKE_DOCKER_FAIL_OPERATION:-}" \
@@ -254,6 +303,7 @@ prepare_common() {
 
 assert_ci_push_only_develop
 assert_failure_diagnostics_bundle
+assert_workflow_log_dir_is_scope_derived
 
 expect_failure 'unknown operation fails closed' run_common destroy
 expect_failure 'prepare rejects collect-only outcome' run_common prepare --outcome failure
@@ -374,7 +424,7 @@ assert_jq 'prepare writes a closed schema v1 document' "$EVIDENCE" '
   .disk.beforeCleanupStatus == "pending" and .disk.afterCleanupStatus == "pending" and
   .imageCleanup == "skipped-unprovable-ownership" and
   .collection == {archiveCreated:false,attemptedContainerIds:[],capturedContainerIds:[],degraded:false,errors:[],outcome:null,truncated:false} and
-  .cleanup == {attemptedContainerIds:[],errors:[],removedContainerIds:[]}'
+  .cleanup == {attemptedContainerIds:[],attemptedNetworkIds:[],errors:[],removedContainerIds:[],removedNetworkIds:[]}'
 
 expect_success 'successful test outcome does not create an archive' run_common collect --outcome success --archive "$ARCHIVE"
 if [ ! -e "$ARCHIVE" ]; then pass 'success archive is absent'; else fail 'success archive is absent'; fi
@@ -426,6 +476,10 @@ fi
 assert_absent 'cross-scope canary is retained' 'other-scope' "$REMOVED"
 assert_absent 'cross-partition canary is retained' 'other-partition' "$REMOVED"
 assert_absent 'container without managed label is retained' 'testcontainers-only' "$REMOVED"
+assert_present 'exact owned network is removed' 'ownednet' "$NETWORK_REMOVED"
+assert_absent 'cross-shard network canary is retained' 'othernetshard' "$NETWORK_REMOVED"
+assert_absent 'cross-partition network canary is retained' 'othernetpartition' "$NETWORK_REMOVED"
+assert_absent 'wrong-service network canary is retained' 'othernetservice' "$NETWORK_REMOVED"
 assert_present 'Docker discovery asks for the managed label' 'label=io.rss.integration.managed=true' "$TRACE"
 assert_present 'Docker discovery asks for the exact scope label' "label=io.rss.integration.scope=$SCOPE" "$TRACE"
 assert_present 'owned candidate is re-inspected before rm' 'inspect' "$TRACE"
@@ -436,6 +490,7 @@ assert_jq 'cleanup evidence records fixed ownership-safe image policy' "$EVIDENC
   .imageCleanup == "skipped-unprovable-ownership" and
   .cleanup.attemptedContainerIds == ["owned-a","owned-b"] and
   .cleanup.removedContainerIds == ["owned-a","owned-b"] and
+  .cleanup.attemptedNetworkIds == ["ownednet"] and .cleanup.removedNetworkIds == ["ownednet"] and
   .cleanup.errors == [] and
   (.disk.beforeCleanupAvailableBytes | type == "number") and
   .disk.beforeCleanupStatus == "success" and

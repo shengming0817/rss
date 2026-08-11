@@ -61,7 +61,7 @@ catalog() {
 
 valid_lane() {
   case "$1" in
-    all|check|test-affected|integration-critical|audit) return 0 ;;
+    all|preflight|check|test-affected|integration-critical|audit) return 0 ;;
     *) return 1 ;;
   esac
 }

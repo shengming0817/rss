@@ -64,7 +64,7 @@ Schema v1 的 exact golden 是
 
 - does not run `promtool`，也不代表告警规则已被 Prometheus 工具验证；
 - does not run a real backend，也不证明 Postgres transaction settlement；
-- does not replace #1776 所负责的真实后端固定 Job 执行；
+- does not replace #1776 所负责的真实 postgres carrier 执行；
 - 不读取或声明部署、请求、租户、设备、数据库或机密数据。
 
 因此报告可以回答“当前仓库的 LocalTx 静态证据是否闭合、缺在哪里”，不能回答“真实 backend 是否已执行、某次
@@ -93,12 +93,13 @@ path 清单。生成报告前，xtask 会把 descriptor 与真实 alert YAML 做
 
 ## CI 边界
 
-普通 PR 的 selector、固定执行 Job 与 result-only gate 不生成、下载或解释这份静态报告。需要该报告时，
+普通 PR 的 preflight、固定执行 Job 与 result-only gate 不生成、下载或解释这份静态报告。需要该报告时，
 操作者使用上面的 canonical CLI 在 same-head checkout 中原子生成 JSON/Markdown，并把它作为纯诊断输出保存；
 缺文件、截断文件或旧 revision 都不能当作 pass。
 
-Azure carrier 同样不拥有这份报告。真实 Postgres 结论必须来自固定 `integration-critical` Job 按 canonical
-`SelectionPlan` 选中的 LocalTx execution units，不得合并进本报告的 `status`。
+Azure carrier 同样不拥有这份报告。真实 Postgres 结论必须来自 postgres integration carrier 按 canonical
+`SelectionPlan` 选中的 LocalTx execution units；稳定 `integration-critical` 只聚合四组结果，不得把结论
+合并进本报告的 `status`。
 
 ## Consumer checklist
 
@@ -106,4 +107,4 @@ Azure carrier 同样不拥有这份报告。真实 Postgres 结论必须来自�
 2. 完整解析结果，验证 schema version、`evidenceScope`，再 parse `status`；unknown schema 必须 fail closed。
 3. status 为 failed 时消费 `findings` 定位静态证据缺口，不把 exit code 0 解释为 pass。
 4. 只有结构完整且 verdict 已明确的文件才能 atomic 发布；Markdown 与 JSON 应来自同一 revision。
-5. 需要真实 Postgres 结论时转到 #1776 的固定 Job 执行，不从静态报告推断运行期结果。
+5. 需要真实 Postgres 结论时转到 #1776 的 postgres carrier 执行，不从静态报告推断运行期结果。

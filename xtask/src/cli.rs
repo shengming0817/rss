@@ -9,10 +9,10 @@
 //! ref: clap-rs/clap examples/derive_ref
 
 use crate::assembly_lock::AssemblyLockAction;
-use crate::ci_gate;
 use crate::ci_impact::{self, LocalOptions, SelectionPlan};
-use crate::ci_lanes::FixedCiJob;
+use crate::ci_lanes::{FixedCiInvocation, FixedCiJob};
 use crate::graph;
+use crate::integration_shards::IntegrationJobGroup;
 use crate::publicapi;
 use crate::report_format::ReportFormat;
 use anyhow::{Result, bail};
@@ -288,9 +288,23 @@ pub(crate) enum CiCommand {
         job: FixedCiJob,
         #[arg(long, value_parser = parse_selection_plan, required = true)]
         selection: Box<SelectionPlan>,
+        #[arg(long, value_parser = parse_integration_job_group)]
+        integration_group: Option<IntegrationJobGroup>,
     },
-    /// 只聚合固定 Job 最终状态。
-    Gate(ci_gate::Options),
+    /// 有界远端编译与治理前置门。
+    Preflight {
+        #[arg(long, value_parser = parse_selection_plan, required = true)]
+        selection: Box<SelectionPlan>,
+    },
+    /// 严格校验 required-evidence，并发布不可替换的上传快照。
+    ValidateEvidence {
+        #[arg(long, value_enum, required = true)]
+        kind: RequiredEvidenceKind,
+        #[arg(long, required = true)]
+        input: PathBuf,
+        #[arg(long, required = true)]
+        output: PathBuf,
+    },
     /// cargo-audit 门。
     Audit,
     /// LocalOnly required evidence producer。
@@ -298,6 +312,12 @@ pub(crate) enum CiCommand {
         #[arg(long, required = true)]
         output: PathBuf,
     },
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum, PartialEq, Eq)]
+pub(crate) enum RequiredEvidenceKind {
+    Localonly,
+    Localtx,
 }
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
@@ -333,7 +353,14 @@ impl Command {
             }
             Self::Graph(GraphCommand::Assembly(options)) => options.validate(),
             Self::Ci(CiCommand::Local(options)) => options.validate(),
-            Self::Ci(CiCommand::Gate(options)) => options.validate(),
+            Self::Ci(CiCommand::Run {
+                job,
+                integration_group,
+                ..
+            }) => {
+                FixedCiInvocation::new(*job, *integration_group)?;
+                Ok(())
+            }
             Self::Consistency(ConsistencyCommand::Report { format }) => {
                 if format.len() != 1 {
                     bail!("consistency report 重复参数: --format");
@@ -420,6 +447,10 @@ fn map_clap_parse_error(err: clap::Error) -> anyhow::Error {
 }
 
 fn parse_fixed_ci_job(value: &str) -> std::result::Result<FixedCiJob, String> {
+    value.parse().map_err(|err: anyhow::Error| err.to_string())
+}
+
+fn parse_integration_job_group(value: &str) -> std::result::Result<IntegrationJobGroup, String> {
     value.parse().map_err(|err: anyhow::Error| err.to_string())
 }
 
@@ -736,8 +767,67 @@ mod tests {
         );
         assert!(parse(&["ci", "plan"]).is_err());
         assert!(parse(&["ci", "gate"]).is_err());
+        assert!(parse(&["ci", "preflight"]).is_err());
         assert!(parse(&["ci", "run"]).is_err());
         assert!(parse(&["ci", "run", "--job", "check"]).is_err());
+        let selection = serde_json::to_string(&crate::ci_impact::test_selection_plan()?)?;
+        assert!(matches!(
+            parse(&["ci", "preflight", "--selection", &selection])?,
+            Command::Ci(CiCommand::Preflight { .. })
+        ));
+        assert!(
+            parse(&[
+                "ci",
+                "run",
+                "--job",
+                "integration-critical",
+                "--selection",
+                &selection,
+            ])
+            .is_err()
+        );
+        assert!(
+            parse(&[
+                "ci",
+                "run",
+                "--job",
+                "check",
+                "--selection",
+                &selection,
+                "--integration-group",
+                "postgres",
+            ])
+            .is_err()
+        );
+        assert!(matches!(
+            parse(&[
+                "ci",
+                "run",
+                "--job",
+                "integration-critical",
+                "--selection",
+                &selection,
+                "--integration-group",
+                "postgres",
+            ])?,
+            Command::Ci(CiCommand::Run {
+                integration_group: Some(IntegrationJobGroup::Postgres),
+                ..
+            })
+        ));
+        assert!(
+            parse(&[
+                "ci",
+                "run",
+                "--job",
+                "integration-critical",
+                "--selection",
+                &selection,
+                "--integration-group",
+                "all",
+            ])
+            .is_err()
+        );
         // legacy 平铺 argv（无 subcommand）必须拒绝。
         assert!(parse(&["ci", "--base", "origin/develop"]).is_err());
         assert!(parse(&["ci", "localonly-evidence"]).is_err());

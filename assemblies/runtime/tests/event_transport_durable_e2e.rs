@@ -12,7 +12,7 @@
 //! Cargo `[[test]] required-features = ["integration"]`：需真实 docker 容器；`cargo test -p runtime --features
 //! integration --no-run` 仅要求编译通过（无 docker 时可用）。
 //! `cargo nextest run -p runtime --features integration` 或复制 selector 输出并运行
-//! `cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'`。
+//! `cargo xtask ci run --job integration-critical --integration-group transport --selection '<canonical SelectionPlan JSON>'`。
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};

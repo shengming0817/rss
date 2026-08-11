@@ -151,9 +151,9 @@ validate_evidence() {
        .outcome == "cancelled" or .outcome == "skipped") and
       ([.attemptedContainerIds[],.capturedContainerIds[] | type == "string"] | all) and
       ([.errors[] | docker_error(["discover","inspect","logs","writer"])] | all)) and
-    (.cleanup | keys == ["attemptedContainerIds","errors","removedContainerIds"] and
-      ([.attemptedContainerIds[],.removedContainerIds[] | type == "string"] | all) and
-      ([.errors[] | docker_error(["discover","inspect","remove"])] | all))
+    (.cleanup | keys == ["attemptedContainerIds","attemptedNetworkIds","errors","removedContainerIds","removedNetworkIds"] and
+      ([.attemptedContainerIds[],.removedContainerIds[],.attemptedNetworkIds[],.removedNetworkIds[] | type == "string"] | all) and
+      ([.errors[] | docker_error(["discover","inspect","remove","network-discover","network-remove"])] | all))
   ' "$evidence" >/dev/null 2>&1 || die 'lifecycle evidence is invalid'
   jq -e --arg scope "$scope" --arg shard "$shard" --arg partition "$partition" \
     '.context == {partition:$partition,scope:$scope,shard:$shard}' "$evidence" >/dev/null 2>&1 || \
@@ -183,7 +183,7 @@ bootstrap() {
        preparation:{status:"pending",reason:null},
        disk:{baselineAvailableBytes:null,beforeCleanupAvailableBytes:null,beforeCleanupStatus:"pending",afterCleanupAvailableBytes:null,afterCleanupStatus:"pending"},
        collection:{archiveCreated:false,outcome:null,truncated:false,degraded:false,attemptedContainerIds:[],capturedContainerIds:[],errors:[]},
-       cleanup:{attemptedContainerIds:[],removedContainerIds:[],errors:[]},
+       cleanup:{attemptedContainerIds:[],removedContainerIds:[],attemptedNetworkIds:[],removedNetworkIds:[],errors:[]},
        imageCleanup:"skipped-unprovable-ownership"}' >"$tmp" 2>/dev/null; then
     chmod 600 "$tmp" || { rm -f "$tmp"; die 'cannot protect evidence temporary file'; }
     mv "$tmp" "$evidence" || { rm -f "$tmp"; die 'cannot replace lifecycle evidence'; }
@@ -401,6 +401,43 @@ EOF
   return 1
 }
 
+inspect_network_labels() {
+  network_id=$1
+  docker_temp_files
+  if run_docker "$docker_stdout" "$docker_stderr" control network inspect --format '{{json .Labels}}' "$network_id"; then
+    inspected_network_labels=$(cat "$docker_stdout")
+    if ! jq -e 'type == "object"' <<EOF >/dev/null 2>&1
+$inspected_network_labels
+EOF
+    then
+      network_inspect_reason=invalid-output
+      network_inspect_status=null
+      rm -f "$docker_stdout" "$docker_stderr"
+      return 1
+    fi
+    rm -f "$docker_stdout" "$docker_stderr"
+    return 0
+  fi
+  network_inspect_reason=$docker_failure_reason
+  network_inspect_status=$docker_exit_status
+  rm -f "$docker_stdout" "$docker_stderr"
+  return 1
+}
+
+network_labels_match() {
+  labels=$1
+  jq -e --arg scope "$scope" --arg shard "$shard" --arg partition "$partition" '
+    .["io.rss.integration.managed"] == "true" and
+    .["io.rss.integration.scope"] == $scope and
+    .["io.rss.integration.shard"] == $shard and
+    .["io.rss.integration.partition"] == $partition and
+    .["io.rss.integration.resource-kind"] == "network" and
+    .["io.rss.integration.service"] == "bridge"
+  ' <<EOF >/dev/null 2>&1
+$labels
+EOF
+}
+
 collect() {
   validate_evidence
   jq -e '.preparation.status == "success"' "$evidence" >/dev/null 2>&1 || die 'lifecycle preparation did not succeed'
@@ -591,6 +628,13 @@ EOF
     while IFS= read -r nid; do
       [ -n "$nid" ] || continue
       case "$nid" in *[!A-Za-z0-9]* ) continue ;; esac
+      if ! inspect_network_labels "$nid"; then
+        report_docker_failure network-inspect "$nid" "$network_inspect_reason" "$network_inspect_status"
+        errors=$(append_error "$errors" "$nid" network-inspect "$network_inspect_reason" "$network_inspect_status")
+        failed=true
+        continue
+      fi
+      network_labels_match "$inspected_network_labels" || continue
       network_attempted=$(jq -c --arg id "$nid" '. + [$id]' <<EOF
 $network_attempted
 EOF

@@ -3,7 +3,7 @@ description: Quiesce sccache, report typed cache diagnostics, and save bounded s
 
 inputs:
   cache-context:
-    description: Closed v1 context emitted by setup-rss-ci.
+    description: Closed v2 context emitted by setup-rss-ci.
     required: true
   execution-outcome:
     description: Closed outcome of the repository execution step.

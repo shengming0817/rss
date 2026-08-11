@@ -52,7 +52,8 @@ body-like field.
 `verify`. It checks schema, ownership, contract consistency level, ready-case
 coverage, and runner mappings.
 
-`cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'` runs the selected real backend journeys. It uses
+Run `cargo xtask ci run --job integration-critical --integration-group <postgres|transport|runtime|artifact> --selection '<canonical SelectionPlan JSON>'`
+once for each required closed group to execute the selected real backend journeys. They use
 `cargo-nextest`, Postgres, Redis, and RabbitMQ. With Docker available, `testkit`
 self-provisions containers. To use long-lived services instead, set
 `RSS_TEST_ALLOW_EXTERNAL_POSTGRES` plus `PGHOST`, `PGPORT`, `PGDATABASE`,

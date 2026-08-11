@@ -7,8 +7,13 @@ on:
         description: Closed fixed CI job identity.
         required: true
         type: string
+      integration-group:
+        description: Closed integration execution group; empty for non-integration jobs.
+        required: false
+        default: ""
+        type: string
       selection:
-        description: Canonical SelectionPlan JSON emitted by the selector.
+        description: Canonical SelectionPlan JSON emitted by preflight.
         required: true
         type: string
       source-revision:
@@ -27,9 +32,9 @@ env:
 
 jobs:
   execute:
-    name: cargo xtask ci run --job ${{ inputs.job }}
+    name: cargo xtask ci run / ${{ inputs.job }} / ${{ inputs.integration-group || 'unpartitioned' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 240
+    timeout-minutes: 50
     steps:
       - name: Checkout execution revision
         uses: actions/checkout@v4
@@ -38,20 +43,34 @@ jobs:
           fetch-depth: 0
           ref: ${{ inputs.source-revision }}
 
-      - name: Validate fixed job
+      - name: Validate fixed invocation and derive identities
         id: policy
         env:
           RSS_FIXED_JOB: ${{ inputs.job }}
+          RSS_INTEGRATION_GROUP: ${{ inputs.integration-group }}
           RSS_SELECTION: ${{ inputs.selection }}
         run: |
           set -euo pipefail
-          case "$RSS_FIXED_JOB" in
-            check) echo "nightly=$RSS_NIGHTLY_PINNED" ;;
-            test-affected|integration-critical) echo 'nightly=' ;;
-            *) exit 64 ;;
-          esac >> "$GITHUB_OUTPUT"
+          case "$RSS_FIXED_JOB:$RSS_INTEGRATION_GROUP" in
+            check:) nightly="$RSS_NIGHTLY_PINNED"; partition=check; suffix=check; localtx=false ;;
+            test-affected:) nightly=''; partition=test-affected; suffix=test-affected; localtx=false ;;
+            integration-critical:postgres|integration-critical:transport|integration-critical:runtime|integration-critical:artifact)
+              nightly=''; partition="$RSS_INTEGRATION_GROUP"; suffix="$RSS_INTEGRATION_GROUP"
+              if [ "$RSS_INTEGRATION_GROUP" = postgres ]; then localtx=true; else localtx=false; fi ;;
+            *)
+              printf 'invalid fixed invocation: job=%s integration-group=%s; allowed: check:<empty>, test-affected:<empty>, integration-critical:{postgres,transport,runtime,artifact}\n' \
+                "$RSS_FIXED_JOB" "${RSS_INTEGRATION_GROUP:-<empty>}" >&2
+              exit 64
+              ;;
+          esac
           [ -n "$RSS_SELECTION" ]
           case "$RSS_SELECTION" in *$'\n'*|*$'\r'*) exit 64 ;; esac
+          {
+            echo "nightly=$nightly"
+            echo "compiler-partition=$partition"
+            echo "artifact-suffix=$suffix"
+            echo "localtx=$localtx"
+          } >> "$GITHUB_OUTPUT"
           if [ "$RSS_FIXED_JOB" = check ] && jq -e '.selection.mode == "release-check"' <<< "$RSS_SELECTION" >/dev/null; then
             echo 'standalone-consumer=true' >> "$GITHUB_OUTPUT"
           else
@@ -68,39 +87,67 @@ jobs:
         uses: ./.github/actions/setup-rss-ci
         with:
           lane: ${{ inputs.job }}
+          compiler-partition: ${{ steps.policy.outputs.compiler-partition }}
           toolchain: 1.96.0
           nightly: ${{ steps.policy.outputs.nightly }}
-          download-cache-epoch: v5
+          download-cache-epoch: v7
           tool-cache-epoch: v4
-          compiler-cache-epoch: v3
+          compiler-cache-epoch: v4
 
-      - name: Prepare aggregate integration lifecycle
+      - name: Prepare group integration lifecycle
         id: integration-prepare
         if: ${{ inputs.job == 'integration-critical' }}
         env:
-          RSS_SCOPE: ${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-integration-critical
+          RSS_GROUP: ${{ steps.policy.outputs.artifact-suffix }}
+          RSS_SCOPE: ${{ github.repository_id }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.policy.outputs.artifact-suffix }}
         run: |
           set -euo pipefail
           log_dir="$RUNNER_TEMP/integration-service-logs-$RSS_SCOPE"
-          evidence="$RUNNER_TEMP/integration-lifecycle.json"
+          evidence="$RUNNER_TEMP/integration-lifecycle-$RSS_GROUP.json"
           {
             echo "RSS_CI_CONTAINER_SCOPE=$RSS_SCOPE"
-            echo 'RSS_CI_INTEGRATION_SHARD=integration-critical'
+            echo "RSS_CI_INTEGRATION_SHARD=$RSS_GROUP"
             echo 'RSS_CI_INTEGRATION_PARTITION=unpartitioned'
             echo "RSS_CI_CONTAINER_LOG_DIR=$log_dir"
+            echo "RSS_CI_LIFECYCLE_EVIDENCE=$evidence"
           } >> "$GITHUB_ENV"
-          .github/scripts/integration-services.sh bootstrap --scope "$RSS_SCOPE" --shard integration-critical --partition unpartitioned --log-dir "$log_dir" --evidence "$evidence"
-          .github/scripts/integration-services.sh prepare --scope "$RSS_SCOPE" --shard integration-critical --partition unpartitioned --log-dir "$log_dir" --evidence "$evidence"
+          .github/scripts/integration-services.sh bootstrap --scope "$RSS_SCOPE" --shard "$RSS_GROUP" --partition unpartitioned --log-dir "$log_dir" --evidence "$evidence"
+          .github/scripts/integration-services.sh prepare --scope "$RSS_SCOPE" --shard "$RSS_GROUP" --partition unpartitioned --log-dir "$log_dir" --evidence "$evidence"
 
-      - name: Execute fixed job
+      - name: Execute fixed invocation
         id: xtask
         env:
           RSS_FIXED_JOB: ${{ inputs.job }}
+          RSS_INTEGRATION_GROUP: ${{ inputs.integration-group }}
           RSS_SELECTION: ${{ inputs.selection }}
         run: |
           set -euo pipefail
           cargo build --locked -p xtask
-          timeout --signal=TERM --kill-after=30s 90m "$CARGO_TARGET_DIR/debug/xtask" ci run --job "$RSS_FIXED_JOB" --selection "$RSS_SELECTION"
+          args=(ci run --job "$RSS_FIXED_JOB" --selection "$RSS_SELECTION")
+          if [ "$RSS_FIXED_JOB" = integration-critical ]; then
+            args+=(--integration-group "$RSS_INTEGRATION_GROUP")
+          fi
+          timeout --signal=TERM --kill-after=30s 32m "$CARGO_TARGET_DIR/debug/xtask" "${args[@]}"
+
+      - name: Validate LocalOnly semantic report
+        id: validate-localonly
+        if: ${{ inputs.job == 'test-affected' && steps.xtask.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$CARGO_TARGET_DIR/debug/xtask" ci validate-evidence \
+            --kind localonly \
+            --input target/localonly-execution/localonly-execution.json \
+            --output "$RUNNER_TEMP/validated-localonly-execution.json"
+
+      - name: Validate LocalTx semantic report
+        id: validate-localtx
+        if: ${{ inputs.job == 'integration-critical' && steps.policy.outputs.localtx == 'true' && steps.xtask.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          "$CARGO_TARGET_DIR/debug/xtask" ci validate-evidence \
+            --kind localtx \
+            --input target/required-evidence/localtx-required.json \
+            --output "$RUNNER_TEMP/validated-localtx-required.json"
 
       - name: Collect integration failure logs
         id: integration-collect
@@ -110,47 +157,47 @@ jobs:
         run: |
           set -euo pipefail
           case "$RSS_XTASK_OUTCOME" in success|failure|cancelled|skipped) ;; *) exit 64 ;; esac
-          timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh collect --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json" --outcome "$RSS_XTASK_OUTCOME" --archive "$RUNNER_TEMP/integration-service-logs.tar.gz"
+          timeout --signal=TERM --kill-after=30s 5m .github/scripts/integration-services.sh collect --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RSS_CI_LIFECYCLE_EVIDENCE" --outcome "$RSS_XTASK_OUTCOME" --archive "$RUNNER_TEMP/integration-service-logs-${{ steps.policy.outputs.artifact-suffix }}.tar.gz"
 
       - name: Snapshot integration services before cleanup
         id: integration-snapshot
         if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}
-        run: timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json"
+        run: timeout --signal=TERM --kill-after=5s 30s .github/scripts/integration-services.sh snapshot --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RSS_CI_LIFECYCLE_EVIDENCE"
 
       - name: Cleanup integration services
         id: integration-cleanup
         if: ${{ always() && inputs.job == 'integration-critical' && steps.integration-prepare.outcome == 'success' }}
-        run: timeout --signal=TERM --kill-after=30s 10m .github/scripts/integration-services.sh cleanup --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RUNNER_TEMP/integration-lifecycle.json"
+        run: timeout --signal=TERM --kill-after=30s 5m .github/scripts/integration-services.sh cleanup --scope "$RSS_CI_CONTAINER_SCOPE" --shard "$RSS_CI_INTEGRATION_SHARD" --partition "$RSS_CI_INTEGRATION_PARTITION" --log-dir "$RSS_CI_CONTAINER_LOG_DIR" --evidence "$RSS_CI_LIFECYCLE_EVIDENCE"
 
       - name: Upload LocalOnly semantic report
         id: upload-localonly
-        if: ${{ always() && inputs.job == 'test-affected' }}
+        if: ${{ steps.validate-localonly.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: localonly-execution-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/localonly-execution/localonly-execution.json
+          path: ${{ runner.temp }}/validated-localonly-execution.json
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload LocalTx semantic report
         id: upload-localtx
-        if: ${{ always() && inputs.job == 'integration-critical' }}
+        if: ${{ steps.validate-localtx.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: localtx-required-${{ github.run_id }}-${{ github.run_attempt }}
-          path: target/required-evidence/localtx-required.json
+          name: localtx-required-${{ github.run_id }}-${{ github.run_attempt }}-postgres
+          path: ${{ runner.temp }}/validated-localtx-required.json
           if-no-files-found: error
           retention-days: 7
 
       - name: Upload integration diagnostics on failure
         id: upload-integration-failure
-        if: ${{ failure() && inputs.job == 'integration-critical' }}
+        if: ${{ failure() && inputs.job == 'integration-critical' && steps.policy.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: integration-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          name: integration-failure-${{ github.run_id }}-${{ github.run_attempt }}-${{ steps.policy.outputs.artifact-suffix }}
           path: |
-            ${{ runner.temp }}/integration-lifecycle.json
-            ${{ runner.temp }}/integration-service-logs.tar.gz
+            ${{ runner.temp }}/integration-lifecycle-${{ steps.policy.outputs.artifact-suffix }}.json
+            ${{ runner.temp }}/integration-service-logs-${{ steps.policy.outputs.artifact-suffix }}.tar.gz
           if-no-files-found: warn
           retention-days: 7
 

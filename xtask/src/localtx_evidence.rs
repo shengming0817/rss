@@ -8,8 +8,6 @@ use crate::localtx_coverage::VerifiedLocalTxContractSet;
 use crate::verify::PostgresDomainPassed;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
-use std::fs::{self, OpenOptions};
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 pub(crate) const FILE_NAME: &str = "localtx-required.json";
@@ -101,6 +99,41 @@ fn validate_wire(wire: &ReportWire) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn validate_upload_snapshot(
+    input: &Path,
+    output: &Path,
+    root: &Path,
+    facts: &workspacefacts::WorkspaceFacts,
+) -> Result<()> {
+    let bytes =
+        crate::evidence_file::read_stable_ordinary_file(input, "LocalTx report", MAX_REPORT_BYTES)?;
+    let wire: ReportWire =
+        serde_json::from_slice(&bytes).context("invalid LocalTx required evidence")?;
+    validate_wire(&wire)?;
+    if wire.source_revision != crate::cmd::source_revision(root)? {
+        bail!("LocalTx evidence revision does not match checked-out HEAD");
+    }
+    let verified = crate::localtx_coverage::verify_required_evidence_set(root, facts)?;
+    if wire.localtx_contract_ids != verified.active_contract_ids() {
+        bail!("LocalTx evidence does not match the current canonical contract set");
+    }
+    prepare_output_slot(output)?;
+    atomic_publish(output, &bytes)
+}
+
+#[cfg(test)]
+fn read_stable_ordinary_file(
+    path: &Path,
+    after_precheck: impl FnOnce() -> Result<()>,
+) -> Result<Vec<u8>> {
+    crate::evidence_file::read_stable_ordinary_file_with_hook(
+        path,
+        "LocalTx report",
+        MAX_REPORT_BYTES,
+        after_precheck,
+    )
+}
+
 fn validate_revision(value: &str) -> Result<()> {
     if value.len() != 40 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         bail!("source revision must be a 40-character hexadecimal git object ID");
@@ -116,45 +149,18 @@ fn ensure_size(size: u64) -> Result<()> {
 }
 
 fn prepare_output_slot(path: &Path) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("LocalTx report output must have a parent directory")?;
-    fs::create_dir_all(parent)
-        .with_context(|| format!("create LocalTx report directory {}", parent.display()))?;
-    if let Ok(metadata) = fs::symlink_metadata(path) {
-        if metadata.file_type().is_symlink() || !metadata.is_file() {
-            bail!("LocalTx report output must be an ordinary file");
-        }
-        fs::remove_file(path).with_context(|| format!("replace {}", path.display()))?;
-    }
+    crate::evidence_file::prepare_output_slot(path, "LocalTx report")?;
     Ok(())
 }
 
 fn atomic_publish(path: &Path, contents: &[u8]) -> Result<()> {
-    let parent = path
-        .parent()
-        .context("LocalTx report output has no parent")?;
-    let temporary = parent.join(format!(".localtx-required-{}.tmp", std::process::id()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&temporary)
-        .with_context(|| format!("create {}", temporary.display()))?;
-    let result: std::io::Result<()> = (|| {
-        file.write_all(contents)?;
-        file.sync_all()?;
-        fs::rename(&temporary, path)?;
-        Ok(())
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temporary);
-    }
-    result.context("publish LocalTx report atomically")
+    crate::evidence_file::atomic_publish(path, contents, "LocalTx report", "localtx-required")
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn wire_rejects_old_receipt_fields_and_wrong_owner() -> Result<()> {
@@ -167,6 +173,43 @@ mod tests {
             localtx_contract_ids: vec!["identity.session-created".to_owned()],
         };
         assert!(validate_wire(&wrong).is_err());
+        let unknown = format!(
+            r#"{{"schemaVersion":4,"job":"integration-critical","sourceRevision":"{}","localtxContractIds":["identity.session-created"],"unexpected":true}}"#,
+            "a".repeat(40)
+        );
+        assert!(serde_json::from_str::<ReportWire>(&unknown).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn upload_consumer_rejects_a_nonempty_wrong_contract_set() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let facts = command_facts.get()?;
+        let fixture = crate::testutil::unique_tmp("localtx-upload-consumer");
+        fs::create_dir_all(&fixture)?;
+        let input = fixture.join("input.json");
+        let output = fixture.join("validated.json");
+        let wrong = ReportWire {
+            schema_version: SCHEMA_VERSION,
+            job: OWNER,
+            source_revision: crate::cmd::source_revision(&root)?,
+            localtx_contract_ids: vec!["identity.session-created".to_owned()],
+        };
+        fs::write(&input, serde_json::to_vec(&wrong)?)?;
+        assert!(validate_upload_snapshot(&input, &output, &root, facts).is_err());
+        assert!(!output.exists());
+        let replacement = fixture.join("replacement.json");
+        fs::write(&replacement, serde_json::to_vec(&wrong)?)?;
+        assert!(
+            read_stable_ordinary_file(&input, || {
+                fs::remove_file(&input)?;
+                fs::rename(&replacement, &input)?;
+                Ok(())
+            })
+            .is_err()
+        );
+        fs::remove_dir_all(fixture)?;
         Ok(())
     }
 }

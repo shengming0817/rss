@@ -28,14 +28,15 @@ gate、test 与 journey 的主要执行归属统一使用闭合的 canonical `Ex
 diff-adaptive `ImpactSet` 是正交的路径影响模型：它记录直接 package 影响、反向依赖闭包、稳定 `IntegrationUnitId`、
 治理路径以及 docs/high-impact/unknown-path 状态。本地投影据此运行 `verify --fast` 门集（真源
 `xtask/src/verify.rs`）加 affected 域门组成的 `meta`、反向闭包 check、直接 package test/clippy 与治理自测；
-远端 selector 则把同一影响闭包投影到固定 PR Job（Job 名与闭集以 `.github/workflows/ci.yml`
+远端 preflight 则把同一影响闭包投影到固定 PR Job（Job 名与闭集以 `.github/workflows/ci.yml`
 为真源；拓扑说明与运维激活状态见
 [`docs/ops/202606231530-001-ci-lane.md`](docs/ops/202606231530-001-ci-lane.md)）。
 集成影响直接投影 catalog 的 `IntegrationUnitId`，不维护第二套 generic execution-unit ID。
 
-GitHub pull request 的执行拓扑固定（selector 只计算规范选择；执行 Job 始终存在并分别消费自己的选择；
+GitHub pull request 的执行拓扑固定（preflight 只构建一次 xtask，计算规范选择并在 10 分钟内运行有界编译/治理早筛；执行 Job 始终存在并分别消费自己的选择；
 `test-affected` 除 affected 组件测试外还始终生产 producer-owned LocalOnly required evidence；gate 只聚合
-执行 Job 的最终结果，不解析额外回执）。具体 Job 名与闭集以 `.github/workflows/ci.yml` 为真源，不在此手抄闭集。
+执行 Job 的最终结果，不解析额外回执）。integration 使用四个显式、非 matrix 的闭合 group 并行 carrier，随后聚合为稳定的
+`integration-critical` context；具体 Job 名与闭集以 `.github/workflows/ci.yml` 为真源，不在此手抄闭集。
 分析失败、高影响根或保守 rename 会把 PR 选择升级为 `PrComplete`，但不会触发 `ReleaseCheck`。后者只属于
 develop、nightly、release 或显式 `ci full`。
 cargo-nextest profile 只配置 runner 的 timeout、retry、JUnit 与 filter 行为，不等同于 `ExecutionProfile`。
@@ -86,13 +87,14 @@ CI 子命令不保留旧的平铺 lane 入口；空的 `ci` 也会报错。固�
 ```bash
 cargo xtask ci run --job check --selection '<canonical SelectionPlan JSON>'
 cargo xtask ci run --job test-affected --selection '<canonical SelectionPlan JSON>'
-cargo xtask ci run --job integration-critical --selection '<canonical SelectionPlan JSON>'
+cargo xtask ci run --job integration-critical --integration-group postgres --selection '<canonical SelectionPlan JSON>'
 cargo xtask ci localonly-evidence --output <report-path>
 cargo xtask ci audit
 ```
 
-`integration-critical` 根据 selector 传入的规范 `SelectionPlan` 运行被选中的真实后端批次，其中
-`postgres-domain` 仍是 LocalTx live proof 的 typed owner。PR gate 只看固定 Job 结果；LocalTx exact-set
+`integration-critical` 必须显式选择 `postgres|transport|runtime|artifact` 之一，根据 preflight 传入的规范
+`SelectionPlan` 只运行该 group 拥有的真实后端批次；不存在旧的全组串行入口或 `all` 默认值。
+`postgres-domain` 仍是 LocalTx live proof 的 typed owner，且只有 `postgres` group 能构造发布资格。PR gate 只看固定 Job 结果；LocalTx exact-set
 由执行单元自身 fail-closed，不能用附加 artifact 把失败 Job 改写为通过。受影响的 `make ci` 会选择
 `localtx-coverage`；也可直接运行该 gate 或 `localtx report` 诊断静态闭包，
 不能替代真实后端执行。当前 required-check 激活边界及人工验证清单见
