@@ -6,12 +6,11 @@
 //! enter the live domain. Merely defining or constructing a correct provider elsewhere is not
 //! evidence.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail, ensure};
-use assembly_schema::AssemblyDomain;
 use syn::visit::{self, Visit};
 use syn::{
     Attribute, Expr, ExprCall, ExprMethodCall, ImplItem, ImplItemFn, Item, ItemFn, Pat, Stmt,
@@ -370,10 +369,10 @@ fn validate_runtime_wire_phase(block: &syn::Block) -> Result<()> {
                         .first()
                         .is_some_and(|argument| expr_is_shared_ref_ident(argument, "deps"))
                     && call.args.iter().nth(1).is_some_and(|argument| {
-                        simple_expr_ident(argument).as_deref() == Some("domain_modules")
+                        simple_expr_ident(argument).as_deref() == Some("local_domain_providers")
                     })
                     && call.args.iter().nth(2).is_some_and(|argument| {
-                        expr_is_shared_ref_ident(argument, "placement_execution_plan")
+                        simple_expr_ident(argument).as_deref() == Some("domain_modules")
                     })
             })
             .then(|| {
@@ -519,7 +518,6 @@ fn validate_generated_runtime_modules(source: &str) -> Result<()> {
     ensure_local_binding_count(&wire.block, "deps", 0, RUNTIME_MODULES)?;
     ensure_local_binding_count(&wire.block, "inputs", 0, RUNTIME_MODULES)?;
     ensure_local_binding_count(&wire.block, "placement", 0, RUNTIME_MODULES)?;
-    let input_bindings = domain_module_input_bindings(wire)?;
     let tail = tail_expression(&wire.block).context("wire_domains must return Ok(bindings)")?;
     let Expr::Call(ok) = tail else {
         bail!("wire_domains must end in direct Ok(bindings)")
@@ -558,76 +556,103 @@ fn validate_generated_runtime_modules(source: &str) -> Result<()> {
         "wire_domains must initialize exactly one mutable Vec::new bindings carrier"
     );
 
-    for domain in ["settings", "identity", "audit"] {
-        let expected = ["crate", "domains", domain, "module"];
-        let binding = input_bindings
-            .get(domain)
-            .with_context(|| format!("wire_domains does not destructure `{domain}` input"))?;
-        let matches = wire
-            .block
-            .stmts
+    let declared = generated_assembly_domain_variants(&syntax)?;
+    let mut matched = BTreeSet::new();
+    struct LocalInputVisitor<'a>(&'a mut BTreeSet<String>);
+    impl<'ast> syn::visit::Visit<'ast> for LocalInputVisitor<'_> {
+        fn visit_pat_tuple_struct(&mut self, pattern: &'ast syn::PatTupleStruct) {
+            let segments = pattern
+                .path
+                .segments
+                .iter()
+                .map(|s| s.ident.to_string())
+                .collect::<Vec<_>>();
+            if segments
+                .iter()
+                .any(|segment| segment == "LocalDomainModuleInput")
+                && let Some(variant) = segments.last()
+            {
+                self.0.insert(variant.clone());
+            }
+            syn::visit::visit_pat_tuple_struct(self, pattern);
+        }
+    }
+    syn::visit::Visit::visit_block(&mut LocalInputVisitor(&mut matched), &wire.block);
+    ensure!(
+        declared == matched,
+        "wire_domains local input variants must exactly equal generated ASSEMBLY_DOMAINS"
+    );
+    for variant in declared {
+        let domain = variant.to_ascii_lowercase();
+        let expected_owned = [
+            "crate".to_owned(),
+            "domains".to_owned(),
+            domain.clone(),
+            "module".to_owned(),
+        ];
+        let expected = expected_owned
             .iter()
-            .filter_map(|statement| placement_gated_domain_match(statement, domain))
-            .filter(|expression| {
-                direct_terminal_call_has_arguments(&expression.expr, &expected, "deps", binding)
-                    && domain_wiring_match_retains_failure(expression)
-            })
-            .count();
-        let total = exact_path_call_count_block(&wire.block, &expected);
+            .map(String::as_str)
+            .collect::<Vec<_>>();
         ensure!(
-            matches == 1 && total == 1,
-            "wire_domains must gate exactly one crate::domains::{domain}::module(deps, {binding}) behind placement.is_local and retain prior bindings on failure, got matches={matches} total={total}"
+            exact_path_call_count_block(&wire.block, &expected) == 1,
+            "wire_domains must call exactly one generated local module for {domain}"
         );
     }
+    #[derive(Default)]
+    struct RetainedFailureVisitor(usize);
+    impl<'ast> syn::visit::Visit<'ast> for RetainedFailureVisitor {
+        fn visit_expr_match(&mut self, expression: &'ast syn::ExprMatch) {
+            if domain_wiring_match_retains_failure(expression) {
+                self.0 += 1;
+            }
+            syn::visit::visit_expr_match(self, expression);
+        }
+    }
+    let mut retained = RetainedFailureVisitor::default();
+    syn::visit::Visit::visit_block(&mut retained, &wire.block);
+    let retained_failures = retained.0;
+    ensure!(
+        retained_failures == 1,
+        "wire_domains must retain prior bindings on the single local input loop failure"
+    );
     Ok(())
 }
 
-fn placement_gated_domain_match<'a>(
-    statement: &'a Stmt,
-    domain: &str,
-) -> Option<&'a syn::ExprMatch> {
-    let Stmt::Expr(Expr::If(if_expr), _) = statement else {
-        return None;
-    };
-    let Expr::MethodCall(method) = peel_expr(&if_expr.cond) else {
-        return None;
-    };
-    if method.method != "is_local"
-        || simple_expr_ident(&method.receiver).as_deref() != Some("placement")
-        || method.args.len() != 1
-    {
-        return None;
-    }
-    let domain_path = match peel_expr(&method.args[0]) {
-        Expr::Path(path) => path,
-        _ => return None,
-    };
-    let segments = domain_path
-        .path
-        .segments
+fn generated_assembly_domain_variants(file: &syn::File) -> Result<BTreeSet<String>> {
+    let item = file
+        .items
         .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
-    // Only domains with a runtime module factory; contractreg/syshealth stay out.
-    let parsed = [
-        AssemblyDomain::Identity,
-        AssemblyDomain::Settings,
-        AssemblyDomain::Audit,
-    ]
-    .into_iter()
-    .find(|candidate| candidate.as_str() == domain)?;
-    let expected_tail = crate::assembly_codegen::domain_variant(parsed);
-    if segments.last().map(String::as_str) != Some(expected_tail) {
-        return None;
-    }
-    if_expr.then_branch.stmts.iter().find_map(statement_match)
-}
-
-fn statement_match(statement: &Stmt) -> Option<&syn::ExprMatch> {
-    match statement {
-        Stmt::Expr(Expr::Match(expression), _) => Some(expression),
-        _ => None,
-    }
+        .find_map(|item| match item {
+            Item::Const(item) if item.ident == "ASSEMBLY_DOMAINS" => Some(item),
+            _ => None,
+        })
+        .context("generated ASSEMBLY_DOMAINS missing")?;
+    let Expr::Reference(reference) = peel_expr(&item.expr) else {
+        bail!("ASSEMBLY_DOMAINS must reference one array")
+    };
+    let Expr::Array(array) = peel_expr(&reference.expr) else {
+        bail!("ASSEMBLY_DOMAINS must reference one array")
+    };
+    let variants = array
+        .elems
+        .iter()
+        .map(|expr| {
+            let Expr::Path(path) = peel_expr(expr) else {
+                bail!("ASSEMBLY_DOMAINS member must be a typed path")
+            };
+            path.path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+                .context("ASSEMBLY_DOMAINS member path is empty")
+        })
+        .collect::<Result<BTreeSet<_>>>()?;
+    ensure!(
+        !variants.is_empty() && variants.len() == array.elems.len(),
+        "ASSEMBLY_DOMAINS must be non-empty and duplicate-free"
+    );
+    Ok(variants)
 }
 
 fn domain_wiring_match_retains_failure(expression: &syn::ExprMatch) -> bool {
@@ -692,97 +717,6 @@ fn result_arm_binding(pattern: &Pat, variant: &str) -> Option<String> {
     (binding.subpat.is_none()).then(|| binding.ident.to_string())
 }
 
-fn domain_module_input_bindings(wire: &ItemFn) -> Result<BTreeMap<String, String>> {
-    let candidates = wire
-        .block
-        .stmts
-        .iter()
-        .filter_map(|statement| {
-            let Stmt::Local(local) = statement else {
-                return None;
-            };
-            let Pat::Struct(pattern) = &local.pat else {
-                return None;
-            };
-            let initializer = local.init.as_ref()?;
-            (pattern
-                .path
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "DomainModuleInputs")
-                && simple_expr_ident(&initializer.expr).as_deref() == Some("inputs"))
-            .then_some(pattern)
-        })
-        .collect::<Vec<_>>();
-    let [pattern] = candidates.as_slice() else {
-        bail!(
-            "wire_domains must destructure its exact `inputs` parameter once, got {}",
-            candidates.len()
-        )
-    };
-    let mut bindings = BTreeMap::new();
-    for field in &pattern.fields {
-        let syn::Member::Named(member) = &field.member else {
-            continue;
-        };
-        if !matches!(
-            member.to_string().as_str(),
-            "identity" | "settings" | "audit"
-        ) {
-            continue;
-        }
-        let Pat::Ident(binding) = field.pat.as_ref() else {
-            bail!("wire_domains `{member}` input must use one plain binding")
-        };
-        ensure!(
-            bindings
-                .insert(member.to_string(), binding.ident.to_string())
-                .is_none(),
-            "wire_domains repeats `{member}` input"
-        );
-    }
-    Ok(bindings)
-}
-
-fn direct_terminal_call_has_arguments(
-    expression: &Expr,
-    expected: &[&str],
-    deps: &str,
-    input: &str,
-) -> bool {
-    let Some(call) = terminal_call(expression) else {
-        return false;
-    };
-    path_is_exact_expr(&call.func, expected)
-        && call.args.len() == 2
-        && call.args.first().and_then(simple_expr_ident).as_deref() == Some(deps)
-        && call
-            .args
-            .iter()
-            .nth(1)
-            .and_then(simple_expr_ident)
-            .as_deref()
-            == Some(input)
-}
-
-fn terminal_call(expression: &Expr) -> Option<&ExprCall> {
-    match expression {
-        Expr::Call(call) => Some(call),
-        Expr::Await(expression) => terminal_call(&expression.base),
-        Expr::Try(expression) => terminal_call(&expression.expr),
-        Expr::Paren(expression) => terminal_call(&expression.expr),
-        Expr::Group(expression) => terminal_call(&expression.expr),
-        Expr::MethodCall(call)
-            if call.method == "context"
-                && call.args.len() == 1
-                && matches!(call.args.first(), Some(Expr::Lit(literal)) if matches!(literal.lit, syn::Lit::Str(_))) =>
-        {
-            terminal_call(&call.receiver)
-        }
-        _ => None,
-    }
-}
-
 fn validate_identity_runtime_module(source: &str) -> Result<()> {
     let syntax = syn::parse_file(source).context("parse identity runtime module")?;
     let module = unique_top_level_function(&syntax.items, "module", IDENTITY_RUNTIME_MODULE)?;
@@ -798,18 +732,22 @@ fn validate_identity_runtime_module(source: &str) -> Result<()> {
             && module_call
                 .args
                 .get(1)
-                .is_some_and(|expr| is_arc_clone_of_deps_field(expr, "password_blocklist"))
+                .is_some_and(|expr| is_arc_clone_of_ident(expr, "password_blocklist"))
             && module_call
                 .args
                 .get(2)
-                .is_some_and(|expr| is_arc_clone_of_deps_field(expr, "identity_signer"))
+                .is_some_and(|expr| is_arc_clone_of_ident(expr, "identity_signer"))
             && module_call
                 .args
                 .get(3)
                 .and_then(simple_expr_ident)
                 .as_deref()
                 == Some("input"),
-        "identity runtime module must pass the exact pg, blocklist, signer, and input directly into wire_with_profile"
+        "identity runtime module must pass the exact local-provider bundle into wire_with_profile"
+    );
+    ensure!(
+        method_call_count_block(&module.block, "identity_local") == 1,
+        "identity runtime module must consume exactly one identity-local provider bundle"
     );
     validate_identity_profile_wire(&syntax.items)?;
     validate_identity_rss_wire(&syntax.items)
@@ -972,16 +910,16 @@ fn validate_settings_runtime_module(source: &str) -> Result<()> {
 fn ensure_wire_domains_signature(wire: &ItemFn) -> Result<()> {
     ensure!(
         wire.sig.asyncness.is_some() && wire.sig.inputs.len() == 3,
-        "wire_domains must be async with exact deps, inputs, and placement parameters"
+        "wire_domains must be async with exact shared deps, local providers, and prepared-local inputs"
     );
     let mut parameters = wire.sig.inputs.iter();
     let deps = parameters.next().context("wire_domains deps disappeared")?;
+    let providers = parameters
+        .next()
+        .context("wire_domains local providers disappeared")?;
     let inputs = parameters
         .next()
         .context("wire_domains inputs disappeared")?;
-    let placement = parameters
-        .next()
-        .context("wire_domains placement disappeared")?;
     ensure!(
         typed_argument_is(deps, "deps", |ty| {
             matches!(ty, syn::Type::Reference(reference)
@@ -991,19 +929,18 @@ fn ensure_wire_domains_signature(wire: &ItemFn) -> Result<()> {
         "wire_domains first parameter must be `deps: &SharedRuntimeDeps`"
     );
     ensure!(
-        typed_argument_is(inputs, "inputs", |ty| {
+        typed_argument_is(providers, "providers", |ty| {
             matches!(ty, syn::Type::Path(path)
-                if path.path.segments.last().is_some_and(|segment| segment.ident == "DomainModuleInputs"))
+                if path.path.segments.last().is_some_and(|segment| segment.ident == "LocalDomainProviderCatalog"))
         }),
-        "wire_domains second parameter must be `inputs: DomainModuleInputs`"
+        "wire_domains second parameter must be `providers: LocalDomainProviderCatalog`"
     );
     ensure!(
-        typed_argument_is(placement, "placement", |ty| {
-            matches!(ty, syn::Type::Reference(reference)
-                if matches!(reference.elem.as_ref(), syn::Type::Path(path)
-                    if path.path.segments.last().is_some_and(|segment| segment.ident == "PlacementExecutionPlan")))
+        typed_argument_is(inputs, "inputs", |ty| {
+            matches!(ty, syn::Type::Path(path)
+                if path.path.segments.last().is_some_and(|segment| segment.ident == "PreparedLocalDomainInputs"))
         }),
-        "wire_domains third parameter must be `placement: &PlacementExecutionPlan`"
+        "wire_domains third parameter must be `inputs: PreparedLocalDomainInputs`"
     );
     Ok(())
 }
@@ -1299,17 +1236,13 @@ fn is_deps_pg_for_domain(expression: &Expr) -> bool {
         && simple_expr_ident(&pg.base).as_deref() == Some("deps")
 }
 
-fn is_arc_clone_of_deps_field(expression: &Expr, expected: &str) -> bool {
+fn is_arc_clone_of_ident(expression: &Expr, expected: &str) -> bool {
     let Expr::Call(call) = peel_expr(expression) else {
         return false;
     };
-    if !path_is_exact_expr(&call.func, &["Arc", "clone"]) || call.args.len() != 1 {
-        return false;
-    }
-    let Some(Expr::Reference(reference)) = call.args.first() else {
-        return false;
-    };
-    reference.mutability.is_none() && expression_is_field_of(&reference.expr, "deps", expected)
+    path_is_exact_expr(&call.func, &["Arc", "clone"])
+        && call.args.len() == 1
+        && call.args.first().and_then(simple_expr_ident).as_deref() == Some(expected)
 }
 
 fn read_bounded(path: &Path) -> Result<String> {
@@ -2612,8 +2545,8 @@ mod tests {
             ),
             (
                 "module signer handoff",
-                "Arc::clone(&deps.identity_signer),",
-                "Arc::clone(&deps.decoy_identity_signer),",
+                "Arc::clone(identity_signer),",
+                "Arc::clone(decoy_identity_signer),",
             ),
             (
                 "RSS profile branch",
@@ -2706,8 +2639,8 @@ mod tests {
             .context("xtask must live below the workspace root")?;
         let source = fs::read_to_string(workspace.join(RUNTIME_MODULES))?;
         let shadowed = source.replacen(
-            "    let crate::domains::DomainModuleInputs {",
-            "    let deps = decoy_deps;\n    let crate::domains::DomainModuleInputs {",
+            "    for input in inputs.into_inputs() {",
+            "    let deps = decoy_deps;\n    for input in inputs.into_inputs() {",
             1,
         );
         assert!(

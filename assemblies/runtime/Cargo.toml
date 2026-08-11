@@ -86,6 +86,7 @@ eventing-composition = { path = "../../composition/eventing", features = ["audit
 assembly-schema = { path = "../../crates/assembly-schema" }
 bootstrap = { path = "../../crates/bootstrap" }
 runtimeexec = { path = "../../crates/runtimeexec" }
+runtimeinventorymint = { path = "../../crates/runtimeinventorymint" }
 authmint = { path = "../../crates/authmint" }
 sagaauthmint = { path = "../../crates/sagaauthmint" }
 httpserve = { path = "../../crates/httpserve" }
@@ -200,6 +201,7 @@ aws-smithy-http-client = { workspace = true, features = ["test-util"] }
 http = "1"
 metrics-exporter-prometheus = { workspace = true }
 settings-composition = { path = "../../composition/settings", features = ["test-support"] }
+identity-composition = { path = "../../composition/identity", features = ["test-support"] }
 # Direct service tests bypass the HTTP router only through the explicitly test-gated receipt mint.
 settings = { path = "../../crates/settings", features = ["test-support"] }
 # 默认单测仅启用 lazy typed capability bundle；不连接 postgres。

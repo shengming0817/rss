@@ -10,7 +10,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v2";
+const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v3";
 const ASSEMBLY_PLAN_TAG: &str = "rss-assembly-lock-v2";
 const SECRET_SENTINEL: &str = "ZZ_RUNTIME_PLAN_SECRET_1788_DO_NOT_SERIALIZE";
 
@@ -136,8 +136,8 @@ fn assert_reader_rejects(value: Value, expected_diagnostic: &str) {
 fn expanded_unsigned() -> Value {
     let mut unsigned = runtime_vector()["unsigned"].clone();
     unsigned["providerPlans"] = json!([
-        {"id":"a-provider","constructor":"amqp::AmqpPublisher","outputs":["probes"]},
-        {"id":"z-provider","constructor":"oidc::OidcProvider","outputs":["workers"]}
+        {"id":"a-provider","constructor":"amqp::AmqpPublisher","activation":{"kind":"localEventExecution"},"outputs":["probes"]},
+        {"id":"z-provider","constructor":"oidc::OidcProvider","activation":{"kind":"process"},"outputs":["workers"]}
     ]);
     unsigned["listenerPlans"] = json!([
         {"id":"admin-main","kind":"admin","auth":"rssAccessToken","domains":["identity"]},
@@ -238,7 +238,7 @@ fn runtime_plan_reader_accepts_the_shared_closed_vector() {
     let wire = wire_from_vector();
     parse(&wire).expect("valid shared RuntimePlan vector");
 
-    assert_eq!(wire["schemaVersion"], 2);
+    assert_eq!(wire["schemaVersion"], 3);
     assert_eq!(
         wire["assemblyFingerprint"],
         vector["unsigned"]["assemblyFingerprint"].clone()
@@ -274,6 +274,12 @@ fn runtime_plan_reader_is_closed_and_fails_on_bad_version_enum_or_digest() {
         .unwrap()
         .insert("port".to_owned(), json!("diport::Pdp"));
 
+    let mut unknown_activation = valid.clone();
+    unknown_activation["providerPlans"][0]["activation"]
+        .as_object_mut()
+        .unwrap()
+        .insert("unexpected".to_owned(), json!("smuggled"));
+
     let mut unknown_auth = valid.clone();
     unknown_auth["listenerPlans"][0]["auth"] = json!("bearer");
 
@@ -293,7 +299,7 @@ fn runtime_plan_reader_is_closed_and_fails_on_bad_version_enum_or_digest() {
     );
     assert_eq!(
         unsupported_error.to_string(),
-        "unsupported RuntimePlan schemaVersion 1; supported schemaVersion is 2; regenerate the RuntimePlan"
+        "unsupported RuntimePlan schemaVersion 1; supported schemaVersion is 3; regenerate the RuntimePlan"
     );
 
     let mut uppercase_digest = valid.clone();
@@ -308,6 +314,7 @@ fn runtime_plan_reader_is_closed_and_fails_on_bad_version_enum_or_digest() {
     for invalid in [
         unknown_root,
         unknown_provider,
+        unknown_activation,
         unknown_auth,
         unknown_constructor,
         unknown_lifecycle,
@@ -705,15 +712,15 @@ fn runtime_plan_reader_detects_semantics_preserving_fingerprint_mutations() {
 fn runtime_plan_reader_rejects_duplicate_json_keys_and_does_not_echo_secret_values() {
     let wire = serde_json::to_string(&wire_from_vector()).expect("wire string");
     let duplicate = wire.replacen(
-        "\"schemaVersion\":2",
-        "\"schemaVersion\":2,\"schemaVersion\":2",
+        "\"schemaVersion\":3",
+        "\"schemaVersion\":3,\"schemaVersion\":3",
         1,
     );
     assert!(validate_runtime_plan_json_slice(duplicate.as_bytes()).is_err());
 
     let bait = wire.replacen(
-        "\"schemaVersion\":2",
-        &format!("\"secret\":\"{SECRET_SENTINEL}\",\"schemaVersion\":2"),
+        "\"schemaVersion\":3",
+        &format!("\"secret\":\"{SECRET_SENTINEL}\",\"schemaVersion\":3"),
         1,
     );
     let result = validate_runtime_plan_json_slice(bait.as_bytes());
@@ -785,8 +792,8 @@ fn runtime_plan_reader_reports_sealed_redacted_json_stage_category_and_path() {
 
     let mut secret_key = serde_json::to_string(&wire_from_vector()).expect("wire string");
     secret_key = secret_key.replacen(
-        "\"schemaVersion\":2",
-        &format!("\"{SECRET_SENTINEL}\":true,\"schemaVersion\":2"),
+        "\"schemaVersion\":3",
+        &format!("\"{SECRET_SENTINEL}\":true,\"schemaVersion\":3"),
         1,
     );
     let unknown_field = validate_runtime_plan_json_slice(secret_key.as_bytes())
@@ -837,7 +844,7 @@ fn runtime_plan_writer_validates_against_draft7_and_round_trips_through_the_read
 }
 
 #[test]
-fn runtime_plan_v2_freezes_closed_workflow_activation_states_without_capability_facts() {
+fn runtime_plan_v3_freezes_closed_workflow_activation_states_without_capability_facts() {
     let committed: Value =
         serde_json::from_str(include_str!("../schemas/runtime-plan.schema.json"))
             .expect("committed schema");
@@ -926,7 +933,7 @@ fn runtime_plan_v2_freezes_closed_workflow_activation_states_without_capability_
 }
 
 #[test]
-fn runtime_plan_rust_schema_matches_the_committed_v2_boundary() {
+fn runtime_plan_rust_schema_matches_the_committed_v3_boundary() {
     let rust = serde_json::to_value(schemars::schema_for!(RuntimePlan)).expect("Rust schema");
     let committed: Value =
         serde_json::from_str(include_str!("../schemas/runtime-plan.schema.json"))

@@ -70,20 +70,21 @@ require_spiffe_fixture() {
     # do we require outbound SPIFFE fixture completeness; otherwise continue all-Local.
     local identity_name
     identity_name="$(assembly_identity_name)"
-    local has_remote=0
-    local key workload
-    for key in \
-        RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD \
-        RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD \
-        RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD
-    do
+    local remote_domains=()
+    local runtime_plan="${SCRIPT_DIR}/../assemblies/runtime/runtime-plan.json"
+    [[ -f "$runtime_plan" ]] || fail "缺少 RuntimePlan：$runtime_plan"
+    local domain_count=0 domain domain_upper key workload
+    while IFS= read -r domain; do
+        domain_count=$((domain_count + 1))
+        domain_upper="$(printf '%s' "$domain" | tr '[:lower:]' '[:upper:]')"
+        key="RSS_${domain_upper}_DOMAIN_PLACEMENT_WORKLOAD"
         workload="$(read_env_file_value "$key")"
         if [[ -n "$workload" && "$workload" != "$identity_name" ]]; then
-            has_remote=1
-            break
+            remote_domains+=("$domain")
         fi
-    done
-    if [[ "$has_remote" -eq 0 ]]; then
+    done < <(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); [print(p["domain"]) for p in d["placementPlans"]]' "$runtime_plan")
+    [[ "$domain_count" -gt 0 ]] || fail "RuntimePlan placementPlans 为空：$runtime_plan"
+    if [[ ${#remote_domains[@]} -eq 0 ]]; then
         return 0
     fi
     local missing=()
@@ -92,6 +93,21 @@ require_spiffe_fixture() {
         RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID
     do
         [[ -n "$(read_env_file_value "$key")" ]] || missing+=("$key")
+    done
+    local topology
+    topology="$(read_env_file_value RSS_TOPOLOGY)"
+    local shared_url
+    shared_url="$(read_env_file_value RSS_DOMAIN_TRANSPORT_URL)"
+    for domain in "${remote_domains[@]}"; do
+        domain_upper="$(printf '%s' "$domain" | tr '[:lower:]' '[:upper:]')"
+        key="RSS_${domain_upper}_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET"
+        [[ -n "$(read_env_file_value "$key")" ]] || missing+=("$key")
+        key="RSS_${domain_upper}_DOMAIN_TRANSPORT_URL"
+        if [[ -z "$(read_env_file_value "$key")" ]]; then
+            if [[ "$topology" = "durable-isolated" || -z "$shared_url" ]]; then
+                missing+=("$key")
+            fi
+        fi
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
         missing_spiffe_fixture "${missing[*]}"

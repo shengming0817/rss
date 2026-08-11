@@ -430,7 +430,7 @@ fn runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_
     let reads = read_log(&source);
     let snapshot = RuntimeConfigSnapshot::capture_test(source).expect("capture succeeds");
 
-    let parts = RuntimeServingConfig::from_snapshot(snapshot.view())
+    let parts = RuntimeServingConfig::from_snapshot_for_test(snapshot.view())
         .expect("complete serving config")
         .into_parts();
 
@@ -439,16 +439,30 @@ fn runtime_config_serving_event_domain_dlx_and_worker_inputs_share_one_captured_
         bootstrap::Topology::DurableShared
     );
     assert_eq!(
-        parts.event_worker.relay_poll_interval(),
+        parts
+            .event_worker
+            .as_ref()
+            .expect("local event worker")
+            .relay_poll_interval(),
         std::time::Duration::from_millis(275)
     );
     assert_eq!(
         parts.auth_grant_sweep_interval,
         std::time::Duration::from_secs(330)
     );
-    assert_eq!(parts.audit_consumer_key.as_bytes(), &[0x42; 32]);
     assert_eq!(
-        parts.domain_modules.settings.readiness_interval().get(),
+        parts
+            .audit_consumer_key
+            .expect("local audit key")
+            .as_bytes(),
+        &[0x42; 32]
+    );
+    assert_eq!(
+        parts
+            .domain_modules
+            .settings_readiness_interval()
+            .expect("local settings input")
+            .get(),
         std::time::Duration::from_secs(7)
     );
     let _ = (parts.dlx_worker, parts.distributed_worker);
@@ -474,13 +488,18 @@ fn complete_serving_config_accepts_federated_primary_and_admin_without_local_rss
     ))
     .expect("capture complete federated serving generation");
 
-    let parts = RuntimeServingConfig::from_snapshot(snapshot.view())
+    let parts = RuntimeServingConfig::from_snapshot_for_test(snapshot.view())
         .expect("federated-only serving config")
         .into_parts();
 
     assert!(parts.token_profiles.rss_access().is_none());
     assert!(parts.token_profiles.federated_access().is_some());
-    assert!(parts.domain_modules.identity.is_federated_access());
+    assert!(
+        parts
+            .domain_modules
+            .identity_for_test()
+            .is_federated_access()
+    );
 }
 
 #[test]
@@ -506,7 +525,7 @@ fn runtime_serving_config_accepts_complete_isolated_event_transport() {
             .map(|(key, value)| (key, FakeValue::Present(value))),
     ))
     .expect("snapshot capture");
-    let parts = RuntimeServingConfig::from_snapshot(snapshot.view())
+    let parts = RuntimeServingConfig::from_snapshot_for_test(snapshot.view())
         .expect("complete isolated serving config")
         .into_parts();
 
@@ -518,6 +537,90 @@ fn runtime_serving_config_accepts_complete_isolated_event_transport() {
         snapshot.view().value("SPIFFE_ENDPOINT_SOCKET"),
         Some(SPIFFE_ENDPOINT)
     );
+}
+
+#[test]
+fn all_remote_execution_does_not_read_relay_only_configuration() {
+    let mut values = complete_shared_serving_values();
+    replace_serving_value(
+        &mut values,
+        "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+        "identity-peer",
+    );
+    replace_serving_value(&mut values, "RSS_RELAY_POLL_INTERVAL_MS", "invalid");
+    for (domain, workload) in [("SETTINGS", "settings-peer"), ("AUDIT", "audit-peer")] {
+        values.push((
+            format!("RSS_{domain}_DOMAIN_PLACEMENT_WORKLOAD"),
+            workload.to_owned(),
+        ));
+        values.push((
+            format!("RSS_{domain}_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET"),
+            format!(
+                "spiffe://example.org/ns/rss/sa/{}",
+                domain.to_ascii_lowercase()
+            ),
+        ));
+    }
+    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
+        values
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    ))
+    .expect("all-remote snapshot capture");
+
+    let parts = RuntimeServingConfig::from_snapshot_for_test(snapshot.view())
+        .expect("unused relay-only value must not block all-remote execution")
+        .into_parts();
+    assert!(parts.event_worker.is_none());
+}
+
+#[test]
+fn remote_domains_do_not_materialize_their_local_only_inputs() {
+    let mut identity_remote = complete_shared_serving_values();
+    identity_remote.push((
+        "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD".to_owned(),
+        "peer-cell".to_owned(),
+    ));
+    identity_remote.push((
+        "RSS_IDENTITY_AUTH_GRANT_TTL_SECS".to_owned(),
+        "0".to_owned(),
+    ));
+    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
+        identity_remote
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    ))
+    .expect("capture identity-remote generation");
+    RuntimeServingConfig::from_snapshot_for_test(snapshot.view())
+        .expect("identity-remote must not parse local auth-grant input");
+
+    let mut identity_local = complete_shared_serving_values();
+    identity_local.push((
+        "RSS_IDENTITY_AUTH_GRANT_TTL_SECS".to_owned(),
+        "0".to_owned(),
+    ));
+    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
+        identity_local
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    ))
+    .expect("capture identity-local generation");
+    assert!(RuntimeServingConfig::from_snapshot_for_test(snapshot.view()).is_err());
+
+    let mut audit_remote = complete_shared_serving_values();
+    replace_serving_value(&mut audit_remote, "RSS_AUDIT_CHAIN_KEY_B64URL", "invalid");
+    audit_remote.push((
+        "RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD".to_owned(),
+        "peer-cell".to_owned(),
+    ));
+    let snapshot = RuntimeConfigSnapshot::capture_test(FakeSource::new(
+        audit_remote
+            .into_iter()
+            .map(|(key, value)| (key, FakeValue::Present(value))),
+    ))
+    .expect("capture audit-remote generation");
+    RuntimeServingConfig::from_snapshot_for_test(snapshot.view())
+        .expect("audit-remote must not parse local audit input/key");
 }
 
 #[allow(clippy::expect_used)]
@@ -1162,20 +1265,32 @@ fn runtime_config_always_captures_assembly_domain_transport_keys() {
     drop(snapshot);
 
     let reads = reads.lock().expect("read log mutex");
-    for expected in [
-        "RSS_SETTINGS_DOMAIN_TRANSPORT_URL",
-        "RSS_SETTINGS_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
-        "RSS_IDENTITY_DOMAIN_TRANSPORT_URL",
-        "RSS_IDENTITY_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
-        "RSS_AUDIT_DOMAIN_TRANSPORT_URL",
-        "RSS_AUDIT_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
-        "RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD",
-        "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
-        "RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD",
-    ] {
-        assert!(
-            reads.iter().any(|key| key == expected),
-            "missing {expected}"
+    let expected = crate::modules_gen::ASSEMBLY_DOMAINS
+        .iter()
+        .flat_map(|domain| {
+            let prefix = format!("RSS_{}", domain.as_str().to_ascii_uppercase());
+            [
+                format!("{prefix}_DOMAIN_TRANSPORT_URL"),
+                format!("{prefix}_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET"),
+                format!("{prefix}_DOMAIN_PLACEMENT_WORKLOAD"),
+            ]
+        })
+        .collect::<BTreeSet<_>>();
+    let domain_prefixes = crate::modules_gen::ASSEMBLY_DOMAINS
+        .iter()
+        .map(|domain| format!("RSS_{}_DOMAIN_", domain.as_str().to_ascii_uppercase()))
+        .collect::<Vec<_>>();
+    let actual = reads
+        .iter()
+        .filter(|key| domain_prefixes.iter().any(|prefix| key.starts_with(prefix)))
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual, expected);
+    for key in expected {
+        assert_eq!(
+            reads.iter().filter(|read| **read == key).count(),
+            1,
+            "{key}"
         );
     }
 }

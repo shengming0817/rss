@@ -226,6 +226,21 @@ fn common_identity_services(
     }
 }
 
+/// Build the listener-security root authorizer without mounting the identity domain.
+pub fn root_contract_authorizer(
+    pg: &PgDomainDeps<caps::Identity>,
+    clock: Arc<dyn Clock>,
+) -> Arc<dyn httpserve::RouteAuthorizer> {
+    let common = common_identity_services(pg, &clock);
+    identity::build_contract_authorizer(
+        common.roles,
+        common.binding_reads,
+        common.policies,
+        common.resource_attribute_reads,
+        clock,
+    )
+}
+
 /// Build the identity domain and its lifecycle output as one owned binding.
 /// # Errors
 /// Returns an error when the JWT issuer configuration is invalid.
@@ -329,7 +344,7 @@ pub mod test_support {
 
     use diport::{Clock, SignRequest, Signature, Signer, SignerError};
 
-    use super::{IdentityModuleDeps, wire};
+    use super::{IdentityModuleDeps, root_contract_authorizer, wire};
 
     /// Deterministic signer used only to prove composition without a live Vault service.
     pub struct TestSigner;
@@ -394,6 +409,14 @@ pub mod test_support {
     /// Returns an error if the fixed JWT configuration is rejected.
     pub fn binding() -> anyhow::Result<bootstrap::DomainBinding> {
         wire(deps()?)
+    }
+
+    /// Build the hermetic listener-security root independently from the identity domain binding.
+    pub fn root_authorizer() -> Arc<dyn httpserve::RouteAuthorizer> {
+        root_contract_authorizer(
+            &postgres::PgRuntimeHandle::for_module_test().for_domain(),
+            Arc::new(TestClock),
+        )
     }
 }
 

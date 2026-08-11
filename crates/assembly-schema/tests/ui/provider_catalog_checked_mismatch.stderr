@@ -4,11 +4,11 @@ error[E0080]: evaluation panicked: provider port drift
  6 |   const FORGED: ProviderCatalogEntry = ProviderCatalogEntry::checked(
    |  ______________________________________^
  7 | |     ProviderRole::ListenerRateLimiter,
- 8 | |     DiportPort::Signer,
- 9 | |     ProviderConstructor::RedisRateLimiter,
+ 8 | |     ProviderRole::ListenerRateLimiter.activation(),
+ 9 | |     DiportPort::Signer,
 ...  |
-17 | |     &[],
-18 | | );
+18 | |     &[],
+19 | | );
    | |_^ evaluation of `FORGED` failed inside this call
    |
 note: inside `ProviderCatalogEntry::checked`
@@ -20,3 +20,29 @@ note: inside `ProviderCatalogEntry::checked`
    |
    |         assert!(spec.port as u8 == port as u8, "provider port drift");
    |         ------------------------------------------------------------- in this macro invocation
+
+error[E0080]: evaluation panicked: provider activation drift
+  --> tests/ui/provider_catalog_checked_mismatch.rs:21:48
+   |
+21 |   const WRONG_ACTIVATION: ProviderCatalogEntry = ProviderCatalogEntry::checked(
+   |  ________________________________________________^
+22 | |     ProviderRole::ListenerRateLimiter,
+23 | |     assembly_schema::ProviderActivation::LocalEventExecution,
+24 | |     DiportPort::RateLimiter,
+...  |
+33 | |     &[],
+34 | | );
+   | |_^ evaluation of `WRONG_ACTIVATION` failed inside this call
+   |
+note: inside `ProviderCatalogEntry::checked`
+  --> $RUST/core/src/panic.rs
+   |
+   = note: the failure occurred here
+   |
+  ::: src/provider.rs
+   |
+   | /         assert!(
+   | |             provider_activation_eq(role.activation(), activation),
+   | |             "provider activation drift"
+   | |         );
+   | |_________- in this macro invocation

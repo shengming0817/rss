@@ -608,6 +608,8 @@ mod tests {
         let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001797")?;
         let mut bindings = vec![identity_composition::test_support::binding()?];
         let (mut registry, _output) = bootstrap::compose_bindings(&mut bindings)?;
+        registry
+            .register_primary_authorizer(identity_composition::test_support::root_authorizer())?;
         let registered = registry.take_primary_authorizer()?;
         assert_eq!(
             auth_plan(ListenerKind::Admin)?.scheme(),

@@ -5,6 +5,7 @@ use assembly_schema::{
 
 const DRAFT: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::DistributedCasStoreAlternative,
+    ProviderRole::DistributedCasStoreAlternative.activation(),
     DiportPort::Cas,
     ProviderConstructor::RedisCasStore,
     ProviderFactorySymbol::EventexecAmqpPublisher,
@@ -19,6 +20,7 @@ const DRAFT: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const CONSTRUCTOR: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::EventPublisher,
+    ProviderRole::EventPublisher.activation(),
     DiportPort::Publisher,
     ProviderConstructor::AmqpSubscriber,
     ProviderFactorySymbol::EventexecAmqpPublisher,
@@ -37,6 +39,7 @@ const CONSTRUCTOR: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const FACTORY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::EventPublisher,
+    ProviderRole::EventPublisher.activation(),
     DiportPort::Publisher,
     ProviderConstructor::AmqpPublisher,
     ProviderFactorySymbol::EventexecAmqpSubscriber,
@@ -55,6 +58,7 @@ const FACTORY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const PROVIDER_CRATE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::EventPublisher,
+    ProviderRole::EventPublisher.activation(),
     DiportPort::Publisher,
     ProviderConstructor::AmqpPublisher,
     ProviderFactorySymbol::EventexecAmqpPublisher,
@@ -73,6 +77,7 @@ const PROVIDER_CRATE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const FEATURES: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::EventPublisher,
+    ProviderRole::EventPublisher.activation(),
     DiportPort::Publisher,
     ProviderConstructor::AmqpPublisher,
     ProviderFactorySymbol::EventexecAmqpPublisher,
@@ -91,6 +96,7 @@ const FEATURES: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const CONSUMER: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::EventPublisher,
+    ProviderRole::EventPublisher.activation(),
     DiportPort::Publisher,
     ProviderConstructor::AmqpPublisher,
     ProviderFactorySymbol::EventexecAmqpPublisher,
@@ -109,6 +115,7 @@ const CONSUMER: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const DURABILITY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::EventPublisher,
+    ProviderRole::EventPublisher.activation(),
     DiportPort::Publisher,
     ProviderConstructor::AmqpPublisher,
     ProviderFactorySymbol::EventexecAmqpPublisher,
@@ -127,6 +134,7 @@ const DURABILITY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const OUTPUTS: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::EventPublisher,
+    ProviderRole::EventPublisher.activation(),
     DiportPort::Publisher,
     ProviderConstructor::AmqpPublisher,
     ProviderFactorySymbol::EventexecAmqpPublisher,
@@ -141,6 +149,7 @@ const OUTPUTS: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const SCOPE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::ServiceTokenReplayStore,
+    ProviderRole::ServiceTokenReplayStore.activation(),
     DiportPort::ServiceTokenReplayStore,
     ProviderConstructor::PostgresServiceTokenReplayStore,
     ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore,
@@ -159,6 +168,7 @@ const SCOPE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const FAILURE_POSTURE: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::ServiceTokenReplayStore,
+    ProviderRole::ServiceTokenReplayStore.activation(),
     DiportPort::ServiceTokenReplayStore,
     ProviderConstructor::PostgresServiceTokenReplayStore,
     ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore,

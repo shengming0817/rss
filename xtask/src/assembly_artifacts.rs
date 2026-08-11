@@ -981,6 +981,7 @@ enum ComposeSmokeRule {
     ReleaseKeepUp,
     DeveloperSkip,
     FixtureDispatch,
+    FixtureCompleteness,
     SuccessTermination,
     PolicyOrder,
     ReleaseTeardown,
@@ -1008,6 +1009,7 @@ impl ComposeSmokeRule {
             Self::ReleaseKeepUp => "SMOKE-RELEASE-KEEP-UP-01",
             Self::DeveloperSkip => "SMOKE-DEVELOPER-SKIP-01",
             Self::FixtureDispatch => "SMOKE-FIXTURE-DISPATCH-01",
+            Self::FixtureCompleteness => "SMOKE-FIXTURE-COMPLETENESS-01",
             Self::SuccessTermination => "SMOKE-SUCCESS-TERMINATION-01",
             Self::PolicyOrder => "SMOKE-POLICY-ORDER-01",
             Self::ReleaseTeardown => "SMOKE-RELEASE-TEARDOWN-01",
@@ -1141,6 +1143,7 @@ fn validate_compose_smoke(source: &str) -> std::result::Result<(), ComposeSmokeR
         return Err(ComposeSmokeRule::StrictShell);
     }
     validate_compose_smoke_policy(&commands)?;
+    validate_remote_fixture_completeness(source)?;
     validate_compose_smoke_outage_closure(&commands)?;
     if !top_level.contains(&"COMPOSE=\"docker compose -f ${SCRIPT_DIR}/docker-compose.yml\"")
         || !top_level.contains(&"$COMPOSE build")
@@ -1169,6 +1172,23 @@ fn validate_compose_smoke(source: &str) -> std::result::Result<(), ComposeSmokeR
         .any(|line| line.starts_with("curl -fsS \"${HEALTH_URL}/healthz\" >/dev/null || fail"));
     if !ready || !health {
         return Err(ComposeSmokeRule::Readiness);
+    }
+    Ok(())
+}
+
+fn validate_remote_fixture_completeness(source: &str) -> std::result::Result<(), ComposeSmokeRule> {
+    for required in [
+        "d[\"placementPlans\"]",
+        "remote_domains+=(\"$domain\")",
+        "RSS_DOMAIN_TRANSPORT_MTLS_LOCAL_SPIFFE_ID",
+        "RSS_${domain_upper}_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
+        "shared_url=\"$(read_env_file_value RSS_DOMAIN_TRANSPORT_URL)\"",
+        "[[ \"$topology\" = \"durable-isolated\" || -z \"$shared_url\" ]]",
+        "RSS_${domain_upper}_DOMAIN_TRANSPORT_URL",
+    ] {
+        if !source.contains(required) {
+            return Err(ComposeSmokeRule::FixtureCompleteness);
+        }
     }
     Ok(())
 }
@@ -1565,6 +1585,9 @@ fn consume_shell_scope_close(
         "esac" => Some(ShellScope::Case),
         ")" => Some(ShellScope::Subshell),
         "}" if scopes.last() == Some(&ShellScope::Group) => Some(ShellScope::Group),
+        redirected_loop_close if redirected_loop_close.starts_with("done < <(") => {
+            Some(ShellScope::Loop)
+        }
         _ => None,
     };
     if let Some(expected) = expected {
@@ -2078,6 +2101,18 @@ fn markdown_cell(value: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn shell_grammar_keeps_redirected_process_substitution_loop_in_current_scope() {
+        let source =
+            "scan() {\nwhile IFS= read -r domain; do\nseen=1\ndone < <(python3 domains.py)\n}\n";
+        let commands = shell_semantic_lines(source).expect("closed redirected loop grammar");
+        assert!(commands.iter().any(|command| {
+            command.function == Some("scan")
+                && command.scopes == [ShellScope::Loop]
+                && command.text == "seen=1"
+        }));
+    }
+
     fn compose_service_block<'a>(compose: &'a str, service: &str) -> Option<&'a str> {
         let marker = format!("  {service}:\n");
         let start = compose.find(&marker)?;
@@ -2559,6 +2594,24 @@ mod tests {
                 "log \"missing fixture\"",
             ),
             (
+                "missing-per-domain-allow-set",
+                ComposeSmokeRule::FixtureCompleteness,
+                "RSS_${domain_upper}_DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET",
+                "RSS_REMOVED_ALLOW_SET",
+            ),
+            (
+                "missing-shared-endpoint",
+                ComposeSmokeRule::FixtureCompleteness,
+                "[[ \"$topology\" = \"durable-isolated\" || -z \"$shared_url\" ]]",
+                "[[ \"$topology\" = \"durable-isolated\" ]]",
+            ),
+            (
+                "missing-isolated-endpoint",
+                ComposeSmokeRule::FixtureCompleteness,
+                "RSS_${domain_upper}_DOMAIN_TRANSPORT_URL",
+                "RSS_REMOVED_DOMAIN_URL",
+            ),
+            (
                 "release-receipt",
                 ComposeSmokeRule::ReleaseReceipt,
                 "printf '%s\\n' 'RELEASE IMAGE ON DEMO INFRA EVIDENCE'",
@@ -3006,7 +3059,7 @@ services:
             "runtimeexec",
             "crates/support/Cargo.toml"
         )?);
-        assert!(!has_exact_normal_dependency(
+        assert!(has_exact_normal_dependency(
             facts,
             "server",
             "runtimeexec",

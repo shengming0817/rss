@@ -72,26 +72,32 @@ impl UncommittedListenerPdpLifecycle {
 
 impl<'a> Planned<'a> {
     pub(super) async fn build_providers(self) -> anyhow::Result<<Self as RuntimePhaseState>::Next> {
-        let serving_config =
-            RuntimeServingConfig::from_snapshot(self.runtime_inputs.config())?.into_parts();
-        let runtime_plan = self.runtime_inputs.take_runtime_plan();
-        let listener_execution_plan = runtime_plan.listener_execution_plan();
-        let placement_execution_plan = runtime_plan.placement_execution_plan(
-            serving_config.event_transport.topology(),
+        let placed = self.runtime_inputs.take_placed_runtime_plan();
+        let crate::plan::PlacedRuntimeParts {
+            runtime_plan,
+            domain: domain_execution_plan,
+            listeners: listener_execution_plan,
+            providers: provider_execution_plan,
+            events: local_event_execution_plan,
+            security: security_execution_plan,
+            placement: placement_execution_plan,
+        } = placed.into_parts();
+        let serving_config = RuntimeServingConfig::from_snapshot(
             self.runtime_inputs.config(),
-        )?;
-        placement_execution_plan
-            .reject_remote_on_local_listeners(&listener_execution_plan)
-            .context("validate placement against local listeners")?;
-        let domain_execution_plan = runtime_plan.domain_execution_plan(&placement_execution_plan);
-        let context =
-            DomainPhaseContext::new(self.runtime_inputs, runtime_plan, domain_execution_plan);
+            &domain_execution_plan,
+            &local_event_execution_plan,
+        )?
+        .into_parts();
+        let context = DomainPhaseContext::new(
+            self.runtime_inputs,
+            runtime_plan,
+            domain_execution_plan,
+            security_execution_plan,
+        );
         let typed_runtime_plan = context.runtime_plan.as_typed();
-        let mut provider_build = crate::provider_output::ProviderBuild::from_plan(
-            typed_runtime_plan.provider_plans(),
-            crate::providers_gen::PROVIDER_CATALOG,
-        )
-        .context("join RuntimePlan with generated active provider catalog")?;
+        let (mut provider_build, mut provider_factories) =
+            crate::provider_output::ProviderBuild::from_execution_plan(provider_execution_plan)
+                .context("join RuntimePlan with generated active provider catalog")?;
         self::emit_typed_runtime_plan_loaded(
             typed_runtime_plan.assembly_fingerprint().as_str(),
             typed_runtime_plan.runtime_plan_fingerprint().as_str(),
@@ -100,11 +106,6 @@ impl<'a> Planned<'a> {
             typed_runtime_plan.domain_plans().len(),
             typed_runtime_plan.placement_plans().len(),
         );
-        let mut provider_factories = crate::provider_output::ProviderFactoryDispatch::from_catalog(
-            &mut provider_build,
-            crate::providers_gen::PROVIDER_CATALOG,
-        )
-        .context("dispatch generated active provider catalog")?;
         let mut uncommitted_token_lifecycle = self::UncommittedListenerPdpLifecycle::new();
         let result = async {
             let listener_pdp_constructor = provider_factories.listener_pdp()?;
@@ -168,6 +169,7 @@ impl<'a> Planned<'a> {
                     provider_build,
                     provider_factories,
                     listener_execution_plan,
+                    local_event_execution_plan,
                     placement_execution_plan,
                     serving_config,
                     runtime_rss_access,

@@ -57,8 +57,7 @@ impl<'a> DomainsWired<'a> {
                     .activated_workflows(),
                 provider_build
                     .take_inventory_receipt()
-                    .context("consume provider inventory completion receipt")?
-                    .into_probe_bindings(),
+                    .context("consume provider inventory completion receipt")?,
                 placement_execution_plan
                     .inventory_observations()
                     .context("project runtime placement inventory")?,

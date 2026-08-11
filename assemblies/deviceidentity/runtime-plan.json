@@ -1,11 +1,15 @@
 {
-  "schemaVersion": 2,
-  "assemblyFingerprint": "sha256:5e60b7497d64e82628f719a4748c0ec4682e48d7105aa1914b69d27a430d8d82",
-  "runtimePlanFingerprint": "sha256:a5190c4cd8529557627d15b89dc918ff7b9d363a1773f42b0382b2bc1fddc11c",
+  "schemaVersion": 3,
+  "assemblyFingerprint": "sha256:ea88ec83ffa7beccab12dccd966809406fb6d5ac0493d1c382cfcdafb2e34e25",
+  "runtimePlanFingerprint": "sha256:62fb85c1d67adef33310ef49db302c3f342983918ed54966d008edbbd032bc3d",
   "providerPlans": [
     {
       "id": "device-certificate-store",
       "constructor": "postgres::PgDeviceCertificateRepository",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
       "outputs": [
         "probes"
       ]
@@ -13,6 +17,10 @@
     {
       "id": "device-command-store",
       "constructor": "postgres::PgDeviceCommandStore",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
       "outputs": [
         "probes",
         "workers"
@@ -21,11 +29,19 @@
     {
       "id": "device-draft-artifact-source",
       "constructor": "identity_composition::DraftArtifactSimulator",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
       "outputs": []
     },
     {
       "id": "device-mqtt-session",
       "constructor": "mqtt::MqttSession",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -35,6 +51,9 @@
     {
       "id": "device-revocation-store",
       "constructor": "postgres::PgRevocationStore",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "workers"

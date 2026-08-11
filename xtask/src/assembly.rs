@@ -2500,54 +2500,46 @@ fn file_has_distributed_consumer_evidence(file: &syn::File) -> bool {
         return false;
     };
 
-    let producers = body
-        .stmts
-        .iter()
-        .enumerate()
-        .filter_map(|(index, statement)| {
-            let syn::Stmt::Local(local) = statement else {
-                return None;
-            };
-            let binding = local_binding_ident(&local.pat)?;
-            let init = local.init.as_ref()?;
-            terminal_path_call(
-                &init.expr,
-                &["crate", "distributed_runtime", "wire_distributed"],
-            )
-            .is_some()
-            .then_some((index, binding.to_string()))
-        })
-        .collect::<Vec<_>>();
-    let [(producer_index, binding)] = producers.as_slice() else {
-        return false;
-    };
-    let consumers = body
-        .stmts
-        .iter()
-        .enumerate()
-        .filter_map(|(index, statement)| {
-            let syn::Stmt::Local(local) = statement else {
-                return None;
-            };
-            let init = local.init.as_ref()?;
-            let call = terminal_path_call(
-                &init.expr,
-                &["crate", "event_transport", "wire_event_transport"],
-            )?;
-            call.args
-                .iter()
-                .nth(1)
-                .is_some_and(|argument| {
-                    matches!(
-                        argument,
-                        syn::Expr::Path(path)
-                            if path.path.get_ident().is_some_and(|ident| ident == binding)
-                    )
-                })
-                .then_some(index)
-        })
-        .collect::<Vec<_>>();
-    matches!(consumers.as_slice(), [consumer_index] if consumer_index > producer_index)
+    #[derive(Default)]
+    struct DistributedJoinVisitor {
+        producers: Vec<String>,
+        consumers: Vec<String>,
+    }
+    impl<'ast> syn::visit::Visit<'ast> for DistributedJoinVisitor {
+        fn visit_local(&mut self, local: &'ast syn::Local) {
+            if let (Some(binding), Some(init)) =
+                (local_binding_ident(&local.pat), local.init.as_ref())
+            {
+                if terminal_path_call(
+                    &init.expr,
+                    &["crate", "distributed_runtime", "wire_distributed"],
+                )
+                .is_some()
+                {
+                    self.producers.push(binding.to_string());
+                }
+                if let Some(call) = terminal_path_call(
+                    &init.expr,
+                    &["crate", "event_transport", "wire_event_transport"],
+                ) && let Some(syn::Expr::Path(path)) = call.args.iter().nth(1)
+                    && let Some(ident) = path.path.get_ident()
+                {
+                    self.consumers.push(ident.to_string());
+                }
+            }
+            syn::visit::visit_local(self, local);
+        }
+
+        fn visit_item_fn(&mut self, _item: &'ast syn::ItemFn) {
+            // Nested function bait is not execution evidence for the phase body.
+        }
+    }
+    let mut visitor = DistributedJoinVisitor::default();
+    syn::visit::Visit::visit_block(&mut visitor, body);
+    matches!(
+        (visitor.producers.as_slice(), visitor.consumers.as_slice()),
+        ([producer], [consumer]) if producer == consumer
+    )
 }
 
 fn local_binding_ident(pat: &syn::Pat) -> Option<&syn::Ident> {
@@ -4643,7 +4635,7 @@ impl<'ast> syn::visit::Visit<'ast> for SecurityCloseoutVisitor {
         }
         if (call_path_ends_with(node.func.as_ref(), "exact_join")
             && call_path_contains_segment(node.func.as_ref(), "ProviderRoleBatches"))
-            || (call_path_ends_with(node.func.as_ref(), "from_plan")
+            || (call_path_ends_with(node.func.as_ref(), "from_execution_plan")
                 && call_path_contains_segment(node.func.as_ref(), "ProviderBuild"))
         {
             self.record_evidence(|e| e.provider_selection = true);
@@ -8038,7 +8030,7 @@ fn wire_domain_transport_from() {
 }
 
 fn run_startup() {
-    let mut provider_build = crate::provider_output::ProviderBuild::from_plan(
+    let mut provider_build = crate::provider_output::ProviderBuild::from_execution_plan(
         runtime_plan,
         provider_catalog,
     ).context("join runtime provider plan")?;
@@ -9823,7 +9815,9 @@ fn run() {{
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
-                Rule::RuntimeInventoryListenerProvenance | Rule::ProviderConstructionLiveJoin
+                Rule::RuntimeInventoryListenerProvenance
+                    | Rule::ProductionEdgeRateLimitFunnel
+                    | Rule::ProviderConstructionLiveJoin
             )),
             "security closeout fixture emitted unrelated findings: {findings:?}"
         );
@@ -9847,7 +9841,9 @@ fn run() {{
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
-                Rule::RuntimeInventoryListenerProvenance | Rule::ProviderConstructionLiveJoin
+                Rule::RuntimeInventoryListenerProvenance
+                    | Rule::ProductionEdgeRateLimitFunnel
+                    | Rule::ProviderConstructionLiveJoin
             )),
             "security closeout fixture emitted unrelated findings: {findings:?}"
         );
@@ -9870,7 +9866,9 @@ fn run() {{
         assert!(
             findings.iter().all(|finding| matches!(
                 finding.rule,
-                Rule::RuntimeInventoryListenerProvenance | Rule::ProviderConstructionLiveJoin
+                Rule::RuntimeInventoryListenerProvenance
+                    | Rule::ProductionEdgeRateLimitFunnel
+                    | Rule::ProviderConstructionLiveJoin
             )),
             "security closeout fixture emitted unrelated findings: {findings:?}"
         );
@@ -10429,9 +10427,12 @@ id = "listener-rate-limiter"
 port = "diport::RateLimiter"
 provider = "redis::RedisRateLimiter"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "httpserve"
 lifecycle = "active"
-durability = "ephemeral-memory"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-open"
 purpose = "per-peer-IP request rate limiting (pre-auth, DoS/brute-force 防护)"
 outputs = []
 "#,
@@ -10440,7 +10441,7 @@ name = "runtime"
 
 [dependencies]
 postgres = { path = "../../adapters/postgres" }
-ratelimit = { path = "../../adapters/ratelimit" }
+redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
 "#,
         )?;
 
@@ -10901,9 +10902,12 @@ id = "listener-rate-limiter"
 port = "diport::RateLimiter"
 provider = "redis::RedisRateLimiter"
 providerCrate = "redis"
+requiredFeatures = ["backend"]
 consumer = "httpserve"
 lifecycle = "active"
-durability = "ephemeral-memory"
+durability = "persistent"
+scope = "cluster-global"
+failurePosture = "fail-open"
 purpose = "per-peer-IP request rate limiting"
 outputs = []
 "#,
@@ -10911,7 +10915,7 @@ outputs = []
 name = "runtime"
 
 [dependencies]
-ratelimit = { path = "../../adapters/ratelimit" }
+redis = { package = "redis-adapter", path = "../../adapters/redis", features = ["backend"] }
 "#,
         )?;
 

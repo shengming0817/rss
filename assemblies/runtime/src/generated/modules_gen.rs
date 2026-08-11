@@ -9,49 +9,109 @@ use crate::SharedRuntimeDeps;
 
 use crate::domains::DomainWiringFailure;
 
+pub const ASSEMBLY_DOMAINS: &[assembly_schema::AssemblyDomain] = &[
+    assembly_schema::AssemblyDomain::Settings,
+    assembly_schema::AssemblyDomain::Identity,
+    assembly_schema::AssemblyDomain::Audit,
+];
+
+pub(crate) struct PreparedLocalDomainInputs {
+    inputs: Vec<LocalDomainModuleInput>,
+}
+
+pub(crate) enum LocalDomainModuleInput {
+    Settings(crate::domains::settings::SettingsModuleInput),
+    Identity(crate::domains::identity::IdentityModuleInput),
+    Audit(crate::domains::audit::AuditModuleInput),
+}
+
+impl PreparedLocalDomainInputs {
+    pub(crate) fn from_snapshot(
+        execution: &crate::plan::DomainExecutionPlan,
+        mapper: &crate::config::ServingConfigMapper<'_>,
+        keyprovider_readiness_interval: settings_composition::KeyProviderReadinessInterval,
+        token_profiles: &crate::config::TokenProfilesConfig,
+    ) -> anyhow::Result<Self> {
+        let mut inputs = Vec::with_capacity(execution.local_domains().len());
+        for domain in execution.local_domains() {
+            inputs.push(match domain {
+                assembly_schema::AssemblyDomain::Settings => LocalDomainModuleInput::Settings(
+                    crate::domains::settings::SettingsModuleInput::new(
+                        keyprovider_readiness_interval,
+                    ),
+                ),
+                assembly_schema::AssemblyDomain::Identity => LocalDomainModuleInput::Identity(
+                    crate::domains::identity::IdentityModuleInput::from_mapper(
+                        mapper,
+                        token_profiles.primary_identity_profile()?,
+                    )?,
+                ),
+                assembly_schema::AssemblyDomain::Audit => LocalDomainModuleInput::Audit(
+                    crate::domains::audit::AuditModuleInput::from_mapper(mapper)?,
+                ),
+                other => anyhow::bail!(
+                    "runtime generated unsupported local domain '{}'",
+                    other.as_str()
+                ),
+            });
+        }
+        Ok(Self { inputs })
+    }
+
+    pub(crate) fn into_inputs(self) -> impl Iterator<Item = LocalDomainModuleInput> {
+        self.inputs.into_iter()
+    }
+
+    pub(crate) fn settings_readiness_interval(
+        &self,
+    ) -> anyhow::Result<settings_composition::KeyProviderReadinessInterval> {
+        self.inputs
+            .iter()
+            .find_map(|input| match input {
+                LocalDomainModuleInput::Settings(input) => Some(input.readiness_interval()),
+                _ => None,
+            })
+            .ok_or_else(|| anyhow::anyhow!("settings local execution input is not active"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn identity_for_test(&self) -> &crate::domains::identity::IdentityModuleInput {
+        self.inputs
+            .iter()
+            .find_map(|input| match input {
+                LocalDomainModuleInput::Identity(input) => Some(input),
+                _ => None,
+            })
+            .unwrap_or_else(|| unreachable!("all-local test plan contains identity"))
+    }
+}
+
 pub async fn wire_domains(
     deps: &SharedRuntimeDeps,
-    inputs: crate::domains::DomainModuleInputs,
-    placement: &crate::plan::PlacementExecutionPlan,
+    providers: crate::LocalDomainProviderCatalog,
+    inputs: PreparedLocalDomainInputs,
 ) -> Result<Vec<DomainBinding>, DomainWiringFailure> {
-    let crate::domains::DomainModuleInputs {
-        settings,
-        identity,
-        audit,
-    } = inputs;
     let mut bindings = Vec::new();
-    if placement.is_local(assembly_schema::AssemblyDomain::Settings) {
-        match crate::domains::settings::module(deps, settings)
-            .await
-            .context("wire domain 'settings'")
-        {
+    for input in inputs.into_inputs() {
+        let result = match input {
+            LocalDomainModuleInput::Settings(input) => {
+                crate::domains::settings::module(deps, &providers, input)
+                    .await
+                    .context("wire domain 'settings'")
+            }
+            LocalDomainModuleInput::Identity(input) => {
+                crate::domains::identity::module(deps, &providers, input)
+                    .await
+                    .context("wire domain 'identity'")
+            }
+            LocalDomainModuleInput::Audit(input) => crate::domains::audit::module(deps, input)
+                .await
+                .context("wire domain 'audit'"),
+        };
+        match result {
             Ok(binding) => bindings.push(binding),
             Err(source) => return Err(DomainWiringFailure { source, bindings }),
         }
-    } else {
-        let _ = settings;
-    }
-    if placement.is_local(assembly_schema::AssemblyDomain::Identity) {
-        match crate::domains::identity::module(deps, identity)
-            .await
-            .context("wire domain 'identity'")
-        {
-            Ok(binding) => bindings.push(binding),
-            Err(source) => return Err(DomainWiringFailure { source, bindings }),
-        }
-    } else {
-        let _ = identity;
-    }
-    if placement.is_local(assembly_schema::AssemblyDomain::Audit) {
-        match crate::domains::audit::module(deps, audit)
-            .await
-            .context("wire domain 'audit'")
-        {
-            Ok(binding) => bindings.push(binding),
-            Err(source) => return Err(DomainWiringFailure { source, bindings }),
-        }
-    } else {
-        let _ = audit;
     }
     Ok(bindings)
 }
@@ -72,27 +132,35 @@ pub const DOMAIN_LISTENER_BINDINGS: &[bootstrap::DomainListenerBinding] = &[
 ];
 
 #[cfg(test)]
-pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {
+pub(crate) async fn wire_test_domains(
+    execution: &crate::plan::DomainExecutionPlan,
+) -> anyhow::Result<Vec<DomainBinding>> {
     let mut bindings = Vec::new();
-    bindings.push(
-        crate::domains::settings::tests::test_binding(
-            crate::domains::settings::tests::test_input()?
-        )
-        .await
-        .context("wire test domain 'settings'")?,
-    );
-    bindings.push(
-        crate::domains::identity::tests::test_binding(
-            crate::domains::identity::tests::test_input()?
-        )
-        .await
-        .context("wire test domain 'identity'")?,
-    );
-    bindings.push(
-        crate::domains::audit::tests::test_binding(crate::domains::audit::tests::test_input()?)
+    if execution.contains(assembly_schema::AssemblyDomain::Settings) {
+        bindings.push(
+            crate::domains::settings::tests::test_binding(
+                crate::domains::settings::tests::test_input()?,
+            )
             .await
-            .context("wire test domain 'audit'")?,
-    );
+            .context("wire test domain 'settings'")?,
+        );
+    }
+    if execution.contains(assembly_schema::AssemblyDomain::Identity) {
+        bindings.push(
+            crate::domains::identity::tests::test_binding(
+                crate::domains::identity::tests::test_input()?,
+            )
+            .await
+            .context("wire test domain 'identity'")?,
+        );
+    }
+    if execution.contains(assembly_schema::AssemblyDomain::Audit) {
+        bindings.push(
+            crate::domains::audit::tests::test_binding(crate::domains::audit::tests::test_input()?)
+                .await
+                .context("wire test domain 'audit'")?,
+        );
+    }
     Ok(bindings)
 }
 

@@ -91,6 +91,10 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             }
         };
         transaction.stage_domain_output(domain_output);
+        registry.register_primary_authorizer(identity_composition::root_contract_authorizer(
+            &pg.for_domain::<postgres::caps::Identity>(),
+            Arc::new(crate::SystemClock),
+        ))?;
 
         let event_outputs = crate::eventing::wire(
             &pg,

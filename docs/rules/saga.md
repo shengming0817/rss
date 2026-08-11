@@ -141,7 +141,7 @@ production activation。runtime 与 operator 均无 caller-controlled retain 或
 ## Activation 与 backend selection
 
 - contract lifecycle 只描述 Saga definition；assembly manifest v2 `workflowActivations` 才描述 deployment
-  activation。AssemblyLock v2 校验 definition identity，RuntimePlan v2 `workflowPlans` 携带 assembly-local
+  activation。AssemblyLock v2 校验 definition identity，RuntimePlan v3 `workflowPlans` 携带 assembly-local
   闭值结果。`Topology`、环境配置和 resolver 均不是 activation/default truth。
 - active Saga 的 requirement exact set 以机器 carrier
   `assembly_schema::SagaActivation::Active.requirements()` 为准：`typed-actions`、`definition-registry`、

@@ -180,6 +180,7 @@ fn listener_pdp_requires_probe_and_resource_lifecycle_outputs() {
 
 const RATE_LIMITER_ENTRY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::ListenerRateLimiter,
+    ProviderRole::ListenerRateLimiter.activation(),
     DiportPort::RateLimiter,
     ProviderConstructor::RedisRateLimiter,
     ProviderFactorySymbol::HttpserveRedisRateLimiter,
@@ -194,6 +195,7 @@ const RATE_LIMITER_ENTRY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
 
 const REPLAY_ENTRY: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::ServiceTokenReplayStore,
+    ProviderRole::ServiceTokenReplayStore.activation(),
     DiportPort::ServiceTokenReplayStore,
     ProviderConstructor::PostgresServiceTokenReplayStore,
     ProviderFactorySymbol::OidcPostgresServiceTokenReplayStore,

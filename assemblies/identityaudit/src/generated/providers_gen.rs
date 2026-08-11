@@ -3,8 +3,8 @@
 // Source-Manifest-Digest: sha256:ddb5983acc09c7afd012a2e91bf60dadb7eaee617f93fbdc4a3008fc7cba5d5f
 
 use assembly_schema::{
-    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,
-    ProviderDurability, ProviderFactorySymbol, ProviderRole,
+    AssemblyDomain, DiportPort, LifecycleChannel, ProviderActivation, ProviderCatalogEntry,
+    ProviderConstructor, ProviderConsumer, ProviderDurability, ProviderFactorySymbol, ProviderRole,
 };
 
 pub(crate) const ASSEMBLY_NAMESPACE: &str = "identityaudit";
@@ -12,6 +12,7 @@ pub(crate) const ASSEMBLY_NAMESPACE: &str = "identityaudit";
 pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ProviderCatalogEntry::checked(
         ProviderRole::AuthAuditSink,
+        ProviderActivation::Process,
         DiportPort::AuditSink,
         ProviderConstructor::PostgresAuthAuditSink,
         ProviderFactorySymbol::HttpservePostgresAuthAuditSink,
@@ -29,6 +30,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::DistributedCasStore,
+        ProviderActivation::Process,
         DiportPort::Cas,
         ProviderConstructor::PostgresCasStore,
         ProviderFactorySymbol::DistributedPostgresCasStore,
@@ -46,6 +48,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::DistributedLockStore,
+        ProviderActivation::Process,
         DiportPort::Lock,
         ProviderConstructor::RedisLockStore,
         ProviderFactorySymbol::DistributedRedisLockStore,
@@ -63,6 +66,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::DlxArchiveKeyProvider,
+        ProviderActivation::Process,
         DiportPort::KeyProvider,
         ProviderConstructor::VaultKeyProvider,
         ProviderFactorySymbol::EventexecVaultArchiveKeyProvider,
@@ -80,6 +84,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::EventPublisher,
+        ProviderActivation::LocalEventExecution,
         DiportPort::Publisher,
         ProviderConstructor::AmqpPublisher,
         ProviderFactorySymbol::EventexecAmqpPublisher,
@@ -97,6 +102,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::EventSubscriber,
+        ProviderActivation::LocalEventExecution,
         DiportPort::AckableSubscriber,
         ProviderConstructor::AmqpSubscriber,
         ProviderFactorySymbol::EventexecAmqpSubscriber,
@@ -114,6 +120,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::IdentitySigner,
+        ProviderActivation::DomainLocal(AssemblyDomain::Identity),
         DiportPort::Signer,
         ProviderConstructor::VaultSigner,
         ProviderFactorySymbol::IdentityVaultSigner,
@@ -131,6 +138,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::ListenerPdp,
+        ProviderActivation::Process,
         DiportPort::Pdp,
         ProviderConstructor::OidcProvider,
         ProviderFactorySymbol::HttpserveOidcPdp,
@@ -144,6 +152,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::ListenerRateLimiter,
+        ProviderActivation::Process,
         DiportPort::RateLimiter,
         ProviderConstructor::RedisRateLimiter,
         ProviderFactorySymbol::HttpserveRedisRateLimiter,

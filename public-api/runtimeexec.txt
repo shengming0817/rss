@@ -72,7 +72,7 @@ impl core::marker::Unpin for runtimeexec::config::SecretValue
 impl core::marker::UnsafeUnpin for runtimeexec::config::SecretValue
 impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::SecretValue
 impl core::panic::unwind_safe::UnwindSafe for runtimeexec::config::SecretValue
-pub struct runtimeexec::config::ServingFrontendConfig
+pub struct runtimeexec::config::ServingFrontendConfig<P>
 pub runtimeexec::config::ServingFrontendConfig::admin_port: u16
 pub runtimeexec::config::ServingFrontendConfig::allow_set: authn::mtls::MtlsAllowSet
 pub runtimeexec::config::ServingFrontendConfig::health_port: u16
@@ -80,14 +80,14 @@ pub runtimeexec::config::ServingFrontendConfig::pod_ip: core::net::ip_addr::IpAd
 pub runtimeexec::config::ServingFrontendConfig::primary_port: u16
 pub runtimeexec::config::ServingFrontendConfig::rate_limit_quota: diport::rate_limiter::RateLimitQuota
 pub runtimeexec::config::ServingFrontendConfig::spiffe_endpoint: alloc::string::String
-pub runtimeexec::config::ServingFrontendConfig::trusted_proxy_cidrs: alloc::vec::Vec<alloc::string::String>
-impl core::marker::Freeze for runtimeexec::config::ServingFrontendConfig
-impl core::marker::Send for runtimeexec::config::ServingFrontendConfig
-impl core::marker::Sync for runtimeexec::config::ServingFrontendConfig
-impl core::marker::Unpin for runtimeexec::config::ServingFrontendConfig
-impl core::marker::UnsafeUnpin for runtimeexec::config::ServingFrontendConfig
-impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::ServingFrontendConfig
-impl core::panic::unwind_safe::UnwindSafe for runtimeexec::config::ServingFrontendConfig
+pub runtimeexec::config::ServingFrontendConfig::trusted_proxy_config: P
+impl<P> core::marker::Freeze for runtimeexec::config::ServingFrontendConfig<P> where P: core::marker::Freeze
+impl<P> core::marker::Send for runtimeexec::config::ServingFrontendConfig<P> where P: core::marker::Send
+impl<P> core::marker::Sync for runtimeexec::config::ServingFrontendConfig<P> where P: core::marker::Sync
+impl<P> core::marker::Unpin for runtimeexec::config::ServingFrontendConfig<P> where P: core::marker::Unpin
+impl<P> core::marker::UnsafeUnpin for runtimeexec::config::ServingFrontendConfig<P> where P: core::marker::UnsafeUnpin
+impl<P> core::panic::unwind_safe::RefUnwindSafe for runtimeexec::config::ServingFrontendConfig<P> where P: core::panic::unwind_safe::RefUnwindSafe
+impl<P> core::panic::unwind_safe::UnwindSafe for runtimeexec::config::ServingFrontendConfig<P> where P: core::panic::unwind_safe::UnwindSafe
 pub const runtimeexec::config::ADMIN_PORT_ENV: &str
 pub const runtimeexec::config::DEFAULT_RATE_LIMIT_BURST: u32
 pub const runtimeexec::config::DEFAULT_RATE_LIMIT_PER_SECOND: u32
@@ -99,10 +99,9 @@ pub const runtimeexec::config::RATE_LIMIT_BURST_ENV: &str
 pub const runtimeexec::config::RATE_LIMIT_PER_SECOND_ENV: &str
 pub const runtimeexec::config::SPIFFE_ENDPOINT_ENV: &str
 pub const runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV: &str
-pub fn runtimeexec::config::capture_serving_frontend(impl core::ops::function::FnMut(&'static str) -> core::option::Option<std::ffi::os_str::OsString>) -> core::result::Result<runtimeexec::config::ServingFrontendConfig, runtimeexec::config::FrontendConfigError>
+pub fn runtimeexec::config::capture_serving_frontend<P>(impl core::ops::function::FnMut(&'static str) -> core::option::Option<std::ffi::os_str::OsString>, impl core::ops::function::FnOnce(core::option::Option<&str>) -> core::result::Result<P, runtimeexec::config::FrontendConfigError>) -> core::result::Result<runtimeexec::config::ServingFrontendConfig<P>, runtimeexec::config::FrontendConfigError>
 pub fn runtimeexec::config::rate_limit_quota_from_values(core::option::Option<&str>, core::option::Option<&str>) -> diport::rate_limiter::RateLimitQuota
 pub fn runtimeexec::config::read_secret_document(&std::path::Path) -> std::io::error::Result<runtimeexec::config::SecretDocument>
-pub fn runtimeexec::config::trusted_proxy_cidrs_from_value(core::option::Option<&str>) -> core::result::Result<alloc::vec::Vec<alloc::string::String>, runtimeexec::config::FrontendConfigError>
 pub mod runtimeexec::inventory
 pub enum runtimeexec::inventory::InventoryEndpointScheme
 pub runtimeexec::inventory::InventoryEndpointScheme::Http
@@ -135,6 +134,7 @@ pub runtimeexec::inventory::InventoryError::Endpoint
 pub runtimeexec::inventory::InventoryError::ListenerBinding
 pub runtimeexec::inventory::InventoryError::Placement
 pub runtimeexec::inventory::InventoryError::ProviderBinding
+pub runtimeexec::inventory::InventoryError::ProviderPlanSource
 pub runtimeexec::inventory::InventoryError::WorkflowPlanSource
 impl core::clone::Clone for runtimeexec::inventory::InventoryError
 pub fn runtimeexec::inventory::InventoryError::clone(&self) -> runtimeexec::inventory::InventoryError
@@ -430,6 +430,18 @@ impl core::marker::Unpin for runtimeexec::inventory::PlacementObservation
 impl core::marker::UnsafeUnpin for runtimeexec::inventory::PlacementObservation
 impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::PlacementObservation
 impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::PlacementObservation
+pub struct runtimeexec::inventory::ProviderExecutionReceipt
+impl runtimeexec::inventory::ProviderExecutionReceipt
+pub fn runtimeexec::inventory::ProviderExecutionReceipt::bindings(&self) -> &[runtimeexec::inventory::ProviderProbeBinding]
+pub fn runtimeexec::inventory::ProviderExecutionReceipt::from_runtime_plan(&assembly_schema::runtime_plan::RuntimePlan, alloc::vec::Vec<runtimeexec::inventory::ProviderProbeBinding>) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
+pub fn runtimeexec::inventory::ProviderExecutionReceipt::seal(runtimeinventorymint::RuntimeInventoryMint, impl core::convert::Into<alloc::string::String>, impl core::iter::traits::collect::IntoIterator<Item = alloc::string::String>, alloc::vec::Vec<runtimeexec::inventory::ProviderProbeBinding>) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
+impl core::marker::Freeze for runtimeexec::inventory::ProviderExecutionReceipt
+impl core::marker::Send for runtimeexec::inventory::ProviderExecutionReceipt
+impl core::marker::Sync for runtimeexec::inventory::ProviderExecutionReceipt
+impl core::marker::Unpin for runtimeexec::inventory::ProviderExecutionReceipt
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::ProviderExecutionReceipt
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::ProviderExecutionReceipt
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::ProviderExecutionReceipt
 pub struct runtimeexec::inventory::ProviderProbeBinding
 impl runtimeexec::inventory::ProviderProbeBinding
 pub fn runtimeexec::inventory::ProviderProbeBinding::from_probe_receipt(impl core::convert::Into<alloc::string::String>, alloc::vec::Vec<primitives::healthz::ProbeName>) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
@@ -452,7 +464,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::Provide
 impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::ProviderProbeBinding
 pub struct runtimeexec::inventory::RuntimeInventorySeed
 impl runtimeexec::inventory::RuntimeInventorySeed
-pub fn runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(&assembly_schema::runtime_plan::RuntimePlan, eventexec::workflow_runtime::ActivatedWorkflowsView<'_>, alloc::vec::Vec<runtimeexec::inventory::ProviderProbeBinding>, alloc::vec::Vec<runtimeexec::inventory::PlacementObservation>) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
+pub fn runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(&assembly_schema::runtime_plan::RuntimePlan, eventexec::workflow_runtime::ActivatedWorkflowsView<'_>, runtimeexec::inventory::ProviderExecutionReceipt, alloc::vec::Vec<runtimeexec::inventory::PlacementObservation>) -> core::result::Result<Self, runtimeexec::inventory::InventoryError>
 pub fn runtimeexec::inventory::RuntimeInventorySeed::with_build_metadata(self, runtimeexec::inventory::BuildMetadata) -> Self
 impl core::marker::Freeze for runtimeexec::inventory::RuntimeInventorySeed
 impl core::marker::Send for runtimeexec::inventory::RuntimeInventorySeed

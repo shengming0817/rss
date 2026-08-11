@@ -2784,6 +2784,32 @@ impl<'dynosaur_struct> !core::marker::Unpin for diport::DynServiceTokenReplaySto
 impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynServiceTokenReplayStore<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynServiceTokenReplayStore<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynServiceTokenReplayStore<'dynosaur_struct>
+pub struct diport::pdp::JwtSigningBinding<P: diport::pdp::TokenProfileMarker>
+impl diport::pdp::JwtSigningBinding<diport::pdp::RssAccessProfile>
+pub fn diport::pdp::JwtSigningBinding<diport::pdp::RssAccessProfile>::rss_access(diport::signer::KeyId) -> Self
+impl diport::pdp::JwtSigningBinding<diport::pdp::ServiceTokenProfile>
+pub fn diport::pdp::JwtSigningBinding<diport::pdp::ServiceTokenProfile>::service_token(diport::signer::KeyId) -> Self
+impl<P: diport::pdp::TokenProfileMarker> diport::pdp::JwtSigningBinding<P>
+pub fn diport::pdp::JwtSigningBinding<P>::accepts(&self, &diport::signer::SignRequest) -> bool
+pub fn diport::pdp::JwtSigningBinding<P>::active_key(&self) -> &diport::signer::KeyId
+pub fn diport::pdp::JwtSigningBinding<P>::algorithm(&self) -> diport::pdp::TokenAlgorithm
+pub fn diport::pdp::JwtSigningBinding<P>::purpose(&self) -> &diport::signer::SigningPurpose
+pub fn diport::pdp::JwtSigningBinding<P>::sign_request(&self, impl core::convert::Into<diport::RedactedBytes>) -> diport::signer::SignRequest
+impl<P: core::clone::Clone + diport::pdp::TokenProfileMarker> core::clone::Clone for diport::pdp::JwtSigningBinding<P>
+pub fn diport::pdp::JwtSigningBinding<P>::clone(&self) -> diport::pdp::JwtSigningBinding<P>
+impl<P: core::cmp::Eq + diport::pdp::TokenProfileMarker> core::cmp::Eq for diport::pdp::JwtSigningBinding<P>
+impl<P: core::cmp::PartialEq + diport::pdp::TokenProfileMarker> core::cmp::PartialEq for diport::pdp::JwtSigningBinding<P>
+pub fn diport::pdp::JwtSigningBinding<P>::eq(&self, &diport::pdp::JwtSigningBinding<P>) -> bool
+impl<P: core::fmt::Debug + diport::pdp::TokenProfileMarker> core::fmt::Debug for diport::pdp::JwtSigningBinding<P>
+pub fn diport::pdp::JwtSigningBinding<P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<P: diport::pdp::TokenProfileMarker> core::marker::StructuralPartialEq for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::Freeze for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::Send for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::Sync for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::Unpin for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::UnsafeUnpin for diport::pdp::JwtSigningBinding<P>
+impl<P> core::panic::unwind_safe::RefUnwindSafe for diport::pdp::JwtSigningBinding<P>
+impl<P> core::panic::unwind_safe::UnwindSafe for diport::pdp::JwtSigningBinding<P>
 pub struct diport::pdp::RawCredential
 impl diport::pdp::RawCredential
 pub fn diport::pdp::RawCredential::federated_access(impl core::convert::Into<alloc::string::String>) -> Self
@@ -2876,11 +2902,13 @@ pub struct diport::pdp::TokenPolicy
 impl diport::pdp::TokenPolicy
 pub const fn diport::pdp::TokenPolicy::algorithm(self) -> diport::pdp::TokenAlgorithm
 pub const fn diport::pdp::TokenPolicy::jose_typ(self) -> &'static str
+pub const fn diport::pdp::TokenPolicy::kind_claim_name(self) -> &'static str
 pub const fn diport::pdp::TokenPolicy::maximum_header_length(self) -> usize
 pub const fn diport::pdp::TokenPolicy::maximum_lifetime(self) -> core::time::Duration
 pub const fn diport::pdp::TokenPolicy::maximum_payload_length(self) -> usize
 pub const fn diport::pdp::TokenPolicy::maximum_signature_length(self) -> usize
 pub const fn diport::pdp::TokenPolicy::maximum_token_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::tenant_claim_name(self) -> &'static str
 pub const fn diport::pdp::TokenPolicy::token_use(self) -> &'static str
 impl core::clone::Clone for diport::pdp::TokenPolicy
 pub fn diport::pdp::TokenPolicy::clone(&self) -> diport::pdp::TokenPolicy
@@ -8417,6 +8445,32 @@ impl core::marker::Unpin for diport::fenced_writer::FencedWriterError
 impl core::marker::UnsafeUnpin for diport::fenced_writer::FencedWriterError
 impl !core::panic::unwind_safe::RefUnwindSafe for diport::fenced_writer::FencedWriterError
 impl !core::panic::unwind_safe::UnwindSafe for diport::fenced_writer::FencedWriterError
+pub struct diport::JwtSigningBinding<P: diport::pdp::TokenProfileMarker>
+impl diport::pdp::JwtSigningBinding<diport::pdp::RssAccessProfile>
+pub fn diport::pdp::JwtSigningBinding<diport::pdp::RssAccessProfile>::rss_access(diport::signer::KeyId) -> Self
+impl diport::pdp::JwtSigningBinding<diport::pdp::ServiceTokenProfile>
+pub fn diport::pdp::JwtSigningBinding<diport::pdp::ServiceTokenProfile>::service_token(diport::signer::KeyId) -> Self
+impl<P: diport::pdp::TokenProfileMarker> diport::pdp::JwtSigningBinding<P>
+pub fn diport::pdp::JwtSigningBinding<P>::accepts(&self, &diport::signer::SignRequest) -> bool
+pub fn diport::pdp::JwtSigningBinding<P>::active_key(&self) -> &diport::signer::KeyId
+pub fn diport::pdp::JwtSigningBinding<P>::algorithm(&self) -> diport::pdp::TokenAlgorithm
+pub fn diport::pdp::JwtSigningBinding<P>::purpose(&self) -> &diport::signer::SigningPurpose
+pub fn diport::pdp::JwtSigningBinding<P>::sign_request(&self, impl core::convert::Into<diport::RedactedBytes>) -> diport::signer::SignRequest
+impl<P: core::clone::Clone + diport::pdp::TokenProfileMarker> core::clone::Clone for diport::pdp::JwtSigningBinding<P>
+pub fn diport::pdp::JwtSigningBinding<P>::clone(&self) -> diport::pdp::JwtSigningBinding<P>
+impl<P: core::cmp::Eq + diport::pdp::TokenProfileMarker> core::cmp::Eq for diport::pdp::JwtSigningBinding<P>
+impl<P: core::cmp::PartialEq + diport::pdp::TokenProfileMarker> core::cmp::PartialEq for diport::pdp::JwtSigningBinding<P>
+pub fn diport::pdp::JwtSigningBinding<P>::eq(&self, &diport::pdp::JwtSigningBinding<P>) -> bool
+impl<P: core::fmt::Debug + diport::pdp::TokenProfileMarker> core::fmt::Debug for diport::pdp::JwtSigningBinding<P>
+pub fn diport::pdp::JwtSigningBinding<P>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<P: diport::pdp::TokenProfileMarker> core::marker::StructuralPartialEq for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::Freeze for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::Send for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::Sync for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::Unpin for diport::pdp::JwtSigningBinding<P>
+impl<P> core::marker::UnsafeUnpin for diport::pdp::JwtSigningBinding<P>
+impl<P> core::panic::unwind_safe::RefUnwindSafe for diport::pdp::JwtSigningBinding<P>
+impl<P> core::panic::unwind_safe::UnwindSafe for diport::pdp::JwtSigningBinding<P>
 pub struct diport::KeyId(_)
 impl diport::signer::KeyId
 pub fn diport::signer::KeyId::as_str(&self) -> &str
@@ -9941,11 +9995,13 @@ pub struct diport::TokenPolicy
 impl diport::pdp::TokenPolicy
 pub const fn diport::pdp::TokenPolicy::algorithm(self) -> diport::pdp::TokenAlgorithm
 pub const fn diport::pdp::TokenPolicy::jose_typ(self) -> &'static str
+pub const fn diport::pdp::TokenPolicy::kind_claim_name(self) -> &'static str
 pub const fn diport::pdp::TokenPolicy::maximum_header_length(self) -> usize
 pub const fn diport::pdp::TokenPolicy::maximum_lifetime(self) -> core::time::Duration
 pub const fn diport::pdp::TokenPolicy::maximum_payload_length(self) -> usize
 pub const fn diport::pdp::TokenPolicy::maximum_signature_length(self) -> usize
 pub const fn diport::pdp::TokenPolicy::maximum_token_length(self) -> usize
+pub const fn diport::pdp::TokenPolicy::tenant_claim_name(self) -> &'static str
 pub const fn diport::pdp::TokenPolicy::token_use(self) -> &'static str
 impl core::clone::Clone for diport::pdp::TokenPolicy
 pub fn diport::pdp::TokenPolicy::clone(&self) -> diport::pdp::TokenPolicy

@@ -43,15 +43,6 @@ const DOMAIN_TRANSPORT_MTLS_SPIFFE_ALLOW_SET_ENV_SUFFIX: &str =
 /// Shared remote domain transport endpoint fallback (`durable-shared` only).
 pub(crate) const DOMAIN_TRANSPORT_SHARED_URL_ENV: &str = "RSS_DOMAIN_TRANSPORT_URL";
 
-/// Assembly domains that always capture per-domain transport URL / allow-set keys.
-const ASSEMBLY_DOMAIN_TRANSPORT_DOMAINS: &[&str] = &["settings", "identity", "audit"];
-
-pub(crate) const SETTINGS_DOMAIN_PLACEMENT_WORKLOAD_ENV: &str =
-    "RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD";
-pub(crate) const IDENTITY_DOMAIN_PLACEMENT_WORKLOAD_ENV: &str =
-    "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD";
-pub(crate) const AUDIT_DOMAIN_PLACEMENT_WORKLOAD_ENV: &str = "RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD";
-
 /// RSS access-token signing / rotation env keys (single source for parse + error copy).
 pub(crate) const RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID_ENV: &str =
     "RSS_ACCESS_TOKEN_SIGNING_ACTIVE_KEY_ID";
@@ -113,9 +104,6 @@ const FIXED_SERVING_KEYS: &[&str] = &[
     runtimeexec::config::RATE_LIMIT_BURST_ENV,
     "RSS_IDENTITY_AUTH_GRANT_TTL_SECS",
     "RSS_IDENTITY_PSEUDONYM_KEY_B64URL",
-    IDENTITY_DOMAIN_PLACEMENT_WORKLOAD_ENV,
-    SETTINGS_DOMAIN_PLACEMENT_WORKLOAD_ENV,
-    AUDIT_DOMAIN_PLACEMENT_WORKLOAD_ENV,
     "RSS_ADMIN_TOKEN_PROFILE",
     "RSS_ACCESS_TOKEN_AUDIENCE",
     "RSS_ACCESS_TOKEN_ISSUER",
@@ -251,9 +239,6 @@ const FIXED_PROJECTION_OPERATOR_KEYS: &[&str] = &[
     "RSS_PRIMARY_TOKEN_PROFILE",
     "RSS_ADMIN_TOKEN_PROFILE",
     "RSS_INTERNAL_AUTH_SCHEME",
-    SETTINGS_DOMAIN_PLACEMENT_WORKLOAD_ENV,
-    IDENTITY_DOMAIN_PLACEMENT_WORKLOAD_ENV,
-    AUDIT_DOMAIN_PLACEMENT_WORKLOAD_ENV,
 ];
 
 const FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS: &[&str] = &[
@@ -1275,7 +1260,7 @@ impl TokenProfilesConfig {
         self.service_token.as_ref()
     }
 
-    fn primary_identity_profile(
+    pub(crate) fn primary_identity_profile(
         &self,
     ) -> anyhow::Result<crate::domains::identity::IdentityTokenProfileInput> {
         match self.primary {
@@ -1470,7 +1455,7 @@ impl<'a> ServingConfigMapper<'a> {
 }
 
 pub(crate) struct WorkerRuntimeConfig {
-    event: crate::event_transport::EventWorkerConfig,
+    event: Option<crate::event_transport::EventWorkerConfig>,
     dlx: crate::event_transport::DlxWorkerConfig,
     distributed: crate::distributed_runtime::DistributedWorkerConfig,
     auth_grant_sweep_interval: std::time::Duration,
@@ -1478,10 +1463,27 @@ pub(crate) struct WorkerRuntimeConfig {
 }
 
 impl WorkerRuntimeConfig {
+    #[cfg(test)]
     pub(crate) fn from_mapper(mapper: &ServingConfigMapper<'_>) -> anyhow::Result<Self> {
+        Self::from_mapper_with_event(mapper, true)
+    }
+
+    fn from_execution(
+        mapper: &ServingConfigMapper<'_>,
+        events: &crate::plan::LocalEventExecutionPlan,
+    ) -> anyhow::Result<Self> {
+        Self::from_mapper_with_event(mapper, events.is_active())
+    }
+
+    fn from_mapper_with_event(
+        mapper: &ServingConfigMapper<'_>,
+        event_active: bool,
+    ) -> anyhow::Result<Self> {
         let config = mapper.config();
         Ok(Self {
-            event: crate::event_transport::EventWorkerConfig::from_mapper(mapper)?,
+            event: event_active
+                .then(|| crate::event_transport::EventWorkerConfig::from_mapper(mapper))
+                .transpose()?,
             dlx: crate::event_transport::DlxWorkerConfig::canonical(),
             distributed: crate::distributed_runtime::DistributedWorkerConfig::canonical(),
             auth_grant_sweep_interval: auth_grant_sweep_interval_from_value(
@@ -1502,7 +1504,8 @@ impl WorkerRuntimeConfig {
         settings_composition::KeyProviderReadinessInterval,
     ) {
         (
-            self.event,
+            self.event
+                .expect("test WorkerRuntimeConfig always activates event execution"),
             self.auth_grant_sweep_interval,
             self.keyprovider_readiness_interval,
         )
@@ -1512,11 +1515,11 @@ impl WorkerRuntimeConfig {
 pub(crate) struct RuntimeServingConfig {
     token_profiles: TokenProfilesConfig,
     event_transport: crate::event_transport::EventTransportConfig,
-    event_worker: crate::event_transport::EventWorkerConfig,
+    event_worker: Option<crate::event_transport::EventWorkerConfig>,
     dlx_worker: crate::event_transport::DlxWorkerConfig,
     distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
-    domain_modules: crate::domains::DomainModuleInputs,
-    audit_consumer_key: primitives::MacKey,
+    domain_modules: crate::modules_gen::PreparedLocalDomainInputs,
+    audit_consumer_key: Option<primitives::MacKey>,
     auth_grant_sweep_interval: std::time::Duration,
     trusted_proxy_config: httpserve::TrustedProxyConfig,
     rate_limit_quota: diport::RateLimitQuota,
@@ -1525,35 +1528,43 @@ pub(crate) struct RuntimeServingConfig {
 pub(crate) struct RuntimeServingConfigParts {
     pub(crate) token_profiles: TokenProfilesConfig,
     pub(crate) event_transport: crate::event_transport::EventTransportConfig,
-    pub(crate) event_worker: crate::event_transport::EventWorkerConfig,
+    pub(crate) event_worker: Option<crate::event_transport::EventWorkerConfig>,
     pub(crate) dlx_worker: crate::event_transport::DlxWorkerConfig,
     pub(crate) distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
-    pub(crate) domain_modules: crate::domains::DomainModuleInputs,
-    pub(crate) audit_consumer_key: primitives::MacKey,
+    pub(crate) domain_modules: crate::modules_gen::PreparedLocalDomainInputs,
+    pub(crate) audit_consumer_key: Option<primitives::MacKey>,
     pub(crate) auth_grant_sweep_interval: std::time::Duration,
     pub(crate) trusted_proxy_config: httpserve::TrustedProxyConfig,
     pub(crate) rate_limit_quota: diport::RateLimitQuota,
 }
 
 impl RuntimeServingConfig {
-    pub(crate) fn from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+    pub(crate) fn from_snapshot(
+        config: SnapshotConfig<'_>,
+        domains: &crate::plan::DomainExecutionPlan,
+        events: &crate::plan::LocalEventExecutionPlan,
+    ) -> anyhow::Result<Self> {
         let mapper = ServingConfigMapper::new(config);
         let token_profiles = TokenProfilesConfig::from_snapshot(config)?;
-        let identity_token_profile = token_profiles.primary_identity_profile()?;
-        let event_transport = crate::event_transport::EventTransportConfig::from_mapper(&mapper)?;
+        let event_transport =
+            crate::event_transport::EventTransportConfig::from_execution(&mapper, events)?;
         let WorkerRuntimeConfig {
             event,
             dlx,
             distributed,
             auth_grant_sweep_interval,
             keyprovider_readiness_interval,
-        } = WorkerRuntimeConfig::from_mapper(&mapper)?;
-        let domain_modules = crate::domains::DomainModuleInputs::from_snapshot(
+        } = WorkerRuntimeConfig::from_execution(&mapper, events)?;
+        let domain_modules = crate::modules_gen::PreparedLocalDomainInputs::from_snapshot(
+            domains,
             &mapper,
             keyprovider_readiness_interval,
-            identity_token_profile,
+            &token_profiles,
         )?;
-        let audit_consumer_key = domain_modules.audit_consumer_key();
+        let audit_consumer_key = events
+            .requires_audit_consumer_key()
+            .then(|| crate::domains::audit::consumer_key_from_snapshot(config))
+            .transpose()?;
         let trusted_proxy_config = httpserve::TrustedProxyConfig::try_from_json(
             config.value(runtimeexec::config::TRUSTED_PROXY_CIDRS_ENV),
         )
@@ -1574,6 +1585,19 @@ impl RuntimeServingConfig {
             trusted_proxy_config,
             rate_limit_quota,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_snapshot_for_test(config: SnapshotConfig<'_>) -> anyhow::Result<Self> {
+        let topology = crate::event_transport::parse_topology(
+            config
+                .value("RSS_TOPOLOGY")
+                .ok_or_else(|| anyhow::anyhow!("missing required env var: RSS_TOPOLOGY"))?
+                .trim(),
+        )?;
+        let placed = crate::plan::RuntimePlan::bundled(config)?.place(topology, config)?;
+        let parts = placed.into_parts();
+        Self::from_snapshot(config, &parts.domain, &parts.events)
     }
 
     pub(crate) fn into_parts(self) -> RuntimeServingConfigParts {
@@ -1740,10 +1764,11 @@ impl RuntimeConfigSnapshot {
             values.insert(key, value);
         }
 
-        for domain in ASSEMBLY_DOMAIN_TRANSPORT_DOMAINS {
+        for domain in crate::modules_gen::ASSEMBLY_DOMAINS {
             for key in [
-                domain_transport_url_env(domain),
-                domain_transport_mtls_allow_set_env(domain),
+                domain_placement_workload_env(domain.as_str()),
+                domain_transport_url_env(domain.as_str()),
+                domain_transport_mtls_allow_set_env(domain.as_str()),
             ] {
                 if values.contains_key(key.as_str()) {
                     continue;
@@ -1768,6 +1793,15 @@ impl RuntimeConfigSnapshot {
             .chain(FORBIDDEN_PROJECTION_OPERATOR_ENVIRONMENT_KEYS)
         {
             let key = RuntimeConfigKey::from_static(name);
+            if values.contains_key(&key) {
+                continue;
+            }
+            let value = source.read(&key);
+            values.insert(key, value);
+        }
+        for domain in crate::modules_gen::ASSEMBLY_DOMAINS {
+            let key =
+                RuntimeConfigKey::from_dynamic(domain_placement_workload_env(domain.as_str()));
             if values.contains_key(&key) {
                 continue;
             }
@@ -1953,6 +1987,13 @@ pub(crate) fn domain_transport_url_env(domain: &str) -> String {
         "RSS_{}_{}",
         domain.to_ascii_uppercase(),
         DOMAIN_TRANSPORT_URL_ENV_SUFFIX
+    )
+}
+
+pub(crate) fn domain_placement_workload_env(domain: &str) -> String {
+    format!(
+        "RSS_{}_DOMAIN_PLACEMENT_WORKLOAD",
+        domain.to_ascii_uppercase()
     )
 }
 

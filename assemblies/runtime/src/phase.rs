@@ -1,4 +1,6 @@
 /// Production runtime assembly phases.
+use anyhow::Context as _;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuntimePhase {
     /// Preflight credential provider configuration and external key sources.
@@ -181,25 +183,32 @@ impl PreparedRuntimeInputs {
 
 /// Serving-only runtime inputs.
 ///
-/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned process snapshot and a non-optional typed password blocklist, while operator inputs cannot be passed to [`crate::run`]; serving and operator provider APIs can only borrow the unforgeable [`SnapshotConfig`] minted from these owned inputs, and Projection dispatch accepts only its distinct nested input owner.
+/// INVARIANT: RUNTIME-CONFIG-SNAPSHOT-01 { level = "Hard", exec = "native-compile", source = "code", native = "type or rustdoc boundary" } -- the crate-private constructor requires an owned process snapshot and consumes the verified plan into a placed execution capability, while operator inputs cannot be passed to [`crate::run`]; serving and operator provider APIs can only borrow the unforgeable [`SnapshotConfig`] minted from these owned inputs.
 /// INVARIANT: RUNTIME-TELEMETRY-PLAN-01 { level = "Hard", exec = "native-compile", source = "code", native = "private required RuntimePlan constructor input plus take-once phase handoff" } -- serving telemetry and runtime inventory originate from the exact preparation-time verified RuntimePlan; the provider phase has no fallback compiler or parallel identity registry.
 pub struct ServingRuntimeInputs {
     prepared: PreparedRuntimeInputs,
-    password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
-    runtime_plan: Option<crate::plan::RuntimePlan>,
+    placed_runtime_plan: Option<crate::plan::PlacedRuntimePlan>,
 }
 
 impl ServingRuntimeInputs {
     pub(crate) fn new(
         prepared: PreparedRuntimeInputs,
-        password_blocklist: std::sync::Arc<secure::DigestPasswordBlocklist>,
         telemetry_plan: PreparedTelemetryPlan,
-    ) -> Self {
-        Self {
+    ) -> anyhow::Result<Self> {
+        let topology = crate::event_transport::parse_topology(
+            prepared
+                .config()
+                .value("RSS_TOPOLOGY")
+                .context("RSS_TOPOLOGY is required")?
+                .trim(),
+        )?;
+        let placed_runtime_plan = telemetry_plan
+            .into_runtime_plan()
+            .place(topology, prepared.config())?;
+        Ok(Self {
             prepared,
-            password_blocklist,
-            runtime_plan: Some(telemetry_plan.into_runtime_plan()),
-        }
+            placed_runtime_plan: Some(placed_runtime_plan),
+        })
     }
 
     /// Mint a borrowed capability for the process snapshot owned by the phase orchestrator.
@@ -207,16 +216,11 @@ impl ServingRuntimeInputs {
         self.prepared.config()
     }
 
-    /// Borrow the typed local policy loaded before any external provider construction.
-    pub(crate) fn password_blocklist(&self) -> &std::sync::Arc<secure::DigestPasswordBlocklist> {
-        &self.password_blocklist
-    }
-
     /// Move the preparation-time plan exactly once into the serving phase chain.
-    pub(crate) fn take_runtime_plan(&mut self) -> crate::plan::RuntimePlan {
-        self.runtime_plan
+    pub(crate) fn take_placed_runtime_plan(&mut self) -> crate::plan::PlacedRuntimePlan {
+        self.placed_runtime_plan
             .take()
-            .unwrap_or_else(|| unreachable!("prepared RuntimePlan enters the phase chain once"))
+            .unwrap_or_else(|| unreachable!("placed RuntimePlan enters the phase chain once"))
     }
 
     /// Move the optional trace exporter into the launch phase while retaining the process snapshot
@@ -295,6 +299,7 @@ struct PhaseContext<'a> {
 struct DomainPhaseContext<'a> {
     context: PhaseContext<'a>,
     domain_execution_plan: crate::plan::DomainExecutionPlan,
+    security_execution_plan: crate::plan::RuntimeSecurityExecutionPlan,
 }
 
 impl<'a> DomainPhaseContext<'a> {
@@ -302,6 +307,7 @@ impl<'a> DomainPhaseContext<'a> {
         runtime_inputs: &'a mut ServingRuntimeInputs,
         runtime_plan: crate::plan::RuntimePlan,
         domain_execution_plan: crate::plan::DomainExecutionPlan,
+        security_execution_plan: crate::plan::RuntimeSecurityExecutionPlan,
     ) -> Self {
         Self {
             context: PhaseContext {
@@ -309,11 +315,22 @@ impl<'a> DomainPhaseContext<'a> {
                 runtime_plan,
             },
             domain_execution_plan,
+            security_execution_plan,
         }
     }
 
-    fn into_parts(self) -> (PhaseContext<'a>, crate::plan::DomainExecutionPlan) {
-        (self.context, self.domain_execution_plan)
+    fn into_parts(
+        self,
+    ) -> (
+        PhaseContext<'a>,
+        crate::plan::DomainExecutionPlan,
+        crate::plan::RuntimeSecurityExecutionPlan,
+    ) {
+        (
+            self.context,
+            self.domain_execution_plan,
+            self.security_execution_plan,
+        )
     }
 }
 
@@ -328,10 +345,6 @@ impl<'a> std::ops::Deref for DomainPhaseContext<'a> {
 impl PhaseContext<'_> {
     fn config(&self) -> SnapshotConfig<'_> {
         self.runtime_inputs.config()
-    }
-
-    fn password_blocklist(&self) -> &Arc<secure::DigestPasswordBlocklist> {
-        self.runtime_inputs.password_blocklist()
     }
 
     fn take_trace_export(&mut self) -> Option<otel::OtelExporter> {
@@ -360,6 +373,7 @@ pub(crate) struct ProvidersBuilt<'a> {
     provider_build: crate::provider_output::ProviderBuild,
     provider_factories: crate::provider_output::ProviderFactoryDispatch,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
+    local_event_execution_plan: crate::plan::LocalEventExecutionPlan,
     placement_execution_plan: crate::plan::PlacementExecutionPlan,
     serving_config: crate::config::RuntimeServingConfigParts,
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
@@ -373,6 +387,7 @@ pub(crate) struct InfraBuilt<'a> {
     provider_build: crate::provider_output::ProviderBuild,
     provider_factories: crate::provider_output::ProviderFactoryDispatch,
     listener_execution_plan: crate::plan::ListenerExecutionPlan,
+    local_event_execution_plan: crate::plan::LocalEventExecutionPlan,
     placement_execution_plan: crate::plan::PlacementExecutionPlan,
     rate_limiter: Arc<redis::RedisRateLimiter>,
     trusted_proxy_config: httpserve::TrustedProxyConfig,
@@ -521,15 +536,6 @@ mod tests {
         }
     }
 
-    fn test_password_blocklist() -> Arc<secure::DigestPasswordBlocklist> {
-        Arc::new(
-            crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
-                "../../../deploy/password-blocklist.demo.sha256"
-            )))
-            .unwrap_or_else(|_| unreachable!()),
-        )
-    }
-
     #[test]
     fn runtime_phase_labels_are_closed_and_ordered() {
         let labels: Vec<_> = RuntimePhase::ALL
@@ -583,16 +589,15 @@ mod tests {
             ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
             ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+            ("RSS_TOPOLOGY", "demo"),
         ])
         .expect("closed catalog capture succeeds");
         let telemetry_plan =
             PreparedTelemetryPlan::prepare(snapshot.view()).expect("bundled RuntimePlan");
-        let blocklist = test_password_blocklist();
         let prepared = PreparedRuntimeInputs::new(snapshot, None);
         let mut serving =
-            ServingRuntimeInputs::new(prepared, Arc::clone(&blocklist), telemetry_plan);
+            ServingRuntimeInputs::new(prepared, telemetry_plan).expect("placed runtime inputs");
         assert!(serving.config().value("RSS_VAULT_TOKEN").is_none());
-        assert!(Arc::ptr_eq(serving.password_blocklist(), &blocklist));
         assert!(serving.take_trace_export().is_none());
 
         let snapshot = crate::config::test_snapshot(&[
@@ -828,6 +833,7 @@ mod tests {
 
         assert_not_impl_any!(Planned<'static>: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(crate::plan::DomainExecutionPlan: Clone, Copy, std::fmt::Debug, Default);
+        assert_not_impl_any!(crate::plan::RuntimeSecurityExecutionPlan: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(DomainPhaseContext<'static>: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(ProvidersBuilt<'static>: Clone, Copy, std::fmt::Debug, Default);
         assert_not_impl_any!(InfraBuilt<'static>: Clone, Copy, std::fmt::Debug, Default);

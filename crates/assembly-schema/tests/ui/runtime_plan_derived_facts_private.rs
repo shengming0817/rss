@@ -1,9 +1,9 @@
 use assembly_schema::{
-    AssemblyDomain, AssemblyListenerKind, DomainLifecyclePhase, ListenerAuth, RuntimePlanV2Input,
+    AssemblyDomain, AssemblyListenerKind, DomainLifecyclePhase, ListenerAuth, RuntimePlanV3Input,
 };
 
 fn main() {
-    let mut input = RuntimePlanV2Input::new();
+    let mut input = RuntimePlanV3Input::new();
     input.listener(
         "primary-main",
         AssemblyListenerKind::Primary,

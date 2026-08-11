@@ -27,11 +27,6 @@ impl AuditModuleInput {
             key: build_audit_key(config.value(AUDIT_CHAIN_KEY_ENV))?,
         })
     }
-
-    #[must_use]
-    pub(crate) fn consumer_key(&self) -> MacKey {
-        self.key.clone()
-    }
 }
 
 /// Build the audit domain as a single-owned runtime binding.
@@ -69,6 +64,10 @@ fn build_audit_key(encoded: Option<&str>) -> anyhow::Result<MacKey> {
         anyhow::bail!("audit chain key must be at least 32 bytes (weak key, see audit-ledger.md)");
     }
     Ok(MacKey::from_bytes(key_bytes))
+}
+
+pub(crate) fn consumer_key_from_snapshot(config: SnapshotConfig<'_>) -> anyhow::Result<MacKey> {
+    build_audit_key(config.value(AUDIT_CHAIN_KEY_ENV))
 }
 
 /// Build a keyed hasher for runtime event-consumer wiring from the same fail-closed key parser.

@@ -24,9 +24,121 @@ pub(crate) const DEFAULT_VAULT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Serving-only Vault generation. The private, non-optional allowlist field makes resolver
 /// authorization impossible to omit after the single snapshot-backed fallible constructor.
+#[cfg(any(test, feature = "integration"))]
 pub(crate) struct VaultRuntimeConfig {
     provider: VaultProviderConfig,
     stores: TenantStoreAllowlist,
+}
+
+pub(crate) struct IdentityVaultRuntimeConfig {
+    provider: VaultProviderConfig,
+}
+
+pub(crate) struct SettingsVaultRuntimeConfig {
+    provider: VaultProviderConfig,
+    stores: TenantStoreAllowlist,
+}
+
+impl IdentityVaultRuntimeConfig {
+    pub(crate) fn from_snapshot(
+        config: SnapshotConfig<'_>,
+    ) -> Result<Self, VaultRuntimeConfigError> {
+        let provider = VaultProviderConfig::from_values(VaultProviderValues {
+            addr: config.value(VAULT_ADDR_ENV).map(str::to_owned),
+            token: config.value(VAULT_TOKEN_ENV),
+            transit_mount: config.value(VAULT_TRANSIT_MOUNT_ENV).map(str::to_owned),
+            ca_cert_pem_path: config.value(VAULT_CA_CERT_PEM_PATH_ENV),
+            settings_key_name: None,
+        })
+        .map_err(VaultRuntimeConfigError::VaultClient)?;
+        Ok(Self { provider })
+    }
+
+    pub(crate) fn into_signer(
+        self,
+        signing_binding: diport::JwtSigningBinding<diport::RssAccessProfile>,
+    ) -> Result<std::sync::Arc<VaultSigner>, VaultRuntimeConfigError> {
+        let VaultProviderConfig {
+            client,
+            addr,
+            token,
+            transit_mount,
+            ..
+        } = self.provider;
+        VaultSigner::new_rss_access(
+            client,
+            addr,
+            token.transfer_secret_allocation(),
+            transit_mount,
+            DEFAULT_VAULT_TIMEOUT,
+            signing_binding,
+        )
+        .map(std::sync::Arc::new)
+        .map_err(|error| {
+            VaultRuntimeConfigError::VaultClient(anyhow::anyhow!(
+                "vault signer config error: {error}"
+            ))
+        })
+    }
+}
+
+impl SettingsVaultRuntimeConfig {
+    pub(crate) fn from_snapshot(
+        config: SnapshotConfig<'_>,
+    ) -> Result<Self, VaultRuntimeConfigError> {
+        let provider = VaultProviderConfig::from_values(VaultProviderValues {
+            addr: config.value(VAULT_ADDR_ENV).map(str::to_owned),
+            token: config.value(VAULT_TOKEN_ENV),
+            transit_mount: config.value(VAULT_TRANSIT_MOUNT_ENV).map(str::to_owned),
+            ca_cert_pem_path: config.value(VAULT_CA_CERT_PEM_PATH_ENV),
+            settings_key_name: config.value(SETTINGS_CONFIG_VALUE_KEY_NAME_ENV),
+        })
+        .map_err(VaultRuntimeConfigError::VaultClient)?;
+        let stores =
+            tenant_store_allowlist_from_value(config.value(VAULT_TENANT_STORE_ALLOWLIST_JSON_ENV))
+                .map_err(VaultRuntimeConfigError::TenantStoreAllowlist)?;
+        Ok(Self { provider, stores })
+    }
+
+    pub(crate) fn into_settings(
+        self,
+    ) -> Result<(VaultRuntimeDeps, KeyName), VaultRuntimeConfigError> {
+        let Self { provider, stores } = self;
+        let VaultProviderConfig {
+            client,
+            addr,
+            token,
+            transit_mount,
+            settings_key_name,
+        } = provider;
+        let resolver = VaultSecretResolver::new(
+            client.clone(),
+            addr.clone(),
+            token.copy_secret_allocation(),
+            DEFAULT_VAULT_TIMEOUT,
+            stores,
+        )
+        .map_err(|error| {
+            VaultRuntimeConfigError::VaultClient(anyhow::anyhow!(
+                "vault resolver config error: {error}"
+            ))
+        })?;
+        let key_provider = VaultKeyProvider::new(
+            client,
+            addr,
+            token.transfer_secret_allocation(),
+            transit_mount,
+            DEFAULT_VAULT_TIMEOUT,
+        )
+        .map_err(|error| {
+            VaultRuntimeConfigError::VaultClient(anyhow::anyhow!(
+                "vault key provider config error: {error}"
+            ))
+        })?;
+        let key_name = settings_config_value_key_name_from_value(settings_key_name.as_deref())
+            .map_err(VaultRuntimeConfigError::SettingsKeyName)?;
+        Ok((VaultRuntimeDeps::new(resolver, key_provider), key_name))
+    }
 }
 
 /// Maintenance-only Vault generation. This type deliberately has no resolver allowlist field and
@@ -77,6 +189,7 @@ pub(crate) enum VaultTenantStoreAllowlistConfigError {
     InvalidBinding(#[source] TenantStoreAllowlistError),
 }
 
+#[cfg(any(test, feature = "integration"))]
 struct VaultConfigValues<'a> {
     addr: Option<String>,
     token: Option<&'a str>,
@@ -109,6 +222,7 @@ struct VaultTenantStoreBindingWire {
     kv_path_prefix: String,
 }
 
+#[cfg(any(test, feature = "integration"))]
 impl std::fmt::Debug for VaultRuntimeConfig {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("VaultRuntimeConfig(<redacted>)")
@@ -121,10 +235,12 @@ impl std::fmt::Debug for VaultKeyProviderConfig {
     }
 }
 
+#[cfg(any(test, feature = "integration"))]
 impl VaultRuntimeConfig {
     /// Capture the complete Vault/settings generation before constructing any adapter. The CA
     /// bundle is read and parsed here exactly once; both runtime adapters later receive clones of
     /// this single configured client handle.
+    #[allow(dead_code)] // test-only compatibility probe; integration uses explicit values.
     pub(crate) fn from_snapshot(
         config: SnapshotConfig<'_>,
     ) -> Result<Self, VaultRuntimeConfigError> {

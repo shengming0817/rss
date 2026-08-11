@@ -182,6 +182,61 @@ pub struct ProviderProbeBinding {
     evidence: ProviderProbeEvidence,
 }
 
+/// Exact provider projection sealed by a completed provider transaction.
+pub struct ProviderExecutionReceipt {
+    source_runtime_plan_fingerprint: String,
+    bindings: Vec<ProviderProbeBinding>,
+}
+
+impl ProviderExecutionReceipt {
+    /// Seal the complete provider set of a typed RuntimePlan without caller-supplied source facts.
+    pub fn from_runtime_plan(
+        runtime: &RuntimePlan,
+        bindings: Vec<ProviderProbeBinding>,
+    ) -> Result<Self, InventoryError> {
+        Self::seal(
+            runtimeinventorymint::RuntimeInventoryMint::capability(),
+            runtime.runtime_plan_fingerprint().as_str(),
+            runtime
+                .provider_plans()
+                .iter()
+                .map(|provider| provider.id().to_owned()),
+            bindings,
+        )
+    }
+
+    /// Seal a placement-projected provider transaction. Only the approved runtime composition
+    /// root can name the mint capability; reference assemblies use [`Self::from_runtime_plan`].
+    pub fn seal(
+        _mint: runtimeinventorymint::RuntimeInventoryMint,
+        source_runtime_plan_fingerprint: impl Into<String>,
+        expected_provider_ids: impl IntoIterator<Item = String>,
+        mut bindings: Vec<ProviderProbeBinding>,
+    ) -> Result<Self, InventoryError> {
+        let expected = expected_provider_ids.into_iter().collect::<BTreeSet<_>>();
+        bindings.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
+        let actual = bindings
+            .iter()
+            .map(|binding| binding.provider_id().to_owned())
+            .collect::<BTreeSet<_>>();
+        if expected.len() != bindings.len() || expected != actual {
+            return Err(InventoryError::ProviderBinding);
+        }
+        Ok(Self {
+            source_runtime_plan_fingerprint: source_runtime_plan_fingerprint.into(),
+            bindings,
+        })
+    }
+
+    fn into_bindings(self) -> Vec<ProviderProbeBinding> {
+        self.bindings
+    }
+
+    pub fn bindings(&self) -> &[ProviderProbeBinding] {
+        &self.bindings
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ProviderProbeEvidence {
     ConstructionOnly,
@@ -374,13 +429,18 @@ impl RuntimeInventorySeed {
     pub fn from_runtime_plan(
         runtime: &RuntimePlan,
         activated_workflows: eventexec::ActivatedWorkflowsView<'_>,
-        mut provider_bindings: Vec<ProviderProbeBinding>,
+        provider_receipt: ProviderExecutionReceipt,
         mut placements: Vec<PlacementObservation>,
     ) -> Result<Self, InventoryError> {
         if activated_workflows.source_runtime_plan_fingerprint()
             != runtime.runtime_plan_fingerprint().as_str()
         {
             return Err(InventoryError::WorkflowPlanSource);
+        }
+        if provider_receipt.source_runtime_plan_fingerprint
+            != runtime.runtime_plan_fingerprint().as_str()
+        {
+            return Err(InventoryError::ProviderPlanSource);
         }
         let activated_workflows = activated_workflows
             .workflows()
@@ -423,21 +483,7 @@ impl RuntimeInventorySeed {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        provider_bindings.sort_by(|left, right| left.provider_id.cmp(&right.provider_id));
-        let expected_providers = runtime
-            .provider_plans()
-            .iter()
-            .map(|provider| provider.id())
-            .collect::<BTreeSet<_>>();
-        let actual_providers = provider_bindings
-            .iter()
-            .map(ProviderProbeBinding::provider_id)
-            .collect::<BTreeSet<_>>();
-        if expected_providers.len() != provider_bindings.len()
-            || expected_providers != actual_providers
-        {
-            return Err(InventoryError::ProviderBinding);
-        }
+        let provider_bindings = provider_receipt.into_bindings();
 
         placements.sort_by(|left, right| {
             (left.domain.as_str(), left.workload.as_str())
@@ -801,6 +847,8 @@ pub enum InventoryError {
     BuildMetadata,
     #[error("runtime inventory provider binding is invalid")]
     ProviderBinding,
+    #[error("runtime inventory provider receipt came from another runtime plan")]
+    ProviderPlanSource,
     #[error("runtime inventory activated workflow is invalid")]
     ActivatedWorkflow,
     #[error("runtime inventory activated workflows came from another runtime plan")]
@@ -937,16 +985,32 @@ mod tests {
             .map(|placement| PlacementObservation::local(placement.domain(), placement.workload()))
             .collect();
         let workflow_runtime = workflow_runtime(runtime)?;
+        let receipt = provider_receipt(runtime, providers)?;
         Ok(RuntimeInventorySeed::from_runtime_plan(
             runtime.as_plan(),
             workflow_runtime.activated_workflows(),
-            providers,
+            receipt,
             placements,
         )?
         .with_build_metadata(BuildMetadata::parse(
             &"a".repeat(40),
             &format!("sha256:{}", "b".repeat(64)),
         )?))
+    }
+
+    fn provider_receipt(
+        runtime: &ParsedRuntimePlan,
+        bindings: Vec<ProviderProbeBinding>,
+    ) -> Result<ProviderExecutionReceipt, InventoryError> {
+        ProviderExecutionReceipt::seal(
+            runtimeinventorymint::RuntimeInventoryMint::capability(),
+            runtime.runtime_plan_fingerprint().as_str(),
+            runtime
+                .provider_plans()
+                .iter()
+                .map(|provider| provider.id().to_owned()),
+            bindings,
+        )
     }
 
     #[test]
@@ -1196,26 +1260,14 @@ mod tests {
             .collect::<Result<Vec<_>, _>>()?;
         let missing = bindings.pop().ok_or("fixture must contain a provider")?;
         assert_eq!(
-            RuntimeInventorySeed::from_runtime_plan(
-                runtime.as_plan(),
-                workflow_runtime.activated_workflows(),
-                bindings.clone(),
-                placements(),
-            )
-            .err(),
+            provider_receipt(&runtime, bindings.clone()).err(),
             Some(InventoryError::ProviderBinding)
         );
         let mut duplicate = bindings.clone();
         duplicate.push(missing.clone());
         duplicate.push(missing.clone());
         assert_eq!(
-            RuntimeInventorySeed::from_runtime_plan(
-                runtime.as_plan(),
-                workflow_runtime.activated_workflows(),
-                duplicate,
-                placements(),
-            )
-            .err(),
+            provider_receipt(&runtime, duplicate).err(),
             Some(InventoryError::ProviderBinding)
         );
         bindings.push(ProviderProbeBinding::from_probe_receipt(
@@ -1223,13 +1275,7 @@ mod tests {
             Vec::new(),
         )?);
         assert_eq!(
-            RuntimeInventorySeed::from_runtime_plan(
-                runtime.as_plan(),
-                workflow_runtime.activated_workflows(),
-                bindings,
-                placements(),
-            )
-            .err(),
+            provider_receipt(&runtime, bindings).err(),
             Some(InventoryError::ProviderBinding)
         );
 
@@ -1244,7 +1290,7 @@ mod tests {
         RuntimeInventorySeed::from_runtime_plan(
             runtime.as_plan(),
             workflow_runtime.activated_workflows(),
-            exact,
+            provider_receipt(&runtime, exact)?,
             placements(),
         )?;
         Ok(())
@@ -1267,7 +1313,7 @@ mod tests {
         let seed = RuntimeInventorySeed::from_runtime_plan(
             runtime.as_plan(),
             workflow_runtime.activated_workflows(),
-            providers,
+            provider_receipt(&runtime, providers)?,
             placements,
         )?;
         let (publisher, reader) = inventory_channel(seed, reporter(HealthStatus::Healthy)?);
@@ -1303,7 +1349,7 @@ mod tests {
         let seed = RuntimeInventorySeed::from_runtime_plan(
             runtime.as_plan(),
             workflow_runtime.activated_workflows(),
-            providers,
+            provider_receipt(&runtime, providers)?,
             placements,
         )?;
         let (publisher, reader) = inventory_channel(seed, reporter(HealthStatus::Healthy)?);
@@ -1333,12 +1379,49 @@ mod tests {
             RuntimeInventorySeed::from_runtime_plan(
                 runtime.as_plan(),
                 other_workflows.activated_workflows(),
-                providers,
+                provider_receipt(&runtime, providers)?,
                 placements,
             )
             .is_err(),
             "inventory must reject activated workflows compiled from another runtime plan"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn inventory_rejects_provider_receipt_from_another_runtime_plan() -> TestResult {
+        let runtime = runtime_plan()?;
+        let other_runtime = alternate_runtime_plan()?;
+        let workflows = workflow_runtime(&runtime)?;
+        let providers = runtime
+            .provider_plans()
+            .iter()
+            .map(|provider| ProviderProbeBinding::from_probe_receipt(provider.id(), Vec::new()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let receipt = ProviderExecutionReceipt::seal(
+            runtimeinventorymint::RuntimeInventoryMint::capability(),
+            other_runtime.runtime_plan_fingerprint().as_str(),
+            runtime
+                .provider_plans()
+                .iter()
+                .map(|provider| provider.id().to_owned()),
+            providers,
+        )?;
+        let placements = runtime
+            .placement_plans()
+            .iter()
+            .map(|placement| PlacementObservation::local(placement.domain(), placement.workload()))
+            .collect();
+
+        assert!(matches!(
+            RuntimeInventorySeed::from_runtime_plan(
+                runtime.as_plan(),
+                workflows.activated_workflows(),
+                receipt,
+                placements,
+            ),
+            Err(InventoryError::ProviderPlanSource)
+        ));
         Ok(())
     }
 }

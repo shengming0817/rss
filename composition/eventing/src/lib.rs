@@ -163,6 +163,37 @@ pub fn bridge_generated_subscriptions(
     bridge_subscriptions_with_events_selected(bindings, generated::event::EVENTS, admitted_dispatch)
 }
 
+/// Bridge exactly the placement-selected generated subscription dispatches.
+///
+/// The selection is a closed generated enum, never a consumer string or caller-defined spec. Each
+/// requested dispatch must name exactly one compiled generated subscription before live bindings
+/// can enter the normal exact-set bridge.
+pub fn bridge_generated_subscriptions_selected(
+    bindings: Vec<SubscriberBinding>,
+    selected: &[SubscriptionDispatchKey],
+) -> anyhow::Result<Vec<BridgedSubscription>> {
+    for (index, dispatch) in selected.iter().copied().enumerate() {
+        anyhow::ensure!(
+            !selected[..index].contains(&dispatch),
+            "placement-selected subscription dispatch is duplicated"
+        );
+        let matches = generated::event::EVENTS
+            .iter()
+            .flat_map(|event| event.subscriptions())
+            .filter(|subscription| {
+                subscription.dispatch() == dispatch && admitted_dispatch(dispatch)
+            })
+            .count();
+        anyhow::ensure!(
+            matches == 1,
+            "placement-selected subscription dispatch has {matches} compiled generated specs"
+        );
+    }
+    bridge_subscriptions_with_events_selected(bindings, generated::event::EVENTS, |dispatch| {
+        selected.contains(&dispatch)
+    })
+}
+
 /// Bridge the exact generated Identity-to-Audit subscription family.
 ///
 /// This entrypoint deliberately ignores unrelated compiled consumer features. Cargo feature
@@ -225,7 +256,7 @@ pub fn bridge_subscriptions_with_events_for_test(
 fn bridge_subscriptions_with_events_selected(
     bindings: Vec<SubscriberBinding>,
     events: &[EventSpec],
-    select: fn(SubscriptionDispatchKey) -> bool,
+    select: impl Fn(SubscriptionDispatchKey) -> bool + Copy,
 ) -> anyhow::Result<Vec<BridgedSubscription>> {
     let specs: Vec<(EventSpec, SubscriptionSpec)> = events
         .iter()
@@ -801,6 +832,30 @@ mod tests {
             .ok_or_else(|| anyhow::anyhow!("settings-only bridge must admit one spec"))?;
         anyhow::ensure!(bridged.len() == 1);
         anyhow::ensure!(subscription.dispatch_token().policy() == ExternalEffectPolicy::Reconcile);
+        Ok(())
+    }
+
+    #[cfg(all(feature = "audit-consumers", feature = "settings-consumers"))]
+    #[test]
+    fn placement_selected_bridge_accepts_each_local_consumer_exact_set() -> anyhow::Result<()> {
+        let settings = [SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings];
+        let settings_bridged = bridge_generated_subscriptions_selected(
+            bindings_selected_by(admitted_settings_dispatch)?,
+            &settings,
+        )?;
+        anyhow::ensure!(settings_bridged.len() == 1);
+
+        let audit = generated::event::EVENTS
+            .iter()
+            .flat_map(|event| event.subscriptions())
+            .filter(|spec| admitted_audit_dispatch(spec.dispatch()))
+            .map(|spec| spec.dispatch())
+            .collect::<Vec<_>>();
+        let audit_bridged = bridge_generated_subscriptions_selected(
+            bindings_selected_by(admitted_audit_dispatch)?,
+            &audit,
+        )?;
+        anyhow::ensure!(audit_bridged.len() == 5);
         Ok(())
     }
 

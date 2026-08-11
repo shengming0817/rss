@@ -1,8 +1,9 @@
 //! Capability required to mint one runtime-inventory live observation.
 //!
 //! `deny.toml` restricts this crate to `assembly-schema` (receipt signature owner) and
-//! `runtimeexec` (the only mint caller). Assembly roots can consume the opaque observation returned
-//! by `runtimeexec`, but cannot name or construct this capability.
+//! `runtimeexec` (full-plan receipt and live observation owner) plus the runtime assembly's closed
+//! placement-projected provider transaction. Other assembly roots can consume opaque receipts but
+//! cannot name or construct this capability.
 //!
 //! INVARIANT: RUNTIME-INVENTORY-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private token + crate graph wrapper allowlist" }
 

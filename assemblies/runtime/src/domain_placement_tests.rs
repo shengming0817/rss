@@ -250,24 +250,31 @@ fn domain_placement_rejects_empty_blank_and_spaced_workload() {
 }
 
 #[test]
-fn domain_placement_remote_on_local_listener_fails_closed() {
+fn remote_domains_are_removed_from_local_listener_projection() {
     let snapshot = profile_snapshot(&[
         ("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD", "peer-cell"),
         ("RSS_TOPOLOGY", "durable-shared"),
         ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
     ]);
-    let runtime_plan = RuntimePlan::bundled(snapshot.view()).expect("bundled plan");
-    let listeners = runtime_plan.listener_execution_plan();
-    let placement = runtime_plan
-        .placement_execution_plan(bootstrap::Topology::DurableShared, snapshot.view())
-        .expect("remote placement plan");
-    let error = placement
-        .reject_remote_on_local_listeners(&listeners)
-        .expect_err("remote identity mounts on primary");
-    let rendered = error.to_string();
-    assert!(rendered.contains("identity"));
-    assert!(rendered.contains("primary-main"));
-    assert!(rendered.contains("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD"));
+    let placed = RuntimePlan::bundled(snapshot.view())
+        .expect("bundled plan")
+        .place(bootstrap::Topology::DurableShared, snapshot.view())
+        .expect("remote placement projection")
+        .into_parts();
+    assert!(
+        placed
+            .listeners
+            .declared_listeners()
+            .iter()
+            .any(|listener| listener.domains().contains(&AssemblyDomain::Identity))
+    );
+    assert!(
+        placed
+            .listeners
+            .listeners()
+            .iter()
+            .all(|listener| !listener.domains().contains(&AssemblyDomain::Identity))
+    );
 }
 
 #[test]
@@ -463,22 +470,133 @@ fn domain_placement_transport_targets_bijection_with_remote_set() {
     assert_eq!(targets.len(), 1);
 }
 
+#[tokio::test]
+#[allow(clippy::expect_used)]
+async fn generated_domain_factories_execute_exact_local_projection_for_all_subsets() {
+    let domains = crate::modules_gen::ASSEMBLY_DOMAINS;
+    for remote_mask in 0_u8..(1_u8 << domains.len()) {
+        let mut entries = vec![
+            ("RSS_TOPOLOGY", "durable-shared"),
+            ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
+        ];
+        for (index, domain) in domains.iter().enumerate() {
+            if remote_mask & (1 << index) != 0 {
+                entries.push((
+                    match domain {
+                        AssemblyDomain::Settings => "RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD",
+                        AssemblyDomain::Identity => "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+                        AssemblyDomain::Audit => "RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD",
+                        other => panic!("unexpected bundled domain {other:?}"),
+                    },
+                    "peer-cell",
+                ));
+            }
+        }
+        let snapshot = profile_snapshot(&entries);
+        let parts = RuntimePlan::bundled(snapshot.view())
+            .expect("bundled plan")
+            .place(bootstrap::Topology::DurableShared, snapshot.view())
+            .expect("placed runtime")
+            .into_parts();
+        let expected = parts
+            .domain
+            .local_domains()
+            .iter()
+            .map(AssemblyDomain::as_str)
+            .collect::<Vec<_>>();
+        let bindings = crate::modules_gen::wire_test_domains(&parts.domain)
+            .await
+            .expect("generated local factories");
+        assert_eq!(
+            bindings
+                .iter()
+                .map(bootstrap::DomainBinding::name)
+                .collect::<Vec<_>>(),
+            expected,
+            "mask={remote_mask}"
+        );
+    }
+}
+
 #[test]
-fn domain_placement_wire_domains_skips_remote_modules() {
-    let placement = crate::plan::PlacementExecutionPlan::from_specs_for_test(vec![
-        crate::plan::PlacementExecutionSpec::local_for_test(AssemblyDomain::Settings, "runtime"),
-        crate::plan::PlacementExecutionSpec::remote_for_test(
-            AssemblyDomain::Identity,
-            "peer-cell",
-            secure::DomainHttpEndpoint::parse("https://identity.internal/rpc")
-                .expect("valid endpoint"),
-        ),
-        crate::plan::PlacementExecutionSpec::local_for_test(AssemblyDomain::Audit, "runtime"),
-    ]);
-    assert!(placement.is_local(AssemblyDomain::Settings));
-    assert!(!placement.is_local(AssemblyDomain::Identity));
-    assert!(placement.is_local(AssemblyDomain::Audit));
-    let source = include_str!("generated/modules_gen.rs");
-    assert!(source.contains("if placement.is_local(assembly_schema::AssemblyDomain::Identity)"));
-    assert!(source.contains("let _ = identity;"));
+fn placement_projection_closes_domains_listeners_providers_and_events_for_all_subsets() {
+    let domains = crate::modules_gen::ASSEMBLY_DOMAINS;
+    for remote_mask in 0_u8..(1_u8 << domains.len()) {
+        let mut entries = vec![
+            ("RSS_TOPOLOGY", "durable-shared"),
+            ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
+        ];
+        for (index, domain) in domains.iter().enumerate() {
+            if remote_mask & (1 << index) != 0 {
+                let key = match domain {
+                    AssemblyDomain::Settings => "RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD",
+                    AssemblyDomain::Identity => "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+                    AssemblyDomain::Audit => "RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD",
+                    other => panic!("unexpected bundled domain {other:?}"),
+                };
+                entries.push((key, "peer-cell"));
+            }
+        }
+        let snapshot = profile_snapshot(&entries);
+        let parts = RuntimePlan::bundled(snapshot.view())
+            .expect("bundled plan")
+            .place(bootstrap::Topology::DurableShared, snapshot.view())
+            .expect("placed runtime")
+            .into_parts();
+        let local = domains
+            .iter()
+            .copied()
+            .enumerate()
+            .filter_map(|(index, domain)| (remote_mask & (1 << index) == 0).then_some(domain))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            parts.domain.local_domains(),
+            local.as_slice(),
+            "mask={remote_mask}"
+        );
+        assert!(parts.listeners.listeners().iter().all(|listener| {
+            listener
+                .domains()
+                .iter()
+                .all(|domain| local.contains(domain))
+        }));
+
+        let event_active = local.iter().any(|domain| {
+            matches!(
+                domain,
+                AssemblyDomain::Settings | AssemblyDomain::Identity | AssemblyDomain::Audit
+            )
+        });
+        assert_eq!(parts.events.is_active(), event_active, "mask={remote_mask}");
+        let (_, provider_specs, _) = parts.providers.into_parts();
+        let actual_ids = provider_specs
+            .iter()
+            .map(|spec| spec.id())
+            .collect::<Vec<_>>();
+        let expected_ids = crate::providers_gen::PROVIDER_CATALOG
+            .iter()
+            .filter(|entry| match entry.activation() {
+                assembly_schema::ProviderActivation::Process => true,
+                assembly_schema::ProviderActivation::DomainLocal(domain) => local.contains(&domain),
+                assembly_schema::ProviderActivation::LocalEventExecution => event_active,
+            })
+            .map(|entry| entry.role().as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(actual_ids, expected_ids, "mask={remote_mask}");
+        for spec in provider_specs {
+            match spec.activation() {
+                assembly_schema::ProviderActivation::Process => {}
+                assembly_schema::ProviderActivation::DomainLocal(domain) => {
+                    assert!(
+                        local.contains(&domain),
+                        "mask={remote_mask} role={}",
+                        spec.id()
+                    );
+                }
+                assembly_schema::ProviderActivation::LocalEventExecution => {
+                    assert!(event_active, "mask={remote_mask} role={}", spec.id());
+                }
+            }
+        }
+    }
 }

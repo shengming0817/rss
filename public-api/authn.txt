@@ -528,9 +528,14 @@ impl<P, S> !core::panic::unwind_safe::RefUnwindSafe for authn::JwtIssuer<P, S>
 impl<P, S> !core::panic::unwind_safe::UnwindSafe for authn::JwtIssuer<P, S>
 pub struct authn::JwtIssuerConfig<P: diport::pdp::TokenProfileMarker>
 impl authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>
-pub fn authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>::rss_access(authn::SigningKeyRing, diport::signer::SigningPurpose, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
+pub fn authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>::rss_access(authn::SigningKeyRing, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
 impl authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>
-pub fn authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>::service_token(authn::SigningKeyRing, diport::signer::SigningPurpose, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
+pub fn authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>::service_token(authn::SigningKeyRing, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::time::Duration) -> Self
+impl<P: diport::pdp::TokenProfileMarker> authn::JwtIssuerConfig<P>
+pub fn authn::JwtIssuerConfig<P>::lifetime(&self) -> core::time::Duration
+pub fn authn::JwtIssuerConfig<P>::signing_binding(&self) -> &diport::pdp::JwtSigningBinding<P>
+impl<P: core::clone::Clone + diport::pdp::TokenProfileMarker> core::clone::Clone for authn::JwtIssuerConfig<P>
+pub fn authn::JwtIssuerConfig<P>::clone(&self) -> authn::JwtIssuerConfig<P>
 impl<P> core::marker::Freeze for authn::JwtIssuerConfig<P>
 impl<P> core::marker::Send for authn::JwtIssuerConfig<P>
 impl<P> core::marker::Sync for authn::JwtIssuerConfig<P>

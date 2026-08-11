@@ -77,11 +77,31 @@ pub struct EventTransportConfig {
     dlx_payload_protector: Option<DlxPayloadProtector>,
     /// Required for durable topologies; absent for Demo.
     amqp_ca: Option<amqp::AmqpPrivateCa>,
+    local_producers: Vec<generated::event::ProducerDomain>,
 }
 
 impl EventTransportConfig {
+    pub(crate) fn from_execution(
+        mapper: &ServingConfigMapper<'_>,
+        execution: &crate::plan::LocalEventExecutionPlan,
+    ) -> anyhow::Result<Self> {
+        map_event_transport_from_snapshot(
+            mapper.config(),
+            execution.required_amqp_domains(),
+            execution.local_producers(),
+            execution.is_active(),
+        )
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_mapper(mapper: &ServingConfigMapper<'_>) -> anyhow::Result<Self> {
-        map_event_transport_from_snapshot(mapper.config())
+        let required = generated_required_domains();
+        map_event_transport_from_snapshot(
+            mapper.config(),
+            &required,
+            generated::event::PRODUCER_DOMAINS,
+            true,
+        )
     }
 
     pub(crate) const fn topology(&self) -> bootstrap::Topology {
@@ -276,6 +296,7 @@ impl EventTransportTestValues {
                 tenant_authority: None,
                 dlx_payload_protector: None,
                 amqp_ca: None,
+                local_producers: generated::event::PRODUCER_DOMAINS.to_vec(),
             });
         }
 
@@ -302,6 +323,7 @@ impl EventTransportTestValues {
             tenant_authority: Some(build_tenant_authority_from(&get)?),
             dlx_payload_protector: Some(build_dlx_payload_protector_from(&get)?),
             amqp_ca: Some(amqp_ca),
+            local_producers: generated::event::PRODUCER_DOMAINS.to_vec(),
         })
     }
 }
@@ -626,6 +648,11 @@ struct EventSecurity {
     amqp_ca: amqp::AmqpPrivateCa,
 }
 
+struct DurableEventExecution {
+    per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
+    local_producers: Vec<generated::event::ProducerDomain>,
+}
+
 // ── 公开函数 ──────────────────────────────────────────────────────────────────
 
 /// 需要 per-domain AMQP vhost 连接的域集 = **generated producer domain ∪ consumer 订阅 topic owner**
@@ -643,6 +670,7 @@ pub(crate) fn required_domains(subscribers: &[BridgedSubscription]) -> Vec<Strin
     domains
 }
 
+#[cfg(any(test, feature = "integration"))]
 fn generated_required_domains() -> Vec<String> {
     let mut domains: Vec<String> = generated::event::PRODUCER_DOMAINS
         .iter()
@@ -659,6 +687,7 @@ fn generated_required_domains() -> Vec<String> {
     domains
 }
 
+#[cfg(any(test, feature = "integration"))]
 fn topic_owner(topic: &str) -> String {
     topic
         .split('.')
@@ -685,6 +714,17 @@ fn consumer_meta_for_subscription(
     subscription.consumer_meta(tenant_authority)
 }
 
+pub(crate) fn bridge_generated_subscriptions_for_execution(
+    bindings: Vec<SubscriberBinding>,
+    execution: &crate::plan::LocalEventExecutionPlan,
+) -> anyhow::Result<Vec<BridgedSubscription>> {
+    eventing_composition::bridge_generated_subscriptions_selected(
+        bindings,
+        execution.local_subscriptions(),
+    )
+}
+
+#[cfg(any(test, feature = "integration"))]
 pub fn bridge_generated_subscriptions(
     bindings: Vec<SubscriberBinding>,
 ) -> anyhow::Result<Vec<BridgedSubscription>> {
@@ -706,6 +746,7 @@ fn bridge_subscriptions_with_events(
 /// - Durable → [`EventDecision::Durable`]
 #[derive(Debug)]
 enum EventDecision {
+    Inactive,
     Demo,
     Durable {
         per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
@@ -742,11 +783,16 @@ pub(crate) async fn wire_event_transport(
     subscribers: Vec<BridgedSubscription>,
     cfg: EventTransportConfig,
     worker: EventWorkerConfig,
-    audit_key: MacKey,
+    audit_key: Option<MacKey>,
 ) -> anyhow::Result<DomainModuleResult> {
+    let local_producers = cfg.local_producers.clone();
     let timing = worker.relay;
-    let security = event_security_for_topology(cfg.topology, &cfg)?;
+    let security = match &cfg.decision {
+        EventDecision::Durable { .. } => event_security_for_topology(cfg.topology, &cfg)?,
+        EventDecision::Inactive | EventDecision::Demo => None,
+    };
     match cfg.decision {
+        EventDecision::Inactive => Ok(DomainModuleResult::default()),
         EventDecision::Demo => {
             // reason: Demo 拓扑返回空产物——函数可在无 env/容器下单测；生产走 Demo 时
             // 组合根 `run()` 在此函数调用前已 fail-fast（TOPO-INMEM-SEAL-01）。
@@ -764,7 +810,10 @@ pub(crate) async fn wire_event_transport(
                 pg,
                 distributed,
                 subscribers,
-                per_domain,
+                DurableEventExecution {
+                    per_domain,
+                    local_producers,
+                },
                 timing,
                 security,
                 audit_key,
@@ -1408,6 +1457,9 @@ fn elapsed_seconds(started: SystemTime, finished: SystemTime) -> f64 {
 /// Map one immutable serving snapshot into exact topology/security configuration.
 fn map_event_transport_from_snapshot(
     config: SnapshotConfig<'_>,
+    required_domains: &[String],
+    local_producers: &[generated::event::ProducerDomain],
+    active: bool,
 ) -> anyhow::Result<EventTransportConfig> {
     let get = |name: &str| config.value(name).map(str::to_owned);
     let topo_raw = get("RSS_TOPOLOGY")
@@ -1423,7 +1475,7 @@ fn map_event_transport_from_snapshot(
         // Production egress: plaintext AMQP opt-in is banned (#1710); always Deny.
         let policy = secure::PlaintextEndpointPolicy::Deny;
         let mut per_domain = BTreeMap::new();
-        for domain in generated::event::PRODUCER_DOMAINS {
+        for domain in required_domains {
             let domain = domain.as_str();
             let env = format!("RSS_{}_AMQP_URL", domain.to_ascii_uppercase());
             if let Some(url) = get(&env) {
@@ -1442,22 +1494,32 @@ fn map_event_transport_from_snapshot(
             .transpose()?;
         bootstrap::eventtransport::TransportConfig::new(per_domain, shared)
     };
-    let decision = resolve_event_decision(topology, transport, &generated_required_domains())?;
+    let decision = if active {
+        resolve_event_decision(topology, transport, required_domains)?
+    } else {
+        EventDecision::Inactive
+    };
     let (tenant_authority, dlx_payload_protector, amqp_ca) =
         if topology == bootstrap::Topology::Demo {
             (None, None, None)
         } else {
-            let pem = crate::infra::read_required_ca_pem(
-                config.value(AMQP_CA_CERT_PEM_PATH_ENV),
-                AMQP_CA_CERT_PEM_PATH_ENV,
-            )?;
-            let amqp_ca = amqp::AmqpPrivateCa::from_pem(pem).with_context(|| {
-                format!("parse AMQP private CA PEM from {AMQP_CA_CERT_PEM_PATH_ENV}")
-            })?;
+            let amqp_ca = active
+                .then(|| {
+                    let pem = crate::infra::read_required_ca_pem(
+                        config.value(AMQP_CA_CERT_PEM_PATH_ENV),
+                        AMQP_CA_CERT_PEM_PATH_ENV,
+                    )?;
+                    amqp::AmqpPrivateCa::from_pem(pem).with_context(|| {
+                        format!("parse AMQP private CA PEM from {AMQP_CA_CERT_PEM_PATH_ENV}")
+                    })
+                })
+                .transpose()?;
             (
-                Some(build_tenant_authority_from(&get)?),
+                active
+                    .then(|| build_tenant_authority_from(&get))
+                    .transpose()?,
                 Some(build_dlx_payload_protector(config)?),
-                Some(amqp_ca),
+                amqp_ca,
             )
         };
 
@@ -1467,6 +1529,7 @@ fn map_event_transport_from_snapshot(
         tenant_authority,
         dlx_payload_protector,
         amqp_ca,
+        local_producers: local_producers.to_vec(),
     })
 }
 
@@ -1503,11 +1566,15 @@ async fn wire_durable(
     pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
     subscribers: Vec<BridgedSubscription>,
-    per_domain: BTreeMap<String, bootstrap::AmqpUrl>,
+    execution: DurableEventExecution,
     timing: RelayTiming,
     security: EventSecurity,
-    audit_key: MacKey,
+    audit_key: Option<MacKey>,
 ) -> anyhow::Result<DomainModuleResult> {
+    let DurableEventExecution {
+        per_domain,
+        local_producers,
+    } = execution;
     let mut module = DomainModuleResult::default();
     // projection replay / shadow-swap 由 `rss projections` 离线控制面处理；本函数只装配在线传输 worker。
     // 每个 required 域（generated producer domain ∪ subscriber 订阅 topic owner）由 resolver 保证有已校验
@@ -1540,7 +1607,11 @@ async fn wire_durable(
 
     // Relay workers：generated producer registry 是迭代单源；闭枚举 match 把每个 producer 映射到
     // postgres sealed capability。新增 producer 变体若未接 PG capability 会在此编译失败。
-    for producer in generated::event::PRODUCER_DOMAINS.iter().copied() {
+    for producer in generated::event::PRODUCER_DOMAINS
+        .iter()
+        .copied()
+        .filter(|producer| local_producers.contains(producer))
+    {
         let domain = producer.as_str();
         let publisher = match relay_publisher(&amqp_map, domain) {
             Ok(publisher) => publisher,
@@ -1577,7 +1648,7 @@ async fn wire_durable(
         &amqp_map,
         &security,
         &timing,
-        &audit_key,
+        audit_key.as_ref(),
         &mut module,
     ) {
         return Err(crate::provider_output::abort_uncommitted(module, primary).await);
@@ -1765,7 +1836,7 @@ fn wire_consumer_resource_bundle(
     amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
     security: &EventSecurity,
     timing: &RelayTiming,
-    audit_key: &MacKey,
+    audit_key: Option<&MacKey>,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let binding_count = subscribers.len();
@@ -1857,7 +1928,7 @@ fn consumer_tx_plan_for_spec(
 fn consumer_tx_worker_for_subscription(
     pg: &PgRuntimeHandle,
     subscription: &BridgedSubscription,
-    audit_key: &MacKey,
+    audit_key: Option<&MacKey>,
     inputs: WorkerInputs,
 ) -> anyhow::Result<WorkerSpec> {
     let token = subscription.dispatch_token().clone();
@@ -1866,9 +1937,11 @@ fn consumer_tx_worker_for_subscription(
         | SubscriptionDispatchKey::IdentityRoleAssignedV1Audit
         | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
         | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
-        | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => {
-            AuditConsumerFactory::new(pg, audit_key).worker(token, inputs)
-        }
+        | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit => AuditConsumerFactory::new(
+            pg,
+            audit_key.context("local audit subscription requires audit consumer key")?,
+        )
+        .worker(token, inputs),
         SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings => {
             SettingsConsumerFactory::new(pg).worker(token, inputs)
         }
@@ -2296,6 +2369,71 @@ mod tests {
             consistency::ConsumerGroup::parse(group).unwrap(),
             capability,
         )
+    }
+
+    #[test]
+    fn placement_selected_live_bridge_closes_all_remote_subsets() -> anyhow::Result<()> {
+        use assembly_schema::AssemblyDomain;
+        use std::collections::BTreeMap;
+
+        let domains = crate::modules_gen::ASSEMBLY_DOMAINS;
+        for remote_mask in 0_u8..(1_u8 << domains.len()) {
+            let mut values = BTreeMap::from([
+                ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+                ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+                ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+                ("RSS_TOPOLOGY", "durable-shared"),
+                ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
+            ]);
+            for (index, domain) in domains.iter().enumerate() {
+                if remote_mask & (1 << index) == 0 {
+                    continue;
+                }
+                let key = match domain {
+                    AssemblyDomain::Settings => "RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD",
+                    AssemblyDomain::Identity => "RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD",
+                    AssemblyDomain::Audit => "RSS_AUDIT_DOMAIN_PLACEMENT_WORKLOAD",
+                    other => anyhow::bail!("unexpected bundled domain {other:?}"),
+                };
+                values.insert(key, "peer-cell");
+            }
+            let values = values.into_iter().collect::<Vec<_>>();
+            let snapshot = crate::config::test_snapshot(&values)?;
+            let execution = crate::plan::RuntimePlan::bundled(snapshot.view())?
+                .place(bootstrap::Topology::DurableShared, snapshot.view())?
+                .into_parts()
+                .events;
+            let bindings = execution
+                .local_subscriptions()
+                .iter()
+                .map(|dispatch| {
+                    let (event, spec) = generated::event::EVENTS
+                        .iter()
+                        .find_map(|event| {
+                            event
+                                .subscriptions()
+                                .iter()
+                                .find(|spec| spec.dispatch() == *dispatch)
+                                .map(|spec| (*event, *spec))
+                        })
+                        .context("selected dispatch must have one generated subscription")?;
+                    Ok(test_binding_with_capability(
+                        event.contract_id(),
+                        event.topic(),
+                        spec.consumer(),
+                        spec.group(),
+                        test_capability_for_spec(spec)?,
+                    ))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?;
+            let selected = execution.local_subscriptions().len();
+            let bridged = bridge_generated_subscriptions_for_execution(bindings, &execution)?;
+            anyhow::ensure!(
+                bridged.len() == selected,
+                "mask={remote_mask} live bridge count drift"
+            );
+        }
+        Ok(())
     }
 
     #[allow(clippy::unwrap_used)]

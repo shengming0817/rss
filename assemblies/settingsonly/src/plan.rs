@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyManifest, AssemblyProfile,
     AssemblyTopology, CanonicalAssemblyManifestV2, DomainLifecyclePhase, ExecutableAssemblyLock,
-    ListenerAuth, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV2Input,
+    ListenerAuth, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
 };
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
@@ -57,7 +57,7 @@ impl SettingsOnlyPlan {
 
         validate_manifest_closure(&manifest, lock.identity())?;
         let input = compiler_input(&manifest)?;
-        let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
+        let typed = TypedRuntimePlan::compile_v3(&manifest, &lock, input)
             .context("compile bundled settingsonly RuntimePlan")?;
         validate_typed_closure(&typed)?;
         let workflow_activation = eventexec::WorkflowActivationPlan::select(&typed)
@@ -361,10 +361,14 @@ impl BoundSettingsOnlyPlan {
                 )
             })
             .collect();
+        let provider_receipt = runtimeexec::inventory::ProviderExecutionReceipt::from_runtime_plan(
+            &self.typed,
+            provider_bindings,
+        )?;
         runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
             &self.typed,
             self.workflow_runtime.activated_workflows(),
-            provider_bindings,
+            provider_receipt,
             placements,
         )
         .context("seal settingsonly runtime inventory seed")
@@ -435,8 +439,8 @@ fn validate_manifest_listeners(manifest: &CanonicalAssemblyManifestV2) -> anyhow
     Ok(())
 }
 
-fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV2Input> {
-    let mut input = RuntimePlanV2Input::from_manifest(manifest);
+fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV3Input> {
+    let mut input = RuntimePlanV3Input::from_manifest(manifest);
 
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
@@ -462,8 +466,8 @@ fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<Runt
 
 fn validate_typed_closure(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
     anyhow::ensure!(
-        plan.schema_version() == 2,
-        "settingsonly requires RuntimePlan schema version 1"
+        plan.schema_version() == 3,
+        "settingsonly requires RuntimePlan schema version 3"
     );
     let listeners = plan.listener_plans();
     anyhow::ensure!(

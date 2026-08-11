@@ -35,10 +35,22 @@ impl RuntimeInventoryRoutes {
                 model::ProviderProbeBinding::from_probe_receipt(provider.id(), Vec::new())
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let expected_provider_ids = plan
+            .as_typed()
+            .provider_plans()
+            .iter()
+            .map(|provider| provider.id().to_owned())
+            .collect::<Vec<_>>();
+        let provider_receipt = model::ProviderExecutionReceipt::seal(
+            runtimeinventorymint::RuntimeInventoryMint::capability(),
+            plan.as_typed().runtime_plan_fingerprint().as_str(),
+            expected_provider_ids,
+            provider_bindings,
+        )?;
         let seed = model::RuntimeInventorySeed::from_runtime_plan(
             plan.as_typed(),
             plan.workflow_runtime().activated_workflows(),
-            provider_bindings,
+            provider_receipt,
             plan.placement_execution_plan(bootstrap::Topology::Demo, config)?
                 .inventory_observations()?,
         )?
@@ -329,10 +341,18 @@ pub mod test_support {
                 model::PlacementObservation::local(placement.domain(), placement.workload())
             })
             .collect();
+        let provider_receipt = model::ProviderExecutionReceipt::seal(
+            runtimeinventorymint::RuntimeInventoryMint::capability(),
+            plan.runtime_plan_fingerprint().as_str(),
+            plan.provider_plans()
+                .iter()
+                .map(|provider| provider.id().to_owned()),
+            bindings,
+        )?;
         let seed = model::RuntimeInventorySeed::from_runtime_plan(
             plan,
             workflow_runtime.activated_workflows(),
-            bindings,
+            provider_receipt,
             placements,
         )?
         .with_build_metadata(model::BuildMetadata::parse(

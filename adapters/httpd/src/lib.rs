@@ -122,7 +122,42 @@ impl DomainHttpTargetConfig {
 /// ambient diagnostic context inside the private HTTP-attempt funnel.
 pub struct DomainHttpTransport {
     targets: BTreeMap<String, DomainHttpTarget>,
-    mtls_source: Option<spiffe::X509Source>,
+    identity_admission: Option<DomainHttpIdentityAdmission>,
+}
+
+struct DomainHttpIdentityAdmission {
+    source: DomainHttpIdentitySource,
+    expected: authn::SpiffeId,
+}
+
+enum DomainHttpIdentitySource {
+    Spiffe(spiffe::X509Source),
+    #[cfg(test)]
+    Fixed {
+        healthy: bool,
+        current_identity: Option<String>,
+    },
+}
+
+impl DomainHttpIdentityAdmission {
+    fn readiness(&self) -> DomainHttpOwnedReadiness {
+        let (healthy, current_identity) = match &self.source {
+            DomainHttpIdentitySource::Spiffe(source) => (
+                source.is_healthy(),
+                source.svid().ok().map(|svid| svid.spiffe_id().to_string()),
+            ),
+            #[cfg(test)]
+            DomainHttpIdentitySource::Fixed {
+                healthy,
+                current_identity,
+            } => (*healthy, current_identity.clone()),
+        };
+        owned_readiness_from_source_state(
+            healthy,
+            current_identity.as_deref(),
+            Some(self.expected.as_str()),
+        )
+    }
 }
 
 /// Current readiness state for outbound domain HTTP transport.
@@ -165,6 +200,7 @@ impl DomainHttpTransport {
         if targets.is_empty() {
             return Err(DomainHttpTransportBuildError::EmptyTargets);
         }
+        let expected_local_identity = targets[0].policy.local_identity().clone();
         let source = x509_source(endpoint, initial_sync_timeout).await?;
         let (mapped, source) = build_domain_http_targets(
             source,
@@ -175,7 +211,10 @@ impl DomainHttpTransport {
         .await?;
         Ok(Self {
             targets: mapped,
-            mtls_source: Some(source),
+            identity_admission: Some(DomainHttpIdentityAdmission {
+                source: DomainHttpIdentitySource::Spiffe(source),
+                expected: expected_local_identity,
+            }),
         })
     }
 
@@ -188,8 +227,26 @@ impl DomainHttpTransport {
         }
         Ok(Self {
             targets,
-            mtls_source: None,
+            identity_admission: None,
         })
+    }
+
+    #[cfg(test)]
+    fn from_targets_with_identity_state(
+        targets: BTreeMap<String, DomainHttpTarget>,
+        healthy: bool,
+        current_identity: Option<&str>,
+        expected: authn::SpiffeId,
+    ) -> Result<Self, DomainHttpTransportBuildError> {
+        let mut transport = Self::from_targets(targets)?;
+        transport.identity_admission = Some(DomainHttpIdentityAdmission {
+            source: DomainHttpIdentitySource::Fixed {
+                healthy,
+                current_identity: current_identity.map(str::to_owned),
+            },
+            expected,
+        });
+        Ok(transport)
     }
 
     /// Readiness snapshot for transport state owned by this process.
@@ -197,10 +254,9 @@ impl DomainHttpTransport {
     /// Production transports hold an `X509Source`; test-only transports do not. Runtime registers
     /// this as `domain_transport_ready`.
     pub fn owned_readiness(&self) -> DomainHttpOwnedReadiness {
-        owned_readiness_from_source_health(
-            self.mtls_source
-                .as_ref()
-                .is_none_or(spiffe::X509Source::is_healthy),
+        self.identity_admission.as_ref().map_or(
+            DomainHttpOwnedReadiness::Ready,
+            DomainHttpIdentityAdmission::readiness,
         )
     }
 
@@ -251,6 +307,15 @@ impl HttpContractTransport for DomainHttpTransport {
         >,
     > {
         Box::pin(async move {
+            if self
+                .identity_admission
+                .as_ref()
+                .is_some_and(|admission| !admission.readiness().is_ready())
+            {
+                return Err(HttpContractTransportError::new(
+                    HttpContractTransportErrorKind::Dispatch,
+                ));
+            }
             let domain = request.contract().domain().to_uppercase();
             let target = self.targets.get(&domain).ok_or_else(|| {
                 HttpContractTransportError::new(HttpContractTransportErrorKind::Dispatch)
@@ -281,11 +346,15 @@ impl ManagedResource for DomainHttpTransport {
     }
 
     async fn shutdown(&self) -> Result<(), ShutdownError> {
-        if let Some(source) = &self.mtls_source {
-            source
-                .shutdown_configured()
-                .await
-                .map_err(ShutdownError::new)?;
+        if let Some(admission) = &self.identity_admission {
+            match &admission.source {
+                DomainHttpIdentitySource::Spiffe(source) => source
+                    .shutdown_configured()
+                    .await
+                    .map_err(ShutdownError::new)?,
+                #[cfg(test)]
+                DomainHttpIdentitySource::Fixed { .. } => {}
+            }
         }
         Ok(())
     }
@@ -420,8 +489,17 @@ fn mtls_reqwest_client(
     ObservedHttpClient::build_mtls(config).map_err(DomainHttpTransportBuildError::Client)
 }
 
-fn owned_readiness_from_source_health(source_healthy: bool) -> DomainHttpOwnedReadiness {
-    if source_healthy {
+fn owned_readiness_from_source_state(
+    source_healthy: bool,
+    current_identity: Option<&str>,
+    expected_identity: Option<&str>,
+) -> DomainHttpOwnedReadiness {
+    let identity_matches = match (current_identity, expected_identity) {
+        (Some(current), Some(expected)) => current == expected,
+        (None, None) => true,
+        (Some(_), None) | (None, Some(_)) => false,
+    };
+    if source_healthy && identity_matches {
         DomainHttpOwnedReadiness::Ready
     } else {
         DomainHttpOwnedReadiness::MtlsSourceUnavailable
@@ -2165,12 +2243,69 @@ mod tests {
     #[test]
     fn domain_transport_owned_readiness_maps_local_source_health() {
         assert_eq!(
-            owned_readiness_from_source_health(true),
+            owned_readiness_from_source_state(
+                true,
+                Some("spiffe://example.test/runtime"),
+                Some("spiffe://example.test/runtime")
+            ),
             DomainHttpOwnedReadiness::Ready
         );
         assert_eq!(
-            owned_readiness_from_source_health(false),
+            owned_readiness_from_source_state(
+                false,
+                Some("spiffe://example.test/runtime"),
+                Some("spiffe://example.test/runtime")
+            ),
             DomainHttpOwnedReadiness::MtlsSourceUnavailable
+        );
+        assert_eq!(
+            owned_readiness_from_source_state(
+                true,
+                Some("spiffe://example.test/rotated-wrong-id"),
+                Some("spiffe://example.test/runtime")
+            ),
+            DomainHttpOwnedReadiness::MtlsSourceUnavailable
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::expect_used)]
+    async fn domain_transport_identity_rotation_mismatch_rejects_before_network_attempt() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let endpoint = reqwest::Url::parse(&format!(
+            "http://{}/rpc",
+            listener.local_addr().expect("address")
+        ))
+        .expect("url");
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            "IDENTITY".to_owned(),
+            DomainHttpTarget::new(endpoint, ObservedHttpClient::plaintext_for_test()),
+        );
+        let expected = authn::SpiffeId::parse("spiffe://example.org/ns/rss/sa/runtime")
+            .expect("expected identity");
+        let transport = DomainHttpTransport::from_targets_with_identity_state(
+            targets,
+            true,
+            Some("spiffe://example.org/ns/rss/sa/rotated-wrong-id"),
+            expected,
+        )
+        .expect("transport");
+
+        let error = transport
+            .dispatch(domain_request("identity"))
+            .await
+            .expect_err("identity mismatch must fail closed");
+        assert_eq!(error.kind(), HttpContractTransportErrorKind::Dispatch);
+        assert_eq!(
+            transport.owned_readiness(),
+            DomainHttpOwnedReadiness::MtlsSourceUnavailable
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), listener.accept())
+                .await
+                .is_err(),
+            "identity mismatch must reject before target connection"
         );
     }
 

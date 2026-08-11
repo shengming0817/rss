@@ -1,11 +1,22 @@
-error[E0451]: fields `role`, `factory` and `evidence` of struct `ProviderCatalogEntry` are private
-  --> tests/ui/provider_catalog_entry_private.rs:22:9
+error: cannot construct `ProviderCatalogEntry` with struct literal syntax due to private fields
+  --> tests/ui/provider_catalog_entry_private.rs:22:13
    |
-21 |     let _ = ProviderCatalogEntry {
-   |             -------------------- in this type
-22 |         role: ProviderRole::ListenerRateLimiter,
-   |         ^^^^ private field
-23 |         factory: ProviderFactorySymbol::HttpserveRedisRateLimiter,
-   |         ^^^^^^^ private field
-24 |         evidence: *VALID.evidence(),
-   |         ^^^^^^^^ private field
+22 |     let _ = ProviderCatalogEntry {
+   |             ^^^^^^^^^^^^^^^^^^^^
+23 |         role: ProviderRole::ListenerRateLimiter,
+   |         --------------------------------------- private field
+24 |         factory: ProviderFactorySymbol::HttpserveRedisRateLimiter,
+   |         --------------------------------------------------------- private field
+25 |         evidence: *VALID.evidence(),
+   |         --------------------------- private field
+   |
+   = note: ...and other private field `activation` that was not provided
+help: you might have meant to use the `checked` associated function
+   |
+22 -     let _ = ProviderCatalogEntry {
+23 -         role: ProviderRole::ListenerRateLimiter,
+24 -         factory: ProviderFactorySymbol::HttpserveRedisRateLimiter,
+25 -         evidence: *VALID.evidence(),
+26 -     };
+22 +     let _ = ProviderCatalogEntry::checked(_, _, _, _, _, _, _, _, _, _, _, _);
+   |

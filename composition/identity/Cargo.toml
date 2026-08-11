@@ -22,6 +22,7 @@ deviceloop = { path = "../../crates/deviceloop" }
 eventexec = { path = "../../crates/eventexec" }
 futures = { workspace = true }
 identity = { path = "../../crates/identity" }
+httpserve = { path = "../../crates/httpserve" }
 ids = { path = "../../crates/ids", optional = true }
 crypto-adapter = { path = "../../adapters/crypto" }
 secure = { path = "../../crates/secure" }

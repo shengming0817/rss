@@ -4,7 +4,7 @@
 # Every landed revision is also committed to `LANDED_HISTORY` in the guard. Append both ledgers in
 # the same change; deleting or rewriting any earlier entry is forbidden.
 schemaVersion = 1
-currentRevision = "issue-2038"
+currentRevision = "issue-1864-1866"
 
 [[history]]
 revision = "pre-1794"
@@ -70,6 +70,18 @@ revision = "issue-2038"
 previousRevision = "issue-2000"
 rawLines = 248
 topLevelFunctions = 10
+topLevelTypes = 1
+topLevelConstStatic = 1
+implMethods = 3
+publicModules = 8
+publicReexports = 9
+inlineProductionModules = 0
+
+[[history]]
+revision = "issue-1864-1866"
+previousRevision = "issue-2038"
+rawLines = 241
+topLevelFunctions = 9
 topLevelTypes = 1
 topLevelConstStatic = 1
 implMethods = 3

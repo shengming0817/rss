@@ -691,7 +691,7 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV2, source_label: &str) 
     let providers = active_providers(manifest);
 
     let mut code = format!(
-        "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,\n    ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\npub(crate) const ASSEMBLY_NAMESPACE: &str = {:?};\n\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
+        "{GENERATED_PROVIDER_OWNERSHIP_MARKER}\n// Source: {source_label}\n// Source-Manifest-Digest: {}\n\nuse assembly_schema::{{\n    AssemblyDomain, DiportPort, LifecycleChannel, ProviderActivation, ProviderCatalogEntry,\n    ProviderConstructor, ProviderConsumer, ProviderDurability, ProviderFactorySymbol, ProviderRole,\n}};\n\npub(crate) const ASSEMBLY_NAMESPACE: &str = {:?};\n\npub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[\n",
         manifest.manifest_digest(),
         manifest.name()
     );
@@ -706,6 +706,10 @@ fn render_providers(manifest: &CanonicalAssemblyManifestV2, source_label: &str) 
         code.push_str(&format!(
             "        ProviderRole::{},\n",
             provider_role_variant(provider.id)
+        ));
+        code.push_str(&format!(
+            "        {},\n",
+            provider_activation_expression(provider.id.activation())
         ));
         code.push_str(&format!(
             "        DiportPort::{},\n",
@@ -1067,7 +1071,7 @@ fn validate_provider_catalog_syntax(
     let import_tokens = compact_tokens(&import.tree);
     ensure!(
         import_tokens
-            == "assembly_schema::{DiportPort,LifecycleChannel,ProviderCatalogEntry,ProviderConstructor,ProviderConsumer,ProviderDurability,ProviderFactorySymbol,ProviderRole,}",
+            == "assembly_schema::{AssemblyDomain,DiportPort,LifecycleChannel,ProviderActivation,ProviderCatalogEntry,ProviderConstructor,ProviderConsumer,ProviderDurability,ProviderFactorySymbol,ProviderRole,}",
         "provider catalog import 集合漂移：{import_tokens}"
     );
     ensure!(
@@ -1372,17 +1376,18 @@ fn validate_provider_catalog_entry(expression: &syn::Expr) -> Result<()> {
         "provider catalog entry 只允许 ProviderCatalogEntry::checked"
     );
     ensure!(
-        call.args.len() == 11,
-        "ProviderCatalogEntry::checked 参数数量必须为 11"
+        call.args.len() == 12,
+        "ProviderCatalogEntry::checked 参数数量必须为 12"
     );
     let args = call.args.iter().collect::<Vec<_>>();
     ensure_enum_variant(args[0], "ProviderRole")?;
-    ensure_enum_variant(args[1], "DiportPort")?;
-    ensure_enum_variant(args[2], "ProviderConstructor")?;
-    ensure_enum_variant(args[3], "ProviderFactorySymbol")?;
+    ensure_provider_activation(args[1])?;
+    ensure_enum_variant(args[2], "DiportPort")?;
+    ensure_enum_variant(args[3], "ProviderConstructor")?;
+    ensure_enum_variant(args[4], "ProviderFactorySymbol")?;
     ensure!(
         matches!(
-            args[4],
+            args[5],
             syn::Expr::Lit(syn::ExprLit {
                 lit: syn::Lit::Str(_),
                 ..
@@ -1390,13 +1395,32 @@ fn validate_provider_catalog_entry(expression: &syn::Expr) -> Result<()> {
         ),
         "provider crate 必须是字符串字面量"
     );
-    ensure_string_slice(args[5])?;
-    ensure_enum_variant(args[6], "ProviderConsumer")?;
-    ensure_enum_variant(args[7], "ProviderDurability")?;
-    ensure_optional_enum_variant(args[8], "ProviderScope")?;
-    ensure_optional_enum_variant(args[9], "ProviderFailurePosture")?;
-    ensure_enum_slice(args[10], "LifecycleChannel")?;
+    ensure_string_slice(args[6])?;
+    ensure_enum_variant(args[7], "ProviderConsumer")?;
+    ensure_enum_variant(args[8], "ProviderDurability")?;
+    ensure_optional_enum_variant(args[9], "ProviderScope")?;
+    ensure_optional_enum_variant(args[10], "ProviderFailurePosture")?;
+    ensure_enum_slice(args[11], "LifecycleChannel")?;
     Ok(())
+}
+
+fn ensure_provider_activation(expression: &syn::Expr) -> Result<()> {
+    if ensure_enum_variant(expression, "ProviderActivation").is_ok() {
+        return Ok(());
+    }
+    let syn::Expr::Call(call) = expression else {
+        bail!("provider activation 必须是闭合 ProviderActivation variant")
+    };
+    ensure!(
+        matches!(call.func.as_ref(), syn::Expr::Path(path)
+            if exact_path(&path.path, &["ProviderActivation", "DomainLocal"]))
+            && call.args.len() == 1,
+        "DomainLocal activation 必须有一个 typed domain"
+    );
+    ensure_enum_variant(
+        call.args.first().context("DomainLocal domain missing")?,
+        "AssemblyDomain",
+    )
 }
 
 fn ensure_enum_variant(expression: &syn::Expr, enum_name: &str) -> Result<()> {
@@ -1673,7 +1697,7 @@ fn render_modules(
     let is_runtime = manifest.name() == "runtime";
     let typed_domain_inputs = is_runtime || manifest.typed_domain_inputs();
     let wire_domains_signature = if is_runtime {
-        "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n    placement: &crate::plan::PlacementExecutionPlan,\n) -> Result<Vec<DomainBinding>, DomainWiringFailure>"
+        "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    providers: crate::LocalDomainProviderCatalog,\n    inputs: PreparedLocalDomainInputs,\n) -> Result<Vec<DomainBinding>, DomainWiringFailure>"
     } else if typed_domain_inputs {
         "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n) -> anyhow::Result<Vec<DomainBinding>>"
     } else {
@@ -1685,8 +1709,59 @@ fn render_modules(
     if is_runtime {
         code.push_str("use crate::domains::DomainWiringFailure;\n\n");
     }
+    if is_runtime {
+        code.push_str("pub const ASSEMBLY_DOMAINS: &[assembly_schema::AssemblyDomain] = &[\n");
+        for domain in manifest.domains() {
+            code.push_str(&format!(
+                "    assembly_schema::AssemblyDomain::{},\n",
+                domain_variant(*domain)
+            ));
+        }
+        code.push_str("];\n\n");
+
+        code.push_str("pub(crate) struct PreparedLocalDomainInputs {\n    inputs: Vec<LocalDomainModuleInput>,\n}\n\npub(crate) enum LocalDomainModuleInput {\n");
+        for domain in manifest.domains() {
+            let module = module_name(*domain)?;
+            code.push_str(&format!(
+                "    {}(crate::domains::{module}::{}ModuleInput),\n",
+                domain_variant(*domain),
+                domain_variant(*domain)
+            ));
+        }
+        code.push_str("}\n\nimpl PreparedLocalDomainInputs {\n    pub(crate) fn from_snapshot(\n        execution: &crate::plan::DomainExecutionPlan,\n        mapper: &crate::config::ServingConfigMapper<'_>,\n        keyprovider_readiness_interval: settings_composition::KeyProviderReadinessInterval,\n        token_profiles: &crate::config::TokenProfilesConfig,\n    ) -> anyhow::Result<Self> {\n        let mut inputs = Vec::with_capacity(execution.local_domains().len());\n        for domain in execution.local_domains() {\n            inputs.push(match domain {\n");
+        for domain in manifest.domains() {
+            let module = module_name(*domain)?;
+            let variant = domain_variant(*domain);
+            let constructor = match domain {
+                AssemblyDomain::Settings => format!(
+                    "crate::domains::{module}::{variant}ModuleInput::new(keyprovider_readiness_interval)"
+                ),
+                AssemblyDomain::Identity => format!(
+                    "crate::domains::{module}::{variant}ModuleInput::from_mapper(mapper, token_profiles.primary_identity_profile()?)?"
+                ),
+                AssemblyDomain::Audit => {
+                    format!("crate::domains::{module}::{variant}ModuleInput::from_mapper(mapper)?")
+                }
+                other => bail!(
+                    "runtime input generator does not support domain '{}'",
+                    other.as_str()
+                ),
+            };
+            code.push_str(&format!(
+                "                assembly_schema::AssemblyDomain::{variant} => LocalDomainModuleInput::{variant}({constructor}),\n"
+            ));
+        }
+        code.push_str("                other => anyhow::bail!(\"runtime generated unsupported local domain '{}'\", other.as_str()),\n            });\n        }\n        Ok(Self { inputs })\n    }\n\n    pub(crate) fn into_inputs(self) -> impl Iterator<Item = LocalDomainModuleInput> {\n        self.inputs.into_iter()\n    }\n");
+        if manifest.domains().contains(&AssemblyDomain::Settings) {
+            code.push_str("\n    pub(crate) fn settings_readiness_interval(&self) -> anyhow::Result<settings_composition::KeyProviderReadinessInterval> {\n        self.inputs.iter().find_map(|input| match input {\n            LocalDomainModuleInput::Settings(input) => Some(input.readiness_interval()),\n            _ => None,\n        }).ok_or_else(|| anyhow::anyhow!(\"settings local execution input is not active\"))\n    }\n");
+        }
+        if manifest.domains().contains(&AssemblyDomain::Identity) {
+            code.push_str("\n    #[cfg(test)]\n    pub(crate) fn identity_for_test(&self) -> &crate::domains::identity::IdentityModuleInput {\n        self.inputs.iter().find_map(|input| match input {\n            LocalDomainModuleInput::Identity(input) => Some(input),\n            _ => None,\n        }).unwrap_or_else(|| unreachable!(\"all-local test plan contains identity\"))\n    }\n");
+        }
+        code.push_str("}\n\n");
+    }
     code.push_str(&format!("{wire_domains_signature} {{\n"));
-    if typed_domain_inputs {
+    if typed_domain_inputs && !is_runtime {
         code.push_str("    let crate::domains::DomainModuleInputs {\n");
         for domain in manifest.domains() {
             let module = module_name(*domain)?;
@@ -1696,14 +1771,23 @@ fn render_modules(
     }
     if is_runtime {
         code.push_str("    let mut bindings = Vec::new();\n");
+        code.push_str(
+            "    for input in inputs.into_inputs() {\n        let result = match input {\n",
+        );
     } else {
         code.push_str("    Ok(vec![\n");
     }
     for domain in manifest.domains() {
         let module = module_name(*domain)?;
         if is_runtime {
+            let provider_argument =
+                if assembly_schema::has_domain_local_provider_activation(*domain) {
+                    "&providers, "
+                } else {
+                    ""
+                };
             code.push_str(&format!(
-                "    if placement.is_local(assembly_schema::AssemblyDomain::{domain_variant}) {{\n        match crate::domains::{module}::module(deps, {module})\n            .await\n            .context(\"wire domain '{module}'\")\n        {{\n            Ok(binding) => bindings.push(binding),\n            Err(source) => return Err(DomainWiringFailure {{ source, bindings }}),\n        }}\n    }} else {{\n        let _ = {module};\n    }}\n",
+                "            LocalDomainModuleInput::{domain_variant}(input) => crate::domains::{module}::module(deps, {provider_argument}input)\n                .await\n                .context(\"wire domain '{module}'\"),\n",
                 domain_variant = domain_variant(*domain),
             ));
         } else if typed_domain_inputs {
@@ -1717,7 +1801,7 @@ fn render_modules(
         }
     }
     if is_runtime {
-        code.push_str("    Ok(bindings)\n");
+        code.push_str("        };\n        match result {\n            Ok(binding) => bindings.push(binding),\n            Err(source) => return Err(DomainWiringFailure { source, bindings }),\n        }\n    }\n    Ok(bindings)\n");
     } else {
         code.push_str("    ])\n");
     }
@@ -1737,8 +1821,15 @@ fn render_modules(
         "];
 
 #[cfg(test)]
-pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {\n",
+",
     );
+    if is_runtime {
+        code.push_str("pub(crate) async fn wire_test_domains(execution: &crate::plan::DomainExecutionPlan) -> anyhow::Result<Vec<DomainBinding>> {\n");
+    } else {
+        code.push_str(
+            "pub(crate) async fn wire_test_domains() -> anyhow::Result<Vec<DomainBinding>> {\n",
+        );
+    }
     render_test_domain_wiring(manifest, &mut code)?;
     code.push_str("}\n\n");
     if manifest.name() == "runtime" || !framework_routes.is_empty() {
@@ -1776,7 +1867,8 @@ fn render_test_domain_wiring(
         let module = module_name(*domain)?;
         if is_runtime {
             code.push_str(&format!(
-                "    bindings.push(\n        crate::domains::{module}::tests::test_binding(crate::domains::{module}::tests::test_input()?)\n            .await\n            .context(\"wire test domain '{module}'\")?,\n    );\n"
+                "    if execution.contains(assembly_schema::AssemblyDomain::{variant}) {{\n        bindings.push(\n            crate::domains::{module}::tests::test_binding(crate::domains::{module}::tests::test_input()?)\n                .await\n                .context(\"wire test domain '{module}'\")?,\n        );\n    }}\n",
+                variant = domain_variant(*domain),
             ));
         } else {
             code.push_str(&format!(
@@ -1839,6 +1931,19 @@ pub(crate) fn domain_variant(domain: AssemblyDomain) -> &'static str {
         AssemblyDomain::Audit => "Audit",
         AssemblyDomain::Contractreg => "Contractreg",
         AssemblyDomain::Syshealth => "Syshealth",
+    }
+}
+
+fn provider_activation_expression(activation: assembly_schema::ProviderActivation) -> String {
+    match activation {
+        assembly_schema::ProviderActivation::Process => "ProviderActivation::Process".to_owned(),
+        assembly_schema::ProviderActivation::LocalEventExecution => {
+            "ProviderActivation::LocalEventExecution".to_owned()
+        }
+        assembly_schema::ProviderActivation::DomainLocal(domain) => format!(
+            "ProviderActivation::DomainLocal(AssemblyDomain::{})",
+            domain_variant(domain)
+        ),
     }
 }
 
@@ -1975,11 +2080,25 @@ domains = [{domains}]
     }
 
     fn assert_runtime_uses_typed_domain_inputs(rendered: &str, domains: &[&str]) {
-        assert!(rendered.contains("inputs: crate::domains::DomainModuleInputs"));
-        assert!(rendered.contains("let crate::domains::DomainModuleInputs {"));
-        assert!(!rendered.contains("DomainModuleInputs { .. }"));
+        assert!(rendered.contains("inputs: PreparedLocalDomainInputs"));
+        assert!(rendered.contains("pub(crate) struct PreparedLocalDomainInputs"));
+        assert!(rendered.contains("pub(crate) enum LocalDomainModuleInput"));
+        assert!(rendered.contains("providers: crate::LocalDomainProviderCatalog"));
+        assert!(rendered.contains("for input in inputs.into_inputs()"));
         for domain in domains {
-            assert!(rendered.contains(&format!("domains::{domain}::module(deps, {domain})")));
+            let variant = match *domain {
+                "settings" => "Settings",
+                "identity" => "Identity",
+                "audit" => "Audit",
+                other => panic!("unsupported runtime fixture domain {other}"),
+            };
+            assert!(rendered.contains(&format!("LocalDomainModuleInput::{variant}(input)")));
+            let call = if *domain == "audit" {
+                format!("domains::{domain}::module(deps, input)")
+            } else {
+                format!("domains::{domain}::module(deps, &providers, input)")
+            };
+            assert!(rendered.contains(&call));
         }
     }
 
@@ -2062,8 +2181,11 @@ domains = [{domains}]
         assert!(rendered.contains("// Source-Manifest-Digest: sha256:"));
         assert!(!rendered.contains("Source-SHA256"));
         assert!(rendered.contains(
-            "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    inputs: crate::domains::DomainModuleInputs,\n    placement: &crate::plan::PlacementExecutionPlan,\n)"
+            "pub async fn wire_domains(\n    deps: &SharedRuntimeDeps,\n    providers: crate::LocalDomainProviderCatalog,\n    inputs: PreparedLocalDomainInputs,\n)"
         ));
+        assert!(
+            rendered.contains("pub const ASSEMBLY_DOMAINS: &[assembly_schema::AssemblyDomain]")
+        );
         assert!(rendered.contains("use crate::domains::DomainWiringFailure;"));
         assert!(!rendered.contains("pub struct DomainWiringFailure"));
         assert!(rendered.contains("Result<Vec<DomainBinding>, DomainWiringFailure>"));
@@ -2071,25 +2193,21 @@ domains = [{domains}]
             rendered
                 .contains("Err(source) => return Err(DomainWiringFailure { source, bindings })")
         );
-        assert!(
-            rendered.contains("if placement.is_local(assembly_schema::AssemblyDomain::Settings)")
-        );
-        assert!(
-            rendered.contains("if placement.is_local(assembly_schema::AssemblyDomain::Identity)")
-        );
-        assert!(rendered.contains("if placement.is_local(assembly_schema::AssemblyDomain::Audit)"));
-        assert!(rendered.contains(
-            "let crate::domains::DomainModuleInputs {\n        settings,\n        identity,\n        audit,\n    } = inputs;"
-        ));
-        assert!(!rendered.contains("DomainModuleInputs { .. }"));
+        assert!(rendered.contains("for input in inputs.into_inputs()"));
+        assert!(!rendered.contains("placement.is_local"));
+        assert!(!rendered.contains("let _ = identity"));
+        assert!(!rendered.contains("let _ = settings"));
+        assert!(!rendered.contains("let _ = audit"));
         assert_eq!(rendered.matches("::module(deps, ").count(), 3);
-        assert!(rendered.contains("domains::settings::module(deps, settings)"));
-        assert!(rendered.contains("domains::identity::module(deps, identity)"));
-        assert!(rendered.contains("domains::audit::module(deps, audit)"));
+        assert!(rendered.contains("domains::settings::module(deps, &providers, input)"));
+        assert!(rendered.contains("domains::identity::module(deps, &providers, input)"));
+        assert!(rendered.contains("domains::audit::module(deps, input)"));
         assert_eq!(rendered.matches(".context(\"wire domain '").count(), 3);
         assert!(rendered.contains("pub(crate) async fn wire_test_domains"));
         assert!(rendered.contains("let mut bindings = Vec::new();"));
-        assert_eq!(rendered.matches("bindings.push(").count(), 6);
+        // Production wiring has one closed-enum loop push; test wiring has one
+        // generated push per manifest domain.
+        assert_eq!(rendered.matches("bindings.push(").count(), 4);
         assert!(rendered.contains("Ok(bindings)"));
         assert!(rendered.contains("pub const DOMAIN_LISTENER_BINDINGS"));
         assert!(rendered.contains("bootstrap::ListenerKind::Primary"));
@@ -2611,10 +2729,17 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             ),
             "ordinary roles must not inherit ListenerPdp finish input"
         );
-        let ordinary_role_with_listener_shape = rendered.replacen(
-            "output: bootstrap::DomainModuleResult",
+        let mut ordinary_role_with_listener_shape = rendered.clone();
+        let start = ordinary_role_with_listener_shape
+            .find("impl DlxHotKeyProviderConstructor")
+            .expect("DLX hot constructor impl");
+        let relative = ordinary_role_with_listener_shape[start..]
+            .find("output: bootstrap::DomainModuleResult")
+            .expect("DLX hot output type");
+        let output_start = start + relative;
+        ordinary_role_with_listener_shape.replace_range(
+            output_start..output_start + "output: bootstrap::DomainModuleResult".len(),
             "output: ListenerPdpJwksLifecycle",
-            1,
         );
         assert!(
             validate_provider_catalog_for_manifest(&ordinary_role_with_listener_shape, &manifest)
@@ -2946,6 +3071,7 @@ const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
             accepted.push(std::panic::catch_unwind(|| {
                 assembly_schema::ProviderCatalogEntry::checked(
                     provider.id,
+                    provider.id.activation(),
                     provider.port,
                     provider.provider,
                     entry.factory,

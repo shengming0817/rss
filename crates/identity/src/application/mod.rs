@@ -1889,6 +1889,23 @@ impl ContractAuthorizer {
     }
 }
 
+/// Build the process-root contract authorizer independently of identity route ownership.
+pub fn build_contract_authorizer(
+    roles: Arc<DynRoleReadRepo<'static>>,
+    binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
+    policies: Arc<DynPolicyRepo<'static>>,
+    resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
+    clock: Arc<dyn Clock>,
+) -> Arc<dyn RouteAuthorizer> {
+    Arc::new(ContractAuthorizer::new(
+        roles,
+        binding_reads,
+        policies,
+        resource_attribute_reads,
+        clock,
+    ))
+}
+
 fn projection_spec(
     contract_id: &'static str,
     permission: RoutePermissionId,
@@ -3411,11 +3428,6 @@ impl IdentityCommonDomain {
         }
     }
 
-    fn register_authorizer(&self, registry: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
-        let authorizer: Arc<dyn RouteAuthorizer> = self.authorizer.clone();
-        registry.register_primary_authorizer(authorizer)
-    }
-
     fn route_state(&self) -> CommonIdentityRouteState {
         CommonIdentityRouteState {
             rbac_assign: RbacHandlerState {
@@ -3567,7 +3579,6 @@ fn mount_common_identity_routes(
 
 impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for IdentityDomain<S> {
     fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
-        self.common.register_authorizer(reg)?;
         let login = Arc::clone(&self.login);
         let refresh = Arc::clone(&self.refresh);
         let common = self.common.route_state();
@@ -3629,7 +3640,6 @@ impl<S: diport::Signer + Send + Sync + 'static> ::bootstrap::Domain for Identity
 
 impl ::bootstrap::Domain for FederatedIdentityDomain {
     fn init(&self, reg: &mut ::bootstrap::Registry) -> Result<(), KernelError> {
-        self.common.register_authorizer(reg)?;
         let common = self.common.route_state();
         reg.route_group::<Primary>(LOGIN_ROUTE_PREFIX, move |rb| {
             mount_common_identity_routes(rb, common)

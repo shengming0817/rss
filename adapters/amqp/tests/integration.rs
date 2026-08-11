@@ -655,7 +655,8 @@ async fn integration_ackable_ack_removes_message() -> Result<(), FixtureError> {
 }
 
 /// Manual Reject is a transport quarantine action: RabbitMQ dead-letters the original payload and
-/// message-id exactly once, and records the broker-owned rejection receipt in `x-death`.
+/// message-id as one dead-lettered message, and records the broker-owned rejection receipt in
+/// `x-death`; this does not strengthen the transport delivery guarantee.
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_ackable_reject_enters_broker_dead_letter_queue() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;

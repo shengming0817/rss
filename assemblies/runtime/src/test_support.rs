@@ -402,7 +402,7 @@ pub fn build_shared_runtime_deps(
     identity_signer: Arc<vault::VaultSigner>,
     settings_config_value_key_name: diport::KeyName,
     domain_transport: Arc<dyn distributed::HttpContractTransport>,
-) -> SharedRuntimeDeps {
+) -> IntegrationRuntimeDeps {
     let settings_readiness = settings_composition::test_support::readiness(pg.readiness_handle());
     shared_runtime_deps_from_parts(
         password_blocklist,
@@ -417,12 +417,26 @@ pub fn build_shared_runtime_deps(
     )
 }
 
+/// Integration-only pairing of process-shared infrastructure and local-domain provider capability.
+pub struct IntegrationRuntimeDeps {
+    shared: SharedRuntimeDeps,
+    local: crate::LocalDomainProviderCatalog,
+}
+
+impl std::ops::Deref for IntegrationRuntimeDeps {
+    type Target = SharedRuntimeDeps;
+
+    fn deref(&self) -> &Self::Target {
+        &self.shared
+    }
+}
+
 /// Purpose-bound Settings fixture which preserves the three non-interchangeable provider outputs.
 ///
 /// The fixture is consumed once; it neither merges lifecycle carriers nor recreates the production
 /// provider transaction's record order.
 pub struct SettingsWireFixture {
-    deps: SharedRuntimeDeps,
+    deps: IntegrationRuntimeDeps,
     postgres_output: settings_composition::SettingsPostgresReadinessOutput,
     key_provider_output: settings_composition::SettingsKeyProviderReadinessOutput,
     secret_resolver_output: settings_composition::SettingsSecretResolverReadinessOutput,
@@ -434,7 +448,7 @@ impl SettingsWireFixture {
     pub fn into_parts(
         self,
     ) -> (
-        SharedRuntimeDeps,
+        IntegrationRuntimeDeps,
         settings_composition::SettingsPostgresReadinessOutput,
         settings_composition::SettingsKeyProviderReadinessOutput,
         settings_composition::SettingsSecretResolverReadinessOutput,
@@ -500,18 +514,16 @@ fn shared_runtime_deps_from_parts(
     settings_config_value_key_name: diport::KeyName,
     settings_readiness: settings_composition::SettingsReadinessDeps,
     domain_transport: Arc<dyn distributed::HttpContractTransport>,
-) -> SharedRuntimeDeps {
-    SharedRuntimeDeps::from_integration_parts(
+) -> IntegrationRuntimeDeps {
+    let shared = SharedRuntimeDeps::from_integration_parts(pg, redis, s3, domain_transport);
+    let local = crate::LocalDomainProviderCatalog::IdentitySettings {
         password_blocklist,
-        pg,
-        redis,
-        s3,
+        signer: identity_signer,
         vault,
-        identity_signer,
-        settings_config_value_key_name,
-        settings_readiness,
-        domain_transport,
-    )
+        key_name: settings_config_value_key_name,
+        readiness: settings_readiness,
+    };
+    IntegrationRuntimeDeps { shared, local }
 }
 
 /// Wires the production event transport through an integration-only seam.
@@ -529,7 +541,7 @@ pub async fn wire_event_transport(
         subscribers,
         cfg,
         worker,
-        audit_key,
+        Some(audit_key),
     )
     .await
 }
@@ -543,9 +555,12 @@ pub fn wire_distributed(deps: &SharedRuntimeDeps) -> anyhow::Result<DistributedR
 }
 
 /// Builds the settings binding for container-backed integration tests.
-pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<bootstrap::DomainBinding> {
+pub async fn wire_settings(
+    deps: &IntegrationRuntimeDeps,
+) -> anyhow::Result<bootstrap::DomainBinding> {
     crate::domains::settings::integration_binding(
         deps,
+        &deps.local,
         crate::domains::settings::SettingsModuleInput::new(
             settings_composition::KeyProviderReadinessInterval::default(),
         ),
@@ -555,17 +570,22 @@ pub async fn wire_settings(deps: &SharedRuntimeDeps) -> anyhow::Result<bootstrap
 
 /// Builds the identity binding from explicit hermetic values for integration tests.
 pub fn wire_identity_with(
-    deps: &SharedRuntimeDeps,
+    deps: &IntegrationRuntimeDeps,
     values: IdentityTestValues,
 ) -> anyhow::Result<bootstrap::DomainBinding> {
-    crate::domains::identity::wire_identity_with(deps, values)
+    crate::domains::identity::wire_identity_with(deps, &deps.local, values)
 }
 
 /// Builds the identity binding with a deterministic password producer transaction rendezvous.
 pub fn wire_identity_with_password_change_barrier(
-    deps: &SharedRuntimeDeps,
+    deps: &IntegrationRuntimeDeps,
     values: IdentityTestValues,
     barrier: Arc<tokio::sync::Barrier>,
 ) -> anyhow::Result<bootstrap::DomainBinding> {
-    crate::domains::identity::wire_identity_with_password_change_barrier(deps, values, barrier)
+    crate::domains::identity::wire_identity_with_password_change_barrier(
+        deps,
+        &deps.local,
+        values,
+        barrier,
+    )
 }

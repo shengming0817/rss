@@ -1,11 +1,11 @@
-//! Canonical RuntimePlan v2 protocol.
+//! Canonical RuntimePlan v3 protocol.
 //!
-//! INVARIANT: RUNTIME-PLAN-CONSTRUCTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private plan fields plus the validated compile_v2 funnel" } — callers can describe candidate facts, but only a manifest/lock-bound compiler or the strict reader can mint a RuntimePlan.
+//! INVARIANT: RUNTIME-PLAN-CONSTRUCTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private plan fields plus the validated compile_v3 funnel" } — callers can describe candidate facts, but only a manifest/lock-bound compiler or the strict reader can mint a RuntimePlan.
 
 use crate::{
     AssemblyDomain, AssemblyFingerprint, AssemblyListenerKind, CanonicalAssemblyManifestV2,
-    ExecutableAssemblyLock, LifecycleChannel, ProviderConstructor, ProviderLifecycle,
-    WorkflowActivation,
+    ExecutableAssemblyLock, LifecycleChannel, ProviderActivation, ProviderConstructor,
+    ProviderLifecycle, ProviderRole, WorkflowActivation,
 };
 use schemars::JsonSchema;
 use schemars::schema::{RootSchema, Schema};
@@ -15,15 +15,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use vocab::CanonicalSha256Digest;
 
-const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v2";
-const SCHEMA_VERSION: u32 = 2;
+const RUNTIME_PLAN_TAG: &str = "rss-runtime-plan-v3";
+const SCHEMA_VERSION: u32 = 3;
 const FIXED_DOMAIN_LIFECYCLE: [DomainLifecyclePhase; 3] = [
     DomainLifecyclePhase::Construct,
     DomainLifecyclePhase::Ready,
     DomainLifecyclePhase::Shutdown,
 ];
 
-/// Validated, closed RuntimePlan v2 value.
+/// Validated, closed RuntimePlan v3 value.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimePlan {
@@ -61,10 +61,10 @@ impl JsonSchema for RuntimePlan {
 
 impl RuntimePlan {
     /// Validate candidate facts against the exact canonical manifest and a provenance proof.
-    pub fn compile_v2(
+    pub fn compile_v3(
         manifest: &CanonicalAssemblyManifestV2,
         lock: &ExecutableAssemblyLock,
-        input: RuntimePlanV2Input,
+        input: RuntimePlanV3Input,
     ) -> Result<Self, RuntimePlanError> {
         validate_manifest_lock(manifest, lock)?;
         validate_candidates(manifest, lock, &input)?;
@@ -215,10 +215,10 @@ impl ParsedRuntimePlan {
             workflow_plans,
             ..
         } = candidate;
-        let plan = RuntimePlan::compile_v2(
+        let plan = RuntimePlan::compile_v3(
             manifest,
             lock,
-            RuntimePlanV2Input {
+            RuntimePlanV3Input {
                 provider_plans,
                 listener_plans,
                 domain_plans,
@@ -318,12 +318,12 @@ fn parse_unbound_runtime_plan(bytes: &[u8]) -> Result<RuntimePlan, RuntimePlanEr
     Ok(plan)
 }
 
-/// Candidate carrier consumed by [`RuntimePlan::compile_v2`].
+/// Candidate carrier consumed by [`RuntimePlan::compile_v3`].
 ///
 /// Its methods deliberately accept duplicate or incomplete declarations so the compiler can
 /// exercise a single fail-closed validation path. It is not serializable.
 #[derive(Default)]
-pub struct RuntimePlanV2Input {
+pub struct RuntimePlanV3Input {
     provider_plans: Vec<ProviderPlan>,
     listener_plans: Vec<ListenerPlan>,
     domain_plans: Vec<DomainPlan>,
@@ -331,7 +331,7 @@ pub struct RuntimePlanV2Input {
     workflow_plans: Vec<WorkflowPlan>,
 }
 
-impl RuntimePlanV2Input {
+impl RuntimePlanV3Input {
     pub fn new() -> Self {
         Self::default()
     }
@@ -352,24 +352,21 @@ impl RuntimePlanV2Input {
             .collect::<Vec<_>>();
         providers.sort_by_key(|provider| provider.id.as_str());
         for provider in providers {
-            input.provider(
-                provider.id.as_str(),
-                provider.provider,
-                provider.outputs.clone(),
-            );
+            input.provider(provider.id, provider.provider, provider.outputs.clone());
         }
         input
     }
 
     pub fn provider(
         &mut self,
-        id: impl Into<String>,
+        role: ProviderRole,
         constructor: ProviderConstructor,
         outputs: Vec<LifecycleChannel>,
     ) {
         self.provider_plans.push(ProviderPlan {
-            id: id.into(),
+            id: role.as_str().to_owned(),
             constructor,
+            activation: role.activation(),
             outputs,
         });
     }
@@ -422,6 +419,7 @@ impl WorkflowPlan {
 pub struct ProviderPlan {
     id: String,
     constructor: ProviderConstructor,
+    activation: ProviderActivation,
     outputs: Vec<LifecycleChannel>,
 }
 
@@ -432,6 +430,10 @@ impl ProviderPlan {
 
     pub const fn constructor(&self) -> ProviderConstructor {
         self.constructor
+    }
+
+    pub const fn activation(&self) -> ProviderActivation {
+        self.activation
     }
 
     pub fn outputs(&self) -> &[LifecycleChannel] {
@@ -701,6 +703,7 @@ fn safe_json_path(path: &serde_path_to_error::Path) -> RuntimePlanJsonPath {
         "workflowPlans",
         "id",
         "constructor",
+        "activation",
         "outputs",
         "kind",
         "auth",
@@ -751,6 +754,7 @@ struct WireRuntimePlan {
 struct WireProviderPlan {
     id: String,
     constructor: ProviderConstructor,
+    activation: ProviderActivation,
     outputs: Vec<LifecycleChannel>,
 }
 
@@ -759,6 +763,7 @@ impl From<WireProviderPlan> for ProviderPlan {
         Self {
             id: wire.id,
             constructor: wire.constructor,
+            activation: wire.activation,
             outputs: wire.outputs,
         }
     }
@@ -849,7 +854,7 @@ fn validate_manifest_lock(
 fn validate_candidates(
     manifest: &CanonicalAssemblyManifestV2,
     _lock: &ExecutableAssemblyLock,
-    input: &RuntimePlanV2Input,
+    input: &RuntimePlanV3Input,
 ) -> Result<(), RuntimePlanError> {
     let expected_workflows = manifest.workflow_activations();
     let actual_workflows = input
@@ -872,6 +877,7 @@ fn validate_candidates(
             (
                 provider.id.as_str(),
                 provider.constructor,
+                provider.activation,
                 provider.outputs.as_slice(),
             )
         })
@@ -930,7 +936,12 @@ fn validate_candidates(
 
 fn executable_provider_declarations(
     manifest: &CanonicalAssemblyManifestV2,
-) -> BTreeSet<(&str, ProviderConstructor, &[LifecycleChannel])> {
+) -> BTreeSet<(
+    &str,
+    ProviderConstructor,
+    ProviderActivation,
+    &[LifecycleChannel],
+)> {
     manifest
         .diport_providers()
         .iter()
@@ -939,6 +950,7 @@ fn executable_provider_declarations(
             (
                 provider.id.as_str(),
                 provider.provider,
+                provider.id.activation(),
                 provider.outputs.as_slice(),
             )
         })
@@ -1230,7 +1242,7 @@ mod tests {
             error.0,
             RuntimePlanErrorKind::UnsupportedVersion {
                 actual: 1,
-                supported: 2
+                supported: 3
             }
         ));
         Ok(())
@@ -1284,9 +1296,9 @@ outputs = ["resources"]
         assert!(
             declarations
                 .iter()
-                .all(|(id, _, _)| *id != "distributed-cas-store-alternative")
+                .all(|(id, _, _, _)| *id != "distributed-cas-store-alternative")
         );
-        let input = RuntimePlanV2Input::from_manifest(&manifest);
+        let input = RuntimePlanV3Input::from_manifest(&manifest);
         assert!(
             input.workflow_plans.is_empty(),
             "omitted workflows must derive an explicit empty RuntimePlan workflow set"
@@ -1294,7 +1306,14 @@ outputs = ["resources"]
         let actual = input
             .provider_plans
             .iter()
-            .map(|plan| (plan.id(), plan.constructor(), plan.outputs()))
+            .map(|plan| {
+                (
+                    plan.id(),
+                    plan.constructor(),
+                    plan.activation(),
+                    plan.outputs(),
+                )
+            })
             .collect::<BTreeSet<_>>();
         assert_eq!(actual, declarations);
         Ok(())
@@ -1330,6 +1349,7 @@ outputs = ["resources"]
         provider_plans.push(ProviderPlan {
             id: "distributed-cas-store-alternative".to_owned(),
             constructor: ProviderConstructor::RedisCasStore,
+            activation: ProviderRole::DistributedCasStoreAlternative.activation(),
             outputs: vec![LifecycleChannel::Resources],
         });
         provider_plans.sort_by(|left, right| left.id.cmp(&right.id));

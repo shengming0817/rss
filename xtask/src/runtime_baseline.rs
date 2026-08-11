@@ -1148,7 +1148,7 @@ fn provider_protocol_residuals(root: &Path) -> Result<Vec<ResidualFinding>> {
     }
     #[derive(Default)]
     struct Inventory {
-        from_plan: Vec<(String, usize)>,
+        from_execution_plan: Vec<(String, usize)>,
         wire_event_transport: Vec<(String, usize)>,
         finish: Vec<(String, usize)>,
     }
@@ -1174,8 +1174,8 @@ fn provider_protocol_residuals(root: &Path) -> Result<Vec<ResidualFinding>> {
                     head
                 };
                 let site = (self.relative.to_owned(), call.span().start().line);
-                if joined.ends_with("ProviderBuild::from_plan") {
-                    self.inventory.from_plan.push(site);
+                if joined.ends_with("ProviderBuild::from_execution_plan") {
+                    self.inventory.from_execution_plan.push(site);
                 } else if joined.ends_with("wire_event_transport") {
                     self.inventory.wire_event_transport.push(site);
                 }
@@ -1226,8 +1226,8 @@ fn provider_protocol_residuals(root: &Path) -> Result<Vec<ResidualFinding>> {
 
     let expected = [
         (
-            "ProviderBuild::from_plan",
-            &inventory.from_plan,
+            "ProviderBuild::from_execution_plan",
+            &inventory.from_execution_plan,
             "assemblies/runtime/src/phase/provider.rs",
         ),
         (
@@ -3501,7 +3501,7 @@ mod tests {
             (
                 "missing catalog transaction",
                 "assemblies/runtime/src/phase/provider.rs",
-                "crate::provider_output::ProviderBuild::from_plan(",
+                "crate::provider_output::ProviderBuild::from_execution_plan(",
                 "crate::provider_output::ProviderBuild::bypass_plan(",
             ),
             (

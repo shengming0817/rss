@@ -1,0 +1,36 @@
+error[E0432]: unresolved import `assembly_schema::RuntimePlanV2Input`
+ --> tests/ui/runtime_plan_v2_removed.rs:1:36
+  |
+1 | use assembly_schema::{RuntimePlan, RuntimePlanV2Input};
+  |                                    ^^^^^^^^^^^^^^^^^^ no `RuntimePlanV2Input` in the root
+  |
+help: a similar name exists in the module
+  |
+1 - use assembly_schema::{RuntimePlan, RuntimePlanV2Input};
+1 + use assembly_schema::{RuntimePlan, RuntimePlanV3Input};
+  |
+
+error[E0599]: no associated function or constant named `compile_v2` found for struct `RuntimePlan` in the current scope
+ --> tests/ui/runtime_plan_v2_removed.rs:4:26
+  |
+4 |     let _ = RuntimePlan::compile_v2(input);
+  |                          ^^^^^^^^^^ associated function or constant not found in `RuntimePlan`
+  |
+note: if you're trying to build a new `RuntimePlan`, consider using `RuntimePlan::compile_v3` which returns `Result<RuntimePlan, RuntimePlanError>`
+ --> src/runtime_plan.rs
+  |
+  | /     pub fn compile_v3(
+  | |         manifest: &CanonicalAssemblyManifestV2,
+  | |         lock: &ExecutableAssemblyLock,
+  | |         input: RuntimePlanV3Input,
+  | |     ) -> Result<Self, RuntimePlanError> {
+  | |_______________________________________^
+help: there is an associated function `compile_v3` with a similar name
+ --> src/runtime_plan.rs
+  |
+  | /     pub fn compile_v3(
+  | |         manifest: &CanonicalAssemblyManifestV2,
+  | |         lock: &ExecutableAssemblyLock,
+  | |         input: RuntimePlanV3Input,
+  | |     ) -> Result<Self, RuntimePlanError> {
+  | |_______________________________________^

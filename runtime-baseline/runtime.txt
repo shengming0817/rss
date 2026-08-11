@@ -69,14 +69,9 @@ vocab = path=../../crates/vocab
 zeroize = workspace=true
 
 [sharedRuntimeDeps.fields]
-password_blocklist = Arc<secure::DigestPasswordBlocklist>
 pg = PgRuntimeHandle
 redis = RedisRuntimeDeps
 s3 = S3RuntimeDeps
-vault = VaultRuntimeDeps
-identity_signer = Arc<vault::VaultSigner>
-settings_config_value_key_name = KeyName
-settings_readiness = settings_composition::SettingsReadinessDeps
 domain_transport = Arc<dyn distributed::HttpContractTransport>
 
 [domainModuleResult.fields]

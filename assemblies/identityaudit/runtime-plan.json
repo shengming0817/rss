@@ -1,11 +1,14 @@
 {
-  "schemaVersion": 2,
-  "assemblyFingerprint": "sha256:77a13d81d3ba2940d6c53a35b77c2d1d85acde6d481806f7ec54e7d2b5a4810f",
-  "runtimePlanFingerprint": "sha256:49135014f29dc1e7f01c4c12db85d6344258c05d84662a9dd1f1a3abf7816037",
+  "schemaVersion": 3,
+  "assemblyFingerprint": "sha256:a2ecad77d1abdf3b6067b2126734971467fcdfd442dc6c076b18993a8ae81f53",
+  "runtimePlanFingerprint": "sha256:ddef5c57573350740cab871302dbce8ae6af63a7727e207096e0b1947c89671d",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
       "constructor": "postgres::PgAuthAuditSink",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -15,6 +18,9 @@
     {
       "id": "distributed-cas-store",
       "constructor": "postgres::PgCasStore",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -24,6 +30,9 @@
     {
       "id": "distributed-lock-store",
       "constructor": "redis::RedisLockStore",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -33,6 +42,9 @@
     {
       "id": "dlx-archive-key-provider",
       "constructor": "vault::VaultKeyProvider",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -42,6 +54,9 @@
     {
       "id": "event-publisher",
       "constructor": "amqp::AmqpPublisher",
+      "activation": {
+        "kind": "localEventExecution"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -51,6 +66,9 @@
     {
       "id": "event-subscriber",
       "constructor": "amqp::AmqpSubscriber",
+      "activation": {
+        "kind": "localEventExecution"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -60,6 +78,10 @@
     {
       "id": "identity-signer",
       "constructor": "vault::VaultSigner",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -69,6 +91,9 @@
     {
       "id": "listener-pdp",
       "constructor": "oidc::OidcProvider",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources"
@@ -77,6 +102,9 @@
     {
       "id": "listener-rate-limiter",
       "constructor": "redis::RedisRateLimiter",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": []
     }
   ],

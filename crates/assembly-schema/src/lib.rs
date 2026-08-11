@@ -16,14 +16,15 @@ pub use lock::{
     RepositoryVerifiedAssemblyLock,
 };
 pub use provider::{
-    DiportPort, DiportProvider, LifecycleChannel, ProviderCapabilityEvidence, ProviderCatalogEntry,
-    ProviderConstructor, ProviderConsumer, ProviderDurability, ProviderFactorySymbol,
-    ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
+    DiportPort, DiportProvider, LifecycleChannel, ProviderActivation, ProviderCapabilityEvidence,
+    ProviderCatalogEntry, ProviderConstructor, ProviderConsumer, ProviderDurability,
+    ProviderFactorySymbol, ProviderFailurePosture, ProviderLifecycle, ProviderRole, ProviderScope,
+    has_domain_local_provider_activation,
 };
 pub use runtime_plan::{
     DomainLifecyclePhase, DomainPlan, ListenerAuth, ListenerPlan, ParsedRuntimePlan, PlacementPlan,
     ProviderPlan, RuntimePlan, RuntimePlanError, RuntimePlanErrorStage, RuntimePlanFingerprint,
-    RuntimePlanJsonCategory, RuntimePlanJsonPath, RuntimePlanV2Input, WorkflowPlan,
+    RuntimePlanJsonCategory, RuntimePlanJsonPath, RuntimePlanV3Input, WorkflowPlan,
     validate_runtime_plan_json_slice,
 };
 

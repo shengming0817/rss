@@ -73,15 +73,6 @@ impl PlacementExecutionSpec {
     }
 
     #[cfg(test)]
-    pub(crate) fn local_for_test(domain: AssemblyDomain, workload: impl Into<String>) -> Self {
-        Self {
-            domain,
-            workload: workload.into(),
-            state: PlacementState::Local,
-        }
-    }
-
-    #[cfg(test)]
     pub(crate) fn remote_for_test(
         domain: AssemblyDomain,
         workload: impl Into<String>,
@@ -169,28 +160,6 @@ impl PlacementExecutionPlan {
                 }
             })
             .collect()
-    }
-
-    pub(crate) fn reject_remote_on_local_listeners(
-        &self,
-        listeners: &super::ListenerExecutionPlan,
-    ) -> anyhow::Result<()> {
-        for listener in listeners.listeners() {
-            for domain in listener.domains() {
-                if !self.is_local(*domain) {
-                    let domain_name = domain.as_str();
-                    let env = format!(
-                        "RSS_{}_DOMAIN_PLACEMENT_WORKLOAD",
-                        domain_name.to_ascii_uppercase()
-                    );
-                    anyhow::bail!(
-                        "remote-placed domain '{domain_name}' cannot mount on local listener '{}'; set {env} to this assembly identity, or remove '{domain_name}' from the listener",
-                        listener.id(),
-                    );
-                }
-            }
-        }
-        Ok(())
     }
 
     #[cfg(test)]

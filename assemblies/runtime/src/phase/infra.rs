@@ -18,7 +18,7 @@ use crate::infra::pg::{PgRuntimeConfig, PgRuntimeConfigParts};
 use crate::infra::redis::{REDIS_READY_PROBE_NAME, RedisReadyProbe, spawn_redis_readiness_sampler};
 use crate::infra::redis::{RedisRuntimeConfig, build_redis_runtime_deps};
 use crate::infra::s3::{S3RuntimeConfig, S3RuntimeConfigParts, build_s3_runtime_deps};
-use crate::infra::vault::VaultRuntimeConfig;
+use crate::infra::vault::{IdentityVaultRuntimeConfig, SettingsVaultRuntimeConfig};
 use crate::support::SystemClock;
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
@@ -30,10 +30,11 @@ const SERVICE_TOKEN_REPLAY_STORE_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub(super) struct RuntimeWiringInputs {
     pub(super) event_transport: crate::event_transport::EventTransportConfig,
-    pub(super) event_worker: crate::event_transport::EventWorkerConfig,
+    pub(super) event_worker: Option<crate::event_transport::EventWorkerConfig>,
     pub(super) distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
-    pub(super) domain_modules: crate::domains::DomainModuleInputs,
-    pub(super) audit_consumer_key: primitives::MacKey,
+    pub(super) domain_modules: crate::modules_gen::PreparedLocalDomainInputs,
+    pub(super) local_domain_providers: crate::LocalDomainProviderCatalog,
+    pub(super) audit_consumer_key: Option<primitives::MacKey>,
     pub(super) auth_grant_sweep_interval: Duration,
 }
 
@@ -88,21 +89,17 @@ struct PhaseADlxVerified {
 }
 
 struct PhaseACarried {
-    password_blocklist: Arc<secure::DigestPasswordBlocklist>,
     token_profiles: crate::config::TokenProfilesConfig,
     event_transport: crate::event_transport::EventTransportConfig,
-    event_worker: crate::event_transport::EventWorkerConfig,
+    event_worker: Option<crate::event_transport::EventWorkerConfig>,
     dlx_worker: crate::event_transport::DlxWorkerConfig,
     distributed_worker: crate::distributed_runtime::DistributedWorkerConfig,
-    domain_modules: crate::domains::DomainModuleInputs,
-    audit_consumer_key: primitives::MacKey,
+    domain_modules: crate::modules_gen::PreparedLocalDomainInputs,
+    audit_consumer_key: Option<primitives::MacKey>,
     auth_grant_sweep_interval: Duration,
     rate_limiter: Arc<redis::RedisRateLimiter>,
     trusted_proxy_config: httpserve::TrustedProxyConfig,
-    vault: vault::VaultRuntimeDeps,
-    identity_signer: Arc<vault::VaultSigner>,
-    settings_config_value_key_name: diport::KeyName,
-    settings_readiness: settings_composition::SettingsProviderReadinessAwaitingPostgres,
+    local_vault: LocalVaultAwaitingPostgres,
     redis: redis::RedisRuntimeDeps,
     s3: s3::S3RuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
@@ -118,6 +115,76 @@ struct PhaseACarried {
     dlx_archive_key_provider_permit: crate::provider_output::DlxArchiveKeyProviderPermit,
 }
 
+enum LocalVaultAwaitingPostgres {
+    None,
+    Identity {
+        password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+        signer: Arc<vault::VaultSigner>,
+    },
+    Settings {
+        vault: vault::VaultRuntimeDeps,
+        key_name: diport::KeyName,
+        readiness: settings_composition::SettingsProviderReadinessAwaitingPostgres,
+    },
+    IdentitySettings {
+        password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+        signer: Arc<vault::VaultSigner>,
+        vault: vault::VaultRuntimeDeps,
+        key_name: diport::KeyName,
+        readiness: settings_composition::SettingsProviderReadinessAwaitingPostgres,
+    },
+}
+
+impl LocalVaultAwaitingPostgres {
+    fn bind(
+        self,
+        readiness: Arc<postgres::PgDbReadiness>,
+    ) -> anyhow::Result<(crate::LocalDomainProviderCatalog, DomainModuleResult)> {
+        let mut module = DomainModuleResult::default();
+        let providers = match self {
+            Self::None => crate::LocalDomainProviderCatalog::None,
+            Self::Identity {
+                password_blocklist,
+                signer,
+            } => crate::LocalDomainProviderCatalog::Identity {
+                password_blocklist,
+                signer,
+            },
+            Self::Settings {
+                vault,
+                key_name,
+                readiness: settings,
+            } => {
+                let (settings, output) = settings.bind_postgres(readiness)?;
+                module.merge(output.into_output());
+                crate::LocalDomainProviderCatalog::Settings {
+                    vault,
+                    key_name,
+                    readiness: settings,
+                }
+            }
+            Self::IdentitySettings {
+                password_blocklist,
+                signer,
+                vault,
+                key_name,
+                readiness: settings,
+            } => {
+                let (settings, output) = settings.bind_postgres(readiness)?;
+                module.merge(output.into_output());
+                crate::LocalDomainProviderCatalog::IdentitySettings {
+                    password_blocklist,
+                    signer,
+                    vault,
+                    key_name,
+                    readiness: settings,
+                }
+            }
+        };
+        Ok((providers, module))
+    }
+}
+
 struct PhaseAPrepared {
     pg_setup: PhaseBSetupInputs,
     carried: PhaseACarried,
@@ -131,6 +198,7 @@ impl<'a> ProvidersBuilt<'a> {
             mut provider_build,
             mut provider_factories,
             listener_execution_plan,
+            local_event_execution_plan,
             placement_execution_plan,
             serving_config,
             runtime_rss_access,
@@ -142,16 +210,14 @@ impl<'a> ProvidersBuilt<'a> {
             let projection_capture = context.runtime_plan.projection_capture();
             let rss_jwks = runtime_rss_access
                 .as_ref()
-                .context("active identity signer requires RSS access-token JWKS")?
-                .jwks_readiness()
-                .handle();
+                .map(|provider| provider.jwks_readiness().handle());
             let PhaseAPrepared {
                 pg_setup,
                 carried,
                 dlx_preflight,
             } = Self::phase_a_prove_external_capabilities(
                 config,
-                Arc::clone(context.password_blocklist()),
+                &context.domain_execution_plan,
                 serving_config,
                 rss_jwks,
                 &mut provider_build,
@@ -182,7 +248,6 @@ impl<'a> ProvidersBuilt<'a> {
                 archive_vault_provider,
             } = verified;
             let PhaseACarried {
-                password_blocklist,
                 token_profiles,
                 event_transport,
                 event_worker,
@@ -193,10 +258,7 @@ impl<'a> ProvidersBuilt<'a> {
                 auth_grant_sweep_interval,
                 rate_limiter,
                 trusted_proxy_config,
-                vault,
-                identity_signer,
-                settings_config_value_key_name,
-                settings_readiness,
+                local_vault,
                 redis,
                 s3,
                 s3_canary_config,
@@ -211,16 +273,18 @@ impl<'a> ProvidersBuilt<'a> {
                 dlx_archive_store_permit,
                 dlx_archive_key_provider_permit,
             } = carried;
-            let relay_budget = event_worker.relay_budget();
-            tracing::info!(
-                runtime.event_topology = topology_label(event_transport.topology()),
-                relay.lease_ttl_ms = relay_budget.lease_ttl_millis(),
-                relay.publish_timeout_ms = relay_budget.publish_timeout_millis(),
-                relay.settle_timeout_ms = relay_budget.settle_timeout_millis(),
-                relay.safety_margin_ms = relay_budget.safety_margin_millis(),
-                relay.required_budget_ms = relay_budget.required_budget_millis(),
-                "runtime event transport budget loaded"
-            );
+            if let Some(event_worker) = event_worker.as_ref() {
+                let relay_budget = event_worker.relay_budget();
+                tracing::info!(
+                    runtime.event_topology = topology_label(event_transport.topology()),
+                    relay.lease_ttl_ms = relay_budget.lease_ttl_millis(),
+                    relay.publish_timeout_ms = relay_budget.publish_timeout_millis(),
+                    relay.settle_timeout_ms = relay_budget.settle_timeout_millis(),
+                    relay.safety_margin_ms = relay_budget.safety_margin_millis(),
+                    relay.required_budget_ms = relay_budget.required_budget_millis(),
+                    "runtime event transport budget loaded"
+                );
+            }
             if event_transport.topology() == bootstrap::Topology::Demo {
                 anyhow::bail!(
                     "RSS_TOPOLOGY=demo is not supported in the production runtime; \
@@ -240,8 +304,8 @@ impl<'a> ProvidersBuilt<'a> {
                 })
                 .transpose();
             let pg = pg_owner.handle();
-            let (settings_readiness, settings_pg_output) =
-                settings_readiness.bind_postgres(pg.readiness_handle())?;
+            let (local_domain_providers, local_provider_pg_output) =
+                local_vault.bind(pg.readiness_handle())?;
             // The unique permit builds both the concrete store and exact probes+workers output
             // from this same verified PostgreSQL handle.
             let revocation_provider = crate::provider_output::BuiltDeviceRevocationProvider::build(
@@ -255,7 +319,7 @@ impl<'a> ProvidersBuilt<'a> {
             *uncommitted_provider_module.get_mut() = pg_provider_module;
             uncommitted_provider_module
                 .get_mut()
-                .merge(settings_pg_output.into_output());
+                .merge(local_provider_pg_output);
             tracing::info!(
                 sample_interval_secs = pg_readiness_period.as_secs(),
                 "pg readiness sampler interval configured"
@@ -329,18 +393,12 @@ impl<'a> ProvidersBuilt<'a> {
                 .context("build command idempotency keyring")?;
 
             let deps = SharedRuntimeDeps::from_built_provider(
-                password_blocklist,
                 pg,
                 revocation_store,
                 redis,
                 s3,
-                vault,
-                identity_signer,
-                settings_config_value_key_name,
-                settings_readiness,
                 domain_transport.dispatch_handle(),
             );
-
             // Pull metrics have no shutdown lifecycle and therefore never enter ShutdownStack.
             let metrics_exporter: Arc<dyn diport::MetricsExporter> = Arc::new(
                 prometheus::PromExporter::install().context("install prometheus recorder")?,
@@ -350,6 +408,7 @@ impl<'a> ProvidersBuilt<'a> {
                 event_worker,
                 distributed_worker,
                 domain_modules,
+                local_domain_providers,
                 audit_consumer_key,
                 auth_grant_sweep_interval,
             };
@@ -387,6 +446,7 @@ impl<'a> ProvidersBuilt<'a> {
                 provider_build,
                 provider_factories,
                 listener_execution_plan,
+                local_event_execution_plan,
                 placement_execution_plan,
                 rate_limiter: built.rate_limiter,
                 trusted_proxy_config: built.trusted_proxy_config,
@@ -414,9 +474,9 @@ impl<'a> ProvidersBuilt<'a> {
     /// as the first argument of [`after_required_preflight`].
     async fn phase_a_prove_external_capabilities(
         config: crate::config::SnapshotConfig<'_>,
-        password_blocklist: Arc<secure::DigestPasswordBlocklist>,
+        domain_execution: &crate::plan::DomainExecutionPlan,
         serving_config: RuntimeServingConfigParts,
-        rss_jwks: oidc::JwksReadinessHandle,
+        rss_jwks: Option<oidc::JwksReadinessHandle>,
         provider_build: &mut crate::provider_output::ProviderBuild,
         provider_factories: &mut crate::provider_output::ProviderFactoryDispatch,
     ) -> anyhow::Result<PhaseAPrepared> {
@@ -454,62 +514,76 @@ impl<'a> ProvidersBuilt<'a> {
         } = s3_config.into_parts();
         let config_value = |name: &str| config.value(name).map(str::to_owned);
 
-        // Phase A parses every configuration and prepares DLX materials before capability proofs
-        // and the forward-only 0062 migration can commit.
-        let vault_config = VaultRuntimeConfig::from_snapshot(config)
-            .context("build snapshot-backed vault config")?;
-
-        let identity_signer_permit = provider_factories.identity_signer()?;
-        let settings_key_provider_permit = provider_factories.settings_key_provider()?;
-        let settings_secret_resolver_permit = provider_factories.settings_secret_resolver()?;
-        let identity_signing_binding = token_profiles
-            .rss_access()
-            .context("active identity signer requires RSS access token profile")?
-            .signing_binding()
-            .clone();
-        let (vault, identity_signer, settings_config_value_key_name) = vault_config
-            .into_runtime(identity_signing_binding.clone())
-            .context("setup vault deps")?;
-        let settings_readiness = settings_composition::SettingsProviderReadiness::new(
-            &vault.for_domain::<vault::caps::Settings>(),
-            settings_config_value_key_name.clone(),
-            domain_modules.settings.readiness_interval(),
-        )
-        .await
-        .context("build settings provider readiness")?;
-        let (settings_readiness, key_output, resolver_output) =
-            settings_readiness.into_vault_parts();
-        let mut vault_resources = vault.runtime_resources().into_iter();
-        let resolver_resource = vault_resources
-            .next()
-            .context("vault omitted settings secret-resolver resource")?;
-        let key_resource = vault_resources
-            .next()
-            .context("vault omitted settings key-provider resource")?;
-        anyhow::ensure!(
-            vault_resources.next().is_none(),
-            "vault exposed an undeclared settings provider resource"
-        );
-        let mut key_module = key_output.into_output();
-        key_module.resources.push(key_resource);
-        let mut resolver_module = resolver_output.into_output();
-        resolver_module.resources.push(resolver_resource);
-        let identity_signer_module = crate::provider_output::identity_signer_module(
-            Arc::clone(&identity_signer),
-            identity_signing_binding,
-            rss_jwks,
-        )
-        .await?;
-        provider_build
-            .record(crate::provider_output::ProviderOutput::vault(
-                identity_signer_module,
-                key_module,
-                resolver_module,
-                identity_signer_permit,
-                settings_key_provider_permit,
-                settings_secret_resolver_permit,
-            ))
-            .context("record vault provider output")?;
+        let local_provider_permits =
+            provider_factories.take_local_domain_permits(domain_execution)?;
+        let local_vault = match local_provider_permits {
+            crate::provider_output::LocalDomainProviderPermits::None => {
+                LocalVaultAwaitingPostgres::None
+            }
+            crate::provider_output::LocalDomainProviderPermits::Identity { signer } => {
+                let password_blocklist = crate::domains::identity::load_password_blocklist(config)?;
+                let signer = Self::build_identity_vault(
+                    config,
+                    &token_profiles,
+                    rss_jwks,
+                    provider_build,
+                    signer,
+                )
+                .await?;
+                LocalVaultAwaitingPostgres::Identity {
+                    password_blocklist,
+                    signer,
+                }
+            }
+            crate::provider_output::LocalDomainProviderPermits::Settings {
+                key_provider,
+                secret_resolver,
+            } => {
+                let (vault, key_name, readiness) = Self::build_settings_vault(
+                    config,
+                    &domain_modules,
+                    provider_build,
+                    key_provider,
+                    secret_resolver,
+                )
+                .await?;
+                LocalVaultAwaitingPostgres::Settings {
+                    vault,
+                    key_name,
+                    readiness,
+                }
+            }
+            crate::provider_output::LocalDomainProviderPermits::IdentitySettings {
+                signer: signer_permit,
+                key_provider,
+                secret_resolver,
+            } => {
+                let password_blocklist = crate::domains::identity::load_password_blocklist(config)?;
+                let signer = Self::build_identity_vault(
+                    config,
+                    &token_profiles,
+                    rss_jwks,
+                    provider_build,
+                    signer_permit,
+                )
+                .await?;
+                let (vault, key_name, readiness) = Self::build_settings_vault(
+                    config,
+                    &domain_modules,
+                    provider_build,
+                    key_provider,
+                    secret_resolver,
+                )
+                .await?;
+                LocalVaultAwaitingPostgres::IdentitySettings {
+                    password_blocklist,
+                    signer,
+                    vault,
+                    key_name,
+                    readiness,
+                }
+            }
+        };
 
         let distributed_lock_store_permit = provider_factories.distributed_lock_store()?;
         let (redis, redis_readiness_period) = build_redis_runtime_deps(redis_config)
@@ -606,7 +680,6 @@ impl<'a> ProvidersBuilt<'a> {
                 audit_admin_config,
             },
             carried: PhaseACarried {
-                password_blocklist,
                 token_profiles,
                 event_transport,
                 event_worker,
@@ -617,10 +690,7 @@ impl<'a> ProvidersBuilt<'a> {
                 auth_grant_sweep_interval,
                 rate_limiter,
                 trusted_proxy_config,
-                vault,
-                identity_signer,
-                settings_config_value_key_name,
-                settings_readiness,
+                local_vault,
                 redis,
                 s3,
                 s3_canary_config,
@@ -646,6 +716,86 @@ impl<'a> ProvidersBuilt<'a> {
                 archive_key_for_preflight,
             },
         })
+    }
+
+    async fn build_identity_vault(
+        config: crate::config::SnapshotConfig<'_>,
+        token_profiles: &crate::config::TokenProfilesConfig,
+        rss_jwks: Option<oidc::JwksReadinessHandle>,
+        provider_build: &mut crate::provider_output::ProviderBuild,
+        signer_permit: crate::provider_output::IdentitySignerPermit,
+    ) -> anyhow::Result<Arc<vault::VaultSigner>> {
+        let binding = token_profiles
+            .rss_access()
+            .context("active identity signer requires RSS access token profile")?
+            .signing_binding()
+            .clone();
+        let signer = IdentityVaultRuntimeConfig::from_snapshot(config)
+            .context("build identity-local vault config")?
+            .into_signer(binding.clone())
+            .context("setup identity-local vault signer")?;
+        let module = crate::provider_output::identity_signer_module(
+            Arc::clone(&signer),
+            binding,
+            rss_jwks.context("active identity signer requires RSS access-token JWKS")?,
+        )
+        .await?;
+        provider_build
+            .record(crate::provider_output::ProviderOutput::identity_vault(
+                module,
+                signer_permit,
+            ))
+            .context("record identity-local vault provider output")?;
+        Ok(signer)
+    }
+
+    async fn build_settings_vault(
+        config: crate::config::SnapshotConfig<'_>,
+        domain_modules: &crate::modules_gen::PreparedLocalDomainInputs,
+        provider_build: &mut crate::provider_output::ProviderBuild,
+        key_provider_permit: crate::provider_output::SettingsKeyProviderPermit,
+        secret_resolver_permit: crate::provider_output::SettingsSecretResolverPermit,
+    ) -> anyhow::Result<(
+        vault::VaultRuntimeDeps,
+        diport::KeyName,
+        settings_composition::SettingsProviderReadinessAwaitingPostgres,
+    )> {
+        let (vault, key_name) = SettingsVaultRuntimeConfig::from_snapshot(config)
+            .context("build settings-local vault config")?
+            .into_settings()
+            .context("setup settings-local vault providers")?;
+        let readiness = settings_composition::SettingsProviderReadiness::new(
+            &vault.for_domain::<vault::caps::Settings>(),
+            key_name.clone(),
+            domain_modules.settings_readiness_interval()?,
+        )
+        .await
+        .context("build settings provider readiness")?;
+        let (readiness, key_output, resolver_output) = readiness.into_vault_parts();
+        let mut resources = vault.runtime_resources().into_iter();
+        let resolver_resource = resources
+            .next()
+            .context("vault omitted settings secret-resolver resource")?;
+        let key_resource = resources
+            .next()
+            .context("vault omitted settings key-provider resource")?;
+        anyhow::ensure!(
+            resources.next().is_none(),
+            "vault exposed an undeclared settings provider resource"
+        );
+        let mut key_module = key_output.into_output();
+        key_module.resources.push(key_resource);
+        let mut resolver_module = resolver_output.into_output();
+        resolver_module.resources.push(resolver_resource);
+        provider_build
+            .record(crate::provider_output::ProviderOutput::settings_vault(
+                key_module,
+                resolver_module,
+                key_provider_permit,
+                secret_resolver_permit,
+            ))
+            .context("record settings-local vault provider outputs")?;
+        Ok((vault, key_name, readiness))
     }
 
     async fn phase_a_run_dlx_preflight(

@@ -10,7 +10,6 @@ pub mod audit;
 pub mod identity;
 pub mod settings;
 
-use crate::config::ServingConfigMapper;
 use bootstrap::DomainBinding;
 
 /// Partial domain wiring failure that retains earlier successful bindings for async rollback.
@@ -25,38 +24,25 @@ impl DomainWiringFailure {
     }
 }
 
-pub(crate) struct DomainModuleInputs {
-    pub(crate) settings: settings::SettingsModuleInput,
-    pub(crate) identity: identity::IdentityModuleInput,
-    pub(crate) audit: audit::AuditModuleInput,
-}
-
-impl DomainModuleInputs {
-    pub(crate) fn from_snapshot(
-        mapper: &ServingConfigMapper<'_>,
-        keyprovider_readiness_interval: settings_composition::KeyProviderReadinessInterval,
-        identity_token_profile: identity::IdentityTokenProfileInput,
-    ) -> anyhow::Result<Self> {
-        Ok(Self {
-            settings: settings::SettingsModuleInput::new(keyprovider_readiness_interval),
-            identity: identity::IdentityModuleInput::from_mapper(mapper, identity_token_profile)?,
-            audit: audit::AuditModuleInput::from_mapper(mapper)?,
-        })
-    }
-
-    #[must_use]
-    pub(crate) fn audit_consumer_key(&self) -> primitives::MacKey {
-        self.audit.consumer_key()
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use bootstrap::compose_bindings;
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn generated_modules_compose_in_manifest_order_with_stable_outputs() {
-        let mut bindings = crate::modules_gen::wire_test_domains()
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ])
+        .expect("all-local snapshot");
+        let runtime_plan =
+            crate::plan::RuntimePlan::bundled(snapshot.view()).expect("bundled RuntimePlan");
+        let placement = runtime_plan
+            .placement_execution_plan(bootstrap::Topology::Demo, snapshot.view())
+            .expect("all-local placement");
+        let execution = runtime_plan.domain_execution_plan(&placement);
+        let mut bindings = crate::modules_gen::wire_test_domains(&execution)
             .await
             .expect("generated test domains build");
         assert_eq!(

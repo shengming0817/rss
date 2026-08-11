@@ -17,7 +17,7 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use assembly_schema::{
-    LifecycleChannel, ProviderCatalogEntry, ProviderFactorySymbol, ProviderPlan, ProviderRole,
+    LifecycleChannel, ProviderCatalogEntry, ProviderFactorySymbol, ProviderRole,
 };
 use bootstrap::{DomainModuleResult, WorkerSpec};
 use diport::{DynManagedResource, ManagedResource, ShutdownError};
@@ -354,22 +354,26 @@ impl ProviderOutput {
         )
     }
 
-    pub(crate) fn vault(
+    pub(crate) fn identity_vault(
         identity_signer_module: DomainModuleResult,
+        identity_signer: IdentitySignerPermit,
+    ) -> Self {
+        Self::new(
+            identity_signer_module,
+            vec![ProviderReceipt::IdentitySigner(identity_signer.0)],
+            "identity-signer",
+            CHANNELS_ALL,
+        )
+    }
+
+    pub(crate) fn settings_vault(
         settings_key_provider_module: DomainModuleResult,
         settings_secret_resolver_module: DomainModuleResult,
-        identity_signer: IdentitySignerPermit,
         settings_key_provider: SettingsKeyProviderPermit,
         settings_secret_resolver: SettingsSecretResolverPermit,
     ) -> Self {
         Self {
             batches: vec![
-                ProviderBatch {
-                    module: identity_signer_module,
-                    receipts: vec![ProviderReceipt::IdentitySigner(identity_signer.0)],
-                    batch: "identity-signer",
-                    expected_channels: CHANNELS_ALL,
-                },
                 ProviderBatch {
                     module: settings_key_provider_module,
                     receipts: vec![ProviderReceipt::SettingsKeyProvider(
@@ -388,6 +392,26 @@ impl ProviderOutput {
                 },
             ],
         }
+    }
+
+    #[cfg(test)]
+    fn vault(
+        identity_signer_module: DomainModuleResult,
+        settings_key_provider_module: DomainModuleResult,
+        settings_secret_resolver_module: DomainModuleResult,
+        identity_signer: IdentitySignerPermit,
+        settings_key_provider: SettingsKeyProviderPermit,
+        settings_secret_resolver: SettingsSecretResolverPermit,
+    ) -> Self {
+        let mut identity = Self::identity_vault(identity_signer_module, identity_signer);
+        let settings = Self::settings_vault(
+            settings_key_provider_module,
+            settings_secret_resolver_module,
+            settings_key_provider,
+            settings_secret_resolver,
+        );
+        identity.batches.extend(settings.batches);
+        identity
     }
 
     pub(crate) fn postgres(
@@ -497,6 +521,25 @@ const CHANNELS_ALL: &[LifecycleChannel] = &[
 ///
 /// Generates permit newtypes, receipts, dispatch fields, catalog join, completeness checks, and
 /// consuming accessors so expanding the active catalog cannot Soft-drift across three hand sites.
+macro_rules! provider_permit_accessor {
+    (process, $field:ident, $permit:ident, $factory:ident) => {
+        pub(crate) fn $field(&mut self) -> Result<$permit, ProviderBuildError> {
+            Self::take(
+                &mut self.$field,
+                ::assembly_schema::ProviderFactorySymbol::$factory,
+            )
+        }
+    };
+    (projected, $field:ident, $permit:ident, $factory:ident) => {
+        fn $field(&mut self) -> Result<$permit, ProviderBuildError> {
+            Self::take(
+                &mut self.$field,
+                ::assembly_schema::ProviderFactorySymbol::$factory,
+            )
+        }
+    };
+}
+
 macro_rules! provider_permits {
     (
         $(
@@ -504,7 +547,8 @@ macro_rules! provider_permits {
                 field: $field:ident,
                 factory: $factory:ident,
                 receipt: $receipt:ident,
-                channels: $channels:expr $(,)?
+                channels: $channels:expr,
+                access: $access:ident $(,)?
             }
         ),+ $(,)?
     ) => {
@@ -579,24 +623,7 @@ macro_rules! provider_permits {
                         });
                     }
                 }
-                dispatch.require_complete()?;
                 Ok(dispatch)
-            }
-
-            fn require_complete(&self) -> Result<(), ProviderBuildError> {
-                for (factory, present) in [
-                    $((::assembly_schema::ProviderFactorySymbol::$factory, self.$field.is_some()),)+
-                ] {
-                    if !present {
-                        return Err(ProviderBuildError::PlanCatalogDrift {
-                            detail: format!(
-                                "generated active catalog omits factory '{}'",
-                                factory.as_str()
-                            ),
-                        });
-                    }
-                }
-                Ok(())
             }
 
             fn take<T>(
@@ -607,14 +634,7 @@ macro_rules! provider_permits {
                     .ok_or(ProviderBuildError::FactoryPermitAlreadyConsumed { factory })
             }
 
-            $(
-                pub(crate) fn $field(&mut self) -> Result<$permit, ProviderBuildError> {
-                    Self::take(
-                        &mut self.$field,
-                        ::assembly_schema::ProviderFactorySymbol::$factory,
-                    )
-                }
-            )+
+            $(provider_permit_accessor!($access, $field, $permit, $factory);)+
         }
     };
 }
@@ -625,97 +645,179 @@ provider_permits! {
         factory: DeviceloopPostgresRevocationStore,
         receipt: DeviceRevocationStore,
         channels: CHANNELS_PROBES_WORKERS,
+        access: process,
     },
     AuthAuditSinkPermit {
         field: auth_audit_sink,
         factory: HttpservePostgresAuthAuditSink,
         receipt: AuthAuditSink,
         channels: CHANNELS_ALL,
+        access: process,
     },
     DistributedCasStorePermit {
         field: distributed_cas_store,
         factory: DistributedPostgresCasStore,
         receipt: DistributedCasStore,
         channels: CHANNELS_ALL,
+        access: process,
     },
     DistributedLockStorePermit {
         field: distributed_lock_store,
         factory: DistributedRedisLockStore,
         receipt: DistributedLockStore,
         channels: CHANNELS_ALL,
+        access: process,
     },
     DlxArchiveKeyProviderPermit {
         field: dlx_archive_key_provider,
         factory: EventexecVaultArchiveKeyProvider,
         receipt: DlxArchiveKeyProvider,
         channels: CHANNELS_ALL,
+        access: process,
     },
     DlxArchiveStorePermit {
         field: dlx_archive_store,
         factory: EventexecS3DlxArchiveStore,
         receipt: DlxArchiveStore,
         channels: CHANNELS_PROBES_WORKERS,
+        access: process,
     },
     DlxLifecycleRepositoryPermit {
         field: dlx_lifecycle_repository,
         factory: EventexecPostgresDlxLifecycleRepository,
         receipt: DlxLifecycleRepository,
         channels: CHANNELS_ALL,
+        access: process,
     },
     EventPublisherPermit {
         field: event_publisher,
         factory: EventexecAmqpPublisher,
         receipt: EventPublisher,
         channels: CHANNELS_ALL,
+        access: projected,
     },
     EventSubscriberPermit {
         field: event_subscriber,
         factory: EventexecAmqpSubscriber,
         receipt: EventSubscriber,
         channels: CHANNELS_ALL,
+        access: projected,
     },
     IdentitySignerPermit {
         field: identity_signer,
         factory: IdentityVaultSigner,
         receipt: IdentitySigner,
         channels: CHANNELS_ALL,
+        access: projected,
     },
     ListenerPdpConstructor {
         field: listener_pdp,
         factory: HttpserveOidcPdp,
         receipt: ListenerPdp,
         channels: CHANNELS_PROBES_RESOURCES,
+        access: process,
     },
     ListenerRateLimiterPermit {
         field: listener_rate_limiter,
         factory: HttpserveRedisRateLimiter,
         receipt: ListenerRateLimiter,
         channels: CHANNELS_NONE,
+        access: process,
     },
     RuntimeObjectStorePermit {
         field: runtime_object_store,
         factory: RuntimeS3ObjectStore,
         receipt: RuntimeObjectStore,
         channels: CHANNELS_RESOURCES,
+        access: process,
     },
     ServiceTokenReplayStorePermit {
         field: service_token_replay_store,
         factory: OidcPostgresServiceTokenReplayStore,
         receipt: ServiceTokenReplayStore,
         channels: CHANNELS_ALL,
+        access: process,
     },
     SettingsKeyProviderPermit {
         field: settings_key_provider,
         factory: SettingsVaultKeyProvider,
         receipt: SettingsKeyProvider,
         channels: CHANNELS_ALL,
+        access: projected,
     },
     SettingsSecretResolverPermit {
         field: settings_secret_resolver,
         factory: SettingsVaultSecretResolver,
         receipt: SettingsSecretResolver,
         channels: CHANNELS_ALL,
+        access: projected,
     },
+}
+
+/// Placement-selected domain-local provider permits. Every variant is complete and contains no
+/// inactive slot; construction consumes the matching one-shot permits in manifest domain order.
+pub(crate) enum LocalDomainProviderPermits {
+    None,
+    Identity {
+        signer: IdentitySignerPermit,
+    },
+    Settings {
+        key_provider: SettingsKeyProviderPermit,
+        secret_resolver: SettingsSecretResolverPermit,
+    },
+    IdentitySettings {
+        signer: IdentitySignerPermit,
+        key_provider: SettingsKeyProviderPermit,
+        secret_resolver: SettingsSecretResolverPermit,
+    },
+}
+
+/// Closed event-provider execution state; inactive execution carries no callable permit.
+pub(crate) enum EventProviderPermits {
+    Inactive,
+    Active {
+        publisher: EventPublisherPermit,
+        subscriber: EventSubscriberPermit,
+    },
+}
+
+impl ProviderFactoryDispatch {
+    pub(crate) fn take_local_domain_permits(
+        &mut self,
+        execution: &crate::plan::DomainExecutionPlan,
+    ) -> Result<LocalDomainProviderPermits, ProviderBuildError> {
+        let identity = execution.contains(assembly_schema::AssemblyDomain::Identity);
+        let settings = execution.contains(assembly_schema::AssemblyDomain::Settings);
+        Ok(match (identity, settings) {
+            (false, false) => LocalDomainProviderPermits::None,
+            (true, false) => LocalDomainProviderPermits::Identity {
+                signer: self.identity_signer()?,
+            },
+            (false, true) => LocalDomainProviderPermits::Settings {
+                key_provider: self.settings_key_provider()?,
+                secret_resolver: self.settings_secret_resolver()?,
+            },
+            (true, true) => LocalDomainProviderPermits::IdentitySettings {
+                signer: self.identity_signer()?,
+                key_provider: self.settings_key_provider()?,
+                secret_resolver: self.settings_secret_resolver()?,
+            },
+        })
+    }
+
+    pub(crate) fn take_event_permits(
+        &mut self,
+        execution: &crate::plan::LocalEventExecutionPlan,
+    ) -> Result<EventProviderPermits, ProviderBuildError> {
+        if execution.is_active() {
+            Ok(EventProviderPermits::Active {
+                publisher: self.event_publisher()?,
+                subscriber: self.event_subscriber()?,
+            })
+        } else {
+            Ok(EventProviderPermits::Inactive)
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -746,6 +848,7 @@ fn foreign_runtime_catalog_drift(factory: ProviderFactorySymbol) -> Option<Strin
 /// INVARIANT: RUNTIME-PROVIDER-BIJECTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private receipt permits, exhaustive generated catalog join, consuming finish, and non-Clone lifecycle owner" } -- every active generated factory is claimable exactly once, every claim must return an exact-channel receipt, and only a completed build can release lifecycle output to launch.
 /// INVARIANT: RUNTIME-PROVIDER-BIJECTION-LIVE-01 { level = "Medium", exec = "test", source = "code", synthetic_red = "tests::provider_plan_active_catalog_claims_all_factories_exactly_once + tests::provider_plan_rejects_missing_extra_duplicate_and_draft_production + tests::provider_plan_rejects_duplicate_factory_receipts + tests::provider_output_partial_build_abort_is_lifo_once_and_preserves_primary_error + tests::provider_factory_dispatch_rejects_second_permit_consumption", anti_vacuity = "tests::provider_plan_active_catalog_claims_all_factories_exactly_once + tests::provider_factory_permits_are_non_copyable_and_non_interchangeable" } -- catalog exact join, receipt completeness, one-shot permit consumption, partial rollback, and primary-error preservation are behavior-owned beside the transactional provider owner; cross-file raw construction and receipt bypass risk remains in `RUNTIME-PROVIDER-BYPASS-01`.
 pub(crate) struct ProviderBuild {
+    source_runtime_plan_fingerprint: String,
     expected: BTreeMap<ProviderFactorySymbol, ExpectedProvider>,
     claimed: BTreeSet<ProviderFactorySymbol>,
     produced: BTreeSet<ProviderFactorySymbol>,
@@ -755,10 +858,30 @@ pub(crate) struct ProviderBuild {
 }
 
 impl ProviderBuild {
-    pub(crate) fn from_plan(
-        provider_plans: &[ProviderPlan],
+    pub(crate) fn from_execution_plan(
+        execution: crate::plan::ProviderExecutionPlan,
+    ) -> Result<(Self, ProviderFactoryDispatch), ProviderBuildError> {
+        let (source_runtime_plan_fingerprint, provider_plans, catalog) = execution.into_parts();
+        let catalog = catalog.into_iter().copied().collect::<Vec<_>>();
+        let mut build = Self::from_projected(&provider_plans, &catalog)?;
+        build.source_runtime_plan_fingerprint = source_runtime_plan_fingerprint;
+        let dispatch = ProviderFactoryDispatch::from_catalog(&mut build, &catalog)?;
+        Ok((build, dispatch))
+    }
+
+    fn from_projected(
+        provider_plans: &[crate::plan::ProviderExecutionSpec],
         catalog: &[ProviderCatalogEntry],
     ) -> Result<Self, ProviderBuildError> {
+        if provider_plans.len() != catalog.len() {
+            return Err(ProviderBuildError::PlanCatalogDrift {
+                detail: format!(
+                    "active RuntimePlan provider count {} disagrees with generated catalog {}",
+                    provider_plans.len(),
+                    catalog.len()
+                ),
+            });
+        }
         let mut expected = BTreeMap::new();
         let mut roles = BTreeSet::new();
         for entry in catalog {
@@ -802,6 +925,7 @@ impl ProviderBuild {
                 });
             };
             if plan.constructor() != entry.evidence().constructor()
+                || plan.activation() != entry.activation()
                 || !same_channels(plan.outputs(), entry.evidence().outputs())
             {
                 return Err(ProviderBuildError::PlanCatalogDrift {
@@ -819,6 +943,7 @@ impl ProviderBuild {
         }
 
         Ok(Self {
+            source_runtime_plan_fingerprint: String::new(),
             expected,
             claimed: BTreeSet::new(),
             produced: BTreeSet::new(),
@@ -826,6 +951,18 @@ impl ProviderBuild {
             provider_module: DomainModuleResult::default(),
             domain_module: DomainModuleResult::default(),
         })
+    }
+
+    #[cfg(test)]
+    fn from_plan(
+        provider_plans: &[assembly_schema::ProviderPlan],
+        catalog: &[ProviderCatalogEntry],
+    ) -> Result<Self, ProviderBuildError> {
+        let projected = provider_plans
+            .iter()
+            .map(crate::plan::ProviderExecutionSpec::from_typed)
+            .collect::<Vec<_>>();
+        Self::from_projected(&projected, catalog)
     }
 
     fn claim(
@@ -984,10 +1121,29 @@ impl ProviderBuild {
                 });
             }
         };
+        let inventory_receipt = match runtimeexec::inventory::ProviderExecutionReceipt::seal(
+            runtimeinventorymint::RuntimeInventoryMint::capability(),
+            self.source_runtime_plan_fingerprint.clone(),
+            self.expected
+                .values()
+                .map(|expected| expected.role.as_str().to_owned()),
+            probe_bindings,
+        ) {
+            Ok(receipt) => receipt,
+            Err(_) => {
+                return Err(ProviderBuildFailure {
+                    build: Box::new(self),
+                    error: ProviderBuildError::PlanCatalogDrift {
+                        detail: "completed provider receipt does not match execution projection"
+                            .to_owned(),
+                    },
+                });
+            }
+        };
         Ok(CompletedProviderBuild {
             provider_module: self.provider_module,
             domain_module: self.domain_module,
-            inventory_receipt: Some(ProviderInventoryReceipt(probe_bindings)),
+            inventory_receipt: Some(inventory_receipt),
         })
     }
 
@@ -1048,11 +1204,13 @@ fn module_channels(module: &DomainModuleResult) -> Vec<LifecycleChannel> {
 pub(crate) struct CompletedProviderBuild {
     provider_module: DomainModuleResult,
     domain_module: DomainModuleResult,
-    inventory_receipt: Option<ProviderInventoryReceipt>,
+    inventory_receipt: Option<runtimeexec::inventory::ProviderExecutionReceipt>,
 }
 
 impl CompletedProviderBuild {
-    pub(crate) fn take_inventory_receipt(&mut self) -> anyhow::Result<ProviderInventoryReceipt> {
+    pub(crate) fn take_inventory_receipt(
+        &mut self,
+    ) -> anyhow::Result<runtimeexec::inventory::ProviderExecutionReceipt> {
         self.inventory_receipt.take().ok_or_else(|| {
             anyhow::anyhow!("provider inventory receipt was consumed more than once")
         })
@@ -1084,14 +1242,6 @@ impl CompletedProviderBuild {
 
     pub(crate) async fn abort(self, primary: anyhow::Error) -> anyhow::Error {
         abort_modules(self.provider_module, self.domain_module, primary).await
-    }
-}
-
-pub(crate) struct ProviderInventoryReceipt(Vec<runtimeexec::inventory::ProviderProbeBinding>);
-
-impl ProviderInventoryReceipt {
-    pub(crate) fn into_probe_bindings(self) -> Vec<runtimeexec::inventory::ProviderProbeBinding> {
-        self.0
     }
 }
 
@@ -1148,9 +1298,10 @@ mod tests {
     use super::{
         BuiltDeviceRevocationProvider, CHANNELS_ALL, CHANNELS_PROBES_WORKERS, CHANNELS_RESOURCES,
         DeviceRevocationStorePermit, DistributedLockStorePermit, IdentitySignerReadinessWorker,
-        ListenerPdpConstructor, ProviderBuild, ProviderBuildError, ProviderFactoryDispatch,
-        ProviderFactoryPermit, ProviderOutput, ProviderReceipt, RuntimeObjectStorePermit,
-        build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle, identity_signer_resource,
+        ListenerPdpConstructor, LocalDomainProviderPermits, ProviderBuild, ProviderBuildError,
+        ProviderFactoryDispatch, ProviderFactoryPermit, ProviderOutput, ProviderReceipt,
+        RuntimeObjectStorePermit, build_pg_runtime_module, commit_listener_pdp_jwks_lifecycle,
+        identity_signer_resource,
     };
     use crate::providers_gen::ListenerPdpJwksLifecycle;
 
@@ -1246,7 +1397,7 @@ mod tests {
         let receipt = completed
             .take_inventory_receipt()
             .expect("inventory receipt is present exactly once");
-        let bindings = receipt.into_probe_bindings();
+        let bindings = receipt.bindings();
         assert_eq!(bindings.len(), PROVIDER_CATALOG.len());
         let provider_binding = |provider_id| {
             bindings
@@ -1444,11 +1595,13 @@ mod tests {
         };
         assert!(matches!(
             empty,
-            ProviderBuildError::PlanCatalogDrift { detail } if detail.contains("empty")
+            ProviderBuildError::PlanCatalogDrift { detail }
+                if detail.contains("provider count")
         ));
 
-        let duplicated = [PROVIDER_CATALOG[0], PROVIDER_CATALOG[0]];
-        let Err(duplicated) = ProviderBuild::from_plan(plans, &duplicated) else {
+        let mut duplicated_catalog = PROVIDER_CATALOG.to_vec();
+        duplicated_catalog[1] = duplicated_catalog[0];
+        let Err(duplicated) = ProviderBuild::from_plan(plans, &duplicated_catalog) else {
             anyhow::bail!("duplicate catalog factory must fail closed");
         };
         assert!(matches!(
@@ -1463,18 +1616,7 @@ mod tests {
         assert!(matches!(
             missing_plans,
             ProviderBuildError::PlanCatalogDrift { detail }
-                if detail.contains("RuntimePlan declarations")
-        ));
-
-        let subset = &PROVIDER_CATALOG[..1];
-        let mut incomplete = ProviderBuild::from_plan(plans, subset).expect("single-entry join");
-        let Err(incomplete) = ProviderFactoryDispatch::from_catalog(&mut incomplete, subset) else {
-            anyhow::bail!("incomplete catalog must fail require_complete");
-        };
-        assert!(matches!(
-            incomplete,
-            ProviderBuildError::PlanCatalogDrift { detail }
-                if detail.contains("omits factory")
+                if detail.contains("provider count")
         ));
 
         let (mut sealed, _sealed_dispatch) = provider_build_and_dispatch();
@@ -1518,6 +1660,28 @@ mod tests {
         )
         .expect("settingsonly-only hot-key must drift");
         assert!(hot.contains("settingsonly-only"));
+        Ok(())
+    }
+
+    #[test]
+    fn remote_domain_factories_have_no_active_permits() -> anyhow::Result<()> {
+        let snapshot = crate::config::test_snapshot(&[
+            ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
+            ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
+            ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+            ("RSS_TOPOLOGY", "durable-shared"),
+            ("RSS_DOMAIN_TRANSPORT_URL", "https://gateway.internal/rpc"),
+            ("RSS_IDENTITY_DOMAIN_PLACEMENT_WORKLOAD", "peer-cell"),
+            ("RSS_SETTINGS_DOMAIN_PLACEMENT_WORKLOAD", "peer-cell"),
+        ])?;
+        let parts = crate::plan::RuntimePlan::bundled(snapshot.view())?
+            .place(bootstrap::Topology::DurableShared, snapshot.view())?
+            .into_parts();
+        let (_build, mut dispatch) = ProviderBuild::from_execution_plan(parts.providers)?;
+        assert!(matches!(
+            dispatch.take_local_domain_permits(&parts.domain)?,
+            LocalDomainProviderPermits::None
+        ));
         Ok(())
     }
 

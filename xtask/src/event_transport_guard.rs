@@ -1441,7 +1441,8 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                 let body = normalized_tokens(&item.block);
                 shape.policy_bound_worker_activation = [
                     "matchtoken.dispatch()",
-                    "AuditConsumerFactory::new(pg,audit_key).worker(token,inputs)",
+                    "AuditConsumerFactory::new(pg,audit_key.context(",
+                    ").worker(token,inputs)",
                     "SettingsConsumerFactory::new(pg).worker(token,inputs)",
                 ]
                 .iter()
@@ -4226,7 +4227,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     &[
                         "let timing = worker.relay",
                         "pg.validate_relay_budget(timing.budget)",
-                        "wire_durable(pg, distributed, subscribers, per_domain, timing, security, audit_key,)",
+                        "wire_durable(pg, distributed, subscribers, DurableEventExecution { per_domain, local_producers, }, timing, security, audit_key,)",
                     ][..],
                 ),
                 (
@@ -7368,7 +7369,10 @@ mod tests {
                     | SubscriptionDispatchKey::IdentityRoleRevokedV1Audit
                     | SubscriptionDispatchKey::IdentitySecurityEventV1Audit
                     | SubscriptionDispatchKey::IdentitySessionCreatedV1Audit =>
-                        AuditConsumerFactory::new(pg, audit_key).worker(token, inputs),
+                        AuditConsumerFactory::new(
+                            pg,
+                            audit_key.context("audit key required")?,
+                        ).worker(token, inputs),
                     SubscriptionDispatchKey::SettingsConfigVersionChangedV1Settings =>
                         SettingsConsumerFactory::new(pg).worker(token, inputs),
                 }

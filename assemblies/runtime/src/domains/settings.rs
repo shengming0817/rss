@@ -4,8 +4,8 @@ use bootstrap::DomainBinding;
 use settings_composition::{KeyProviderReadinessInterval, SettingsModuleDeps};
 use vault::caps as vault_caps;
 
-use crate::SharedRuntimeDeps;
 use crate::support::SystemClock;
+use crate::{LocalDomainProviderCatalog, SharedRuntimeDeps};
 
 pub use settings_composition::{CONFIGS_READY_PROBE_NAME, ConfigsReadyProbe};
 
@@ -33,9 +33,10 @@ impl SettingsModuleInput {
 /// Returns an error when the settings composition fails its startup self-check.
 pub async fn module(
     deps: &SharedRuntimeDeps,
+    providers: &LocalDomainProviderCatalog,
     input: SettingsModuleInput,
 ) -> anyhow::Result<DomainBinding> {
-    wire_from_runtime(deps, input).await
+    wire_from_runtime(deps, providers, input).await
 }
 
 /// Integration-only entry that exercises the same typed wiring without naming the generated live
@@ -43,21 +44,24 @@ pub async fn module(
 #[cfg(feature = "integration")]
 pub(crate) async fn integration_binding(
     deps: &SharedRuntimeDeps,
+    providers: &LocalDomainProviderCatalog,
     input: SettingsModuleInput,
 ) -> anyhow::Result<DomainBinding> {
-    wire_from_runtime(deps, input).await
+    wire_from_runtime(deps, providers, input).await
 }
 
 async fn wire_from_runtime(
     deps: &SharedRuntimeDeps,
+    providers: &LocalDomainProviderCatalog,
     _input: SettingsModuleInput,
 ) -> anyhow::Result<DomainBinding> {
+    let (vault, key_name, readiness) = providers.settings_local()?;
     settings_composition::wire(SettingsModuleDeps::new(
         deps.pg.for_domain(),
-        deps.vault.for_domain::<vault_caps::Settings>(),
-        deps.settings_config_value_key_name.clone(),
+        vault.for_domain::<vault_caps::Settings>(),
+        key_name.clone(),
         std::sync::Arc::new(SystemClock),
-        deps.settings_readiness.clone(),
+        readiness.clone(),
     ))
     .await
 }

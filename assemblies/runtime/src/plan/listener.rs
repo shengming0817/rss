@@ -5,13 +5,13 @@ use crate::{
     plan::RuntimePlanError,
 };
 use assembly_schema::{
-    AssemblyListenerKind, CanonicalAssemblyManifestV2, ListenerAuth, RuntimePlanV2Input,
+    AssemblyListenerKind, CanonicalAssemblyManifestV2, ListenerAuth, RuntimePlanV3Input,
 };
 
 pub(super) fn append(
     manifest: &CanonicalAssemblyManifestV2,
     config: SnapshotConfig<'_>,
-    input: &mut RuntimePlanV2Input,
+    input: &mut RuntimePlanV3Input,
 ) -> Result<(), RuntimePlanError> {
     let (primary, admin, internal) = TokenProfilesConfig::listener_selections(config)
         .map_err(|_| RuntimePlanError::ListenerAuth)?;

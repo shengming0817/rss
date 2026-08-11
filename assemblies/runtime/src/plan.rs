@@ -7,9 +7,11 @@ mod placement;
 mod placement_exec;
 
 use crate::config::SnapshotConfig;
+use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyListenerKind, AssemblyManifest, ExecutableAssemblyLock, ListenerAuth,
-    ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV2Input,
+    ParsedAssemblyLock, ProviderActivation, ProviderCatalogEntry, RuntimePlan as TypedRuntimePlan,
+    RuntimePlanV3Input,
 };
 use primitives::{AuthScheme, ListenerKind};
 use std::fmt;
@@ -31,10 +33,141 @@ pub struct RuntimePlan {
     telemetry_resource: observ::TelemetryResource,
 }
 
+/// The sole placement-first runtime execution capability.
+///
+/// Construction consumes the unplaced plan, so domain-local configuration and provider factories
+/// cannot be reached through a surviving raw plan value.
+pub(crate) struct PlacedRuntimePlan {
+    runtime_plan: RuntimePlan,
+    domain: DomainExecutionPlan,
+    listeners: ListenerExecutionPlan,
+    providers: ProviderExecutionPlan,
+    events: LocalEventExecutionPlan,
+    security: RuntimeSecurityExecutionPlan,
+    placement: PlacementExecutionPlan,
+}
+
+/// Process-owned listener security capability minted only by placement.
+///
+/// This is deliberately independent from Identity domain locality: protected local/framework
+/// routes must remain fail-closed when Identity executes remotely.
+pub(crate) struct RuntimeSecurityExecutionPlan {
+    _private: (),
+}
+
+pub(crate) struct ProviderExecutionPlan {
+    source_runtime_plan_fingerprint: String,
+    plans: Vec<ProviderExecutionSpec>,
+    catalog: Vec<&'static ProviderCatalogEntry>,
+}
+
+pub(crate) struct ProviderExecutionSpec {
+    id: String,
+    constructor: assembly_schema::ProviderConstructor,
+    activation: ProviderActivation,
+    outputs: Vec<assembly_schema::LifecycleChannel>,
+}
+
+pub(crate) struct LocalEventExecutionPlan {
+    active: bool,
+    local_producers: Vec<generated::event::ProducerDomain>,
+    local_subscriptions: Vec<generated::event::SubscriptionDispatchKey>,
+    requires_audit_consumer_key: bool,
+    required_amqp_domains: Vec<String>,
+}
+
+impl ProviderExecutionPlan {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        String,
+        Vec<ProviderExecutionSpec>,
+        Vec<&'static ProviderCatalogEntry>,
+    ) {
+        (
+            self.source_runtime_plan_fingerprint,
+            self.plans,
+            self.catalog,
+        )
+    }
+}
+
+impl ProviderExecutionSpec {
+    pub(crate) fn id(&self) -> &str {
+        &self.id
+    }
+    pub(crate) const fn constructor(&self) -> assembly_schema::ProviderConstructor {
+        self.constructor
+    }
+    pub(crate) const fn activation(&self) -> ProviderActivation {
+        self.activation
+    }
+    pub(crate) fn outputs(&self) -> &[assembly_schema::LifecycleChannel] {
+        &self.outputs
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_typed(plan: &assembly_schema::ProviderPlan) -> Self {
+        Self {
+            id: plan.id().to_owned(),
+            constructor: plan.constructor(),
+            activation: plan.activation(),
+            outputs: plan.outputs().to_vec(),
+        }
+    }
+}
+
+impl LocalEventExecutionPlan {
+    pub(crate) const fn is_active(&self) -> bool {
+        self.active
+    }
+
+    pub(crate) const fn requires_audit_consumer_key(&self) -> bool {
+        self.requires_audit_consumer_key
+    }
+
+    pub(crate) fn required_amqp_domains(&self) -> &[String] {
+        &self.required_amqp_domains
+    }
+
+    pub(crate) fn local_producers(&self) -> &[generated::event::ProducerDomain] {
+        &self.local_producers
+    }
+
+    pub(crate) fn local_subscriptions(&self) -> &[generated::event::SubscriptionDispatchKey] {
+        &self.local_subscriptions
+    }
+}
+
+pub(crate) struct PlacedRuntimeParts {
+    pub(crate) runtime_plan: RuntimePlan,
+    pub(crate) domain: DomainExecutionPlan,
+    pub(crate) listeners: ListenerExecutionPlan,
+    pub(crate) providers: ProviderExecutionPlan,
+    pub(crate) events: LocalEventExecutionPlan,
+    pub(crate) security: RuntimeSecurityExecutionPlan,
+    pub(crate) placement: PlacementExecutionPlan,
+}
+
+impl PlacedRuntimePlan {
+    pub(crate) fn into_parts(self) -> PlacedRuntimeParts {
+        PlacedRuntimeParts {
+            runtime_plan: self.runtime_plan,
+            domain: self.domain,
+            listeners: self.listeners,
+            providers: self.providers,
+            events: self.events,
+            security: self.security,
+            placement: self.placement,
+        }
+    }
+}
+
 /// A validated listener projection that can only be minted from [`RuntimePlan`].
 ///
 /// INVARIANT: RUNTIME-LISTENER-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private execution fields plus RuntimePlan-only mint and consuming FinalizedListenerSet handoff" } -- runtime listener identity, domain placement, authentication and launch membership cross the composition root only through this plan-derived capability.
 pub(crate) struct ListenerExecutionPlan {
+    declared: Vec<ListenerExecutionSpec>,
     listeners: Vec<ListenerExecutionSpec>,
 }
 
@@ -48,6 +181,10 @@ pub(crate) struct ListenerExecutionSpec {
 impl ListenerExecutionPlan {
     pub(crate) fn listeners(&self) -> &[ListenerExecutionSpec] {
         &self.listeners
+    }
+
+    pub(crate) fn declared_listeners(&self) -> &[ListenerExecutionSpec] {
+        &self.declared
     }
 
     pub(crate) fn into_listeners(self) -> Vec<ListenerExecutionSpec> {
@@ -120,12 +257,12 @@ impl RuntimePlan {
         }
         let lock = ExecutableAssemblyLock::from_build_attested(parsed);
 
-        let mut input = RuntimePlanV2Input::from_manifest(&manifest);
+        let mut input = RuntimePlanV3Input::from_manifest(&manifest);
         listener::append(&manifest, config, &mut input)?;
         domain::append(&manifest, &mut input);
         placement::append(&manifest, &lock, config, &mut input)?;
 
-        let plan = TypedRuntimePlan::compile_v2(&manifest, &lock, input)
+        let plan = TypedRuntimePlan::compile_v3(&manifest, &lock, input)
             .map_err(RuntimePlanError::Protocol)?;
         let workflow_activation = eventexec::WorkflowActivationPlan::select(&plan)
             .map_err(RuntimePlanError::WorkflowRuntime)?;
@@ -228,13 +365,132 @@ impl RuntimePlan {
         &self.assembly_identity
     }
 
-    pub(crate) fn listener_execution_plan(&self) -> ListenerExecutionPlan {
-        listener_execution_plan_from_typed(&self.plan)
-    }
-
-    /// Project exclusive Local / Remote placement execution facts.
+    /// Consume this plan into the exclusive Local / Remote execution projection.
     ///
     /// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private closed placement state with mandatory secure::DomainHttpEndpoint plus RuntimePlan-only fallible mint from typed topology" } -- this is the sole mint for [`PlacementExecutionPlan`].
+    pub(crate) fn place(
+        self,
+        topology: bootstrap::Topology,
+        config: SnapshotConfig<'_>,
+    ) -> anyhow::Result<PlacedRuntimePlan> {
+        let placement =
+            placement_exec::mint(&self.plan, &self.assembly_identity, topology, config)?;
+        let domain = domain_exec::mint(&self.plan, &placement);
+        let listeners = listener_execution_plan_from_typed(&self.plan, Some(&placement));
+        let local_domains = domain.local_domains().to_vec();
+        let local_producers = generated::event::PRODUCER_DOMAINS
+            .iter()
+            .copied()
+            .filter(|producer| {
+                local_domains
+                    .iter()
+                    .any(|domain| domain.as_str() == producer.as_str())
+            })
+            .collect::<Vec<_>>();
+        let mut local_subscriptions = Vec::new();
+        let mut requires_audit_consumer_key = false;
+        let mut required_amqp_domains = local_producers
+            .iter()
+            .map(|producer| producer.as_str().to_owned())
+            .collect::<Vec<_>>();
+        for event in generated::event::EVENTS {
+            requires_audit_consumer_key |= event.subscriptions().iter().any(|subscription| {
+                subscription.consumer() == AssemblyDomain::Audit.as_str()
+                    && local_domains.contains(&AssemblyDomain::Audit)
+            });
+            if event.subscriptions().iter().any(|subscription| {
+                local_domains
+                    .iter()
+                    .any(|domain| domain.as_str() == subscription.consumer())
+            }) {
+                required_amqp_domains.push(
+                    event
+                        .topic()
+                        .split('.')
+                        .next()
+                        .unwrap_or(event.topic())
+                        .to_owned(),
+                );
+            }
+            local_subscriptions.extend(
+                event
+                    .subscriptions()
+                    .iter()
+                    .filter(|subscription| {
+                        local_domains
+                            .iter()
+                            .any(|domain| domain.as_str() == subscription.consumer())
+                    })
+                    .map(|subscription| subscription.dispatch()),
+            );
+        }
+        required_amqp_domains.sort_unstable();
+        required_amqp_domains.dedup();
+        let events = LocalEventExecutionPlan {
+            active: !required_amqp_domains.is_empty(),
+            local_producers,
+            local_subscriptions,
+            requires_audit_consumer_key,
+            required_amqp_domains,
+        };
+        let mut plans = Vec::new();
+        let mut catalog = Vec::new();
+        anyhow::ensure!(
+            self.plan.provider_plans().len() == crate::providers_gen::PROVIDER_CATALOG.len(),
+            "RuntimePlan provider set disagrees with generated catalog"
+        );
+        for entry in crate::providers_gen::PROVIDER_CATALOG {
+            let active = match entry.activation() {
+                ProviderActivation::Process => true,
+                ProviderActivation::DomainLocal(domain) => placement.is_local(domain),
+                ProviderActivation::LocalEventExecution => events.is_active(),
+            };
+            let plan = self
+                .plan
+                .provider_plans()
+                .iter()
+                .find(|plan| plan.id() == entry.role().as_str())
+                .with_context(|| {
+                    format!("RuntimePlan omits provider '{}'", entry.role().as_str())
+                })?;
+            anyhow::ensure!(
+                plan.activation() == entry.activation(),
+                "RuntimePlan provider activation disagrees with generated catalog"
+            );
+            if active {
+                plans.push(plan);
+                catalog.push(entry);
+            }
+        }
+        let plans = plans
+            .into_iter()
+            .map(|plan| ProviderExecutionSpec {
+                id: plan.id().to_owned(),
+                constructor: plan.constructor(),
+                activation: plan.activation(),
+                outputs: plan.outputs().to_vec(),
+            })
+            .collect();
+        let source_runtime_plan_fingerprint =
+            self.plan.runtime_plan_fingerprint().as_str().to_owned();
+        Ok(PlacedRuntimePlan {
+            runtime_plan: self,
+            domain,
+            listeners,
+            providers: ProviderExecutionPlan {
+                source_runtime_plan_fingerprint,
+                plans,
+                catalog,
+            },
+            events,
+            security: RuntimeSecurityExecutionPlan { _private: () },
+            placement,
+        })
+    }
+
+    // Unit tests inspect projections directly. Production can only use the consuming `place`
+    // transition above, so these helpers cannot become an alternate startup path.
+    #[cfg(test)]
     pub(crate) fn placement_execution_plan(
         &self,
         topology: bootstrap::Topology,
@@ -243,27 +499,59 @@ impl RuntimePlan {
         placement_exec::mint(&self.plan, &self.assembly_identity, topology, config)
     }
 
-    /// Project the exact locally composed domain sequence from plan declarations and placement.
+    #[cfg(test)]
     pub(crate) fn domain_execution_plan(
         &self,
         placement: &PlacementExecutionPlan,
     ) -> DomainExecutionPlan {
         domain_exec::mint(&self.plan, placement)
     }
+
+    #[cfg(any(test, feature = "integration"))]
+    pub(crate) fn listener_execution_plan(&self) -> ListenerExecutionPlan {
+        listener_execution_plan_from_typed(&self.plan, None)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn listener_execution_plan_for_placement(
+        &self,
+        placement: &PlacementExecutionPlan,
+    ) -> ListenerExecutionPlan {
+        listener_execution_plan_from_typed(&self.plan, Some(placement))
+    }
 }
 
-fn listener_execution_plan_from_typed(plan: &TypedRuntimePlan) -> ListenerExecutionPlan {
+fn listener_execution_plan_from_typed(
+    plan: &TypedRuntimePlan,
+    placement: Option<&PlacementExecutionPlan>,
+) -> ListenerExecutionPlan {
+    let declared = plan
+        .listener_plans()
+        .iter()
+        .map(|listener| ListenerExecutionSpec {
+            id: listener.id().to_owned(),
+            kind: runtime_listener_kind(listener.kind()),
+            auth_scheme: runtime_auth_scheme(listener.auth()),
+            domains: listener.domains().to_vec(),
+        })
+        .collect::<Vec<_>>();
+    let listeners = declared
+        .iter()
+        .map(|listener| ListenerExecutionSpec {
+            id: listener.id.clone(),
+            kind: listener.kind,
+            auth_scheme: listener.auth_scheme,
+            domains: listener
+                .domains
+                .iter()
+                .copied()
+                .filter(|domain| placement.is_none_or(|plan| plan.is_local(*domain)))
+                .collect(),
+        })
+        .collect();
     ListenerExecutionPlan {
-        listeners: plan
-            .listener_plans()
-            .iter()
-            .map(|listener| ListenerExecutionSpec {
-                id: listener.id().to_owned(),
-                kind: runtime_listener_kind(listener.kind()),
-                auth_scheme: runtime_auth_scheme(listener.auth()),
-                domains: listener.domains().to_vec(),
-            })
-            .collect(),
+        declared,
+        listeners,
     }
 }
 
@@ -304,7 +592,7 @@ pub(crate) fn fixture_listener_spec(
         &lock,
     )
     .map_err(|error| anyhow::anyhow!("parse fingerprint-verified RuntimePlan fixture: {error}"))?;
-    listener_execution_plan_from_typed(parsed.as_plan())
+    listener_execution_plan_from_typed(parsed.as_plan(), None)
         .into_listeners()
         .into_iter()
         .find(|listener| listener.kind() == runtime_listener_kind(kind))
@@ -459,7 +747,7 @@ mod tests {
         manifest: &CanonicalAssemblyManifestV2,
         lock: &ExecutableAssemblyLock,
     ) -> assembly_schema::RuntimePlanError {
-        TypedRuntimePlan::compile_v2(manifest, lock, compiler_input(manifest, lock, None))
+        TypedRuntimePlan::compile_v3(manifest, lock, compiler_input(manifest, lock, None))
             .expect_err("mismatched manifest/lock must fail")
     }
 
@@ -467,8 +755,8 @@ mod tests {
         manifest: &CanonicalAssemblyManifestV2,
         lock: &ExecutableAssemblyLock,
         mutation: Option<Mutation>,
-    ) -> RuntimePlanV2Input {
-        let mut input = RuntimePlanV2Input::from_manifest(manifest);
+    ) -> RuntimePlanV3Input {
+        let mut input = RuntimePlanV3Input::from_manifest(manifest);
         append_candidate_providers(manifest, mutation, &mut input);
         append_candidate_listeners(manifest, mutation, &mut input);
         append_candidate_domains(manifest, mutation, &mut input);
@@ -479,7 +767,7 @@ mod tests {
     fn append_candidate_providers(
         manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV2Input,
+        input: &mut RuntimePlanV3Input,
     ) {
         if mutation != Some(Mutation::DuplicateProvider) {
             return;
@@ -490,17 +778,13 @@ mod tests {
             .filter(|provider| provider.lifecycle == ProviderLifecycle::Active)
             .min_by_key(|provider| provider.id.as_str())
             .expect("runtime has an active provider");
-        input.provider(
-            provider.id.as_str(),
-            provider.provider,
-            provider.outputs.clone(),
-        );
+        input.provider(provider.id, provider.provider, provider.outputs.clone());
     }
 
     fn append_candidate_listeners(
         manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV2Input,
+        input: &mut RuntimePlanV3Input,
     ) {
         let mut listeners = manifest
             .listeners()
@@ -539,7 +823,7 @@ mod tests {
     fn append_candidate_domains(
         manifest: &CanonicalAssemblyManifestV2,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV2Input,
+        input: &mut RuntimePlanV3Input,
     ) {
         for (index, domain) in manifest.domains().iter().enumerate() {
             if index == 0 && mutation == Some(Mutation::MissingDomain) {
@@ -556,7 +840,7 @@ mod tests {
         manifest: &CanonicalAssemblyManifestV2,
         lock: &ExecutableAssemblyLock,
         mutation: Option<Mutation>,
-        input: &mut RuntimePlanV2Input,
+        input: &mut RuntimePlanV3Input,
     ) {
         let mut placements = manifest
             .domains()
@@ -839,7 +1123,7 @@ mod tests {
             .expect("canonical manifest");
         let lock = verified_lock(BUNDLED_ASSEMBLY_LOCK, "runtime");
 
-        TypedRuntimePlan::compile_v2(&manifest, &lock, compiler_input(&manifest, &lock, None))
+        TypedRuntimePlan::compile_v3(&manifest, &lock, compiler_input(&manifest, &lock, None))
             .expect("unmutated candidate facts must compile");
         for mutation in [
             Mutation::DuplicateProvider,
@@ -855,7 +1139,7 @@ mod tests {
             Mutation::ReversePlacements,
         ] {
             assert!(
-                TypedRuntimePlan::compile_v2(
+                TypedRuntimePlan::compile_v3(
                     &manifest,
                     &lock,
                     compiler_input(&manifest, &lock, Some(mutation))

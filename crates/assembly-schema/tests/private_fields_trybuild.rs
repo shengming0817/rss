@@ -23,6 +23,7 @@ fn runtime_plan_construction_is_sealed() {
     cases.compile_fail("tests/ui/runtime_plan_parsed_lock_compile_rejected.rs");
     cases.compile_fail("tests/ui/runtime_plan_parsed_lock_reader_rejected.rs");
     cases.compile_fail("tests/ui/runtime_plan_unbound_reader_private.rs");
+    cases.compile_fail("tests/ui/runtime_plan_v2_removed.rs");
 }
 
 #[test]

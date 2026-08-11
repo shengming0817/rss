@@ -76,6 +76,7 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 /// through the committed generated module list.
 #[cfg(feature = "integration")]
 pub mod test_support;
+pub(crate) use module::LocalDomainProviderCatalog;
 pub use module::SharedRuntimeDeps;
 pub use phase::ServingRuntimeInputs;
 
@@ -98,23 +99,20 @@ use crypto::RustCryptoMacVerifier;
 use diport::ManagedResource as _;
 #[cfg(test)]
 use primitives::MacKey;
-use std::sync::Arc;
-
-fn prepare_serving_local(
-    config: SnapshotConfig<'_>,
-) -> anyhow::Result<Arc<secure::DigestPasswordBlocklist>> {
-    domains::identity::load_password_blocklist(config)
-}
-
 fn prepare_operator_local(_: SnapshotConfig<'_>) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
+fn prepare_serving_local(config: SnapshotConfig<'_>) -> anyhow::Result<()> {
+    prepare_operator_local(config)
+}
+
 /// Capture one process snapshot, run profile-local preparation, then build external tracing.
 ///
-/// The local closure always runs before the OTLP builder. Serving uses it to seal the mandatory
-/// password policy; operators use the same snapshot/tracing lifecycle without receiving that
-/// serving-only capability.
+/// The local closure always runs before the OTLP builder. Serving keeps this step process-only;
+/// placement-selected domain configuration such as the Identity password blocklist is parsed later
+/// from the same snapshot and only when that domain executes locally.
 fn prepare_runtime_kernel<Local>(
     prepare_local: impl FnOnce(SnapshotConfig<'_>) -> anyhow::Result<Local>,
 ) -> anyhow::Result<(PreparedRuntimeInputs, Local, phase::PreparedTelemetryPlan)> {
@@ -138,22 +136,18 @@ fn prepare_runtime_kernel<Local>(
     ))
 }
 
-/// Prepare serving inputs, sealing the local password policy before any external provider.
+/// Prepare serving inputs and the placement-first runtime plan before provider construction.
 ///
 /// 组合根 binary 入口在 [`run`] **之前**调用——否则运行时入口的全部结构化日志
 /// （bind / serve / shutdown / fail-fast）皆为 no-op。`RUST_LOG`、[`telemetry::OTEL_ENDPOINT_ENV`] 与后续
-/// serving consumer 全部来自这个 snapshot，不再读取 ambient environment。密码 blocklist 在
-/// snapshot 后立即加载并成为必填 [`ServingRuntimeInputs`] typestate，任何 OTLP/外部 provider 都晚于它。
+/// serving consumer 全部来自这个 snapshot，不再读取 ambient environment。`ServingRuntimeInputs`
+/// 消费 unplaced RuntimePlan 生成唯一 placement capability；domain-local config/provider 随后只由该
+/// capability 的 Local projection 构造。
 ///
 /// Only this type can enter [`run`] or [`shutdown_runtime`].
 pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
-    let (prepared, password_blocklist, telemetry_plan) =
-        prepare_runtime_kernel(prepare_serving_local)?;
-    Ok(ServingRuntimeInputs::new(
-        prepared,
-        password_blocklist,
-        telemetry_plan,
-    ))
+    let (prepared, (), telemetry_plan) = prepare_runtime_kernel(prepare_operator_local)?;
+    ServingRuntimeInputs::new(prepared, telemetry_plan)
 }
 
 /// Emit a process-terminal failure through the installed JSON subscriber.

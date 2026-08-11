@@ -23,5 +23,9 @@ trybuild.workspace = true
 [features]
 default = []
 
+[[test]]
+name = "compile_trybuild"
+path = "tests/compile.rs"
+
 [lints]
 workspace = true

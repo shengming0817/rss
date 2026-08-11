@@ -164,6 +164,22 @@ fn same_channel_set(actual: &[LifecycleChannel], expected: &[LifecycleChannel]) 
     actual == expected
 }
 
+/// Closed runtime activation owner for a provider role.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
+#[serde(
+    rename_all = "camelCase",
+    tag = "kind",
+    content = "domain",
+    deny_unknown_fields
+)]
+pub enum ProviderActivation {
+    Process,
+    DomainLocal(crate::AssemblyDomain),
+    LocalEventExecution,
+}
+
 macro_rules! provider_roles {
     ($( $variant:ident => $wire:literal ),+ $(,)?) => {
         #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
@@ -180,6 +196,10 @@ macro_rules! provider_roles {
                 match self {
                     $( Self::$variant => $wire, )+
                 }
+            }
+
+            pub const fn activation(self) -> ProviderActivation {
+                provider_role_spec(self).activation
             }
         }
 
@@ -316,7 +336,7 @@ provider_factory_symbols! {
     EventexecVaultHotKeyProvider => "eventexec::vault-hot-key-provider",
 }
 
-/// Closed registry of provider constructors accepted by an AssemblyManifest and RuntimePlan v2.
+/// Closed registry of provider constructors accepted by an AssemblyManifest and RuntimePlan v3.
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
 )]
@@ -666,6 +686,7 @@ display_as_str!(
 #[derive(Debug, Clone, Copy)]
 struct ProviderRoleSpec {
     role: ProviderRole,
+    activation: ProviderActivation,
     lifecycle: ProviderLifecycle,
     port: DiportPort,
     constructor: ProviderConstructor,
@@ -686,6 +707,7 @@ const W: LifecycleChannel = LifecycleChannel::Workers;
 const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     ProviderRoleSpec {
         role: ProviderRole::DeviceCertificateStore,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::CertificateReconcileRepository,
         constructor: ProviderConstructor::PostgresDeviceCertificateRepository,
@@ -700,6 +722,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DeviceCommandStore,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::DeviceCommandStore,
         constructor: ProviderConstructor::PostgresDeviceCommandStore,
@@ -714,6 +737,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DeviceDraftArtifactSource,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::CertificateArtifactSource,
         constructor: ProviderConstructor::IdentityDraftArtifactSimulator,
@@ -728,6 +752,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DeviceMqttSession,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::MqttSession,
         constructor: ProviderConstructor::MqttSession,
@@ -742,6 +767,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DeviceRevocationStore,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::RevocationStore,
         constructor: ProviderConstructor::PostgresRevocationStore,
@@ -756,6 +782,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::EventPublisher,
+        activation: ProviderActivation::LocalEventExecution,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::Publisher,
         constructor: ProviderConstructor::AmqpPublisher,
@@ -770,6 +797,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::EventSubscriber,
+        activation: ProviderActivation::LocalEventExecution,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::AckableSubscriber,
         constructor: ProviderConstructor::AmqpSubscriber,
@@ -784,6 +812,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::IdentitySigner,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity),
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::Signer,
         constructor: ProviderConstructor::VaultSigner,
@@ -798,6 +827,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::SettingsKeyProvider,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Settings),
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::KeyProvider,
         constructor: ProviderConstructor::VaultKeyProvider,
@@ -812,6 +842,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::SettingsSecretResolver,
+        activation: ProviderActivation::DomainLocal(crate::AssemblyDomain::Settings),
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::SecretResolver,
         constructor: ProviderConstructor::VaultSecretResolver,
@@ -826,6 +857,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::ListenerPdp,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::Pdp,
         constructor: ProviderConstructor::OidcProvider,
@@ -840,6 +872,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::ServiceTokenReplayStore,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::ServiceTokenReplayStore,
         constructor: ProviderConstructor::PostgresServiceTokenReplayStore,
@@ -854,6 +887,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::AuthAuditSink,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::AuditSink,
         constructor: ProviderConstructor::PostgresAuthAuditSink,
@@ -868,6 +902,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::ListenerRateLimiter,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::RateLimiter,
         constructor: ProviderConstructor::RedisRateLimiter,
@@ -882,6 +917,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DistributedLockStore,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::Lock,
         constructor: ProviderConstructor::RedisLockStore,
@@ -896,6 +932,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DistributedCasStore,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::Cas,
         constructor: ProviderConstructor::PostgresCasStore,
@@ -910,6 +947,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DistributedCasStoreAlternative,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Draft,
         port: DiportPort::Cas,
         constructor: ProviderConstructor::RedisCasStore,
@@ -924,6 +962,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::RuntimeObjectStore,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::ObjectStore,
         constructor: ProviderConstructor::S3Store,
@@ -938,6 +977,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DlxLifecycleRepository,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::DlxLifecycleRepository,
         constructor: ProviderConstructor::PostgresDlxLifecycleRepository,
@@ -952,6 +992,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DlxArchiveStore,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::DlxArchiveStore,
         constructor: ProviderConstructor::S3VerifiedDlxArchiveStore,
@@ -966,6 +1007,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DlxArchiveKeyProvider,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::KeyProvider,
         constructor: ProviderConstructor::VaultKeyProvider,
@@ -980,6 +1022,7 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
     },
     ProviderRoleSpec {
         role: ProviderRole::DlxHotKeyProvider,
+        activation: ProviderActivation::Process,
         lifecycle: ProviderLifecycle::Active,
         port: DiportPort::KeyProvider,
         constructor: ProviderConstructor::VaultKeyProvider,
@@ -996,6 +1039,15 @@ const PROVIDER_ROLE_SPECS: [ProviderRoleSpec; ProviderRole::COUNT] = [
 
 const fn provider_role_spec(role: ProviderRole) -> &'static ProviderRoleSpec {
     &PROVIDER_ROLE_SPECS[role as usize]
+}
+
+/// Whether the closed provider registry assigns at least one local provider to `domain`.
+#[must_use]
+pub fn has_domain_local_provider_activation(domain: crate::AssemblyDomain) -> bool {
+    PROVIDER_ROLE_SPECS.iter().any(|spec| {
+        spec.activation == ProviderActivation::DomainLocal(domain)
+            && spec.lifecycle == ProviderLifecycle::Active
+    })
 }
 
 const fn str_eq(left: &str, right: &str) -> bool {
@@ -1150,6 +1202,7 @@ impl ProviderCapabilityEvidence {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderCatalogEntry {
     role: ProviderRole,
+    activation: ProviderActivation,
     factory: ProviderFactorySymbol,
     evidence: ProviderCapabilityEvidence,
 }
@@ -1158,6 +1211,7 @@ impl ProviderCatalogEntry {
     #[allow(clippy::too_many_arguments)]
     pub const fn checked(
         role: ProviderRole,
+        activation: ProviderActivation,
         port: DiportPort,
         constructor: ProviderConstructor,
         factory: ProviderFactorySymbol,
@@ -1170,6 +1224,10 @@ impl ProviderCatalogEntry {
         outputs: &'static [LifecycleChannel],
     ) -> Self {
         let spec = provider_role_spec(role);
+        assert!(
+            provider_activation_eq(role.activation(), activation),
+            "provider activation drift"
+        );
         assert!(
             spec.lifecycle as u8 == ProviderLifecycle::Active as u8,
             "draft provider roles cannot enter an active catalog"
@@ -1220,6 +1278,7 @@ impl ProviderCatalogEntry {
         );
         Self {
             role: spec.role,
+            activation,
             factory: expected_factory,
             evidence: ProviderCapabilityEvidence {
                 port: spec.port,
@@ -1239,12 +1298,29 @@ impl ProviderCatalogEntry {
         self.role
     }
 
+    pub const fn activation(&self) -> ProviderActivation {
+        self.activation
+    }
+
     pub const fn factory(&self) -> ProviderFactorySymbol {
         self.factory
     }
 
     pub const fn evidence(&self) -> &ProviderCapabilityEvidence {
         &self.evidence
+    }
+}
+
+const fn provider_activation_eq(left: ProviderActivation, right: ProviderActivation) -> bool {
+    match (left, right) {
+        (ProviderActivation::Process, ProviderActivation::Process)
+        | (ProviderActivation::LocalEventExecution, ProviderActivation::LocalEventExecution) => {
+            true
+        }
+        (ProviderActivation::DomainLocal(left), ProviderActivation::DomainLocal(right)) => {
+            left as u8 == right as u8
+        }
+        _ => false,
     }
 }
 
@@ -1291,6 +1367,14 @@ mod tests {
                 ProviderConsumer::Identity
             };
             assert_eq!(spec.consumer, expected_consumer);
+            assert_eq!(
+                spec.activation,
+                if role == ProviderRole::DeviceRevocationStore {
+                    ProviderActivation::Process
+                } else {
+                    ProviderActivation::DomainLocal(crate::AssemblyDomain::Identity)
+                }
+            );
             assert!(spec.factory.is_some());
         }
     }

@@ -4,7 +4,7 @@ use anyhow::Context as _;
 use assembly_schema::{
     AssemblyDomain, AssemblyIdentity, AssemblyListenerKind, AssemblyManifest, AssemblyProfile,
     AssemblyTopology, CanonicalAssemblyManifestV2, DomainLifecyclePhase, ExecutableAssemblyLock,
-    ListenerAuth, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV2Input,
+    ListenerAuth, ParsedAssemblyLock, RuntimePlan as TypedRuntimePlan, RuntimePlanV3Input,
 };
 
 const BUNDLED_ASSEMBLY_TOML: &str = include_str!("../assembly.toml");
@@ -29,7 +29,7 @@ impl IdentityAuditPlan {
                 .context("parse bundled identityaudit AssemblyLock")?,
         );
         validate_manifest(&manifest, lock.identity())?;
-        let typed = TypedRuntimePlan::compile_v2(&manifest, &lock, compiler_input(&manifest)?)
+        let typed = TypedRuntimePlan::compile_v3(&manifest, &lock, compiler_input(&manifest)?)
             .context("compile bundled identityaudit RuntimePlan")?;
         validate_typed(&typed)?;
         let workflow_runtime = eventexec::WorkflowActivationPlan::select(&typed)
@@ -82,10 +82,14 @@ impl IdentityAuditPlan {
                 )
             })
             .collect();
+        let provider_receipt = runtimeexec::inventory::ProviderExecutionReceipt::from_runtime_plan(
+            &self.typed,
+            provider_bindings,
+        )?;
         runtimeexec::inventory::RuntimeInventorySeed::from_runtime_plan(
             &self.typed,
             self.workflow_runtime.activated_workflows(),
-            provider_bindings,
+            provider_receipt,
             placements,
         )
         .context("seal identityaudit runtime inventory seed")
@@ -153,8 +157,8 @@ fn validate_manifest(
     Ok(())
 }
 
-fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV2Input> {
-    let mut input = RuntimePlanV2Input::from_manifest(manifest);
+fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<RuntimePlanV3Input> {
+    let mut input = RuntimePlanV3Input::from_manifest(manifest);
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
     for listener in listeners {
@@ -181,7 +185,7 @@ fn compiler_input(manifest: &CanonicalAssemblyManifestV2) -> anyhow::Result<Runt
 }
 
 fn validate_typed(plan: &TypedRuntimePlan) -> anyhow::Result<()> {
-    anyhow::ensure!(plan.schema_version() == 2, "unexpected RuntimePlan schema");
+    anyhow::ensure!(plan.schema_version() == 3, "unexpected RuntimePlan schema");
     let listeners = plan.listener_plans();
     anyhow::ensure!(
         listeners.len() == 3

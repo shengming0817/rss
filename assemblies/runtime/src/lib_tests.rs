@@ -64,48 +64,16 @@ impl diport::Clock for FixedDlxBootstrapClock {
     }
 }
 
-fn test_password_blocklist() -> Arc<secure::DigestPasswordBlocklist> {
-    Arc::new(
-        crypto::load_password_blocklist_from_reader(std::io::Cursor::new(include_bytes!(
-            "../../../deploy/password-blocklist.demo.sha256"
-        )))
-        .unwrap_or_else(|_| unreachable!()),
-    )
-}
-
 #[test]
-fn production_prepare_runtime_loads_policy_before_otlp_and_subscriber_setup() {
+fn production_prepare_runtime_defers_domain_policy_until_after_placement() {
     let external_calls = AtomicUsize::new(0);
     let missing = crate::config::test_snapshot(&[]).unwrap_or_else(|_| unreachable!());
-    let error = prepare_local_before_external(missing.view(), prepare_serving_local, || {
+    let ((), ()) = prepare_local_before_external(missing.view(), prepare_serving_local, || {
         external_calls.fetch_add(1, Ordering::SeqCst);
         Ok(())
     })
-    .err()
-    .unwrap_or_else(|| unreachable!());
-    assert_eq!(external_calls.load(Ordering::SeqCst), 0);
-    assert!(
-        error
-            .to_string()
-            .contains(domains::identity::PASSWORD_BLOCKLIST_PATH_ENV)
-    );
-
-    let valid = crate::config::test_snapshot(&[(
-        domains::identity::PASSWORD_BLOCKLIST_PATH_ENV,
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../deploy/password-blocklist.demo.sha256"
-        ),
-    )])
     .unwrap_or_else(|_| unreachable!());
-    let (blocklist, ()) =
-        prepare_local_before_external(valid.view(), prepare_serving_local, || {
-            external_calls.fetch_add(1, Ordering::SeqCst);
-            Ok(())
-        })
-        .unwrap_or_else(|_| unreachable!());
     assert_eq!(external_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(Arc::strong_count(&blocklist), 1);
 }
 
 #[test]
@@ -248,15 +216,13 @@ fn generated_graph_evidence_matches_live_runtime_carriers() {
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ("RSS_TOPOLOGY", "demo"),
     ])
     .unwrap_or_else(|_| unreachable!());
     let runtime_plan =
         plan::RuntimePlan::bundled(snapshot.view()).unwrap_or_else(|_| unreachable!());
     let listener_plan = runtime_plan.listener_execution_plan();
-    let placement_plan = runtime_plan
-        .placement_execution_plan(bootstrap::Topology::Demo, snapshot.view())
-        .expect("placement execution plan");
-    assert!(validate_domain_listener_evidence(&listener_plan, &placement_plan, &[]).is_err());
+    assert!(validate_domain_listener_evidence(&listener_plan, &[]).is_err());
 }
 
 #[test]
@@ -1031,7 +997,10 @@ impl audit::ports::AuditAdminRepo for DelegatingAuditAdminRepo {
 #[allow(clippy::expect_used)]
 fn test_identity_domain_with_audit_role(
     tenant: vocab::TenantId,
-) -> identity::IdentityDomain<TestSigner> {
+) -> (
+    identity::IdentityDomain<TestSigner>,
+    Arc<dyn httpserve::RouteAuthorizer>,
+) {
     let audit_role = identity::ports::Role::hydrate(
         "audit-reader",
         "Audit reader",
@@ -1130,7 +1099,14 @@ fn test_identity_domain_with_audit_role(
         )),
         Box::new(SystemClock),
     ));
-    identity::IdentityDomain::new(identity::IdentityDomainDeps {
+    let authorizer = identity::build_contract_authorizer(
+        Arc::clone(&roles),
+        Arc::clone(&binding_reads),
+        Arc::clone(&policies),
+        Arc::clone(&resource_attribute_reads),
+        Arc::new(SystemClock),
+    );
+    let domain = identity::IdentityDomain::new(identity::IdentityDomainDeps {
         login,
         refresh,
         credential_security,
@@ -1141,7 +1117,8 @@ fn test_identity_domain_with_audit_role(
         policies,
         resource_attribute_reads,
         clock: Arc::new(SystemClock),
-    })
+    });
+    (domain, authorizer)
 }
 
 struct TestAuditRepos {
@@ -1276,7 +1253,7 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
     let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
     let audit_repo = test_audit_repo();
     append_sensitive_audit_record(&audit_repo.write, tenant).await;
-    let identity_domain = test_identity_domain_with_audit_role(tenant);
+    let (identity_domain, authorizer) = test_identity_domain_with_audit_role(tenant);
     let audit_domain = audit::AuditDomain::new(
         Arc::clone(&audit_repo.read),
         Some(test_audit_admin_repo(Arc::clone(&audit_repo.read))),
@@ -1285,6 +1262,7 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
     );
     let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &audit_domain];
     let mut registry = bootstrap::compose(&domains)?;
+    registry.register_primary_authorizer(authorizer)?;
     let providers =
         routes::TokenProviderBindings::new(None, None, Some(runtime_test_provider()), None);
     let snapshot = crate::config::test_snapshot(&[
@@ -1372,8 +1350,9 @@ async fn runtime_inventory_admin_uses_rss_user_and_identity_durable_grant_policy
 -> anyhow::Result<()> {
     let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
     let bound_subject = "11111111-2222-4333-8444-555555555555";
-    let identity_domain = test_identity_domain_with_audit_role(tenant);
+    let (identity_domain, authorizer) = test_identity_domain_with_audit_role(tenant);
     let mut registry = bootstrap::compose(&[&identity_domain])?;
+    registry.register_primary_authorizer(authorizer)?;
     let authorizer = registry.take_primary_authorizer()?;
     let snapshot = crate::config::test_snapshot(&[
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
@@ -1979,6 +1958,7 @@ async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ("RSS_TOPOLOGY", "demo"),
     ])
     .expect("capture runtime config with local password policy");
     let endpoint = otel::OtelEndpoint::insecure_localhost("http://localhost:4317")
@@ -1990,9 +1970,9 @@ async fn run_pre_handoff_failure_explicitly_shuts_down_trace_exporter() {
     let shutdown_witness = provider.clone();
     let inputs = ServingRuntimeInputs::new(
         PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
-        test_password_blocklist(),
         telemetry_plan,
-    );
+    )
+    .expect("place runtime before provider phase");
 
     let err = run(inputs)
         .await
@@ -2011,6 +1991,7 @@ async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
         ("RSS_PRIMARY_TOKEN_PROFILE", "rss-access"),
         ("RSS_ADMIN_TOKEN_PROFILE", "rss-access"),
         ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
+        ("RSS_TOPOLOGY", "demo"),
     ])
     .expect("capture runtime plan config");
     let endpoint = otel::OtelEndpoint::insecure_localhost("http://localhost:4317")
@@ -2022,9 +2003,9 @@ async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
     let handoff_witness = provider.clone();
     let inputs = ServingRuntimeInputs::new(
         PreparedRuntimeInputs::new(snapshot, Some(otel::OtelExporter::new(provider))),
-        test_password_blocklist(),
         telemetry_plan,
-    );
+    )
+    .expect("place runtime before lifecycle handoff");
     let mut owner = RuntimeLifecycleOwner::new(inputs);
     let handed_off = owner
         .inputs

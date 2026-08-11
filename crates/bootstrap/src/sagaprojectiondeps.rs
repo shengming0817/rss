@@ -8,7 +8,7 @@
 //!
 //! # 与 WorkflowActivation 的边界
 //!
-//! Assembly manifest v2 的 `workflowActivations`、AssemblyLock v2 与 RuntimePlan v2 `workflowPlans` 构成
+//! Assembly manifest v2 的 `workflowActivations`、AssemblyLock v2 与 RuntimePlan v3 `workflowPlans` 构成
 //! deployment activation 协议链。本 resolver 不读该 plan，不接受 definition lifecycle/activation，也不提供
 //! omitted/disabled 的默认语义；它的成功结果只证明 topology 所需的 backend 配置完整，不证明
 //! workflow 已激活，也不证明 typed actions、receipt/dead-letter store、worker 或 probe 已闭合。

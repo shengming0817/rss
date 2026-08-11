@@ -3,8 +3,8 @@
 // Source-Manifest-Digest: sha256:23faaa65727ccb329303da9f5bd7f7a73cd4fbaf561a078f62da3817a56f8432
 
 use assembly_schema::{
-    DiportPort, LifecycleChannel, ProviderCatalogEntry, ProviderConstructor, ProviderConsumer,
-    ProviderDurability, ProviderFactorySymbol, ProviderRole,
+    AssemblyDomain, DiportPort, LifecycleChannel, ProviderActivation, ProviderCatalogEntry,
+    ProviderConstructor, ProviderConsumer, ProviderDurability, ProviderFactorySymbol, ProviderRole,
 };
 
 pub(crate) const ASSEMBLY_NAMESPACE: &str = "deviceidentity";
@@ -12,6 +12,7 @@ pub(crate) const ASSEMBLY_NAMESPACE: &str = "deviceidentity";
 pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ProviderCatalogEntry::checked(
         ProviderRole::DeviceCertificateStore,
+        ProviderActivation::DomainLocal(AssemblyDomain::Identity),
         DiportPort::CertificateReconcileRepository,
         ProviderConstructor::PostgresDeviceCertificateRepository,
         ProviderFactorySymbol::IdentityPostgresDeviceCertificateStore,
@@ -25,6 +26,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::DeviceCommandStore,
+        ProviderActivation::DomainLocal(AssemblyDomain::Identity),
         DiportPort::DeviceCommandStore,
         ProviderConstructor::PostgresDeviceCommandStore,
         ProviderFactorySymbol::IdentityPostgresDeviceCommandStore,
@@ -38,6 +40,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::DeviceDraftArtifactSource,
+        ProviderActivation::DomainLocal(AssemblyDomain::Identity),
         DiportPort::CertificateArtifactSource,
         ProviderConstructor::IdentityDraftArtifactSimulator,
         ProviderFactorySymbol::IdentityDraftArtifactSimulator,
@@ -51,6 +54,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::DeviceMqttSession,
+        ProviderActivation::DomainLocal(AssemblyDomain::Identity),
         DiportPort::MqttSession,
         ProviderConstructor::MqttSession,
         ProviderFactorySymbol::IdentityMqttSession,
@@ -68,6 +72,7 @@ pub(crate) const PROVIDER_CATALOG: &[ProviderCatalogEntry] = &[
     ),
     ProviderCatalogEntry::checked(
         ProviderRole::DeviceRevocationStore,
+        ProviderActivation::Process,
         DiportPort::RevocationStore,
         ProviderConstructor::PostgresRevocationStore,
         ProviderFactorySymbol::DeviceloopPostgresRevocationStore,

@@ -38,5 +38,9 @@ jsonschema = { workspace = true }
 trybuild = { workspace = true }
 assembly-schema = { path = "../crates/assembly-schema", features = ["test-support"] }
 
+[[test]]
+name = "runtime_inventory_construction_trybuild"
+path = "tests/runtime_inventory_construction.rs"
+
 [lints]
 workspace = true

@@ -199,7 +199,7 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   不存在 serving、demo 或进程内 fallback。
 - workflow definition lifecycle 与 assembly deployment activation 是两个维度。activation 单源是 assembly
   manifest v2 的 `workflowActivations`，由 AssemblyLock v2 绑定 repository definition，并原样进入
-  RuntimePlan v2 `workflowPlans`；contract lifecycle、`Topology` 和 backend resolver 均不得提供 activation
+  RuntimePlan v3 `workflowPlans`；contract lifecycle、`Topology` 和 backend resolver 均不得提供 activation
   default 或把 omitted/disabled workflow 推断为 active。
 - active Saga 的完整 requirement 集合为 typed actions + 单一 tenant-scoped `SagaDurableStore`
   （instance/lease、append-only journal cursor、protected receipt 的原子视图）+ dead-letter store +

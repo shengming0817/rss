@@ -1,6 +1,6 @@
 use assembly_schema::{
     AssemblyDigests, AssemblyFingerprint, AssemblyIdentity, CanonicalAssemblyManifestV2,
-    ParsedAssemblyLock, RuntimePlan, RuntimePlanV2Input,
+    ParsedAssemblyLock, RuntimePlan, RuntimePlanV3Input,
 };
 
 struct FakeExecutionProof<'a>(&'a ParsedAssemblyLock);
@@ -22,10 +22,10 @@ impl FakeExecutionProof<'_> {
 fn compile(
     manifest: &CanonicalAssemblyManifestV2,
     lock: &ParsedAssemblyLock,
-    input: RuntimePlanV2Input,
+    input: RuntimePlanV3Input,
 ) {
     let fake = FakeExecutionProof(lock);
-    let _ = RuntimePlan::compile_v2(manifest, &fake, input);
+    let _ = RuntimePlan::compile_v3(manifest, &fake, input);
 }
 
 fn main() {}

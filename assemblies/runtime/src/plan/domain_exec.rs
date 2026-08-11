@@ -46,9 +46,12 @@ impl DomainExecutionPlan {
         Ok(ValidatedDomainBindings { bindings })
     }
 
-    #[cfg(test)]
     pub(crate) fn local_domains(&self) -> &[AssemblyDomain] {
         &self.local_domains
+    }
+
+    pub(crate) fn contains(&self, domain: AssemblyDomain) -> bool {
+        self.local_domains.contains(&domain)
     }
 }
 
@@ -408,7 +411,7 @@ mod tests {
         );
 
         let domain_execution_plan = runtime_plan.domain_execution_plan(&placement);
-        let live_bindings = crate::modules_gen::wire_test_domains()
+        let live_bindings = crate::modules_gen::wire_test_domains(&domain_execution_plan)
             .await
             .expect("generated live domains build");
         assert_relation_mutations(
@@ -484,7 +487,7 @@ mod tests {
             .iter()
             .map(|domain| domain.as_str().to_owned())
             .collect::<Vec<_>>();
-        let live_bindings = crate::modules_gen::wire_test_domains()
+        let live_bindings = crate::modules_gen::wire_test_domains(&domain_execution_plan)
             .await
             .expect("generated live domains build");
         let live_domain_names = live_bindings
@@ -513,7 +516,7 @@ mod tests {
         .expect("listener plan/generated closure");
         let listener_plan = runtime_plan.listener_execution_plan();
         let live_listeners = registry.domain_listener_bindings();
-        crate::validate_domain_listener_evidence(&listener_plan, &placement, &live_listeners)
+        crate::validate_domain_listener_evidence(&listener_plan, &live_listeners)
             .expect("listener generated/live closure");
     }
 }

@@ -2030,21 +2030,27 @@ mod tests {
     }
 
     #[test]
-    fn real_workspace_catalog_has_empty_release_and_disjoint_owners() -> Result<()> {
+    fn real_workspace_catalog_has_exact_release_and_disjoint_owners() -> Result<()> {
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
         let facts = command_facts.get()?;
         let catalog = BaselineCatalog::derive(&root, facts)?;
-        assert!(catalog.release.is_empty());
+        assert_eq!(
+            catalog
+                .release
+                .iter()
+                .map(PackageKey::as_str)
+                .collect::<Vec<_>>(),
+            vec!["rss-diag-context", "rss-platform", "rss-trace-context"]
+        );
         let internal = catalog.internal.iter().collect::<BTreeSet<_>>();
         let release = catalog.release.iter().collect::<BTreeSet<_>>();
         assert!(internal.is_disjoint(&release));
-        assert_eq!(
-            internal.len(),
+        let owned = internal.union(&release).copied().collect::<BTreeSet<_>>();
+        assert!(
             target_crates(None)
                 .into_iter()
-                .collect::<BTreeSet<_>>()
-                .len()
+                .all(|package| owned.iter().any(|owned| owned.as_str() == package))
         );
         Ok(())
     }

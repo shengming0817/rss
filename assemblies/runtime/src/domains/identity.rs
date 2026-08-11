@@ -9,13 +9,13 @@ use bootstrap::DomainBinding;
 use identity_composition::{FederatedIdentityModuleDeps, IdentityModuleDeps};
 use postgres::{PgDomainDeps, caps};
 
-use crate::SharedRuntimeDeps;
 use crate::config::{ServingConfigMapper, SnapshotConfig};
 #[cfg(test)]
 use crate::infra::vault::{
     VAULT_ADDR_ENV, VAULT_TOKEN_ENV, VAULT_TRANSIT_MOUNT_ENV, build_vault_signer_with,
 };
 use crate::support::SystemClock;
+use crate::{LocalDomainProviderCatalog, SharedRuntimeDeps};
 
 const DEFAULT_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 30 * 24 * 60 * 60;
 const MAX_IDENTITY_AUTH_GRANT_TTL_SECS: u64 = 365 * 24 * 60 * 60;
@@ -135,12 +135,14 @@ pub struct IdentityTestValues {
 /// is absent or invalid, or when the profile-specific identity composition fails.
 pub async fn module(
     deps: &SharedRuntimeDeps,
+    providers: &LocalDomainProviderCatalog,
     input: IdentityModuleInput,
 ) -> anyhow::Result<DomainBinding> {
+    let (password_blocklist, identity_signer) = providers.identity_local()?;
     wire_with_profile(
         deps.pg.for_domain(),
-        Arc::clone(&deps.password_blocklist),
-        Arc::clone(&deps.identity_signer),
+        Arc::clone(password_blocklist),
+        Arc::clone(identity_signer),
         input,
     )
 }
@@ -292,12 +294,14 @@ fn validate_explicit_ttl(ttl: Duration, name: &str, max_secs: u64) -> anyhow::Re
 #[cfg(feature = "integration")]
 pub(crate) fn wire_identity_with(
     deps: &SharedRuntimeDeps,
+    providers: &LocalDomainProviderCatalog,
     values: IdentityTestValues,
 ) -> anyhow::Result<DomainBinding> {
+    let (password_blocklist, identity_signer) = providers.identity_local()?;
     wire_with_profile(
         deps.pg.for_domain(),
-        Arc::clone(&deps.password_blocklist),
-        Arc::clone(&deps.identity_signer),
+        Arc::clone(password_blocklist),
+        Arc::clone(identity_signer),
         IdentityModuleInput::from_test_values(values)?,
     )
 }
@@ -305,15 +309,17 @@ pub(crate) fn wire_identity_with(
 #[cfg(feature = "integration")]
 pub(crate) fn wire_identity_with_password_change_barrier(
     deps: &SharedRuntimeDeps,
+    providers: &LocalDomainProviderCatalog,
     values: IdentityTestValues,
     barrier: Arc<tokio::sync::Barrier>,
 ) -> anyhow::Result<DomainBinding> {
+    let (password_blocklist, identity_signer) = providers.identity_local()?;
     wire_with_profile(
         deps.pg
             .for_domain()
             .with_identity_security_start_barrier_for_test(barrier),
-        Arc::clone(&deps.password_blocklist),
-        Arc::clone(&deps.identity_signer),
+        Arc::clone(password_blocklist),
+        Arc::clone(identity_signer),
         IdentityModuleInput::from_test_values(values)?,
     )
 }

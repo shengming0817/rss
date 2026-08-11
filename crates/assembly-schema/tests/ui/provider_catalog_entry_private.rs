@@ -5,6 +5,7 @@ use assembly_schema::{
 
 const VALID: ProviderCatalogEntry = ProviderCatalogEntry::checked(
     ProviderRole::ListenerRateLimiter,
+    ProviderRole::ListenerRateLimiter.activation(),
     DiportPort::RateLimiter,
     ProviderConstructor::RedisRateLimiter,
     ProviderFactorySymbol::HttpserveRedisRateLimiter,

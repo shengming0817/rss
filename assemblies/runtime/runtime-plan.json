@@ -1,11 +1,14 @@
 {
-  "schemaVersion": 2,
-  "assemblyFingerprint": "sha256:93e21c704322b09afd35ddd9eae57f22e0ed887febe5f1acafc7648e6ea86b2a",
-  "runtimePlanFingerprint": "sha256:eee03dcbb8aa1357688031f24157e50ed3b1ac771bd6557fa5b8155cd871bf3c",
+  "schemaVersion": 3,
+  "assemblyFingerprint": "sha256:b5dc4cb399234a9e9a7f789e3f245c87ab4787fe8c8942846bfe7654e114dae5",
+  "runtimePlanFingerprint": "sha256:901e1d673286cd30ec42efda584c4130acae6a87824a5fc05d0497b927a05f5f",
   "providerPlans": [
     {
       "id": "auth-audit-sink",
       "constructor": "postgres::PgAuthAuditSink",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -15,6 +18,9 @@
     {
       "id": "device-revocation-store",
       "constructor": "postgres::PgRevocationStore",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "workers"
@@ -23,6 +29,9 @@
     {
       "id": "distributed-cas-store",
       "constructor": "postgres::PgCasStore",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -32,6 +41,9 @@
     {
       "id": "distributed-lock-store",
       "constructor": "redis::RedisLockStore",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -41,6 +53,9 @@
     {
       "id": "dlx-archive-key-provider",
       "constructor": "vault::VaultKeyProvider",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -50,6 +65,9 @@
     {
       "id": "dlx-archive-store",
       "constructor": "s3::VerifiedS3DlxArchiveStore",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "workers"
@@ -58,6 +76,9 @@
     {
       "id": "dlx-lifecycle-repository",
       "constructor": "postgres::PgDlxLifecycleRepository",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -67,6 +88,9 @@
     {
       "id": "event-publisher",
       "constructor": "amqp::AmqpPublisher",
+      "activation": {
+        "kind": "localEventExecution"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -76,6 +100,9 @@
     {
       "id": "event-subscriber",
       "constructor": "amqp::AmqpSubscriber",
+      "activation": {
+        "kind": "localEventExecution"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -85,6 +112,10 @@
     {
       "id": "identity-signer",
       "constructor": "vault::VaultSigner",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "identity"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -94,6 +125,9 @@
     {
       "id": "listener-pdp",
       "constructor": "oidc::OidcProvider",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources"
@@ -102,11 +136,17 @@
     {
       "id": "listener-rate-limiter",
       "constructor": "redis::RedisRateLimiter",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": []
     },
     {
       "id": "runtime-object-store",
       "constructor": "s3::S3Store",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "resources"
       ]
@@ -114,6 +154,9 @@
     {
       "id": "service-token-replay-store",
       "constructor": "postgres::PgServiceTokenReplayStore",
+      "activation": {
+        "kind": "process"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -123,6 +166,10 @@
     {
       "id": "settings-key-provider",
       "constructor": "vault::VaultKeyProvider",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "settings"
+      },
       "outputs": [
         "probes",
         "resources",
@@ -132,6 +179,10 @@
     {
       "id": "settings-secret-resolver",
       "constructor": "vault::VaultSecretResolver",
+      "activation": {
+        "kind": "domainLocal",
+        "domain": "settings"
+      },
       "outputs": [
         "probes",
         "resources",

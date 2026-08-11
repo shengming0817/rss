@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 use assembly_schema::{
-    AssemblyListenerKind, ListenerAuth, ParsedAssemblyLock, RuntimePlan, RuntimePlanV2Input,
+    AssemblyListenerKind, ListenerAuth, ParsedAssemblyLock, RuntimePlan, RuntimePlanV3Input,
 };
 use std::fs;
 use std::io;
@@ -76,7 +76,7 @@ fn plan_target(assembly: &crate::assembly_governance::GovernedAssembly) -> Resul
         .with_context(|| format!("repository 验证 {} 失败", lock_path.display()))?
         .into_executable();
     let input = compiler_input(manifest)?;
-    let plan = RuntimePlan::compile_v2(manifest, &lock, input)
+    let plan = RuntimePlan::compile_v3(manifest, &lock, input)
         .with_context(|| format!("编译 {directory_name} RuntimePlan 失败"))?;
     let mut expected = serde_json::to_vec_pretty(&plan).context("序列化 RuntimePlan 失败")?;
     expected.push(b'\n');
@@ -122,8 +122,8 @@ fn generate_fixture_target(root: &Path, name: &str, check: bool) -> Result<()> {
 
 fn compiler_input(
     manifest: &assembly_schema::CanonicalAssemblyManifestV2,
-) -> Result<RuntimePlanV2Input> {
-    let mut input = RuntimePlanV2Input::from_manifest(manifest);
+) -> Result<RuntimePlanV3Input> {
+    let mut input = RuntimePlanV3Input::from_manifest(manifest);
     let mut listeners = manifest.listeners().iter().collect::<Vec<_>>();
     listeners.sort_by_key(|listener| listener.kind.as_str());
     for listener in listeners {

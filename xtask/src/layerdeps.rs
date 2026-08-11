@@ -55,8 +55,9 @@
 //! INVARIANT: AUTHMINT-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::authmint_wrapper_widened_to_bin_red|tests::authmint_wrapper_missing_consumer_red", anti_vacuity = "tests::authmint_wrapper_exact_green" }——
 //!   `authmint` target wrapper 必须恰为 httpserve + runtime/settingsonly/identityaudit；域 / journeys 不得持有
 //!   Authenticated production mint capability（AUTH-EVIDENCE-MINT-01 Hard 的 deny.toml 半段）。
-//! INVARIANT: RUNTIME-INVENTORY-MINT-01 { level = "Hard", exec = "native-compile", source = "code", native = "private token + exact wrapper allowlist", synthetic_red = "tests::runtimeinventorymint_wrapper_widened_to_assembly_red", anti_vacuity = "tests::runtimeinventorymint_wrapper_exact_green|tests::real_workspace_green" }——
-//!   inventory mint token 只准 assembly-schema 声明签名、runtimeexec 实际持有；assembly roots 不得依赖。
+//! INVARIANT: RUNTIME-INVENTORY-MINT-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeinventorymint_wrapper_widened_to_assembly_red", anti_vacuity = "tests::runtimeinventorymint_wrapper_exact_green|tests::real_workspace_green" }——
+//!   inventory mint token 只准 assembly-schema 声明签名、runtimeexec 铸造完整计划 receipt，以及 runtime
+//!   的 placement-projected provider transaction 持有；其它 assembly roots 不得依赖。
 //! INVARIANT: RUNTIMEEXEC-DEPS-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_direct_dependencies_extra_internal_and_external_red|tests::runtimeexec_direct_dependencies_package_alias_red", anti_vacuity = "tests::runtimeexec_direct_dependencies_allowlist_green|tests::real_workspace_green" }——
 //!   `runtimeexec` shipped direct dependency 只准内部 assembly-schema/authn/bootstrap/diport/eventexec/primitives/secure 与外部
 //!   anyhow/serde/serde_json/thiserror/tokio/tokio-util/tracing/zeroize；
@@ -479,7 +480,8 @@ const SAGAAUTHMINT_ALLOWED_WRAPPERS: &[&str] = &["diport", "runtime"];
 const REQUESTIDMINT_CRATE: &str = "requestidmint";
 const REQUESTIDMINT_ALLOWED_WRAPPERS: &[&str] = &["httpserve", "generated"];
 const RUNTIMEINVENTORYMINT_CRATE: &str = "runtimeinventorymint";
-const RUNTIMEINVENTORYMINT_ALLOWED_WRAPPERS: &[&str] = &["assembly-schema", "runtimeexec"];
+const RUNTIMEINVENTORYMINT_ALLOWED_WRAPPERS: &[&str] =
+    &["assembly-schema", "runtimeexec", "runtime"];
 const WORKSPACEFACTS_CRATE: &str = "workspacefacts";
 const WORKSPACEFACTS_CONSUMER: &str = "xtask";
 const GUPPY_CRATE: &str = "guppy";
@@ -1106,6 +1108,7 @@ pub(crate) fn check_runtimeinventorymint_wrapper_coverage(
     for (name, path, layer) in [
         ("assembly-schema", "crates/assembly-schema", Layer::Basis),
         ("runtimeexec", "crates/runtimeexec", Layer::RuntimeExec),
+        ("runtime", "assemblies/runtime", Layer::Root),
     ] {
         if !members
             .iter()
@@ -3448,7 +3451,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     fn runtimeinventorymint_wrapper_exact_green() {
         let bans = vec![ban(
             "runtimeinventorymint",
-            &["assembly-schema", "runtimeexec"],
+            &["assembly-schema", "runtimeexec", "runtime"],
         )];
         assert!(
             check_runtimeinventorymint_wrapper_coverage(
@@ -3463,7 +3466,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
     fn runtimeinventorymint_wrapper_widened_to_assembly_red() {
         let bans = vec![ban(
             "runtimeinventorymint",
-            &["assembly-schema", "runtimeexec", "runtime"],
+            &["assembly-schema", "runtimeexec", "runtime", "settingsonly"],
         )];
         let findings = check_runtimeinventorymint_wrapper_coverage(
             &runtimeinventorymint_fixture_members(),
