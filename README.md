@@ -65,7 +65,8 @@ build-jobs 默认值、ambient rustc-wrapper 清洗或 sccache 自动策略，�
 `ci local` 只读取 `<base>...HEAD` 的已提交项目差异，不扫描 untracked、本地工具或额外工作区文件。
 无差异直接成功；docs-only 和 unknown-only 只运行 `verify --fast` 门集对应的 `meta`（真源
 `xtask/src/verify.rs`）；Rust、contract 与 generated 影响运行反向依赖 check 和直接
-影响包 test/clippy。未知路径本地忽略并留痕，但不会抹掉同一 diff 中已知包的定向测试；rename/copy 运行
+影响包 test/clippy；direct package 还会与 canonical internal public-api owner catalog 求交，并由唯一
+`PublicApi` gate 精确检查命中的 baseline，即使同一 diff 升级为完整 PR scope 也不会丢失。未知路径本地忽略并留痕，但不会抹掉同一 diff 中已知包的定向测试；rename/copy 运行
 affected 域 `meta`（域集由 CI/verify 投影派生，不在此维护数量），影响分析失败直接报错。本地
 preflight 的 snapshot checkout、xtask build 与全部 gate 共用一个受 600 秒 wall-clock deadline 约束的
 worker 进程组，且不运行
@@ -122,7 +123,7 @@ cargo xtask assembly generate-providers --check        # typed provider catalog 
 cargo xtask assembly generate-runtime-plans --check    # manifest + lock 派生 RuntimePlan 漂移门
 cargo xtask assembly lock check                        # 全仓 AssemblyLock raw-byte 漂移门
 cargo xtask runtime-baseline verify                    # 静态 inventory、merge coverage 与跨文件 escape guards
-cargo xtask runtime-root guard                         # runtime root 单调职责/LOC ratchet
+cargo xtask runtime-root guard                         # runtime root 纯声明 façade 守卫
 cargo xtask layer-deps                                 # source-centric 分层依赖 lint
 cargo xtask codegen --check                            # 契约 codegen 漂移门
 ./hack/cargo.sh xtask l2-assurance                     # 从 active contract 生成 L2 assurance inventory
@@ -145,7 +146,8 @@ provenance，也不把这些声明并入 RuntimePlan、workload 或 deployment f
 `runtime::operator::*` 是 operator 命令的唯一 Rust API 路径，serving 继续只使用
 `runtime::{prepare_runtime, run, shutdown_runtime}`。共享时钟与审计 sink 只从
 `runtime::support::{SystemClock, TracingAuthAuditSink}` 导入。旧 root operator/support 路径没有 alias 或兼容 shim；
-`runtime-root guard` 的 append-only policy 会拒绝 root LOC、职责或 public surface 回涨。
+`runtime-root guard` 只允许 crate root 包含外置 module 声明与 import/re-export；启动、
+关停与错误报告实现必须留在私有 lifecycle owner，不使用 LOC 或当前数量 golden。
 
 `providers_gen.rs` 是每个 assembly crate 内部编译的 provider constructor catalog，不是外部
 SDK/API，也不读取环境、配置或 secret。它只收 active provider，并通过闭合 role、consumer、factory

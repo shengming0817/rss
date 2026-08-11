@@ -69,7 +69,6 @@ pub(crate) const STRIPPED_ENV: &[&str] = &[
     crate::ci_impact::LOCAL_HEAD_ENV,
     crate::ci_impact::LOCAL_BASE_ENV,
     crate::ci_impact::LOCAL_MERGE_BASE_ENV,
-    crate::runtime_root_guard::BASE_ENV,
     // toolchain 选择
     "RUSTUP_TOOLCHAIN",
     "RUSTC",

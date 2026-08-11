@@ -588,7 +588,63 @@ fn ensure_provider_catalog_linked(assembly_dir: &Path) -> Result<()> {
         lib_path.display()
     );
 
-    let catalog_assertions = syntax
+    let root_assertions = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Const(item) if item.ident == "_" => Some(item),
+            _ => None,
+        })
+        .filter(|item| provider_catalog_non_empty_assertion(item))
+        .count();
+    ensure!(
+        root_assertions <= 1,
+        "{} provider catalog root assertion duplicated",
+        lib_path.display()
+    );
+    if root_assertions == 1 {
+        return Ok(());
+    }
+
+    let carrier_modules = syntax
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            syn::Item::Mod(module)
+                if module.ident == "provider_catalog"
+                    && module.content.is_none()
+                    && module.attrs.is_empty()
+                    && matches!(module.vis, syn::Visibility::Inherited) =>
+            {
+                Some(module)
+            }
+            _ => None,
+        })
+        .count();
+    ensure!(
+        carrier_modules == 1,
+        "{} 必须唯一私有、无 cfg 地声明 `mod provider_catalog;`",
+        lib_path.display()
+    );
+    let carrier_path = assembly_dir.join("src/provider_catalog.rs");
+    reject_symlink(&carrier_path)?;
+    let carrier_source = fs::read_to_string(&carrier_path).with_context(|| {
+        format!(
+            "读取 provider catalog assertion carrier {} 失败",
+            carrier_path.display()
+        )
+    })?;
+    let carrier = syn::parse_file(&carrier_source)
+        .with_context(|| format!("解析 {} Rust AST 失败", carrier_path.display()))?;
+    ensure!(
+        !carrier
+            .attrs
+            .iter()
+            .any(|attribute| meta_may_apply_cfg(&attribute.meta)),
+        "{} 禁止 cfg/cfg_attr",
+        carrier_path.display()
+    );
+    let catalog_assertions = carrier
         .items
         .iter()
         .filter_map(|item| match item {
@@ -600,7 +656,7 @@ fn ensure_provider_catalog_linked(assembly_dir: &Path) -> Result<()> {
     ensure!(
         catalog_assertions == 1,
         "{} 必须唯一 const 断言 `!providers_gen::PROVIDER_CATALOG.is_empty()`",
-        lib_path.display()
+        carrier_path.display()
     );
     Ok(())
 }
@@ -655,9 +711,13 @@ fn provider_catalog_non_empty_assertion(item: &syn::ItemConst) -> bool {
         && matches!(
             call.receiver.as_ref(),
             syn::Expr::Path(path)
-                if path.path.segments.len() == 2
+                if (path.path.segments.len() == 2
                     && path.path.segments[0].ident == "providers_gen"
-                    && path.path.segments[1].ident == "PROVIDER_CATALOG"
+                    && path.path.segments[1].ident == "PROVIDER_CATALOG")
+                    || (path.path.segments.len() == 3
+                        && path.path.segments[0].ident == "crate"
+                        && path.path.segments[1].ident == "providers_gen"
+                        && path.path.segments[2].ident == "PROVIDER_CATALOG")
         )
 }
 
@@ -2601,9 +2661,36 @@ domains = [{domains}]
             assembly_dir.join("src/lib.rs"),
             r#"#[path = "generated/providers_gen.rs"]
 mod providers_gen;
-const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
+mod provider_catalog;
 "#,
         )?;
+        fs::write(
+            assembly_dir.join("src/provider_catalog.rs"),
+            "const _: () = assert!(!crate::providers_gen::PROVIDER_CATALOG.is_empty());\n",
+        )?;
+        Ok(())
+    }
+
+    #[test]
+    fn provider_catalog_link_rejects_cfg_and_decoy_carriers() -> Result<()> {
+        let root = provider_fixture_root("green")?;
+        let assembly = root.join("assemblies/runtime");
+        fs::write(
+            assembly.join("src/lib.rs"),
+            "#[path = \"generated/providers_gen.rs\"] mod providers_gen; #[cfg(test)] mod provider_catalog;\n",
+        )?;
+        assert!(ensure_provider_catalog_linked(&assembly).is_err());
+
+        fs::write(
+            assembly.join("src/lib.rs"),
+            "#[path = \"generated/providers_gen.rs\"] mod providers_gen; mod unrelated;\n",
+        )?;
+        fs::write(
+            assembly.join("src/unrelated.rs"),
+            "const _: () = assert!(!crate::providers_gen::PROVIDER_CATALOG.is_empty());\n",
+        )?;
+        assert!(ensure_provider_catalog_linked(&assembly).is_err());
+        fs::remove_dir_all(root)?;
         Ok(())
     }
 

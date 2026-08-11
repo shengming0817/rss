@@ -231,7 +231,7 @@ pub(crate) enum RuntimeBaselineCommand {
 
 #[derive(Debug, Subcommand, PartialEq, Eq)]
 pub(crate) enum RuntimeRootCommand {
-    /// runtime composition-root 单调职责 ratchet。
+    /// runtime composition-root 纯声明 façade 守卫。
     Guard,
 }
 

@@ -103,7 +103,15 @@ struct VerifyOpts {
     /// ReleaseCheck 的固定 `test-affected` Job：用与 selection 同 base 的 CoverageProjection。
     /// `ci full` / release-check：恒 Workspace。
     coverage_typed_job: bool,
+    /// Adaptive PR check: exact internal public-api baseline owners selected from direct package impact.
+    public_api: Option<PublicApiCheckScope>,
     execution_policy: crate::cmd::ExecutionPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PublicApiCheckScope {
+    Affected(Vec<String>),
+    CompleteInternal,
 }
 
 /// in-process Rust 门（无外部进程 / 自管子进程）。
@@ -149,7 +157,7 @@ enum InternalCheck {
     DlxLifecycleFunnel,
     /// runtime assembly baseline 漂移门（RUNTIME-BASELINE-DRIFT-01）。
     RuntimeBaseline,
-    /// runtime composition-root 单调职责 ratchet（RUNTIME-ROOT-RATCHET-01）。
+    /// runtime composition-root 纯声明 façade（RUNTIME-ROOT-DECLARATIVE-01）。
     RuntimeRootGuard,
     /// runtime production ambient environment reader closure（RUNTIME-ENV-FUNNEL-01）。
     RuntimeEnvGuard,
@@ -1555,6 +1563,16 @@ fn run_internal(
             let facts = command_facts
                 .get()
                 .context(command_scope_facts_context("public-api-check"))?;
+            if let Some(scope) = &opts.public_api {
+                return match scope {
+                    PublicApiCheckScope::Affected(packages) => {
+                        crate::publicapi::run_affected_internal_check(root, facts, packages)
+                    }
+                    PublicApiCheckScope::CompleteInternal => {
+                        crate::publicapi::run_complete_internal_check(root, facts)
+                    }
+                };
+            }
             let surface = crate::publicapi::run_release_check(
                 root,
                 facts,
@@ -1805,6 +1823,7 @@ pub(crate) fn run_local_meta(
         core_test_selection: crate::nextest::CoreTestSelection::workspace(),
         contract_against: contract_against.to_owned(),
         coverage_typed_job: false,
+        public_api: None,
         execution_policy,
     };
     let only = gates
@@ -1835,6 +1854,7 @@ pub(crate) fn run(
             .unwrap_or(contract::breaking::DEFAULT_AGAINST)
             .to_owned(),
         coverage_typed_job: false,
+        public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
     };
     let root = workspace_root()?;
@@ -1884,6 +1904,7 @@ pub(crate) fn run_remote_preflight(selection: &crate::ci_impact::SelectionPlan) 
         core_test_selection: crate::nextest::CoreTestSelection::workspace(),
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
+        public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
     let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -1943,6 +1964,7 @@ pub(crate) fn run_ci(allow_missing_tools: bool, fail_fast: bool) -> Result<()> {
         core_test_selection: crate::nextest::CoreTestSelection::workspace(),
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
+        public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::from_fail_fast(fail_fast),
     };
     let root = workspace_root()?;
@@ -2092,7 +2114,7 @@ fn fixed_gate_plan(job: FixedCiJob, selection: &crate::ci_impact::SelectionPlan)
         }
         crate::ci_impact::SelectionMode::ReleaseCheck => ExecutionProfile::ReleaseCheck,
     };
-    ExecutionUnitSpec::project(profile)
+    let mut plan = ExecutionUnitSpec::project(profile)
         .filter_map(|unit| match unit {
             ExecutionUnitSpec::Gate(spec)
                 if spec.included_in_profile(profile) && fixed_job_owns_gate(job, *spec) =>
@@ -2108,7 +2130,17 @@ fn fixed_gate_plan(job: FixedCiJob, selection: &crate::ci_impact::SelectionPlan)
             ) || *id != GateId::ComponentTests
         })
         .map(step_for_id)
-        .collect()
+        .collect::<Vec<_>>();
+    if job == FixedCiJob::Check
+        && !matches!(
+            selection.public_api_selection(),
+            crate::ci_impact::ProjectedPublicApiSelection::None
+        )
+        && !plan.iter().any(|step| step.id == GateId::PublicApi)
+    {
+        plan.push(step_public_api());
+    }
+    plan
 }
 
 fn core_selection_for_fixed_job(
@@ -2139,6 +2171,15 @@ fn run_fixed_gate_job(job: FixedCiJob, selection: &crate::ci_impact::SelectionPl
         core_test_selection: core_selection_for_fixed_job(selection)?,
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
+        public_api: match selection.public_api_selection() {
+            crate::ci_impact::ProjectedPublicApiSelection::None => None,
+            crate::ci_impact::ProjectedPublicApiSelection::Affected(packages) => {
+                Some(PublicApiCheckScope::Affected(packages.as_slice().to_vec()))
+            }
+            crate::ci_impact::ProjectedPublicApiSelection::CompleteInternal => {
+                Some(PublicApiCheckScope::CompleteInternal)
+            }
+        },
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
     let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -2272,6 +2313,7 @@ pub(crate) fn run_audit(allow_missing_tools: bool) -> Result<()> {
         core_test_selection: crate::nextest::CoreTestSelection::workspace(),
         contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
         coverage_typed_job: false,
+        public_api: None,
         execution_policy: crate::cmd::ExecutionPolicy::FailFast,
     };
     let root = workspace_root()?;
@@ -2787,6 +2829,49 @@ mod tests {
     }
 
     #[test]
+    fn affected_internal_api_adds_the_canonical_gate_to_check_only() -> anyhow::Result<()> {
+        let adaptive = crate::ci_impact::test_adaptive_selection_plan()?;
+        let mut wire = serde_json::to_value(&adaptive)?;
+        wire["selection"]["affected_packages"] = serde_json::json!(["diport"]);
+        wire["selection"]["public_api"] =
+            serde_json::json!({"scope": "affected", "packages": ["diport"]});
+        let selection: crate::ci_impact::SelectionPlan = serde_json::to_string(&wire)?.parse()?;
+
+        assert_eq!(selection.public_api_packages(), ["diport"]);
+        assert_eq!(
+            fixed_gate_plan(FixedCiJob::Check, &selection)
+                .iter()
+                .filter(|step| step.id == GateId::PublicApi)
+                .count(),
+            1
+        );
+        assert!(
+            fixed_gate_plan(FixedCiJob::TestAffected, &selection)
+                .iter()
+                .all(|step| step.id != GateId::PublicApi)
+        );
+
+        let mut complete_wire =
+            serde_json::to_value(crate::ci_impact::test_pr_complete_selection_plan()?)?;
+        complete_wire["selection"]["public_api"] =
+            serde_json::json!({"scope": "complete-internal"});
+        let complete: crate::ci_impact::SelectionPlan =
+            serde_json::to_string(&complete_wire)?.parse()?;
+        assert!(matches!(
+            complete.public_api_selection(),
+            crate::ci_impact::ProjectedPublicApiSelection::CompleteInternal
+        ));
+        assert_eq!(
+            fixed_gate_plan(FixedCiJob::Check, &complete)
+                .iter()
+                .filter(|step| step.id == GateId::PublicApi)
+                .count(),
+            1
+        );
+        Ok(())
+    }
+
+    #[test]
     fn pr_complete_excludes_release_only_work() -> anyhow::Result<()> {
         let pr = crate::ci_impact::test_pr_complete_selection_plan()?;
         let release = crate::ci_impact::test_selection_plan()?;
@@ -2859,6 +2944,7 @@ mod tests {
             core_test_selection: crate::nextest::CoreTestSelection::workspace(),
             contract_against: contract::breaking::DEFAULT_AGAINST.to_owned(),
             coverage_typed_job: false,
+            public_api: None,
             execution_policy: crate::cmd::ExecutionPolicy::FailFast,
         }
     }

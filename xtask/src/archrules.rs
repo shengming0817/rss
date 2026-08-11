@@ -1893,13 +1893,6 @@ fn build_index(root: &Path) -> Result<Index> {
         "runtime-deps-config",
         "check",
     )?;
-    scan_config(
-        root,
-        &mut index,
-        "xtask/runtime-root-ratchet.toml",
-        "runtime-root-ratchet-config",
-        "check",
-    )?;
     scan_public_api(root, &mut index)?;
     scan_source_invariants(root, &mut index)?;
     scan_trybuild_and_native(root, &mut index)?;
@@ -3505,9 +3498,7 @@ impl SourceKind {
         match carrier {
             "xtask" => matches!(self, Self::Code | Self::Codegen),
             "dylint" => self == Self::Dylint,
-            "deny" | "clippy" | "runtime-deps-config" | "runtime-root-ratchet-config" => {
-                self == Self::Config
-            }
+            "deny" | "clippy" | "runtime-deps-config" => self == Self::Config,
             "public-api" => self == Self::PublicApi,
             "native-hard" => matches!(self, Self::Code | Self::Rustdoc | Self::Trybuild),
             _ => false,
@@ -5546,10 +5537,6 @@ members = ["rss_demo"]
         write(
             &root.join("xtask/runtime-deps-guard.toml"),
             "# INVARIANT: RUNTIME-DEPS-CONFIG-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"config\" }\n",
-        )?;
-        write(
-            &root.join("xtask/runtime-root-ratchet.toml"),
-            "# INVARIANT: RUNTIME-ROOT-CONFIG-DEMO-01 { level = \"Medium\", exec = \"check\", source = \"config\" }\n",
         )?;
         write(
             &root.join("xtask/src/layerdeps.rs"),

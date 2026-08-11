@@ -28,7 +28,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use workspacefacts::{PackageKey, TargetKind, WorkspaceFacts};
 
-const SELECTION_SCHEMA_VERSION: u8 = 1;
+const SELECTION_SCHEMA_VERSION: u8 = 2;
 const POLICY_SCHEMA_VERSION: u8 = 3;
 const UNKNOWN_REVISION: &str = "unknown";
 const GITHUB_EVENT_NAME_ENV: &str = "GITHUB_EVENT_NAME";
@@ -484,6 +484,40 @@ enum AdaptiveTestSelection {
     Packages { packages: NonEmptyPackageSet },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "scope", rename_all = "kebab-case", deny_unknown_fields)]
+enum PublicApiSelection {
+    None,
+    Affected { packages: NonEmptyPackageSet },
+    CompleteInternal,
+}
+
+impl PublicApiSelection {
+    fn affected(packages: BTreeSet<String>) -> Result<Self> {
+        if packages.is_empty() {
+            Ok(Self::None)
+        } else {
+            Ok(Self::Affected {
+                packages: NonEmptyPackageSet::new(packages.into_iter().collect())?,
+            })
+        }
+    }
+
+    fn packages(&self) -> &[String] {
+        match self {
+            Self::Affected { packages } => packages.as_slice(),
+            Self::None | Self::CompleteInternal => &[],
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectedPublicApiSelection<'a> {
+    None,
+    Affected(&'a NonEmptyPackageSet),
+    CompleteInternal,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProjectedTestSelection<'a> {
     None,
@@ -496,10 +530,13 @@ pub(crate) enum ProjectedTestSelection<'a> {
 enum Selection {
     Adaptive {
         affected_packages: Vec<String>,
+        public_api: PublicApiSelection,
         test_selection: AdaptiveTestSelection,
         integration_selection: IntegrationSelection,
     },
-    PrComplete {},
+    PrComplete {
+        public_api: PublicApiSelection,
+    },
     ReleaseCheck {},
 }
 
@@ -523,9 +560,24 @@ struct SelectionInput {
     fallback_context: Option<FallbackContext>,
     revisions: RevisionIdentity,
     affected_packages: BTreeSet<String>,
+    public_api: PublicApiInput,
     test_packages: BTreeSet<String>,
     integration_units: BTreeSet<IntegrationUnitId>,
     unknown_paths: BTreeSet<String>,
+}
+
+enum PublicApiInput {
+    Affected(BTreeSet<String>),
+    CompleteInternal,
+}
+
+impl PublicApiInput {
+    fn into_selection(self) -> Result<PublicApiSelection> {
+        match self {
+            Self::Affected(packages) => PublicApiSelection::affected(packages),
+            Self::CompleteInternal => Ok(PublicApiSelection::CompleteInternal),
+        }
+    }
 }
 
 impl SelectionPlan {
@@ -550,11 +602,14 @@ impl SelectionPlan {
                 );
                 Selection::Adaptive {
                     affected_packages: input.affected_packages.into_iter().collect(),
+                    public_api: input.public_api.into_selection()?,
                     test_selection,
                     integration_selection: IntegrationSelection::critical(units)?,
                 }
             }
-            SelectionMode::PrComplete => Selection::PrComplete {},
+            SelectionMode::PrComplete => Selection::PrComplete {
+                public_api: input.public_api.into_selection()?,
+            },
             SelectionMode::ReleaseCheck => Selection::ReleaseCheck {},
         };
         let selection = Self {
@@ -586,6 +641,7 @@ impl SelectionPlan {
             }
         }
         validate_canonical_strings(self.affected_packages(), "affected packages")?;
+        validate_canonical_strings(self.public_api_packages(), "public-api packages")?;
         validate_canonical_strings(&self.unknown_paths, "unknown paths")?;
         if self.unknown_paths.iter().any(|path| {
             Path::new(path).is_absolute() || path.split('/').any(|component| component == "..")
@@ -595,9 +651,17 @@ impl SelectionPlan {
         if let Selection::Adaptive {
             test_selection,
             integration_selection,
+            public_api,
             ..
         } = &self.selection
         {
+            if public_api
+                .packages()
+                .iter()
+                .any(|package| !self.affected_packages().contains(package))
+            {
+                bail!("adaptive public-api packages must be an affected-package subset");
+            }
             match test_selection {
                 AdaptiveTestSelection::None => {}
                 AdaptiveTestSelection::Packages { packages } => {
@@ -670,7 +734,7 @@ impl SelectionPlan {
     pub(crate) const fn mode(&self) -> SelectionMode {
         match self.selection {
             Selection::Adaptive { .. } => SelectionMode::Adaptive,
-            Selection::PrComplete {} => SelectionMode::PrComplete,
+            Selection::PrComplete { .. } => SelectionMode::PrComplete,
             Selection::ReleaseCheck {} => SelectionMode::ReleaseCheck,
         }
     }
@@ -685,7 +749,7 @@ impl SelectionPlan {
                 test_selection: AdaptiveTestSelection::Packages { packages },
                 ..
             } => ProjectedTestSelection::Packages(packages),
-            Selection::PrComplete {} | Selection::ReleaseCheck {} => {
+            Selection::PrComplete { .. } | Selection::ReleaseCheck {} => {
                 ProjectedTestSelection::Workspace
             }
         }
@@ -697,7 +761,7 @@ impl SelectionPlan {
                 integration_selection,
                 ..
             } => Ok(integration_selection.clone()),
-            Selection::PrComplete {} => IntegrationSelection::for_profile(
+            Selection::PrComplete { .. } => IntegrationSelection::for_profile(
                 crate::execution_profiles::ExecutionProfile::IntegrationCritical,
             ),
             Selection::ReleaseCheck {} => Ok(IntegrationSelection::release_check()),
@@ -709,7 +773,31 @@ impl SelectionPlan {
             Selection::Adaptive {
                 affected_packages, ..
             } => affected_packages,
-            Selection::PrComplete {} | Selection::ReleaseCheck {} => &[],
+            Selection::PrComplete { .. } | Selection::ReleaseCheck {} => &[],
+        }
+    }
+
+    pub(crate) fn public_api_packages(&self) -> &[String] {
+        match &self.selection {
+            Selection::Adaptive { public_api, .. } => public_api.packages(),
+            Selection::PrComplete { public_api } => public_api.packages(),
+            Selection::ReleaseCheck {} => &[],
+        }
+    }
+
+    pub(crate) const fn public_api_selection(&self) -> ProjectedPublicApiSelection<'_> {
+        let selection = match &self.selection {
+            Selection::Adaptive { public_api, .. } | Selection::PrComplete { public_api } => {
+                public_api
+            }
+            Selection::ReleaseCheck {} => return ProjectedPublicApiSelection::None,
+        };
+        match selection {
+            PublicApiSelection::None => ProjectedPublicApiSelection::None,
+            PublicApiSelection::Affected { packages } => {
+                ProjectedPublicApiSelection::Affected(packages)
+            }
+            PublicApiSelection::CompleteInternal => ProjectedPublicApiSelection::CompleteInternal,
         }
     }
 
@@ -774,7 +862,19 @@ enum EscalationCause {
 enum ImpactSet {
     Empty,
     Selective(SelectiveImpact),
-    Escalated(EscalationCause),
+    Escalated {
+        cause: EscalationCause,
+        public_api_packages: BTreeSet<String>,
+    },
+}
+
+impl ImpactSet {
+    fn escalated(cause: EscalationCause) -> Self {
+        Self::Escalated {
+            cause,
+            public_api_packages: BTreeSet::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -795,6 +895,7 @@ struct SelectiveImpact {
     governance: BTreeSet<GovernanceImpact>,
     local_meta_domains: BTreeSet<LocalImpactDomain>,
     unknown_paths: BTreeSet<String>,
+    public_api_packages: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -851,6 +952,7 @@ struct RemoteProjection {
     mode: SelectionMode,
     cause: Option<EscalationCause>,
     affected_packages: BTreeSet<String>,
+    public_api_packages: BTreeSet<String>,
     test_packages: BTreeSet<String>,
     integration_units: BTreeSet<IntegrationUnitId>,
     unknown_paths: BTreeSet<String>,
@@ -863,11 +965,15 @@ impl From<&ImpactSet> for RemoteProjection {
                 mode: SelectionMode::Adaptive,
                 cause: None,
                 affected_packages: BTreeSet::new(),
+                public_api_packages: BTreeSet::new(),
                 test_packages: BTreeSet::new(),
                 integration_units: BTreeSet::new(),
                 unknown_paths: BTreeSet::new(),
             },
-            ImpactSet::Escalated(cause) => Self {
+            ImpactSet::Escalated {
+                cause,
+                public_api_packages,
+            } => Self {
                 mode: match cause {
                     #[cfg(test)]
                     EscalationCause::MandatoryCatalog => SelectionMode::ReleaseCheck,
@@ -879,6 +985,7 @@ impl From<&ImpactSet> for RemoteProjection {
                 },
                 cause: Some(*cause),
                 affected_packages: BTreeSet::new(),
+                public_api_packages: public_api_packages.clone(),
                 test_packages: BTreeSet::new(),
                 integration_units: BTreeSet::new(),
                 unknown_paths: BTreeSet::new(),
@@ -901,6 +1008,7 @@ impl From<&ImpactSet> for RemoteProjection {
                     },
                     cause: unknown_only.then_some(EscalationCause::UnknownPath),
                     affected_packages,
+                    public_api_packages: selective.public_api_packages.clone(),
                     test_packages,
                     integration_units: selective.integration_units.clone(),
                     unknown_paths: selective.unknown_paths.clone(),
@@ -939,6 +1047,7 @@ enum LocalProjection {
         /// Whether Check should pass `--lib` (false for bin-only reverse closures).
         check_includes_lib: bool,
         test_clippy_packages: Vec<String>,
+        public_api_packages: Vec<String>,
         governance: BTreeSet<GovernanceImpact>,
     },
 }
@@ -947,10 +1056,25 @@ impl From<&ImpactSet> for LocalProjection {
     fn from(impact: &ImpactSet) -> Self {
         match impact {
             ImpactSet::Empty => Self::Empty,
-            ImpactSet::Escalated(EscalationCause::UnknownPath) => {
-                Self::Meta(local_meta_gates(None))
-            }
-            ImpactSet::Escalated(_) => Self::Meta(all_local_meta_gates()),
+            ImpactSet::Escalated {
+                cause: EscalationCause::UnknownPath,
+                public_api_packages,
+            } if public_api_packages.is_empty() => Self::Meta(local_meta_gates(None)),
+            ImpactSet::Escalated {
+                public_api_packages,
+                ..
+            } if public_api_packages.is_empty() => Self::Meta(all_local_meta_gates()),
+            ImpactSet::Escalated {
+                public_api_packages,
+                ..
+            } => Self::Selective {
+                meta_gates: all_local_meta_gates(),
+                check_packages: Vec::new(),
+                check_includes_lib: true,
+                test_clippy_packages: Vec::new(),
+                public_api_packages: public_api_packages.iter().cloned().collect(),
+                governance: BTreeSet::new(),
+            },
             ImpactSet::Selective(selective)
                 if selective.packages.is_empty() && selective.governance.is_empty() =>
             {
@@ -975,6 +1099,7 @@ impl From<&ImpactSet> for LocalProjection {
                     check_packages: selective.reverse_closure.iter().cloned().collect(),
                     check_includes_lib: selective.check_includes_lib,
                     test_clippy_packages,
+                    public_api_packages: selective.public_api_packages.iter().cloned().collect(),
                     governance: selective.governance.clone(),
                 }
             }
@@ -1026,6 +1151,8 @@ impl LocalCargoTarget {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum LocalStep {
     Meta(Vec<GateId>),
+    PublicApi(Vec<String>),
+    CompleteInternalPublicApi,
     PythonHooks,
     CargoWrapperSelftest,
     Packages {
@@ -1047,9 +1174,13 @@ impl LocalProjection {
                 check_packages,
                 check_includes_lib,
                 test_clippy_packages,
+                public_api_packages,
                 governance,
             } => {
                 let mut steps = vec![LocalStep::Meta(meta_gates.clone())];
+                if !public_api_packages.is_empty() {
+                    steps.push(LocalStep::PublicApi(public_api_packages.clone()));
+                }
                 if !check_packages.is_empty() {
                     steps.push(LocalStep::Packages {
                         operation: LocalCargoOperation::Check,
@@ -1112,7 +1243,17 @@ fn all_local_meta_gates() -> Vec<GateId> {
 }
 
 fn local_steps(impact: &ImpactSet) -> Vec<LocalStep> {
-    LocalProjection::from(impact).steps()
+    let mut steps = LocalProjection::from(impact).steps();
+    if matches!(
+        impact,
+        ImpactSet::Escalated {
+            cause: EscalationCause::UnknownPath,
+            public_api_packages,
+        } if public_api_packages.is_empty()
+    ) {
+        steps.push(LocalStep::CompleteInternalPublicApi);
+    }
+    steps
 }
 
 /// Workspace-wide coverage cause mapped from [`EscalationCause`] (exhaustive).
@@ -1196,7 +1337,7 @@ impl From<&ImpactSet> for CoverageProjection {
     fn from(impact: &ImpactSet) -> Self {
         match impact {
             ImpactSet::Empty => Self(CoverageDecision::Skip),
-            ImpactSet::Escalated(cause) => {
+            ImpactSet::Escalated { cause, .. } => {
                 Self(CoverageDecision::Scope(CoverageScope::Workspace {
                     cause: CoverageWorkspaceCause::from(*cause),
                 }))
@@ -1309,7 +1450,7 @@ fn coverage_scope_for_pull_request(root: &Path) -> Option<CoverageScope> {
     let entries = read_diff(root, &pull_request.base.sha, &pull_request.head.sha).ok()?;
     if let Some(cause) = immediate_escalation_cause(&entries) {
         return Some(
-            CoverageProjection::from(&ImpactSet::Escalated(cause)).into_scope_or_fallback(),
+            CoverageProjection::from(&ImpactSet::escalated(cause)).into_scope_or_fallback(),
         );
     }
     let command_facts = CommandWorkspaceFacts::new(root);
@@ -1463,11 +1604,16 @@ pub(crate) fn run(root: &Path, options: &Options) -> Result<()> {
 
 fn render_selection_summary(selection: &SelectionPlan) -> String {
     let mut summary = format!(
-        "## Typed CI selection\n\n- Policy: `{}`\n- Mode: `{}`\n- Reason: `{}`\n- Affected packages: `{}`\n- Integration selection: `{}`\n- Unknown paths retained for trace: `{}`\n",
+        "## Typed CI selection\n\n- Policy: `{}`\n- Mode: `{}`\n- Reason: `{}`\n- Affected packages: `{}`\n- Internal public-api owners: `{}`\n- Integration selection: `{}`\n- Unknown paths retained for trace: `{}`\n",
         selection.policy_version,
         selection_mode_name(selection.mode()),
         decision_reason_name(selection.decision_reason),
         selection.affected_packages().len(),
+        match selection.public_api_selection() {
+            ProjectedPublicApiSelection::None => "none".to_owned(),
+            ProjectedPublicApiSelection::Affected(packages) => packages.as_slice().join(", "),
+            ProjectedPublicApiSelection::CompleteInternal => "complete-internal".to_owned(),
+        },
         selection
             .integration_selection()
             .map(|value| value.to_string())
@@ -1615,13 +1761,22 @@ fn plan_event(
                     );
                 }
             };
+            let decision_reason = projection.decision_reason();
+            let fallback_context = projection.fallback_context();
+            let public_api =
+                if projection.public_api_packages.is_empty() && fallback_context.is_some() {
+                    PublicApiInput::CompleteInternal
+                } else {
+                    PublicApiInput::Affected(projection.public_api_packages)
+                };
             SelectionPlan::new(SelectionInput {
                 policy_version,
                 mode: projection.mode,
-                decision_reason: projection.decision_reason(),
-                fallback_context: projection.fallback_context(),
+                decision_reason,
+                fallback_context,
                 revisions,
                 affected_packages: projection.affected_packages,
+                public_api,
                 test_packages: projection.test_packages,
                 integration_units: projection.integration_units,
                 unknown_paths: projection.unknown_paths,
@@ -1664,6 +1819,7 @@ fn release_selection(
         fallback_context: None,
         revisions: unknown_revisions(execution_revision),
         affected_packages: BTreeSet::new(),
+        public_api: PublicApiInput::Affected(BTreeSet::new()),
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
         unknown_paths: BTreeSet::new(),
@@ -1712,6 +1868,7 @@ fn fallback_selection_with_revisions(
         fallback_context: Some(fallback_context),
         revisions,
         affected_packages: BTreeSet::new(),
+        public_api: PublicApiInput::CompleteInternal,
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
         unknown_paths: BTreeSet::new(),
@@ -1766,9 +1923,6 @@ fn pull_request_projection(
     }
     let entries = read_diff(root, base, head)
         .map_err(|_| PlannerFailure::new(FallbackCode::GitDiffUnavailable, None))?;
-    if let Some(cause) = immediate_escalation_cause(&entries) {
-        return Ok(RemoteProjection::from(&ImpactSet::Escalated(cause)));
-    }
     let command_facts = CommandWorkspaceFacts::new(root);
     let facts = workspace_facts_for_impact(&entries, &command_facts).map_err(|_| {
         PlannerFailure::new(
@@ -1943,7 +2097,7 @@ fn local_impact(root: &Path, base: &str) -> ImpactSet {
     LocalExecutionContext::new(root, base).map_or_else(
         |error| {
             eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
-            ImpactSet::Escalated(EscalationCause::FallbackUncertainty)
+            ImpactSet::escalated(EscalationCause::FallbackUncertainty)
         },
         |context| {
             let command_facts = CommandWorkspaceFacts::new(context.root());
@@ -2007,13 +2161,6 @@ impl LocalWorkerProvenance {
         validate_revision(&head, "local worker HEAD")?;
         validate_revision(&base, "local worker base")?;
         validate_revision(&merge_base, "local worker merge-base")?;
-        if env::var(crate::runtime_root_guard::BASE_ENV)
-            .ok()
-            .as_deref()
-            != Some(merge_base.as_str())
-        {
-            bail!("local worker runtime-root base does not match captured merge-base");
-        }
         Ok(Some(Self {
             caller_worktree: PathBuf::from(required(LOCAL_CALLER_WORKTREE_ENV)?),
             snapshot_root: PathBuf::from(required(LOCAL_SNAPSHOT_ROOT_ENV)?),
@@ -2183,9 +2330,6 @@ impl LocalExecutionContext {
         entries: &[DiffEntry],
         command_facts: &CommandWorkspaceFacts,
     ) -> Result<ImpactSet> {
-        if let Some(cause) = immediate_escalation_cause(entries) {
-            return Ok(ImpactSet::Escalated(cause));
-        }
         match workspace_facts_for_impact(entries, command_facts)? {
             Some(facts) => impact_with_facts(self.root(), entries, facts, &self.merge_base),
             None => try_impact_entries(entries, None, &BTreeSet::new(), &BTreeMap::new()),
@@ -2196,7 +2340,7 @@ impl LocalExecutionContext {
     fn impact_or_full(&self, command_facts: &CommandWorkspaceFacts) -> ImpactSet {
         self.impact(command_facts).unwrap_or_else(|error| {
             eprintln!("ci local：影响分析失败，fail-safe 到完整 verify：{error:#}");
-            ImpactSet::Escalated(EscalationCause::FallbackUncertainty)
+            ImpactSet::escalated(EscalationCause::FallbackUncertainty)
         })
     }
 }
@@ -2394,6 +2538,8 @@ impl LocalStep {
     const fn stage(&self) -> LocalStage {
         match self {
             Self::Meta(_) => LocalStage::Meta,
+            Self::PublicApi(_) => LocalStage::Meta,
+            Self::CompleteInternalPublicApi => LocalStage::Meta,
             Self::PythonHooks => LocalStage::PythonHooks,
             Self::CargoWrapperSelftest => LocalStage::CargoWrapperSelftest,
             Self::Packages { operation, .. } => match operation {
@@ -2407,6 +2553,10 @@ impl LocalStep {
     fn label(&self) -> String {
         match self {
             Self::Meta(gates) => format!("meta（{} gates）", gates.len()),
+            Self::PublicApi(packages) => {
+                format!("public-api affected {}", packages.join(","))
+            }
+            Self::CompleteInternalPublicApi => "public-api complete internal".to_owned(),
             Self::PythonHooks => "python hook tests".to_owned(),
             Self::CargoWrapperSelftest => "cargo wrapper selftest".to_owned(),
             Self::Packages {
@@ -2431,6 +2581,10 @@ impl LocalStep {
     fn checkpoint_key(&self) -> Option<String> {
         match self {
             Self::Meta(_) => None,
+            Self::PublicApi(packages) => Some(format!("stage:public-api:{}", packages.join(","))),
+            Self::CompleteInternalPublicApi => {
+                Some("stage:public-api:complete-internal".to_owned())
+            }
             Self::PythonHooks => Some("stage:python-hooks".to_owned()),
             Self::CargoWrapperSelftest => Some("stage:cargo-wrapper-selftest".to_owned()),
             Self::Packages {
@@ -2607,6 +2761,18 @@ fn run_local_step(
             execution_policy,
             ledger,
         ),
+        LocalStep::PublicApi(packages) => {
+            let command_facts = CommandWorkspaceFacts::new(context.root());
+            crate::publicapi::run_affected_internal_check(
+                context.root(),
+                command_facts.get()?,
+                packages,
+            )
+        }
+        LocalStep::CompleteInternalPublicApi => {
+            let command_facts = CommandWorkspaceFacts::new(context.root());
+            crate::publicapi::run_complete_internal_check(context.root(), command_facts.get()?)
+        }
         LocalStep::PythonHooks => {
             let status = external_cmd(
                 ExternalProgram::SystemPython,
@@ -2904,8 +3070,18 @@ fn classify_with_facts(
     facts: &WorkspaceFacts,
     merge_base: &str,
 ) -> Result<RemoteProjection> {
-    Ok(RemoteProjection::from(&impact_with_facts(
-        root, entries, facts, merge_base,
+    let internal_owners = facts
+        .workspace_packages()
+        .into_iter()
+        .map(|package| package.key().as_str().to_owned())
+        .filter(|package| crate::publicapi::target_crates(None).contains(&package.as_str()))
+        .collect::<BTreeSet<_>>();
+    Ok(RemoteProjection::from(&impact_with_facts_and_owners(
+        root,
+        entries,
+        facts,
+        merge_base,
+        Some(&internal_owners),
     )?))
 }
 
@@ -2915,6 +3091,36 @@ fn impact_with_facts(
     facts: &WorkspaceFacts,
     merge_base: &str,
 ) -> Result<ImpactSet> {
+    impact_with_facts_and_owners(root, entries, facts, merge_base, None)
+}
+
+fn impact_with_facts_and_owners(
+    root: &Path,
+    entries: &[DiffEntry],
+    facts: &WorkspaceFacts,
+    merge_base: &str,
+    internal_owners: Option<&BTreeSet<String>>,
+) -> Result<ImpactSet> {
+    let affected_internal = |candidates: &BTreeSet<String>| -> Result<BTreeSet<String>> {
+        internal_owners.map_or_else(
+            || crate::publicapi::affected_internal_packages(root, facts, candidates),
+            |owners| Ok(candidates.intersection(owners).cloned().collect()),
+        )
+    };
+    let path_packages = entries
+        .iter()
+        .map(|entry| facts.package_for_repo_path(Path::new(&entry.path)))
+        .collect::<std::result::Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .map(|package| package.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    if let Some(cause) = immediate_escalation_cause(entries) {
+        return Ok(ImpactSet::Escalated {
+            cause,
+            public_api_packages: affected_internal(&path_packages)?,
+        });
+    }
     let mut direct = BTreeMap::<String, BTreeSet<PackageImpact>>::new();
     for entry in entries {
         // Same documentation gate as classify_selective_entry: governance docs under
@@ -2952,17 +3158,14 @@ fn impact_with_facts(
         }
     }
     let mut impacted = direct.keys().cloned().collect::<BTreeSet<_>>();
-    impacted.extend(
-        entries
-            .iter()
-            .map(|entry| facts.package_for_repo_path(Path::new(&entry.path)))
-            .collect::<std::result::Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .map(|package| package.as_str().to_owned()),
-    );
+    impacted.extend(path_packages);
     let closure = reverse_closure(facts, &impacted)?;
-    try_impact_entries(entries, Some(facts), &closure, &direct)
+    let public_api_packages = affected_internal(&impacted)?;
+    let mut impact = try_impact_entries(entries, Some(facts), &closure, &direct)?;
+    if let ImpactSet::Selective(selective) = &mut impact {
+        selective.public_api_packages = public_api_packages;
+    }
+    Ok(impact)
 }
 
 fn changed_integration_sources(
@@ -2990,7 +3193,7 @@ fn try_impact_entries(
     seeded_packages: &BTreeMap<String, BTreeSet<PackageImpact>>,
 ) -> Result<ImpactSet> {
     if let Some(cause) = immediate_escalation_cause(entries) {
-        return Ok(ImpactSet::Escalated(cause));
+        return Ok(ImpactSet::escalated(cause));
     }
     if entries.is_empty() {
         return Ok(ImpactSet::Empty);
@@ -3011,7 +3214,7 @@ fn try_impact_entries(
         )?;
     }
     let Some((exact_units, exact_source_paths)) = changed_integration_sources(entries) else {
-        return Ok(ImpactSet::Escalated(EscalationCause::GlobalImpact));
+        return Ok(ImpactSet::escalated(EscalationCause::GlobalImpact));
     };
     let exact_packages = exact_units
         .iter()
@@ -3097,7 +3300,7 @@ fn try_impact_entries(
     }
     for provider in providers {
         let Some(units) = integration_shards::critical_units_for_provider(provider) else {
-            return Ok(ImpactSet::Escalated(EscalationCause::GlobalImpact));
+            return Ok(ImpactSet::escalated(EscalationCause::GlobalImpact));
         };
         selected_units.extend(units);
     }
@@ -3131,6 +3334,7 @@ fn try_impact_entries(
         governance,
         local_meta_domains,
         unknown_paths,
+        public_api_packages: BTreeSet::new(),
     }))
 }
 
@@ -3257,7 +3461,6 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/inbox_cutover_guard.rs",
         "xtask/src/outbox_same_id_guard.rs",
         "xtask/src/reconcile_outbox_command_guard.rs",
-        "xtask/runtime-root-ratchet.toml",
         "xtask/runtime-deps-guard.toml",
     ];
     const EVENT_TRANSPORT_SCAN_PREFIXES: &[&str] =
@@ -4136,6 +4339,7 @@ pub(crate) fn test_selection_plan() -> Result<SelectionPlan> {
             execution_revision: "e".repeat(40),
         },
         affected_packages: BTreeSet::new(),
+        public_api: PublicApiInput::Affected(BTreeSet::new()),
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
         unknown_paths: BTreeSet::new(),
@@ -4156,6 +4360,7 @@ pub(crate) fn test_adaptive_selection_plan() -> Result<SelectionPlan> {
             execution_revision: "e".repeat(40),
         },
         affected_packages: BTreeSet::new(),
+        public_api: PublicApiInput::Affected(BTreeSet::new()),
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
         unknown_paths: BTreeSet::new(),
@@ -4176,6 +4381,7 @@ pub(crate) fn test_pr_complete_selection_plan() -> Result<SelectionPlan> {
             execution_revision: "e".repeat(40),
         },
         affected_packages: BTreeSet::new(),
+        public_api: PublicApiInput::Affected(BTreeSet::new()),
         test_packages: BTreeSet::new(),
         integration_units: BTreeSet::new(),
         unknown_paths: BTreeSet::new(),
@@ -4249,6 +4455,7 @@ mod tests {
             governance: BTreeSet::new(),
             local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::new(),
+            public_api_packages: BTreeSet::new(),
         })
     }
 
@@ -4668,6 +4875,111 @@ mod tests {
     }
 
     #[test]
+    fn internal_api_sources_select_only_their_owner_baselines() -> Result<()> {
+        let facts = synthetic_workspace_facts(vec![
+            (
+                "diport",
+                "crates/diport",
+                vec![metadata_target("diport", "lib", true, &[], "crates/diport")],
+                Vec::new(),
+            ),
+            (
+                "runtimeexec",
+                "crates/runtimeexec",
+                vec![metadata_target(
+                    "runtimeexec",
+                    "lib",
+                    true,
+                    &[],
+                    "crates/runtimeexec",
+                )],
+                Vec::new(),
+            ),
+            (
+                "leaf",
+                "crates/leaf",
+                vec![metadata_target("leaf", "lib", true, &[], "crates/leaf")],
+                Vec::new(),
+            ),
+        ])?;
+
+        for (path, expected) in [
+            ("crates/diport/src/lib.rs", Some("diport")),
+            ("crates/runtimeexec/src/lib.rs", Some("runtimeexec")),
+            ("crates/leaf/src/lib.rs", None),
+        ] {
+            let projection = classify_with_facts(
+                Path::new("/workspace"),
+                &[DiffEntry::modified(path)],
+                &facts,
+                "unknown",
+            )?;
+            assert_eq!(
+                projection.public_api_packages,
+                expected.into_iter().map(str::to_owned).collect(),
+                "{path}"
+            );
+            let impact = impact_with_facts_and_owners(
+                Path::new("/workspace"),
+                &[DiffEntry::modified(path)],
+                &facts,
+                "unknown",
+                Some(&BTreeSet::from([
+                    "diport".to_owned(),
+                    "runtimeexec".to_owned(),
+                ])),
+            )?;
+            let local_public_api =
+                LocalProjection::from(&impact)
+                    .steps()
+                    .into_iter()
+                    .find_map(|step| match step {
+                        LocalStep::PublicApi(packages) => Some(packages),
+                        _ => None,
+                    });
+            assert_eq!(
+                local_public_api,
+                expected.map(|package| vec![package.to_owned()]),
+                "local projection: {path}"
+            );
+        }
+
+        let mixed = classify_with_facts(
+            Path::new("/workspace"),
+            &[
+                DiffEntry::modified("Cargo.toml"),
+                DiffEntry::modified("crates/diport/src/lib.rs"),
+            ],
+            &facts,
+            "unknown",
+        )?;
+        assert_eq!(mixed.mode, SelectionMode::PrComplete);
+        assert_eq!(
+            mixed.public_api_packages,
+            BTreeSet::from(["diport".to_owned()])
+        );
+        let selection = SelectionPlan::new(SelectionInput {
+            policy_version: "a".repeat(64),
+            mode: mixed.mode,
+            decision_reason: mixed.decision_reason(),
+            fallback_context: mixed.fallback_context(),
+            revisions: unknown_revisions("e".repeat(40)),
+            affected_packages: mixed.affected_packages,
+            public_api: PublicApiInput::Affected(mixed.public_api_packages),
+            test_packages: mixed.test_packages,
+            integration_units: mixed.integration_units,
+            unknown_paths: mixed.unknown_paths,
+        })?;
+        assert!(selection.affected_packages().is_empty());
+        assert_eq!(selection.public_api_packages(), ["diport"]);
+        assert_eq!(
+            SelectionPlan::from_json(&selection.to_json()?)?.public_api_packages(),
+            ["diport"]
+        );
+        Ok(())
+    }
+
+    #[test]
     fn contract_rename_remains_pr_complete() -> Result<()> {
         let entries = parse_diff(
             b"R100\0contracts/event/identity/v1/old/contract.toml\0contracts/event/identity/v1/new/contract.toml\0",
@@ -4678,7 +4990,7 @@ mod tests {
             Some(EscalationCause::RenameOrCopy)
         );
         assert_eq!(
-            RemoteProjection::from(&ImpactSet::Escalated(EscalationCause::RenameOrCopy)).mode,
+            RemoteProjection::from(&ImpactSet::escalated(EscalationCause::RenameOrCopy)).mode,
             SelectionMode::PrComplete
         );
         Ok(())
@@ -4787,6 +5099,7 @@ mod tests {
                 check_packages: vec!["consumer".to_owned(), "leaf".to_owned()],
                 check_includes_lib: true,
                 test_clippy_packages: vec!["leaf".to_owned()],
+                public_api_packages: Vec::new(),
                 governance: BTreeSet::new(),
             }
         );
@@ -4902,6 +5215,7 @@ mod tests {
                 governance: BTreeSet::new(),
                 local_meta_domains: BTreeSet::new(),
                 unknown_paths: BTreeSet::new(),
+                public_api_packages: BTreeSet::new(),
             });
             match CoverageProjection::from(&impact).decision() {
                 CoverageDecision::Skip => {
@@ -4941,7 +5255,7 @@ mod tests {
             }
         }
 
-        let full = CoverageProjection::from(&ImpactSet::Escalated(EscalationCause::GlobalImpact))
+        let full = CoverageProjection::from(&ImpactSet::escalated(EscalationCause::GlobalImpact))
             .decision();
         assert_eq!(
             full,
@@ -4967,6 +5281,7 @@ mod tests {
             governance: BTreeSet::new(),
             local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::from(["mystery/path.rs".to_owned()]),
+            public_api_packages: BTreeSet::new(),
         });
         assert_eq!(
             CoverageProjection::from(&unknown_impact).decision(),
@@ -4992,6 +5307,7 @@ mod tests {
             governance: BTreeSet::new(),
             local_meta_domains: BTreeSet::new(),
             unknown_paths: BTreeSet::new(),
+            public_api_packages: BTreeSet::new(),
         });
         assert_eq!(
             CoverageProjection::from(&impact).decision(),
@@ -5114,6 +5430,7 @@ mod tests {
             fallback_context: remote.fallback_context(),
             revisions: unknown_revisions("e".repeat(40)),
             affected_packages: remote.affected_packages,
+            public_api: PublicApiInput::Affected(remote.public_api_packages),
             test_packages: remote.test_packages,
             integration_units: remote.integration_units,
             unknown_paths: remote.unknown_paths,
@@ -5457,6 +5774,7 @@ mod tests {
             check_packages: vec!["redis-adapter".to_owned(), "runtime".to_owned()],
             check_includes_lib: true,
             test_clippy_packages: vec!["redis-adapter".to_owned()],
+            public_api_packages: Vec::new(),
             governance: BTreeSet::new(),
         };
         assert_eq!(
@@ -5689,11 +6007,11 @@ mod tests {
         }
         for (impact, entries) in [
             (
-                ImpactSet::Escalated(EscalationCause::MandatoryCatalog),
+                ImpactSet::escalated(EscalationCause::MandatoryCatalog),
                 vec![DiffEntry::modified("xtask/src/ci_impact.rs")],
             ),
             (
-                ImpactSet::Escalated(EscalationCause::RenameOrCopy),
+                ImpactSet::escalated(EscalationCause::RenameOrCopy),
                 vec![DiffEntry::rename("xtask/src/ci_impact.rs")],
             ),
         ] {
@@ -6174,7 +6492,10 @@ mod tests {
         );
         assert!(matches!(
             local_impact(&root, "refs/heads/does-not-exist"),
-            ImpactSet::Escalated(EscalationCause::FallbackUncertainty)
+            ImpactSet::Escalated {
+                cause: EscalationCause::FallbackUncertainty,
+                ..
+            }
         ));
         fs::remove_dir_all(root)?;
         Ok(())
@@ -6529,6 +6850,22 @@ mod tests {
         invalid_mode["selection"]["mode"] = serde_json::json!("pr-complete");
         assert!(SelectionPlan::from_json(&invalid_mode.to_string()).is_err());
 
+        let mut legacy_version: serde_json::Value =
+            serde_json::from_str(&test_adaptive_selection_plan()?.to_json()?)?;
+        legacy_version["schemaVersion"] = serde_json::json!(1);
+        assert!(SelectionPlan::from_json(&legacy_version.to_string()).is_err());
+        let mut missing_owner_field: serde_json::Value =
+            serde_json::from_str(&test_adaptive_selection_plan()?.to_json()?)?;
+        missing_owner_field["selection"]
+            .as_object_mut()
+            .context("adaptive selection must be an object")?
+            .remove("public_api");
+        assert!(SelectionPlan::from_json(&missing_owner_field.to_string()).is_err());
+        let mut legacy_alias: serde_json::Value =
+            serde_json::from_str(&test_adaptive_selection_plan()?.to_json()?)?;
+        legacy_alias["selection"]["public_api_packages"] = serde_json::json!([]);
+        assert!(SelectionPlan::from_json(&legacy_alias.to_string()).is_err());
+
         let mut forged_payload: serde_json::Value =
             serde_json::from_str(&test_pr_complete_selection_plan()?.to_json()?)?;
         forged_payload["selection"]["affectedPackages"] = serde_json::json!(["xtask"]);
@@ -6771,7 +7108,10 @@ mod tests {
                 &BTreeSet::new(),
                 &BTreeMap::new(),
             ),
-            ImpactSet::Escalated(EscalationCause::GlobalImpact)
+            ImpactSet::Escalated {
+                cause: EscalationCause::GlobalImpact,
+                ..
+            }
         ));
 
         let localtx_path = "journeys/tests/support/localtx_validation.rs";
@@ -7954,6 +8294,18 @@ readiness = "required"
                 .is_some_and(|action| action.to_ascii_lowercase().contains("fetch")),
             "fallback diagnostic must include a stable remediation without leaking raw errors"
         );
+        assert!(matches!(
+            selection.public_api_selection(),
+            ProjectedPublicApiSelection::CompleteInternal
+        ));
+        assert_eq!(
+            wire["selection"]["public_api"]["scope"],
+            "complete-internal"
+        );
+        assert!(
+            local_steps(&ImpactSet::escalated(EscalationCause::UnknownPath))
+                .contains(&LocalStep::CompleteInternalPublicApi)
+        );
         let summary = render_selection_summary(&selection);
         assert!(summary.contains("CI-PLAN-DIFF-UNAVAILABLE"));
         assert!(summary.contains("Fetch complete base and head history"));
@@ -8032,6 +8384,22 @@ readiness = "required"
                 .integration_units
                 .iter()
                 .any(|unit| unit.spec().shard == IntegrationShard::PostgresDomain)
+        );
+
+        let release_owner_impact = impact_with_facts(
+            &root,
+            &[
+                DiffEntry::modified("Cargo.toml"),
+                DiffEntry::modified("crates/platform/src/lib.rs"),
+            ],
+            facts,
+            UNKNOWN_REVISION,
+        )?;
+        let release_owner_projection = RemoteProjection::from(&release_owner_impact);
+        assert_eq!(release_owner_projection.mode, SelectionMode::PrComplete);
+        assert!(
+            release_owner_projection.public_api_packages.is_empty(),
+            "release baseline owners must never enter the affected-internal selector"
         );
         Ok(())
     }

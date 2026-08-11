@@ -26,6 +26,7 @@ const CONFIG_CAPTURE_METHOD: &str = "capture_process_snapshot";
 const CONFIG_PATH: &str = "assemblies/runtime/src/config.rs";
 const LIB_PATH: &str = "assemblies/runtime/src/lib.rs";
 const PLAN_PATH: &str = "assemblies/runtime/src/plan.rs";
+const LIFECYCLE_PATH: &str = "assemblies/runtime/src/lifecycle.rs";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Rule {
@@ -689,7 +690,7 @@ impl ExpectedInventory {
             Rule::MissingCapture,
             InventoryKind::ConfigCapture,
             &self.config_capture_sites,
-            LIB_PATH,
+            LIFECYCLE_PATH,
             CONFIG_CAPTURE_OWNER,
             "prepare_runtime_kernel must call RuntimeConfigSnapshot::capture_process_snapshot exactly once",
         );
@@ -1338,7 +1339,7 @@ impl<'ast> Visit<'ast> for FileScanner<'_> {
                 && path.path.segments.len() == 2
                 && path.path.segments[0].ident == "RuntimeConfigSnapshot"
                 && path.path.segments[1].ident == CONFIG_CAPTURE_METHOD;
-            let exact_owner = self.path == LIB_PATH
+            let exact_owner = self.path == LIFECYCLE_PATH
                 && self.module_depth == 0
                 && self.function_depth == 1
                 && self.owner == CONFIG_CAPTURE_OWNER
@@ -1817,6 +1818,10 @@ mod tests {
                 PLAN_PATH.to_owned(),
                 "const BUNDLED_REPOSITORY_SNAPSHOT: &[u8] = include_bytes!(concat!(env!(\"OUT_DIR\"), \"/repository-assembly-v2.json\"));"
                     .to_owned(),
+            ),
+            (
+                LIFECYCLE_PATH.to_owned(),
+                include_str!("../fixtures/runtime-env-guard/canonical-lifecycle.rs").to_owned(),
             ),
         ];
         for grant in GRANTS {

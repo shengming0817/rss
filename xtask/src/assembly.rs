@@ -2779,6 +2779,7 @@ fn security_closeout_evidence_from_sources(dir: &Path) -> Result<SecurityCloseou
             Ok((path, content, file))
         })
         .collect::<Result<Vec<_>>>()?;
+    let root_function_aliases = crate_root_function_reexports(&src_dir, &sources);
     let diverging_function_names =
         collect_diverging_function_names(sources.iter().map(|(_, _, file)| file));
     let mut program = SecurityCloseoutProgram::default();
@@ -2797,7 +2798,77 @@ fn security_closeout_evidence_from_sources(dir: &Path) -> Result<SecurityCloseou
         file_program.legacy_token_surface |= source_contains_legacy_token_surface(&content);
         program.merge(file_program);
     }
+    for (exported, target) in root_function_aliases {
+        program.bind_unique_function_alias(
+            &format!("free::crate::{exported}"),
+            &format!("free::crate::{}", target.join("::")),
+        );
+    }
     Ok(program.reachable_evidence_from_run())
+}
+
+fn crate_root_function_reexports(
+    src_dir: &Path,
+    sources: &[(std::path::PathBuf, String, syn::File)],
+) -> Vec<(String, Vec<String>)> {
+    sources
+        .iter()
+        .filter(|(path, _, _)| *path == src_dir.join("lib.rs"))
+        .flat_map(|(_, _, file)| public_function_reexports(file))
+        .collect()
+}
+
+fn public_function_reexports(file: &syn::File) -> Vec<(String, Vec<String>)> {
+    fn collect(
+        tree: &syn::UseTree,
+        prefix: &mut Vec<String>,
+        aliases: &mut Vec<(String, Vec<String>)>,
+    ) {
+        match tree {
+            syn::UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                collect(&path.tree, prefix, aliases);
+                prefix.pop();
+            }
+            syn::UseTree::Name(name) => {
+                let exported = name.ident.to_string();
+                let mut target = prefix.clone();
+                target.push(exported.clone());
+                aliases.push((exported, target));
+            }
+            syn::UseTree::Rename(rename) => {
+                let mut target = prefix.clone();
+                target.push(rename.ident.to_string());
+                aliases.push((rename.rename.to_string(), target));
+            }
+            syn::UseTree::Group(group) => {
+                for item in &group.items {
+                    collect(item, prefix, aliases);
+                }
+            }
+            syn::UseTree::Glob(_) => {}
+        }
+    }
+    let mut aliases = Vec::new();
+    for item in &file.items {
+        let syn::Item::Use(item) = item else {
+            continue;
+        };
+        if !matches!(item.vis, syn::Visibility::Public(_)) {
+            continue;
+        }
+        collect(&item.tree, &mut Vec::new(), &mut aliases);
+    }
+    for (_, target) in &mut aliases {
+        if target
+            .first()
+            .is_some_and(|segment| segment == "crate" || segment == "self")
+        {
+            target.remove(0);
+        }
+    }
+    aliases.retain(|(_, target)| !target.is_empty() && target[0] != "super");
+    aliases
 }
 
 #[derive(Default)]
@@ -4072,6 +4143,24 @@ struct SecurityCloseoutProgram {
 }
 
 impl SecurityCloseoutProgram {
+    fn bind_unique_function_alias(&mut self, alias: &str, target: &str) {
+        if let Some(existing) = self.resolve_function(alias) {
+            if self
+                .resolve_function(target)
+                .is_some_and(|target| target != existing)
+            {
+                self.invalid_functions.insert(alias.to_owned());
+            }
+            return;
+        }
+        if let Some(identity) = self.resolve_function(target) {
+            self.function_symbols
+                .entry(alias.to_owned())
+                .or_default()
+                .insert(identity);
+        }
+    }
+
     fn merge(&mut self, other: Self) {
         self.profile_binding_definitions = self
             .profile_binding_definitions
@@ -8352,6 +8441,79 @@ fn mtls_config_from_env() {
         let (assemblies, _) = discover_test_targets(&root)?;
         assert!(validate_framework_contracts(&root, &assemblies, &contracts).is_empty());
         fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn lifecycle_run_reexport_binds_the_canonical_assembly_root() -> anyhow::Result<()> {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+        let lib = syn::parse_file(&fs::read_to_string(
+            root.join("assemblies/runtime/src/lib.rs"),
+        )?)?;
+        assert!(public_function_reexports(&lib).contains(&(
+            "run".to_owned(),
+            vec!["lifecycle".to_owned(), "run".to_owned()]
+        )));
+
+        for source in [
+            "pub use lifecycle::run;",
+            "pub use crate::lifecycle::run;",
+            "pub use self::lifecycle::{run};",
+        ] {
+            assert_eq!(
+                public_function_reexports(&syn::parse_file(source)?),
+                vec![(
+                    "run".to_owned(),
+                    vec!["lifecycle".to_owned(), "run".to_owned()]
+                )]
+            );
+        }
+        assert!(public_function_reexports(&syn::parse_file("use lifecycle::run;")?).is_empty());
+        assert_eq!(
+            public_function_reexports(&syn::parse_file("pub use lifecycle::run as start;")?),
+            vec![(
+                "start".to_owned(),
+                vec!["lifecycle".to_owned(), "run".to_owned()]
+            )]
+        );
+
+        let src = std::path::PathBuf::from("/fixture/src");
+        let sources = vec![
+            (
+                src.join("nested/lib.rs"),
+                String::new(),
+                syn::parse_file("pub use bait::run;")?,
+            ),
+            (
+                src.join("lib.rs"),
+                String::new(),
+                syn::parse_file("pub use lifecycle::run;")?,
+            ),
+        ];
+        assert_eq!(
+            crate_root_function_reexports(&src, &sources),
+            vec![(
+                "run".to_owned(),
+                vec!["lifecycle".to_owned(), "run".to_owned()]
+            )]
+        );
+
+        let lifecycle = syn::parse_file(&fs::read_to_string(
+            root.join("assemblies/runtime/src/lifecycle.rs"),
+        )?)?;
+        let mut program = file_security_closeout_program_at(
+            &lifecycle,
+            "lifecycle.rs".to_string(),
+            vec!["crate".to_string(), "lifecycle".to_string()],
+            collect_diverging_function_names(std::iter::once(&lifecycle)),
+        );
+        assert!(
+            program
+                .resolve_function("free::crate::lifecycle::run")
+                .is_some()
+        );
+        program.bind_unique_function_alias("free::crate::run", "free::crate::lifecycle::run");
+        assert!(program.resolve_function("free::crate::run").is_some());
         Ok(())
     }
 

@@ -1438,28 +1438,11 @@ macro_rules! impl_dlq_write {
                 &mut self,
                 event_id: &str,
             ) -> Result<i64, sqlx::Error> {
-                sqlx::query_scalar(crate::outbox_routine::OutboxCallableRoutine::Redrive.sql())
+                sqlx::query_scalar(DlqCallableRoutine::Redrive.sql())
                     .bind(event_id)
                     .bind(self.tenant.to_string())
                     .fetch_one(&mut *self.conn)
                     .await
-            }
-
-            pub(crate) async fn dlq_resolve_expired_outbox(
-                &mut self,
-                input: DlqExpiredResolution<'_>,
-            ) -> Result<i64, sqlx::Error> {
-                sqlx::query_scalar(
-                    crate::outbox_routine::OutboxCallableRoutine::ResolveExpired.sql(),
-                )
-                .bind(input.event_id)
-                .bind(self.tenant.to_string())
-                .bind(input.kind)
-                .bind(input.change_ticket)
-                .bind(input.operator_subject)
-                .bind(input.evidence_event_id)
-                .fetch_one(&mut *self.conn)
-                .await
             }
         }
     };
@@ -1467,7 +1450,38 @@ macro_rules! impl_dlq_write {
 
 impl_dlq_write!(MaintenanceWriteLane);
 
+enum DlqCallableRoutine {
+    Redrive,
+    ResolveExpired,
+}
+
+impl DlqCallableRoutine {
+    const fn sql(self) -> &'static str {
+        match self {
+            Self::Redrive => "SELECT rss_outbox_redrive($1, $2::uuid)",
+            Self::ResolveExpired => {
+                "SELECT rss_outbox_resolve_expired($1, $2::uuid, $3, $4, $5, $6)"
+            }
+        }
+    }
+}
+
 impl EventingTx<'_, MaintenanceWriteLane, DlqConcern> {
+    pub(crate) async fn dlq_resolve_expired_outbox(
+        &mut self,
+        input: DlqExpiredResolution<'_>,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(DlqCallableRoutine::ResolveExpired.sql())
+            .bind(input.event_id)
+            .bind(self.tenant.to_string())
+            .bind(input.kind)
+            .bind(input.change_ticket)
+            .bind(input.operator_subject)
+            .bind(input.evidence_event_id)
+            .fetch_one(&mut *self.conn)
+            .await
+    }
+
     pub(crate) async fn dlq_record_finish_audit(
         &mut self,
         input: DlqFinishAudit<'_>,

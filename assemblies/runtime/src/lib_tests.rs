@@ -2008,8 +2008,7 @@ async fn runtime_lifecycle_owner_does_not_shutdown_exporter_after_handoff() {
     .expect("place runtime before lifecycle handoff");
     let mut owner = RuntimeLifecycleOwner::new(inputs);
     let handed_off = owner
-        .inputs
-        .take_trace_export()
+        .take_trace_export_for_test()
         .expect("exporter must move into launch ownership");
 
     owner

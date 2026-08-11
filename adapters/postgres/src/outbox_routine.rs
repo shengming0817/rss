@@ -82,13 +82,11 @@ macro_rules! outbox_routine_catalog {
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub(crate) enum OutboxCallableRoutine {
             $( $serving, )+
-            $( $operator, )+
         }
 
         impl OutboxCallableRoutine {
             pub(crate) const ALL: &'static [Self] = &[
                 $( Self::$serving, )+
-                $( Self::$operator, )+
             ];
 
             pub(crate) const fn spec(self) -> OutboxRoutineSpec {
@@ -98,12 +96,6 @@ macro_rules! outbox_routine_catalog {
                         function: stringify!($serving_function),
                         signature: concat!(stringify!($serving_function), $serving_arguments),
                         role: OutboxRoutineRole::ServingAuthority,
-                    }, )+
-                    $( Self::$operator => OutboxRoutineSpec {
-                        id: OutboxRoutineId::$operator,
-                        function: stringify!($operator_function),
-                        signature: concat!(stringify!($operator_function), $operator_arguments),
-                        role: OutboxRoutineRole::OperatorAuthority,
                     }, )+
                 }
             }
@@ -116,7 +108,6 @@ macro_rules! outbox_routine_catalog {
                 let _policy = spec.role.policy();
                 match self {
                     $( Self::$serving => concat!($serving_prefix, stringify!($serving_function), $serving_suffix), )+
-                    $( Self::$operator => concat!($operator_prefix, stringify!($operator_function), $operator_suffix), )+
                 }
             }
         }

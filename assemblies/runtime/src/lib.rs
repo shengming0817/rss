@@ -34,28 +34,29 @@ mod domains;
 pub mod event_transport;
 pub mod infra;
 pub(crate) mod launch;
+mod lifecycle;
 mod listeners;
 mod module;
 #[path = "generated/modules_gen.rs"]
 mod modules_gen;
 pub mod operator;
-#[path = "generated/providers_gen.rs"]
-mod providers_gen;
-#[cfg(test)]
-mod telemetry_tests;
-#[cfg(test)]
-#[path = "lib_tests.rs"]
-mod tests;
-const _: () = assert!(!providers_gen::PROVIDER_CATALOG.is_empty());
 mod phase;
 pub mod plan;
+mod provider_catalog;
 mod provider_output;
+#[path = "generated/providers_gen.rs"]
+mod providers_gen;
 mod routes;
 mod runtime_inventory;
 pub mod saga_runtime;
 mod secret_config;
 pub mod support;
 mod telemetry;
+#[cfg(test)]
+mod telemetry_tests;
+#[cfg(test)]
+#[path = "lib_tests.rs"]
+mod tests;
 pub(crate) use secret_config::EnvSecret;
 #[cfg(test)]
 use telemetry::{
@@ -76,10 +77,19 @@ pub use settings_composition::KEYPROVIDER_READY_PROBE_NAME;
 /// through the committed generated module list.
 #[cfg(feature = "integration")]
 pub mod test_support;
+pub(crate) use lifecycle::{
+    prepare_operator_local, prepare_runtime_kernel, shutdown_prepared_runtime,
+};
+pub use lifecycle::{prepare_runtime, report_process_error, run, shutdown_runtime};
 pub(crate) use module::LocalDomainProviderCatalog;
 pub use module::SharedRuntimeDeps;
 pub use phase::ServingRuntimeInputs;
 
+#[cfg(test)]
+pub(crate) use lifecycle::{RuntimeLifecycleOwner, prepare_serving_local, safe_process_error_line};
+
+#[cfg(test)]
+use crypto::RustCryptoMacVerifier;
 #[cfg(test)]
 use infra::oidc::{
     FEDERATED_ACCESS_TOKEN_JWKS_READY_PROBE_NAME, RSS_ACCESS_TOKEN_JWKS_READY_PROBE_NAME,
@@ -88,154 +98,7 @@ use infra::oidc::{
 use infra::redis::REDIS_READY_PROBE_NAME;
 #[cfg(test)]
 use infra::s3::{S3RuntimeConfig, S3RuntimeConfigParts};
-use phase::PreparedRuntimeInputs;
 #[cfg(test)]
 use phase::{RuntimePhase, after_required_preflight, validate_domain_listener_evidence};
-
-use anyhow::Context as _;
-use config::{RuntimeConfigSnapshot, SnapshotConfig};
-#[cfg(test)]
-use crypto::RustCryptoMacVerifier;
-use diport::ManagedResource as _;
 #[cfg(test)]
 use primitives::MacKey;
-fn prepare_operator_local(_: SnapshotConfig<'_>) -> anyhow::Result<()> {
-    Ok(())
-}
-
-#[cfg(test)]
-fn prepare_serving_local(config: SnapshotConfig<'_>) -> anyhow::Result<()> {
-    prepare_operator_local(config)
-}
-
-/// Capture one process snapshot, run profile-local preparation, then build external tracing.
-///
-/// The local closure always runs before the OTLP builder. Serving keeps this step process-only;
-/// placement-selected domain configuration such as the Identity password blocklist is parsed later
-/// from the same snapshot and only when that domain executes locally.
-fn prepare_runtime_kernel<Local>(
-    prepare_local: impl FnOnce(SnapshotConfig<'_>) -> anyhow::Result<Local>,
-) -> anyhow::Result<(PreparedRuntimeInputs, Local, phase::PreparedTelemetryPlan)> {
-    let runtime_config = RuntimeConfigSnapshot::capture_process_snapshot()
-        .context("capture process runtime configuration")?;
-    let config = runtime_config.view();
-    let telemetry_plan = phase::PreparedTelemetryPlan::prepare(config)?;
-    let (local, trace_export) =
-        telemetry::prepare_local_before_external(config, prepare_local, || {
-            telemetry::build_trace_export(config, telemetry_plan.resource())
-        })?;
-    telemetry::install_runtime_subscriber(
-        telemetry_plan.filter(),
-        telemetry_plan.resource().clone(),
-        trace_export.as_ref(),
-    )?;
-    Ok((
-        PreparedRuntimeInputs::new(runtime_config, trace_export),
-        local,
-        telemetry_plan,
-    ))
-}
-
-/// Prepare serving inputs and the placement-first runtime plan before provider construction.
-///
-/// 组合根 binary 入口在 [`run`] **之前**调用——否则运行时入口的全部结构化日志
-/// （bind / serve / shutdown / fail-fast）皆为 no-op。`RUST_LOG`、[`telemetry::OTEL_ENDPOINT_ENV`] 与后续
-/// serving consumer 全部来自这个 snapshot，不再读取 ambient environment。`ServingRuntimeInputs`
-/// 消费 unplaced RuntimePlan 生成唯一 placement capability；domain-local config/provider 随后只由该
-/// capability 的 Local projection 构造。
-///
-/// Only this type can enter [`run`] or [`shutdown_runtime`].
-pub fn prepare_runtime() -> anyhow::Result<ServingRuntimeInputs> {
-    let (prepared, (), telemetry_plan) = prepare_runtime_kernel(prepare_operator_local)?;
-    ServingRuntimeInputs::new(prepared, telemetry_plan)
-}
-
-/// Emit a process-terminal failure through the installed JSON subscriber.
-///
-/// Preparation failures before subscriber installation use one safe CLI line; a process can
-/// therefore emit either pre-runtime CLI text or the versioned JSON stream, never both.
-pub fn report_process_error(error: &anyhow::Error) {
-    if !telemetry::report_process_error(error) {
-        eprintln!("{}", safe_process_error_line(error));
-    }
-}
-
-fn safe_process_error_line(error: &anyhow::Error) -> String {
-    let single_line: String = error
-        .to_string()
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect();
-    secure::redact_observation_field("process_error", &single_line).to_string()
-}
-
-/// Flush the trace exporter when a prepared runtime exits before serving launch.
-pub async fn shutdown_runtime(mut runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
-    shutdown_prepared_runtime(runtime_inputs.prepared_mut()).await
-}
-
-async fn shutdown_prepared_runtime(
-    runtime_inputs: &mut PreparedRuntimeInputs,
-) -> anyhow::Result<()> {
-    if let Some(trace_export) = runtime_inputs.take_trace_export() {
-        trace_export
-            .shutdown()
-            .await
-            .context("shutdown trace exporter")?;
-    }
-    Ok(())
-}
-
-/// Owns resources prepared before startup until the inner startup body moves them into launch.
-struct RuntimeLifecycleOwner {
-    inputs: ServingRuntimeInputs,
-}
-
-impl RuntimeLifecycleOwner {
-    fn new(inputs: ServingRuntimeInputs) -> Self {
-        Self { inputs }
-    }
-
-    async fn run(mut self) -> anyhow::Result<()> {
-        let startup_result = run_startup(&mut self.inputs).await;
-        self.finish(startup_result).await
-    }
-
-    async fn finish(mut self, startup_result: anyhow::Result<()>) -> anyhow::Result<()> {
-        let cleanup_result = shutdown_prepared_runtime(self.inputs.prepared_mut()).await;
-        match (startup_result, cleanup_result) {
-            (Ok(()), cleanup_result) => cleanup_result,
-            (Err(startup_error), Ok(())) => Err(startup_error),
-            (Err(startup_error), Err(cleanup_error)) => {
-                tracing::error!(
-                    cleanup_error = %cleanup_error,
-                    "runtime startup failed and trace cleanup also failed; preserving startup error"
-                );
-                Err(startup_error)
-            }
-        }
-    }
-}
-
-/// 生产组合根入口：构造共享基础设施 → generated domains → `compose_bindings`
-/// → 聚合 readiness/lifecycle outputs → 装配认证接线 → 挂 Health listener
-/// → bind + serve + 信号优雅关停。
-///
-/// 缺配 / 连不上 / migration 失败均 **fail-fast**；各域接线由 manifest-derived domain list 驱动。
-/// tracing subscriber 与配置 snapshot 由 [`prepare_runtime`] 在 `main` 中先于本 fn 装配。
-// reason: 组合根入口顺序编排（infra setup → provider setup → generated domains → compose → finalize → serve）
-// 多条 tracing 宏展开在 cognitive_complexity 计数贡献额外节点——item-level carve-out（error-handling.md §Carve-out）。
-#[allow(clippy::cognitive_complexity)]
-pub async fn run(runtime_inputs: ServingRuntimeInputs) -> anyhow::Result<()> {
-    RuntimeLifecycleOwner::new(runtime_inputs).run().await
-}
-
-async fn run_startup(runtime_inputs: &mut ServingRuntimeInputs) -> anyhow::Result<()> {
-    phase::execute(runtime_inputs).await.map(|_| ())
-}

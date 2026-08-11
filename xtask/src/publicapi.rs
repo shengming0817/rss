@@ -112,13 +112,20 @@ enum BaselineOwner {
 enum BaselineScope {
     Complete(BaselineOwner),
     InternalLayer(InternalLayer),
+    AffectedInternal,
+}
+
+#[derive(Clone, Copy)]
+enum StaticBaselineScope {
+    Complete(BaselineOwner),
+    InternalLayer(InternalLayer),
 }
 
 impl BaselineScope {
     const fn owner(self) -> BaselineOwner {
         match self {
             Self::Complete(owner) => owner,
-            Self::InternalLayer(_) => BaselineOwner::Internal,
+            Self::InternalLayer(_) | Self::AffectedInternal => BaselineOwner::Internal,
         }
     }
 }
@@ -228,15 +235,19 @@ impl BaselineCatalog {
         })
     }
 
-    fn plan(&self, scope: BaselineScope) -> BaselinePlan {
-        let (targets, universe) = match scope {
-            BaselineScope::Complete(BaselineOwner::Internal) => {
-                (self.internal.clone(), BaselineUniverse::Complete)
-            }
-            BaselineScope::Complete(BaselineOwner::Release) => {
-                (self.release.clone(), BaselineUniverse::Complete)
-            }
-            BaselineScope::InternalLayer(layer) => {
+    fn plan(&self, selection: StaticBaselineScope) -> BaselinePlan {
+        let (scope, targets, universe) = match selection {
+            StaticBaselineScope::Complete(BaselineOwner::Internal) => (
+                BaselineScope::Complete(BaselineOwner::Internal),
+                self.internal.clone(),
+                BaselineUniverse::Complete,
+            ),
+            StaticBaselineScope::Complete(BaselineOwner::Release) => (
+                BaselineScope::Complete(BaselineOwner::Release),
+                self.release.clone(),
+                BaselineUniverse::Complete,
+            ),
+            StaticBaselineScope::InternalLayer(layer) => {
                 let selected = target_crates(Some(layer))
                     .into_iter()
                     .collect::<BTreeSet<_>>();
@@ -252,7 +263,11 @@ impl BaselineCatalog {
                     .filter(|package| selected.contains(package.as_str()))
                     .cloned()
                     .collect();
-                (targets, BaselineUniverse::Packages(universe))
+                (
+                    BaselineScope::InternalLayer(layer),
+                    targets,
+                    BaselineUniverse::Packages(universe),
+                )
             }
         };
         BaselinePlan {
@@ -262,6 +277,93 @@ impl BaselineCatalog {
             library_targets: self.library_targets.clone(),
         }
     }
+
+    fn affected_internal_plan(&self, packages: &BTreeSet<String>) -> Result<BaselinePlan> {
+        let universe = self
+            .internal
+            .iter()
+            .filter(|package| packages.contains(package.as_str()))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        if universe.len() != packages.len() {
+            let known = universe
+                .iter()
+                .map(|package| package.as_str())
+                .collect::<BTreeSet<_>>();
+            let unknown = packages
+                .iter()
+                .filter(|package| !known.contains(package.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            bail!(
+                "affected internal public-api packages are not baseline owners: {}",
+                unknown.join(", ")
+            );
+        }
+        let targets = self
+            .internal
+            .iter()
+            .filter(|package| packages.contains(package.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            targets.len() == packages.len(),
+            "affected internal public-api selection did not resolve every owner"
+        );
+        Ok(BaselinePlan {
+            scope: BaselineScope::AffectedInternal,
+            universe: BaselineUniverse::Packages(universe),
+            targets,
+            library_targets: self.library_targets.clone(),
+        })
+    }
+}
+
+pub(crate) fn affected_internal_packages(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    candidates: &BTreeSet<String>,
+) -> Result<BTreeSet<String>> {
+    let possible_owners = target_crates(None).into_iter().collect::<BTreeSet<_>>();
+    if candidates.is_empty()
+        || candidates
+            .iter()
+            .all(|candidate| !possible_owners.contains(candidate.as_str()))
+    {
+        return Ok(BTreeSet::new());
+    }
+    let catalog = BaselineCatalog::derive(root, facts)?;
+    let internal = catalog
+        .internal
+        .iter()
+        .map(|package| package.as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    Ok(candidates.intersection(&internal).cloned().collect())
+}
+
+pub(crate) fn run_affected_internal_check(
+    root: &Path,
+    facts: &WorkspaceFacts,
+    packages: &[String],
+) -> Result<()> {
+    let selected = packages.iter().cloned().collect::<BTreeSet<_>>();
+    anyhow::ensure!(
+        !selected.is_empty(),
+        "affected internal public-api selection is empty"
+    );
+    let catalog = BaselineCatalog::derive(root, facts)?;
+    let plan = catalog.affected_internal_plan(&selected)?;
+    execute(root, &plan, true).map(drop)
+}
+
+pub(crate) fn run_complete_internal_check(root: &Path, facts: &WorkspaceFacts) -> Result<()> {
+    let catalog = BaselineCatalog::derive(root, facts)?;
+    execute(
+        root,
+        &catalog.plan(StaticBaselineScope::Complete(BaselineOwner::Internal)),
+        true,
+    )
+    .map(drop)
 }
 
 fn resolve_library(facts: &WorkspaceFacts, name: &str) -> Result<PackageKey> {
@@ -631,14 +733,14 @@ pub(crate) fn run(command: Command) -> Result<()> {
     let catalog = BaselineCatalog::derive(&root, facts)?;
     let (plan, check) = match command {
         Command::Internal { check, layer } => {
-            let scope = layer.map_or(
-                BaselineScope::Complete(BaselineOwner::Internal),
-                BaselineScope::InternalLayer,
+            let selection = layer.map_or(
+                StaticBaselineScope::Complete(BaselineOwner::Internal),
+                StaticBaselineScope::InternalLayer,
             );
-            (catalog.plan(scope), check)
+            (catalog.plan(selection), check)
         }
         Command::Release { check } => (
-            catalog.plan(BaselineScope::Complete(BaselineOwner::Release)),
+            catalog.plan(StaticBaselineScope::Complete(BaselineOwner::Release)),
             check,
         ),
     };
@@ -699,7 +801,7 @@ pub(crate) fn run_release_check(
     collect_release_stage(&mut failures, 0, "internal-exact-set", || {
         execute(
             root,
-            &catalog.plan(BaselineScope::Complete(BaselineOwner::Internal)),
+            &catalog.plan(StaticBaselineScope::Complete(BaselineOwner::Internal)),
             true,
         )
     });
@@ -736,7 +838,7 @@ pub(crate) fn run_release_check(
 
     let captures = match execute(
         root,
-        &catalog.plan(BaselineScope::Complete(BaselineOwner::Release)),
+        &catalog.plan(StaticBaselineScope::Complete(BaselineOwner::Release)),
         true,
     ) {
         Ok(captures) => Some(captures),
@@ -1815,6 +1917,12 @@ mod tests {
                     .map(|name| facts.package_key(name).map_err(Into::into))
                     .collect::<Result<_>>()?,
             ),
+            BaselineScope::AffectedInternal => BaselineUniverse::Packages(
+                names
+                    .iter()
+                    .map(|name| facts.package_key(name).map_err(Into::into))
+                    .collect::<Result<_>>()?,
+            ),
         };
         let targets = names
             .iter()
@@ -2056,6 +2164,29 @@ mod tests {
     }
 
     #[test]
+    fn affected_internal_plan_is_exact_and_rejects_non_owner_packages() -> Result<()> {
+        let root = crate::workspace_root()?;
+        let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
+        let catalog = BaselineCatalog::derive(&root, command_facts.get()?)?;
+        let selected = BTreeSet::from(["diport".to_owned(), "runtimeexec".to_owned()]);
+        let plan = catalog.affected_internal_plan(&selected)?;
+        assert_eq!(
+            plan.targets
+                .iter()
+                .map(PackageKey::as_str)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["diport", "runtimeexec"])
+        );
+        assert!(matches!(plan.scope, BaselineScope::AffectedInternal));
+        assert!(
+            catalog
+                .affected_internal_plan(&BTreeSet::from(["rss-platform".to_owned()]))
+                .is_err()
+        );
+        Ok(())
+    }
+
+    #[test]
     fn release_selection_rejects_non_library_package() -> Result<()> {
         let root = crate::workspace_root()?;
         let command_facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
@@ -2131,7 +2262,7 @@ mod tests {
         let root = crate::workspace_root()?;
         let facts = crate::workspace_facts::CommandWorkspaceFacts::new(&root);
         let catalog = BaselineCatalog::from_selected_packages(facts.get()?, ["vocab"])?;
-        let plan = catalog.plan(BaselineScope::InternalLayer(InternalLayer::Basis));
+        let plan = catalog.plan(StaticBaselineScope::InternalLayer(InternalLayer::Basis));
         let dir = Path::new("/repo/public-api");
         let actual = BTreeMap::from([("vocab.txt".to_owned(), b"stale".to_vec())]);
         let diff = differences(&plan, dir, &actual, &BTreeMap::new());
