@@ -28,10 +28,11 @@ and is cluster-global.
    manager configuration or production infrastructure has been validated. Only
    `RSS_SMOKE_MODE=developer RSS_SMOKE_ALLOW_SKIP=1` may skip an incomplete Remote/SPIFFE fixture,
    and it emits the sole `NOT PRODUCTION EVIDENCE` receipt with every missing variable named.
-3. On a fresh, project-scoped database, start two containers from the same image and configuration
-   generation concurrently. Both processes may call the embedded SQLx migrator; the advisory lock
-   serializes application. Verify `_sqlx_migrations` has exactly one successful row and the expected
-   checksum for every embedded version, then require both replicas to become ready.
+3. On a fresh, project-scoped database, run the sealed release's independent migration operator and
+   verify `_sqlx_migrations` has exactly one successful row with the expected checksum for every
+   embedded version. After that job completes, start two containers from the same image and
+   configuration generation concurrently and require both replicas to become ready. Serving
+   processes never own or execute migration capability.
 4. Pause Vault and require both replicas to become unready through the exact unhealthy Vault-backed
    probes. Resume Vault and require those probes to become healthy with overall readiness 200 and no
    fallback provider. The strict single-image smoke applies the same exact unhealthy/healthy closure
@@ -71,7 +72,7 @@ release rather than installing a compatibility reader, alias or fallback.
 | Vault Transit / Vault KV | strict smoke and two-replica readiness down/up | in-process recovery |
 | S3 | strict smoke readiness down/up | in-process recovery |
 | Redis | strict smoke plus active/standby coordination evidence | in-process recovery when the exercised path recovers |
-| PostgreSQL | concurrent migration and initial readiness only | restore service, then restart replicas if readiness does not recover |
+| PostgreSQL | independent migration ledger and initial two-replica readiness only | restore service, then restart replicas if readiness does not recover |
 | RabbitMQ | initial readiness only | rolling process restart; automatic consumer re-subscription is not claimed |
 | SPIFFE / JWKS | startup and static production gates | restore source and restart when the exercised runtime path does not self-heal |
 

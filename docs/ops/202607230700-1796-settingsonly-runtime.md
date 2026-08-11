@@ -126,6 +126,12 @@ s3AccessKeyId
 s3SecretAccessKey
 ```
 
+镜像身份固定为 `65532:65532`。delivery 投影必须让该身份可遍历 secret 目录并读取 bundle，同时禁止
+group/other 权限和可写挂载；production artifact fixture 的精确证明采用目录 `65532:65532/0500`、文件
+`65532:65532/0400` 的 Docker-owned volume，并把整个 `/var/run/rss/secrets` 只读挂入容器。外部 delivery
+可以采用等效的 ownership/projected-volume 机制，但不得依赖宿主运行用户 UID、world-readable mode、root
+容器或运行时 `--user` 覆盖。
+
 `settingsAmqpPublisherUrl` 与 `settingsAmqpSubscriberUrl` 必须为不同的 `amqps://` credential，
 分别只授予 Settings exchange publish 与 queue consume/bind 所需权限；两者使用 Settings 独立 vhost。
 存在 `RSS_AMQP_URL` 即启动失败，不接受单 URL alias 或 fallback。
@@ -147,9 +153,9 @@ docker run --rm --network host \
   rss-settingsonly:1796 --config /etc/rss/settingsonly.toml
 ```
 
-外部 delivery 系统必须以只读方式投影配置、JWKS、CA 和 secret，并让 TLS proxy 在同一网络命名空间访问
-loopback listener。具体调度资源不由本仓库定义。镜像、配置与 secret 必须作为同一 generation 发布和回滚，
-禁止旧 schema 双读、别名或 fallback。
+外部 delivery 系统必须按上述 non-root 可读且非 world-readable 契约，以只读方式投影配置、JWKS、CA 和
+secret，并让 TLS proxy 在同一网络命名空间访问 loopback listener。具体调度资源不由本仓库定义。镜像、
+配置与 secret 必须作为同一 generation 发布和回滚，禁止旧 schema 双读、别名或 fallback。
 
 `pgProjectionWorkerPassword` 只供 `rss_projection_worker` 登录。该角色必须保持 `NOINHERIT`、无表级权限、
 无角色成员关系，并且只能执行 0095 安装的 purpose-bound tenant/source/checkpoint/DLQ/apply 函数；启动时

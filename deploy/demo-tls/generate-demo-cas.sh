@@ -14,6 +14,35 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 OUT="${RSS_DEMO_TLS_OUT:-$ROOT/out}"
 FORCE="${RSS_DEMO_TLS_FORCE:-0}"
+LOCK="${OUT}.lock"
+
+release_generation_lock() {
+  rm -f -- "$LOCK/pid"
+  rmdir -- "$LOCK" 2>/dev/null || true
+}
+
+acquire_generation_lock() {
+  mkdir -p "$(dirname "$OUT")"
+  local attempt owner
+  for attempt in {1..300}; do
+    if mkdir "$LOCK" 2>/dev/null; then
+      printf '%s\n' "$$" >"$LOCK/pid"
+      trap release_generation_lock EXIT
+      return
+    fi
+    if [[ -f "$LOCK/pid" ]]; then
+      owner="$(cat "$LOCK/pid" 2>/dev/null || true)"
+      if [[ "$owner" =~ ^[0-9]+$ ]] && ! kill -0 "$owner" 2>/dev/null; then
+        rm -f -- "$LOCK/pid"
+        rmdir -- "$LOCK" 2>/dev/null || true
+        continue
+      fi
+    fi
+    sleep 0.1
+  done
+  echo "timed out acquiring demo TLS generation lock: $LOCK" >&2
+  exit 1
+}
 
 need_openssl() {
   command -v openssl >/dev/null 2>&1 || {
@@ -180,6 +209,7 @@ stage_minio_layout() {
 }
 
 need_openssl
+acquire_generation_lock
 wipe_if_forced
 ensure_layout
 

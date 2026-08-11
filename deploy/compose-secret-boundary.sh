@@ -4,10 +4,72 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+check_postgres_password_source() {
+  local public_env="$1"
+  local secret_env="$2"
+  python3 - "${public_env}" "${secret_env}" <<'PY'
+from pathlib import Path
+import sys
+
+import re
+
+assignment = re.compile(r"^\s*(?:export\s+)?POSTGRES_PASSWORD\s*=\s*(.*)$")
+
+def assignments(path: str) -> list[str]:
+    values = []
+    for line in Path(path).read_text(encoding="utf-8").splitlines():
+        matched = assignment.match(line)
+        if matched:
+            values.append(matched.group(1).strip())
+    return values
+
+public_values = assignments(sys.argv[1])
+secret_values = assignments(sys.argv[2])
+if public_values:
+    raise SystemExit("public Compose env must not define POSTGRES_PASSWORD")
+if len(secret_values) != 1:
+    raise SystemExit("canonical Compose secret env must define POSTGRES_PASSWORD exactly once")
+PY
+}
+
+check_postgres_password_declaration() {
+  local compose_file="$1"
+  docker compose --profile "*" -f "${compose_file}" config --format json --no-env-resolution |
+    python3 -c '
+import json, sys
+
+postgres = (json.load(sys.stdin).get("services", {}).get("postgres") or {})
+if "POSTGRES_PASSWORD" in (postgres.get("environment") or {}):
+    raise SystemExit("postgres must not override canonical POSTGRES_PASSWORD via environment")
+'
+}
+
+render_validated_compose() {
+  local compose_file="$1"
+  check_postgres_password_declaration "${compose_file}"
+  docker compose --profile "*" -f "${compose_file}" config --format json |
+    python3 -c '
+import json, sys
+
+document = json.load(sys.stdin)
+postgres = (document.get("services", {}).get("postgres") or {})
+password = (postgres.get("environment") or {}).get("POSTGRES_PASSWORD")
+if (
+    not isinstance(password, str)
+    or not password.strip()
+    or password.lstrip().startswith("#")
+):
+    raise SystemExit("resolved Compose POSTGRES_PASSWORD must contain an effective secret")
+json.dump(document, sys.stdout)
+'
+}
+
 run_checks() {
   local compose_file="$1"
   local rendered
-  rendered="$(docker compose --profile "*" -f "${compose_file}" config --format json)"
+  if ! rendered="$(render_validated_compose "${compose_file}")"; then
+    return 1
+  fi
   python3 -c '
 import json, os, sys
 
@@ -253,6 +315,72 @@ if missing_mounts:
 if [[ "${1:-}" == "--selftest" ]]; then
   tmp="$(mktemp -d)"
   trap 'rm -rf "${tmp}"' EXIT
+  printf '%s\n' 'RSS_NON_SECRET=value' >"${tmp}/public.env"
+  : >"${tmp}/postgres.env"
+  if check_postgres_password_source "${tmp}/public.env" "${tmp}/postgres.env"; then
+    echo "selftest expected red for missing canonical POSTGRES_PASSWORD" >&2
+    exit 1
+  fi
+  printf '%s\n' 'POSTGRES_PASSWORD=first' 'POSTGRES_PASSWORD=second' >"${tmp}/postgres.env"
+  if check_postgres_password_source "${tmp}/public.env" "${tmp}/postgres.env"; then
+    echo "selftest expected red for duplicate canonical POSTGRES_PASSWORD" >&2
+    exit 1
+  fi
+  printf '%s\n' 'POSTGRES_PASSWORD=public-leak' >"${tmp}/public.env"
+  printf '%s\n' 'POSTGRES_PASSWORD=secret' >"${tmp}/postgres.env"
+  if check_postgres_password_source "${tmp}/public.env" "${tmp}/postgres.env"; then
+    echo "selftest expected red for public POSTGRES_PASSWORD leakage" >&2
+    exit 1
+  fi
+  printf '%s\n' 'RSS_NON_SECRET=value' >"${tmp}/public.env"
+  check_postgres_password_source "${tmp}/public.env" "${tmp}/postgres.env"
+  printf '%s\n' ' export POSTGRES_PASSWORD = public-leak' >"${tmp}/public.env"
+  if check_postgres_password_source "${tmp}/public.env" "${tmp}/postgres.env"; then
+    echo "selftest expected red for Compose-equivalent public POSTGRES_PASSWORD syntax" >&2
+    exit 1
+  fi
+  printf '%s\n' 'RSS_NON_SECRET=value' >"${tmp}/public.env"
+  cat >"${tmp}/postgres-override.yml" <<'YAML'
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD: direct-override
+YAML
+  if check_postgres_password_declaration "${tmp}/postgres-override.yml"; then
+    echo "selftest expected red for direct postgres environment override" >&2
+    exit 1
+  fi
+  cat >"${tmp}/postgres-null-override.yml" <<'YAML'
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_PASSWORD:
+YAML
+  if check_postgres_password_declaration "${tmp}/postgres-null-override.yml"; then
+    echo "selftest expected red for null postgres environment override" >&2
+    exit 1
+  fi
+  cat >"${tmp}/postgres-env-file.yml" <<'YAML'
+services:
+  postgres:
+    image: postgres:16-alpine
+    env_file: ./postgres.env
+YAML
+  unset RSS_COMPOSE_SELFTEST_UNDEFINED_PASSWORD
+  for invalid_password in \
+    'POSTGRES_PASSWORD=""' \
+    "POSTGRES_PASSWORD=\${RSS_COMPOSE_SELFTEST_UNDEFINED_PASSWORD}" \
+    'POSTGRES_PASSWORD= # inline comment'; do
+    printf '%s\n' "${invalid_password}" >"${tmp}/postgres.env"
+    if render_validated_compose "${tmp}/postgres-env-file.yml" >/dev/null; then
+      echo "selftest expected red for resolved empty POSTGRES_PASSWORD: ${invalid_password}" >&2
+      exit 1
+    fi
+  done
+  printf '%s\n' 'POSTGRES_PASSWORD=secret' >"${tmp}/postgres.env"
+  render_validated_compose "${tmp}/postgres-env-file.yml" >/dev/null
   mkdir -p "${tmp}/demo-tls/out/rabbitmq"
 
   mkdir -p "${tmp}/l2-init-bin"
@@ -329,6 +457,7 @@ services:
       - ./postgres-ca.pem:/run/rss-demo-tls/postgres/ca.pem:ro
   postgres:
     image: postgres:16-alpine
+    env_file: ./postgres.env
     environment:
       RSS_PG_L2_DR_RECOVERY_AUDITOR_USERNAME: rss_l2_dr_recovery_auditor
       RSS_PG_L2_DR_RECOVERY_AUDITOR_PASSWORD_FILE: /run/rss-demo-secrets/pg-l2-dr-recovery-auditor-password
@@ -433,5 +562,8 @@ PY
 fi
 
 export RSS_COMPOSE_FILE="${script_dir}/docker-compose.yml"
+check_postgres_password_source \
+  "${script_dir}/.env.example" \
+  "${script_dir}/demo-secrets/postgres.env"
 run_checks "${script_dir}/docker-compose.yml"
 printf '%s\n' 'compose serving, Projection, and L2 provisioning Secret boundaries verified'

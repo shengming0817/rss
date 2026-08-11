@@ -32,6 +32,7 @@ use testkit::{
     integration_container_labels, minio_tls_archive, postgres_tls, rabbitmq_tls, redis_tls,
     vault_tls,
 };
+use tokio::io::AsyncWriteExt as _;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
 
@@ -50,7 +51,7 @@ const AUDIENCE: &str = "rss-settingsonly";
 const JWT_KID: &str = "settingsonly-production-artifact";
 const SETTINGS_TOPIC: &str = "settings.config-version-changed";
 const CONFIG_PATH: &str = "/fixtures/settingsonly.toml";
-const SECRET_PATH: &str = "/var/run/rss/secrets/serving-secret-bundle";
+const SECRET_DIRECTORY: &str = "/var/run/rss/secrets";
 const WORKLOAD_DIRECTORY: &str = "/run/rss-spiffe";
 const WORKLOAD_SOCKET: &str = "/run/rss-spiffe/workload.sock";
 const WORKLOAD_ENDPOINT: &str = "unix:///run/rss-spiffe/workload.sock";
@@ -68,6 +69,7 @@ const TENANT_AUTHORITY_KEY: &str = "settingsonly-tenant-authority-key-1875";
 const CONFIG_TRANSIT_KEY: &str = "settings-config-value";
 const DLX_HOT_TRANSIT_KEY: &str = "settings-dlx-hot";
 const DLX_ARCHIVE_TRANSIT_KEY: &str = "settings-dlx-archive";
+const PROJECTION_TARGET_GENERATION: &str = "v3";
 static UNIQUE: AtomicU64 = AtomicU64::new(0);
 
 /// Eventually：`Ok(true)` 成功，`Ok(false)` 继续轮询，`Err` 立即失败。
@@ -225,6 +227,7 @@ struct Fixture {
     denied_client: reqwest::Client,
     token: String,
     files: FixtureFiles,
+    secret_bundle: SecretBundleVolume,
     process: Option<ImageProcess>,
 }
 
@@ -413,7 +416,7 @@ impl Fixture {
             .duration_since(UNIX_EPOCH)?
             .as_secs();
         let federated = FederatedInput::new(issued_at)?;
-        files.write_instance(
+        let secret_document = files.write_instance(
             &providers.sut,
             &providers.rabbit,
             &providers.redis,
@@ -422,6 +425,8 @@ impl Fixture {
             &federated,
             &roles,
         )?;
+        let secret_bundle = SecretBundleVolume::provision(&secret_document, &mut cleanup).await?;
+        drop(secret_document);
         let identities =
             IdentitySet::generate(SPIFFE_ID, INGRESS_SPIFFE_ID, DENIED_INGRESS_SPIFFE_ID)?;
         let ingress = WorkloadApi::start_host(identities.ingress).await?;
@@ -450,6 +455,7 @@ impl Fixture {
             denied_client,
             token: federated.token,
             files,
+            secret_bundle,
             process: None,
         };
         fixture.spawn().await?;
@@ -597,7 +603,7 @@ impl Fixture {
         self.workload.release_identity()?;
         let _ready = self.wait_ready().await?;
         sqlx::query(
-            "REVOKE EXECUTE ON FUNCTION public.rss_projection_worker_list_tenants(text,text,text,text,text,uuid,integer) FROM rss_projection_worker",
+            "REVOKE EXECUTE ON FUNCTION public.rss_projection_worker_list_tenants(text,text,text,text,uuid,integer) FROM rss_projection_worker",
         )
         .execute(&self.pool)
         .await
@@ -627,44 +633,40 @@ impl Fixture {
 
     async fn wait_projection_effect(&self, key: &str, event_id: &str) -> anyhow::Result<()> {
         let observed = await_pred(TEST_TIMEOUT, || async {
-            let row_count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM settings_config_projection_rows WHERE tenant_id = $1 AND projection_id = 'settings.config-projection' AND config_key = $2 AND source_event_id = $3",
+            let (row_count, receipt_count, checkpoint_offset, source_lsn): (
+                i64,
+                i64,
+                Option<i64>,
+                Option<i64>,
+            ) = sqlx::query_as(
+                "SELECT \
+                    (SELECT count(*) FROM settings_config_projection_rows WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection' AND config_key = $3 AND source_event_id = $2), \
+                    (SELECT count(*) FROM settings_projection_dedupe_receipts WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection' AND source_event_id = $2), \
+                    (SELECT max(offset_lsn) FROM checkpoint WHERE owner = 'projection:' || $1 AND checkpoint_id LIKE 'settings.config-projection@%:shadow'), \
+                    (SELECT max(id) FROM projection_events WHERE event_id = $2)",
             )
             .bind(TENANT)
+            .bind(event_id)
             .bind(key)
-            .bind(event_id)
             .fetch_one(&self.pool)
             .await?;
-            let receipt_count: i64 = sqlx::query_scalar(
-                "SELECT count(*) FROM settings_projection_dedupe_receipts WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection' AND source_event_id = $2",
-            )
-            .bind(TENANT)
-            .bind(event_id)
-            .fetch_one(&self.pool)
-            .await?;
-            let checkpoint_count: i64 = sqlx::query_scalar(
-                "SELECT count(*) \
-                   FROM checkpoint AS checkpoint \
-                   JOIN projection_events AS event ON event.event_id = $2 \
-                  WHERE checkpoint.owner = 'projection:' || $1 \
-                    AND checkpoint.checkpoint_id LIKE 'settings.config-projection@%:shadow' \
-                    AND checkpoint.offset_lsn >= event.id",
-            )
-            .bind(TENANT)
-            .bind(event_id)
-            .fetch_one(&self.pool)
-            .await?;
-            Ok(row_count == 1 && receipt_count == 1 && checkpoint_count == 1)
+            Ok(row_count == 1
+                && receipt_count == 1
+                && checkpoint_offset
+                    .zip(source_lsn)
+                    .is_some_and(|(checkpoint, source)| checkpoint >= source))
         })
         .await;
         if observed.is_ok() {
             return Ok(());
         }
-        let diagnostic: (i64, i64, i64, i64, i64, Option<i64>) = sqlx::query_as(
+        let diagnostic: (i64, i64, i64, Option<i64>, Option<i64>, i64, i64, Option<i64>) = sqlx::query_as(
             "SELECT \
                 (SELECT count(*) FROM projection_events WHERE event_id = $2), \
                 (SELECT count(*) FROM settings_config_projection_rows WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection' AND config_key = $3 AND source_event_id = $2), \
                 (SELECT count(*) FROM checkpoint WHERE owner = 'projection:' || $1 AND checkpoint_id LIKE 'settings.config-projection@%:shadow'), \
+                (SELECT max(offset_lsn) FROM checkpoint WHERE owner = 'projection:' || $1 AND checkpoint_id LIKE 'settings.config-projection@%:shadow'), \
+                (SELECT max(id) FROM projection_events WHERE event_id = $2), \
                 (SELECT count(*) FROM dead_letter WHERE tenant_id = $1::uuid AND message_id = $2), \
                 (SELECT count(*) FROM settings_projection_dedupe_receipts WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection' AND source_event_id = $2), \
                 (SELECT max(high_water_lsn) FROM settings_projection_generations WHERE tenant_id = $1::uuid AND projection_id = 'settings.config-projection')",
@@ -676,13 +678,15 @@ impl Fixture {
         .await
         .context("read Settings shadow projection timeout diagnostic")?;
         anyhow::bail!(
-            "Settings shadow projection did not durably apply and checkpoint the event: source_events={} rows={} checkpoints={} dead_letters={} receipts={} high_water={:?}",
+            "Settings shadow projection did not durably apply and checkpoint the event: source_events={} rows={} checkpoints={} checkpoint_offset={:?} source_lsn={:?} dead_letters={} receipts={} high_water={:?}",
             diagnostic.0,
             diagnostic.1,
             diagnostic.2,
             diagnostic.3,
             diagnostic.4,
-            diagnostic.5
+            diagnostic.5,
+            diagnostic.6,
+            diagnostic.7
         )
     }
 
@@ -731,6 +735,7 @@ impl Fixture {
         let process = image
             .spawn(
                 &self.files,
+                &self.secret_bundle,
                 self.workload.volume_mount()?,
                 &mut self.cleanup,
             )
@@ -951,18 +956,22 @@ impl Fixture {
             mounts.len() == 3,
             "runtime mount set was not closed: {mounts_json}"
         );
-        for (destination, source) in [
-            ("/fixtures", self.files.public_path.display().to_string()),
-            (SECRET_PATH, self.files.secret_path.display().to_string()),
-        ] {
-            ensure!(
-                mounts.iter().any(|mount| mount.destination == destination
-                    && mount.source == Path::new(&source)
-                    && !mount.rw),
-                "runtime omitted exact read-only mount {} -> {destination}: {mounts_json}",
-                source
-            );
-        }
+        let public_source = self.files.public_path.display().to_string();
+        ensure!(
+            mounts.iter().any(|mount| mount.kind == "bind"
+                && mount.destination == "/fixtures"
+                && mount.source == Path::new(&public_source)
+                && !mount.rw),
+            "runtime omitted exact read-only public bind mount {} -> /fixtures: {mounts_json}",
+            public_source
+        );
+        ensure!(
+            mounts.iter().any(|mount| mount.kind == "volume"
+                && mount.destination == SECRET_DIRECTORY
+                && mount.name.as_deref() == Some(self.secret_bundle.name())
+                && !mount.rw),
+            "runtime omitted private read-only secret volume at {SECRET_DIRECTORY}: {mounts_json}"
+        );
         let workload_source = self.workload.mount_source()?;
         ensure!(
             mounts
@@ -1422,13 +1431,21 @@ impl Fixture {
         {
             errors.push("close PostgreSQL owner pool: timed out after 10s".to_owned());
         }
-        if let Err(error) = self.cleanup.cleanup().await {
-            errors.push(format!("remove owned Docker resources: {error:#}"));
-        }
-        if let Some(root) = self.root.take()
-            && let Err(error) = root.remove()
-        {
-            errors.push(format!("remove fixture root: {error:#}"));
+        let cleanup_succeeded = match self.cleanup.cleanup().await {
+            Ok(()) => true,
+            Err(error) => {
+                errors.push(format!("remove owned Docker resources: {error:#}"));
+                false
+            }
+        };
+        if let Some(root) = self.root.take() {
+            if cleanup_succeeded {
+                if let Err(error) = root.remove() {
+                    errors.push(format!("remove fixture root: {error:#}"));
+                }
+            } else {
+                root.relinquish_to_watchdog();
+            }
         }
         match (result, errors.is_empty()) {
             (Ok(()), true) => Ok(()),
@@ -1497,6 +1514,8 @@ struct Readyz {
 
 #[derive(Deserialize)]
 struct RuntimeMount {
+    #[serde(rename = "Type")]
+    kind: String,
     #[serde(rename = "Name", default)]
     name: Option<String>,
     #[serde(rename = "Source")]
@@ -1580,6 +1599,10 @@ impl FixtureRoot {
 
     fn remove(self) -> anyhow::Result<()> {
         fs::remove_dir_all(&self.0).context("remove SettingsOnly fixture root")
+    }
+
+    fn relinquish_to_watchdog(self) {
+        std::mem::forget(self);
     }
 }
 
@@ -1753,19 +1776,22 @@ rm -rf -- "$root"
                 }
             }
         }
+        if !failures.is_empty() {
+            anyhow::bail!(failures.join("; "));
+        }
         self.resources.clear();
         if let Some(mut child) = self.child.take() {
             let _result = child.kill();
             let _result = child.wait();
         }
         let _result = fs::remove_file(&self.manifest);
-        ensure!(failures.is_empty(), "{}", failures.join("; "));
         Ok(())
     }
 }
 
 impl Drop for CleanupSupervisor {
     fn drop(&mut self) {
+        let mut complete = true;
         for phase in 0..=3 {
             for resource in self
                 .resources
@@ -1773,16 +1799,29 @@ impl Drop for CleanupSupervisor {
                 .rev()
                 .filter(|resource| resource.cleanup_phase() == phase)
             {
-                let _output = Command::new("docker")
+                let removed = Command::new("docker")
                     .args(resource.docker_args())
                     .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .output();
+                    .output()
+                    .is_ok_and(|output| {
+                        output.status.success()
+                            || String::from_utf8_lossy(&output.stderr)
+                                .to_ascii_lowercase()
+                                .contains("no such")
+                    });
+                complete &= removed;
             }
         }
-        if let Some(child) = self.child.as_mut() {
-            let _result = child.kill();
-            let _result = child.wait();
+        if complete {
+            if let Some(child) = self.child.as_mut() {
+                let _result = child.kill();
+                let _result = child.wait();
+            }
+            let root = self.manifest.parent().map(Path::to_path_buf);
+            let _result = fs::remove_file(&self.manifest);
+            if let Some(root) = root {
+                let _result = fs::remove_dir_all(root);
+            }
         }
     }
 }
@@ -1871,7 +1910,6 @@ impl FixtureNetwork {
 
 struct FixtureFiles {
     public_path: PathBuf,
-    secret_path: PathBuf,
     log_path: PathBuf,
     postgres_ca: PathBuf,
     config: String,
@@ -1888,16 +1926,9 @@ impl FixtureFiles {
         ports: RuntimePorts,
     ) -> anyhow::Result<Self> {
         let public_path = root.join("public");
-        let secret_directory = root.join("secret");
         let log_path = root.join("logs");
         fs::create_dir(&public_path)?;
-        fs::create_dir(&secret_directory)?;
         fs::create_dir(&log_path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-            fs::set_permissions(&secret_directory, fs::Permissions::from_mode(0o700))?;
-        }
         for (name, pem) in [
             ("postgres-ca.pem", providers.postgres.ca_pem()),
             ("redis-ca.pem", providers.redis.ca_pem()),
@@ -2005,7 +2036,6 @@ totalSeconds = 60
         );
         Ok(Self {
             public_path,
-            secret_path: secret_directory.join("serving-secret-bundle"),
             log_path,
             postgres_ca: root.join("public/postgres-ca.pem"),
             config,
@@ -2028,7 +2058,7 @@ totalSeconds = 60
         vault: &VaultTokens,
         federated: &FederatedInput,
         roles: &[testkit::PgAppRole; 6],
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Vec<u8>> {
         fs::write(self.public_path.join("settingsonly.toml"), &self.config)?;
         fs::write(
             self.public_path.join("federated.jwks.json"),
@@ -2061,7 +2091,126 @@ totalSeconds = 60
             "s3AccessKeyId": minio.workload().access_key_id(),
             "s3SecretAccessKey": minio.workload().secret_access_key(),
         });
-        write_private(self.secret_path.clone(), &serde_json::to_vec(&secrets)?)
+        serde_json::to_vec(&secrets).context("encode SettingsOnly secret bundle")
+    }
+}
+
+/// Docker-owned projection for the production secret bundle.
+///
+/// The host never supplies inode ownership to the runtime: a short-lived root seeder writes the
+/// document through stdin, fixes the exact non-root ownership/mode, and a second container proves
+/// that the production identity can read the resulting read-only projection.
+struct SecretBundleVolume {
+    name: String,
+    mount: String,
+}
+
+impl SecretBundleVolume {
+    async fn provision(document: &[u8], cleanup: &mut CleanupSupervisor) -> anyhow::Result<Self> {
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::Relaxed)
+        );
+        let name = format!("rss-settingsonly-secret-{suffix}");
+        let seeder = format!("rss-settingsonly-secret-seeder-{suffix}");
+        let verifier = format!("rss-settingsonly-secret-verifier-{suffix}");
+        cleanup.record(CleanupResource::Volume(name.clone()))?;
+        cleanup.record(CleanupResource::Container(seeder.clone()))?;
+        cleanup.record(CleanupResource::Container(verifier.clone()))?;
+        ensure_success(
+            docker_output(["volume", "create", &name]).await?,
+            "create private SettingsOnly secret volume",
+        )?;
+
+        let volume_mount = format!("type=volume,source={name},target={SECRET_DIRECTORY}");
+        let mut seed = Command::new("docker");
+        seed.args([
+            "run",
+            "--rm",
+            "--interactive",
+            "--name",
+            &seeder,
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--cap-add",
+            "CHOWN",
+            "--user",
+            "0:0",
+        ]);
+        add_labels(&mut seed, false)?;
+        seed.args([
+            "--mount",
+            &volume_mount,
+            "--entrypoint",
+            "/bin/sh",
+            "alpine/socat:1.8.0.3",
+            "-ec",
+            concat!(
+                "umask 077; ",
+                "cat > /var/run/rss/secrets/serving-secret-bundle; ",
+                "test -s /var/run/rss/secrets/serving-secret-bundle; ",
+                "chmod 0400 /var/run/rss/secrets/serving-secret-bundle; ",
+                "chmod 0500 /var/run/rss/secrets; ",
+                "chown 65532:65532 /var/run/rss/secrets/serving-secret-bundle; ",
+                "chown 65532:65532 /var/run/rss/secrets"
+            ),
+        ]);
+        ensure_success(
+            run_command_with_input(seed, document, Duration::from_secs(30)).await?,
+            "seed private SettingsOnly secret volume",
+        )?;
+
+        let readonly_mount = format!("{volume_mount},readonly");
+        let mut verify = Command::new("docker");
+        verify.args([
+            "run",
+            "--rm",
+            "--name",
+            &verifier,
+            "--network",
+            "none",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--user",
+            "65532:65532",
+        ]);
+        add_labels(&mut verify, false)?;
+        verify.args([
+            "--mount",
+            &readonly_mount,
+            "--entrypoint",
+            "/bin/sh",
+            "alpine/socat:1.8.0.3",
+            "-ec",
+            concat!(
+                "test \"$(stat -c '%u:%g:%a' /var/run/rss/secrets)\" = '65532:65532:500'; ",
+                "test \"$(stat -c '%u:%g:%a' /var/run/rss/secrets/serving-secret-bundle)\" = '65532:65532:400'; ",
+                "test -r /var/run/rss/secrets/serving-secret-bundle; ",
+                "cat /var/run/rss/secrets/serving-secret-bundle >/dev/null"
+            ),
+        ]);
+        ensure_success(
+            run_command(verify, Duration::from_secs(30)).await?,
+            "verify private SettingsOnly secret volume",
+        )?;
+
+        Ok(Self {
+            name,
+            mount: readonly_mount,
+        })
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn mount(&self) -> &str {
+        &self.mount
     }
 }
 
@@ -2115,11 +2264,13 @@ async fn register_projection_generation(pool: &PgPool) -> anyhow::Result<()> {
         !bindings.is_empty(),
         "generated Settings projection has no input bindings"
     );
+    let definition = generated::event::PROJECTION_DEFINITIONS
+        .iter()
+        .find(|definition| {
+            definition.contract_id() == generated::projection::settings_v3::CONTRACT_ID
+        })
+        .context("generated Settings projection lacks its definition")?;
     for binding in bindings {
-        let definition = generated::event::PROJECTION_DEFINITIONS
-            .iter()
-            .find(|definition| definition.contract_id() == binding.projection_id())
-            .context("generated Projection input lacks its definition")?;
         sqlx::query(
             "SELECT rss_register_projection_input_binding($1, $2, $3, $4, $5, $6, $7, $8, $9)",
         )
@@ -2135,6 +2286,25 @@ async fn register_projection_generation(pool: &PgPool) -> anyhow::Result<()> {
         .execute(&mut *transaction)
         .await?;
     }
+    sqlx::query(
+        "INSERT INTO settings_projection_generations (tenant_id, projection_id, generation, definition_version, definition_schema_digest, input_generation, high_water_lsn) VALUES ($1::uuid, $2, $3, $4, $5, $6, 0)",
+    )
+    .bind(TENANT)
+    .bind(generated::projection::settings_v3::CONTRACT_ID)
+    .bind(PROJECTION_TARGET_GENERATION)
+    .bind(definition.version())
+    .bind(definition.schema_hash())
+    .bind(generated::event::PROJECTION_INPUT_GENERATION)
+    .execute(&mut *transaction)
+    .await?;
+    sqlx::query(
+        "INSERT INTO settings_projection_active_pointer (tenant_id, projection_id, generation, promoted_high_water_lsn, token) VALUES ($1::uuid, $2, $3, 0, 1)",
+    )
+    .bind(TENANT)
+    .bind(generated::projection::settings_v3::CONTRACT_ID)
+    .bind(PROJECTION_TARGET_GENERATION)
+    .execute(&mut *transaction)
+    .await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -2368,6 +2538,7 @@ impl ProductionImage {
     async fn spawn(
         &self,
         files: &FixtureFiles,
+        secret_bundle: &SecretBundleVolume,
         workload_mount: &str,
         cleanup: &mut CleanupSupervisor,
     ) -> anyhow::Result<ImageProcess> {
@@ -2405,7 +2576,7 @@ impl ProductionImage {
             ]);
         command
             .args(["--volume", &format!("{}:/fixtures:ro", files.public_path.display())])
-            .args(["--volume", &format!("{}:{SECRET_PATH}:ro", files.secret_path.display())])
+            .args(["--mount", secret_bundle.mount()])
             .args(["--mount", workload_mount])
             .args(["--env", "RSS_DEPLOYMENT_POD_IP=0.0.0.0"])
             .args(["--env", &format!("RSS_DEPLOYMENT_PRIMARY_PORT={}", ports.frontend_primary)])
@@ -2651,6 +2822,37 @@ async fn run_command(mut command: Command, timeout: Duration) -> anyhow::Result<
         .context("execute external command")
 }
 
+async fn run_command_with_input(
+    mut command: Command,
+    input: &[u8],
+    timeout: Duration,
+) -> anyhow::Result<Output> {
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut command = tokio::process::Command::from(command);
+    command.kill_on_drop(true);
+    let mut child = command.spawn().context("execute external command")?;
+    tokio::time::timeout(timeout, async {
+        let mut stdin = child
+            .stdin
+            .take()
+            .context("external command stdin unavailable")?;
+        stdin
+            .write_all(input)
+            .await
+            .context("write external command stdin")?;
+        drop(stdin);
+        child
+            .wait_with_output()
+            .await
+            .context("wait for external command")
+    })
+    .await
+    .context("external command timed out")?
+}
+
 fn ensure_success(output: Output, action: &str) -> anyhow::Result<Output> {
     ensure!(
         output.status.success(),
@@ -2773,6 +2975,7 @@ impl InboxBarrier {
 /// admission; releasing the advisory lock lets the same transaction finish during SIGTERM drain.
 struct ProjectionBarrier {
     lock_key: i64,
+    event_id: String,
     connection: Option<sqlx::pool::PoolConnection<sqlx::Postgres>>,
 }
 
@@ -2810,6 +3013,7 @@ impl ProjectionBarrier {
         .await?;
         Ok(Self {
             lock_key,
+            event_id: event_id.to_owned(),
             connection: Some(connection),
         })
     }
@@ -2827,7 +3031,7 @@ impl ProjectionBarrier {
         let observed = Arc::new(Mutex::new(0_i64));
         let pool = pool.clone();
         let lock_key = self.lock_key;
-        await_pred(TEST_TIMEOUT, || {
+        let result = await_pred(TEST_TIMEOUT, || {
             let observed = Arc::clone(&observed);
             let pool = pool.clone();
             async move {
@@ -2843,16 +3047,23 @@ impl ProjectionBarrier {
                 Ok(count == 1)
             }
         })
-        .await
-        .with_context(|| {
+        .await;
+        if let Err(error) = result {
             let observed = *observed
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            format!(
-                "Projection admitted-batch barrier timed out for key={}; observed_waiters={observed}",
-                self.lock_key
+            let diagnostics: Result<(i64, i64, i64), sqlx::Error> = sqlx::query_as(
+                "SELECT (SELECT count(*) FROM projection_events WHERE event_id = $1), (SELECT count(*) FROM settings_config_projection_rows WHERE source_event_id = $1), (SELECT count(*) FROM projection_input_bindings)",
             )
-        })?;
+            .bind(&self.event_id)
+            .fetch_one(&pool)
+            .await;
+            anyhow::bail!(
+                "Projection admitted-batch barrier timed out for key={}; observed_waiters={observed}; event_id={}; diagnostics={diagnostics:?}; {error:#}",
+                self.lock_key,
+                self.event_id
+            );
+        }
         Ok(())
     }
 
@@ -3407,6 +3618,88 @@ impl SpiffeWorkloadApi for SpiffeWorkloadService {
         let stream: Self::FetchX509svidStream =
             Box::pin(futures::stream::once(async move { Ok(response) }));
         Ok(tonic::Response::new(stream))
+    }
+}
+
+#[cfg(test)]
+mod secret_bundle_volume_tests {
+    use std::sync::atomic::Ordering;
+
+    use super::{
+        CleanupResource, CleanupSupervisor, FixtureRoot, SECRET_DIRECTORY, SecretBundleVolume,
+        UNIQUE, docker_output, ensure_success,
+    };
+
+    #[tokio::test]
+    async fn nonroot_secret_bundle_contract_is_readable_and_private() {
+        let root = FixtureRoot::create().expect("create fixture root");
+        let mut cleanup = CleanupSupervisor::start(&root).expect("start cleanup supervisor");
+        let bundle = SecretBundleVolume::provision(
+            br#"{"synthetic":"non-sensitive-contract-sentinel"}"#,
+            &mut cleanup,
+        )
+        .await
+        .expect("provision private secret volume");
+        assert_eq!(
+            bundle.mount(),
+            format!(
+                "type=volume,source={},target={SECRET_DIRECTORY},readonly",
+                bundle.name()
+            )
+        );
+        cleanup.cleanup().await.expect("clean Docker resources");
+        root.remove().expect("remove fixture root");
+    }
+
+    #[tokio::test]
+    async fn failed_secret_volume_removal_preserves_manifest_for_exact_retry() {
+        let root = FixtureRoot::create().expect("create fixture root");
+        let mut cleanup = CleanupSupervisor::start(&root).expect("start cleanup supervisor");
+        let suffix = format!(
+            "{}-{}",
+            std::process::id(),
+            UNIQUE.fetch_add(1, Ordering::Relaxed)
+        );
+        let volume = format!("rss-settingsonly-cleanup-test-volume-{suffix}");
+        let blocker = format!("rss-settingsonly-cleanup-test-container-{suffix}");
+        ensure_success(
+            docker_output(["volume", "create", &volume])
+                .await
+                .expect("create cleanup test volume"),
+            "create cleanup test volume",
+        )
+        .expect("create cleanup test volume");
+        cleanup
+            .record(CleanupResource::Volume(volume.clone()))
+            .expect("record cleanup test volume");
+        let mount = format!("type=volume,source={volume},target=/fixture-secret");
+        ensure_success(
+            docker_output([
+                "create",
+                "--name",
+                &blocker,
+                "--mount",
+                &mount,
+                "alpine/socat:1.8.0.3",
+                "true",
+            ])
+            .await
+            .expect("create cleanup blocker"),
+            "create cleanup blocker",
+        )
+        .expect("create cleanup blocker");
+
+        let first_attempt = cleanup.cleanup().await;
+        cleanup
+            .record(CleanupResource::Container(blocker))
+            .expect("record blocker for exact retry");
+        assert!(first_attempt.is_err());
+        assert!(cleanup.manifest.is_file());
+        assert!(cleanup.child.is_some());
+        assert_eq!(cleanup.resources.len(), 2);
+
+        cleanup.cleanup().await.expect("retry exact Docker cleanup");
+        root.remove().expect("remove fixture root");
     }
 }
 
