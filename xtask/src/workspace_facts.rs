@@ -49,23 +49,6 @@ impl CommandWorkspaceFacts {
         })
     }
 
-    /// Isolated release consumers must resolve the committed/generated lock without consulting a
-    /// network source. The metadata acquisition still stays inside the single command funnel.
-    pub(crate) fn new_locked_offline(root: &Path) -> Self {
-        Self::with_loader(root, |root| {
-            run_cargo_metadata(
-                root,
-                &[
-                    "--locked",
-                    "--offline",
-                    "--all-features",
-                    "--format-version",
-                    "1",
-                ],
-            )
-        })
-    }
-
     /// Fixture workspaces intentionally omit `--locked`; flags and failure diagnostics stay single-sourced.
     #[cfg(test)]
     pub(crate) fn for_test_fixture(root: &Path) -> Self {

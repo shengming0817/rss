@@ -6359,26 +6359,10 @@ mod tests {
             && workflow_has_no_direct_cache(caller_root)
             && workflow_has_no_direct_cache(reusable_root)
             && fixed_cache_actions_are_closed(setup, finalize, cache_policy);
-        let standalone_consumer_is_exact = step_by_id(execute, "policy")
-            .and_then(|step| yaml_scalar(step, "run"))
-            .is_some_and(|run| {
-                run.contains(
-                    "if [ \"$RSS_FIXED_JOB\" = check ] && jq -e '.selection.mode == \"release-check\"' <<< \"$RSS_SELECTION\" >/dev/null; then",
-                )
-                    && run.contains("echo 'standalone-consumer=true' >> \"$GITHUB_OUTPUT\"")
-                    && run.contains("echo 'standalone-consumer=false' >> \"$GITHUB_OUTPUT\"")
-            })
-            && step_by_id(execute, "standalone-consumer").is_some_and(|step| {
-                yaml_scalar(step, "if")
-                    == Some("${{ steps.policy.outputs.standalone-consumer == 'true' }}")
-                    && yaml_scalar(step, "run")
-                        == Some("git submodule update --init -- consumers/standalone")
-            });
         let lifecycle = step_ids_are_ordered(
             execute,
             &[
                 "policy",
-                "standalone-consumer",
                 "integration-prepare",
                 "xtask",
                 "validate-localonly",
@@ -6454,7 +6438,6 @@ mod tests {
             && exact_gate
             && cleanup_is_always
             && cache_lifecycle
-            && standalone_consumer_is_exact
             && lifecycle
             && caller.matches("cargo build --locked -p xtask").count() == 1
             && !caller.contains("cargo run --locked -p xtask -- ci gate")

@@ -1,3 +1,0 @@
-[submodule "consumers/standalone"]
-	path = consumers/standalone
-	url = https://github.com/shengming0817/rss-standalone-consumer.git

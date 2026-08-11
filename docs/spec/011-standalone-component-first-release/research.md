@@ -9,14 +9,13 @@
   candidate eligibility 不构成 RC、published 或支持承诺。
 - `diagctx` 已有仓内真实 consumer，并与授权 context 分离；`tracewire` 的仓内 HTTP、outbox 与 consumer 调用方已
   迁移到候选 typed API，不保留旧 raw-string 入口。
-- 独立 Plain Rust consumer 的稳定源码链接是
-  [`shengming0817/rss-standalone-consumer`](https://github.com/shengming0817/rss-standalone-consumer)，repository
-  custody 为 `ghbvf`、maintenance 为 `github:shengming0817:rss-maintainers`；RSS 只保存 reviewed gitlink 和消费契约，
-  不复制外仓源码、lockfile、CI、动态 digest 或 receipt。
-- [`ADR-026`](../../architecture/202608111253-026-rss-incubator-ownership-migration.md) 已接纳将该仓原地迁移为
-  `rss-incubator` 的目标 ownership：RSS 只保留 Release Surface 与 `.crate` correctness，incubator 拥有 workspace、
-  lock、candidate consumption、CI 和自身安全响应。当前 gitlink 在 incubator first-green 与 RSS 原子 cutover 完成前
-  仍是过渡事实，不构成长久源码拓扑或旧 URL 兼容承诺。
+- 独立 Plain Rust product-consumption consumer 由
+  [`shengming0817/rss-incubator`](https://github.com/shengming0817/rss-incubator) 拥有；该仓自行维护 workspace、根 lock、
+  candidate consumption、CI 与安全响应。RSS 只拥有 Release Surface 与 `.crate` correctness，不保存外仓 checkout、
+  gitlink、workspace shape、lockfile、CI、动态 digest 或 receipt。
+- [`ADR-026`](../../architecture/202608111253-026-rss-incubator-ownership-migration.md) 的 ownership cutover 已完成；依赖方向
+  只有 `rss-incubator -> immutable RSS Release Surface artifacts`，旧仓 URL、submodule、alias、shim 和双 owner 均不构成
+  兼容承诺或失败 fallback。
 
 本规格不复制 package inventory、代码行数或 API 符号快照。实现 PBI 必须重新从当前 Cargo metadata 与源码读取事实。
 
@@ -71,10 +70,10 @@ revision 生成 `.crate` 并在 workspace 外完成 canonical proof；真实 con
 - TraceParent 必须先验证再暴露；成功恢复和各类拒绝结果产生闭值、无原始输入的诊断 outcome，不得把裸 SDK 类型
   变成公共 wire 语义。
 - package tarball 必须是验证输入，workspace/path build 不能冒充发布证明。
-- 单包 archive fixture 只闭合 package 自身 hazard；真实 consumer 必须从 pinned 外仓 commit 同时消费本次 RSS HEAD
-  生成的两个 archive。gitlink、selected/artifact/resolved/executed exact-set 与 lock checksum 任一漂移都必须失败。
-- 上述 pinned 外仓校验只在 ADR-026 的 first-green/cutover 前保持 canonical；cutover 后联合 product-consumption proof
-  由 incubator-owned CI 承担，RSS 不保存其 checkout、lock 或 workspace shape。
+- 单包 archive fixture 只闭合 package 自身 hazard；RSS package proof 对动态 Release Surface exact-set 生成 same-head
+  `.crate`、校验 checksum，并通过 workspace 外 ephemeral registry consumer 闭合独立 artifact correctness。
+- 联合 product-consumption proof 由 incubator-owned canonical CI 消费 immutable candidate bundle 承担；RSS 不校验或保存
+  其 checkout、lock、workspace shape，也不以 path/git/workspace source 替代 registry artifact。
 - package digest 与 same-revision 结果只进入 closeout evidence，不形成 committed receipt database；早于最终 API 的
   mechanics 结果不得晋升为该证据。
 
