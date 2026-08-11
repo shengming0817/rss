@@ -1622,6 +1622,16 @@ mod tests {
             .expect("validated release surface");
         let plans = PackageProofPlan::derive_all(facts, &surface).expect("release proof plans");
         assert_eq!(plans.len(), surface.packages().len());
+        let release_identities = surface
+            .packages()
+            .iter()
+            .map(|package| (package.package().to_owned(), package.version().to_string()))
+            .collect::<BTreeSet<_>>();
+        let plan_identities = plans
+            .iter()
+            .map(|plan| (plan.package.clone(), plan.version.clone()))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(plan_identities, release_identities);
         let projected = plans
             .iter()
             .map(|plan| (plan.package.as_str(), plan.behavior))
@@ -1635,7 +1645,6 @@ mod tests {
             ])
         );
         for plan in &plans {
-            assert_eq!(plan.version, "0.1.0");
             assert_eq!(plan.minimum_rust_version, "1.96.0");
             assert!(plan.dependencies.iter().all(|dependency| {
                 dependency["registry"].as_str().is_some()
