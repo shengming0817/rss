@@ -1043,7 +1043,7 @@ async fn dead_letter_tenant_conformance() -> TestResult {
                 Ok::<bool, Box<dyn std::error::Error + Send + Sync>>(cnt.0 > 0)
             }
         },
-        |_| testkit::ConformanceErrorCategory::Storage,
+        |_| rss_conformance::ConformanceErrorCategory::Storage,
     )
     .await?;
 

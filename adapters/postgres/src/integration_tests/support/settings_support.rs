@@ -23,13 +23,17 @@ pub(in super::super) use crate::{
 
 pub(in super::super) fn conformance_retry_category(
     retry_class: consistency::TxRetryClass,
-) -> testkit::ConformanceErrorCategory {
+) -> rss_conformance::ConformanceErrorCategory {
     match retry_class {
-        consistency::TxRetryClass::Transient => testkit::ConformanceErrorCategory::Transient,
-        consistency::TxRetryClass::Conflict => testkit::ConformanceErrorCategory::Conflict,
-        consistency::TxRetryClass::Permanent => testkit::ConformanceErrorCategory::Permanent,
+        consistency::TxRetryClass::Transient => {
+            rss_conformance::ConformanceErrorCategory::Transient
+        }
+        consistency::TxRetryClass::Conflict => rss_conformance::ConformanceErrorCategory::Conflict,
+        consistency::TxRetryClass::Permanent => {
+            rss_conformance::ConformanceErrorCategory::Permanent
+        }
         consistency::TxRetryClass::OwnershipLost => {
-            testkit::ConformanceErrorCategory::OwnershipLost
+            rss_conformance::ConformanceErrorCategory::OwnershipLost
         }
     }
 }

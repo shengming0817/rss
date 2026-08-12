@@ -330,7 +330,7 @@ async fn observation(
         );
         testkit::projection_conformance::ProjectionConformanceError::provider(
             "postgres-settings-counts",
-            testkit::ConformanceErrorCategory::Storage,
+            rss_conformance::ConformanceErrorCategory::Storage,
         )
     })?;
     Ok(testkit::projection_conformance::ProjectionObservation::new(
@@ -378,7 +378,7 @@ async fn settings_conformance_store() -> Result<
     let provider = || {
         testkit::projection_conformance::ProjectionConformanceError::provider(
             "postgres-settings-target",
-            testkit::ConformanceErrorCategory::Other,
+            rss_conformance::ConformanceErrorCategory::Other,
         )
     };
     let (fixture, owner) = connect_pg().await.map_err(|_| provider())?;

@@ -2664,7 +2664,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
     let repo = app.secret_repo();
     let writer = PgSecretUnitOfWork::from_unverified_for_test(&app);
     let commit_writes = AtomicUsize::new(0);
-    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
+    ::rss_conformance::localtx::assert_commit(::rss_conformance::localtx::CommitCase::new(
         || async {
             writer
                 .publish(
@@ -2858,15 +2858,15 @@ async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
     .bind(&no_write_red_key)
     .execute(&owner.pool)
     .await?;
-    let no_write_red =
-        ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+    let no_write_red = ::rss_conformance::localtx::assert_rejected_no_write(
+        ::rss_conformance::localtx::RejectedNoWriteCase::new(
             || async {
-                Err::<(), _>(testkit::localtx::ClassifiedError::new(
-                    testkit::ConformanceErrorCategory::Validation,
+                Err::<(), _>(rss_conformance::localtx::ClassifiedError::new(
+                    rss_conformance::ConformanceErrorCategory::Validation,
                     std::io::Error::other("synthetic rejection"),
                 ))
             },
-            testkit::ConformanceErrorCategory::Validation,
+            rss_conformance::ConformanceErrorCategory::Validation,
             || async {
                 sqlx::query_as::<_, (i64,)>(
                     "SELECT count(*) FROM secret_refs WHERE secret_key = $1",
@@ -2876,21 +2876,22 @@ async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
                 .await
                 .map(|count| count.0)
                 .map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::Storage,
+                    rss_conformance::localtx::ClassifiedError::new(
+                        rss_conformance::ConformanceErrorCategory::Storage,
                         error,
                     )
                 })
             },
             0,
             || 0,
-        ))
-        .await;
+        ),
+    )
+    .await;
     assert!(matches!(
         no_write_red,
         Err(
-            testkit::localtx::LocalTxConformanceError::SnapshotMismatch {
-                stage: testkit::localtx::LocalTxStage::RejectedSnapshot
+            rss_conformance::localtx::LocalTxConformanceError::SnapshotMismatch {
+                stage: rss_conformance::localtx::LocalTxStage::RejectedSnapshot
             }
         )
     ));
@@ -2959,45 +2960,49 @@ async fn ts9_secret_repo_real_rss_app_validation_profile() -> TestResult {
 
     let invalid_scope_key_raw = format!("scope-mismatch.{}", uuid::Uuid::new_v4().simple());
     let invalid_scope_key = SecretKey::parse(&invalid_scope_key_raw).unwrap();
-    ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
-        || async {
-            writer
-                .publish(
-                    settings_scope(tenant_a),
-                    http_secret_publish(make_secret_entry(
-                        &invalid_scope_key_raw,
-                        "vault",
-                        "secret/scope-mismatch",
-                        None,
-                        1,
-                        tenant_b,
-                    )),
-                )
-                .await
-                .map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::Validation,
-                        error,
+    ::rss_conformance::localtx::assert_rejected_no_write(
+        ::rss_conformance::localtx::RejectedNoWriteCase::new(
+            || async {
+                writer
+                    .publish(
+                        settings_scope(tenant_a),
+                        http_secret_publish(make_secret_entry(
+                            &invalid_scope_key_raw,
+                            "vault",
+                            "secret/scope-mismatch",
+                            None,
+                            1,
+                            tenant_b,
+                        )),
                     )
-                })
-        },
-        testkit::ConformanceErrorCategory::Validation,
-        || async {
-            sqlx::query_as::<_, (i64,)>("SELECT count(*) FROM secret_refs WHERE secret_key = $1")
+                    .await
+                    .map_err(|error| {
+                        rss_conformance::localtx::ClassifiedError::new(
+                            rss_conformance::ConformanceErrorCategory::Validation,
+                            error,
+                        )
+                    })
+            },
+            rss_conformance::ConformanceErrorCategory::Validation,
+            || async {
+                sqlx::query_as::<_, (i64,)>(
+                    "SELECT count(*) FROM secret_refs WHERE secret_key = $1",
+                )
                 .bind(&invalid_scope_key_raw)
                 .fetch_one(&owner.pool)
                 .await
                 .map(|count| count.0)
                 .map_err(|error| {
-                    testkit::localtx::ClassifiedError::new(
-                        testkit::ConformanceErrorCategory::Storage,
+                    rss_conformance::localtx::ClassifiedError::new(
+                        rss_conformance::ConformanceErrorCategory::Storage,
                         error,
                     )
                 })
-        },
-        0,
-        || crate::secret_repo::secret_save_attempts(&invalid_scope_key),
-    ))
+            },
+            0,
+            || crate::secret_repo::secret_save_attempts(&invalid_scope_key),
+        ),
+    )
     .await?;
 
     app.shutdown().await?;
@@ -3468,8 +3473,8 @@ async fn ts9_secret_repo_real_rss_app_commit_unknown_profile() -> TestResult {
     let unknown_key_raw = format!("commit-unknown.{}", uuid::Uuid::new_v4().simple());
     let unknown_key = SecretKey::parse(&unknown_key_raw).unwrap();
     crate::secret_repo::fail_secret_save_commit_unknown_after_insert_once(&unknown_key);
-    ::testkit::localtx::assert_commit_unknown_no_replay(
-        ::testkit::localtx::CommitUnknownCase::new(
+    ::rss_conformance::localtx::assert_commit_unknown_no_replay(
+        ::rss_conformance::localtx::CommitUnknownCase::new(
             || async {
                 writer
                     .publish(
@@ -3485,13 +3490,13 @@ async fn ts9_secret_repo_real_rss_app_commit_unknown_profile() -> TestResult {
                     )
                     .await
                     .map_err(|error| {
-                        testkit::localtx::ClassifiedError::new(
-                            testkit::ConformanceErrorCategory::CommitUnknown,
+                        rss_conformance::localtx::ClassifiedError::new(
+                            rss_conformance::ConformanceErrorCategory::CommitUnknown,
                             error,
                         )
                     })
             },
-            testkit::ConformanceErrorCategory::CommitUnknown,
+            rss_conformance::ConformanceErrorCategory::CommitUnknown,
             || crate::secret_repo::secret_save_attempts(&unknown_key),
         ),
     )

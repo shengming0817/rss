@@ -4570,6 +4570,7 @@ dependencies = [
  "observ",
  "postgres-migration-inventory",
  "primitives",
+ "rss-conformance",
  "rss-diag-context",
  "rss-trace-context",
  "runctx",
@@ -5263,6 +5264,14 @@ dependencies = [
  "runtimeexec",
  "tokio",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "rss-conformance"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -6820,6 +6829,7 @@ dependencies = [
  "axum",
  "futures",
  "rcgen",
+ "rss-conformance",
  "serde",
  "serde_json",
  "sqlx",

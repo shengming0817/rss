@@ -10,13 +10,13 @@
 //!
 //! ```
 //! use std::cell::Cell;
-//! use testkit::{ConformanceErrorCategory, localtx::{ClassifiedError, CommitCase, assert_commit}};
+//! use rss_conformance::{ConformanceErrorCategory, localtx::{ClassifiedError, CommitCase, assert_commit}};
 //!
 //! struct SecretProviderError;
 //! #[derive(PartialEq)]
 //! struct Snapshot(u32);
 //!
-//! # async fn example() -> Result<(), testkit::localtx::LocalTxConformanceError> {
+//! # async fn example() -> Result<(), rss_conformance::localtx::LocalTxConformanceError> {
 //! let _classified = ClassifiedError::new(ConformanceErrorCategory::Storage, SecretProviderError);
 //! let writes = Cell::new(0_u32);
 //! assert_commit(CommitCase::new(

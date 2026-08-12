@@ -1191,8 +1191,8 @@ mod tests {
                 fs::write(
                     &path,
                     fs::read_to_string(&path)?.replacen(
-                        "::testkit::localtx::assert_rollback(",
-                        "::testkit::localtx::ignored_rollback(",
+                        "::rss_conformance::localtx::assert_rollback(",
+                        "::rss_conformance::localtx::ignored_rollback(",
                         1,
                     ),
                 )?;

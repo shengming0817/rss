@@ -66,6 +66,10 @@ incubator commit、每个 package 的精确版本、checksum 与 archive VCS rev
 以及 locked/offline check、test、clippy 的成功结果和 canonical CI URL。RSS 自有 artifact proof 必须先绿；结果只链接到
 现有 issue/PR，不写入 committed receipt、evidence database 或第二套 release registry。
 
+Candidate-first consumer fixture 源码只归 `rss-incubator`；RSS 不保存旧 issue 路径
+`fixtures/external-conformance-consumer/`。fixture 可作为非 workspace 模板提交，由 candidate proof 仅在 committed-HEAD
+临时快照中物化并生成候选 lock，因而普通 CI 与 committed root lock 不解析尚未发布的 package。
+
 ### 失败与回退
 
 - first-green 前继续保留现有 RSS legacy carrier；incubator 准备失败不得通过放宽 RSS artifact proof、加入 path dependency

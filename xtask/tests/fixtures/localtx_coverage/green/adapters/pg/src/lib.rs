@@ -24,19 +24,19 @@ mod tests {
         )> = ::std::marker::PhantomData;
         let _typed_enrollment = LOCALTX_BACKEND_PROFILE_DEMO_WRITE;
         let provider = DemoProviderFixture::new();
-        ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(|| async {
+        ::rss_conformance::localtx::assert_commit(::rss_conformance::localtx::CommitCase::new(|| async {
             provider.execute().await
         }))
         .await?;
-        ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(|| async {
+        ::rss_conformance::localtx::assert_rollback(::rss_conformance::localtx::RollbackCase::new(|| async {
             provider.execute().await
         }))
         .await?;
-        ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        ::rss_conformance::localtx::assert_rejected_no_write(::rss_conformance::localtx::RejectedNoWriteCase::new(
             || async { provider.execute().await },
         ))
         .await?;
-        ::testkit::localtx::assert_rejected_no_write(::testkit::localtx::RejectedNoWriteCase::new(
+        ::rss_conformance::localtx::assert_rejected_no_write(::rss_conformance::localtx::RejectedNoWriteCase::new(
             || async { provider.execute().await },
         ))
         .await?;
@@ -65,14 +65,14 @@ mod tests {
             ),
         )
         .await?;
-        ::testkit::localtx::assert_commit_unknown_no_replay(
-            ::testkit::localtx::CommitUnknownCase::new(|| async {
+        ::rss_conformance::localtx::assert_commit_unknown_no_replay(
+            ::rss_conformance::localtx::CommitUnknownCase::new(|| async {
                 provider.execute().await
             }),
         )
         .await?;
-        ::testkit::localtx::assert_rollback_failed_no_replay(
-            ::testkit::localtx::RollbackFailedCase::new(|| async {
+        ::rss_conformance::localtx::assert_rollback_failed_no_replay(
+            ::rss_conformance::localtx::RollbackFailedCase::new(|| async {
                 provider.execute().await
             }),
         )

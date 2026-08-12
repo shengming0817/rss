@@ -46,75 +46,6 @@ pub use request::ContractRequest;
 pub use response::{ContractResponse, WireError};
 pub use wait::{await_delay, await_map, await_notified, await_try, await_try_every};
 
-/// Closed, low-cardinality provider error category shared by conformance helpers.
-///
-/// The category is safe to render in diagnostics. Provider messages, tenant identifiers, keys,
-/// credentials, and payloads must remain in the opaque provider error value.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum ConformanceErrorCategory {
-    Storage,
-    Transient,
-    Conflict,
-    Permanent,
-    OwnershipLost,
-    Validation,
-    Authorization,
-    CommitUnknown,
-    RollbackFailed,
-    Other,
-}
-
-impl ConformanceErrorCategory {
-    /// Returns the stable, low-cardinality diagnostic label.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Storage => "storage",
-            Self::Transient => "transient",
-            Self::Conflict => "conflict",
-            Self::Permanent => "permanent",
-            Self::OwnershipLost => "ownership-lost",
-            Self::Validation => "validation",
-            Self::Authorization => "authorization",
-            Self::CommitUnknown => "commit-unknown",
-            Self::RollbackFailed => "rollback-failed",
-            Self::Other => "other",
-        }
-    }
-}
-
-impl std::fmt::Display for ConformanceErrorCategory {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-#[cfg(test)]
-mod conformance_error_category_tests {
-    use super::ConformanceErrorCategory;
-
-    #[test]
-    fn labels_are_closed_and_display_uses_the_same_source() {
-        let cases = [
-            (ConformanceErrorCategory::Storage, "storage"),
-            (ConformanceErrorCategory::Transient, "transient"),
-            (ConformanceErrorCategory::Conflict, "conflict"),
-            (ConformanceErrorCategory::Permanent, "permanent"),
-            (ConformanceErrorCategory::OwnershipLost, "ownership-lost"),
-            (ConformanceErrorCategory::Validation, "validation"),
-            (ConformanceErrorCategory::Authorization, "authorization"),
-            (ConformanceErrorCategory::CommitUnknown, "commit-unknown"),
-            (ConformanceErrorCategory::RollbackFailed, "rollback-failed"),
-            (ConformanceErrorCategory::Other, "other"),
-        ];
-
-        for (category, expected) in cases {
-            assert_eq!(category.as_str(), expected);
-            assert_eq!(category.to_string(), expected);
-        }
-    }
-}
-
 // 容器 fixture（#1137，仅 `containers` feature）：legacy `env_or_*` resolver 仅覆盖
 // postgres/redis/rabbitmq；MQTT 与其它安全敏感 provider 使用 hermetic TLS guard。
 // 供 adapter 集成测试 + journeys durable journey 经 [dev-dependencies] 消费。零内部 workspace 依赖（只回
@@ -141,8 +72,6 @@ pub mod projection_conformance;
 
 // tenant-scope repository conformance 骨架（#1437 PERSIST-016 种子；#1426 在此扩展全套 repo conformance）。
 // 仅 `containers` feature（其唯一消费方是启用 containers 的 adapter 集成测试）；不增 default public-api 面。
-#[cfg(feature = "containers")]
-pub mod localtx;
 #[cfg(feature = "containers")]
 pub mod policy_conformance;
 #[cfg(feature = "containers")]

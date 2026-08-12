@@ -15,7 +15,7 @@
 //!
 //! ref: docs/references/framework-comparison.md（repo conformance：oxidecomputer/omicron 手写 DI 测试范式）。
 
-use crate::ConformanceErrorCategory;
+use rss_conformance::ConformanceErrorCategory;
 use std::future::Future;
 
 /// Typed provider stage used in safe diagnostics.

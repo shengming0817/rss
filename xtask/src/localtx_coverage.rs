@@ -2957,7 +2957,7 @@ fn validate_evidence_dependencies(
         }
     }
     if !evidence.backend_enrollments.is_empty() || !evidence.backend_profile_violations.is_empty() {
-        for key in ["generated", "testkit", "vocab"] {
+        for key in ["generated", "rss_conformance", "testkit", "vocab"] {
             validate_dependency(member, key, true, expected_packages)?;
         }
     }
@@ -3011,8 +3011,13 @@ fn validate_dependency(
     allow_dev: bool,
     expected_packages: &BTreeMap<String, PathBuf>,
 ) -> Result<()> {
+    let package_name = if key == "rss_conformance" {
+        "rss-conformance"
+    } else {
+        key
+    };
     let expected = expected_packages
-        .get(key)
+        .get(package_name)
         .ok_or_else(|| anyhow!("protected dependency package is not a workspace member"))?;
     let normal = member.normal_dependencies.get(key);
     let dev = member.dev_dependencies.get(key);
@@ -3022,7 +3027,10 @@ fn validate_dependency(
         let DependencySource::Workspace { repo_relative_root } = &candidate.source else {
             bail!("protected dependency is not a workspace package");
         };
-        if candidate.package != key || repo_relative_root != expected || !candidate.unconditional {
+        if candidate.package != package_name
+            || repo_relative_root != expected
+            || !candidate.unconditional
+        {
             bail!("protected dependency key does not identify the expected workspace package");
         }
     }
@@ -3757,7 +3765,7 @@ fn collect_use(
 fn protected_root(binding: &str) -> bool {
     matches!(
         binding,
-        "bootstrap" | "generated" | "httpserve" | "testkit" | "vocab"
+        "bootstrap" | "generated" | "httpserve" | "rss_conformance" | "testkit" | "vocab"
     )
 }
 
@@ -5717,9 +5725,11 @@ fn backend_probe_from_call(call: &ExprCall, resolver: &Resolver) -> Option<Backe
         .collect::<Vec<_>>()
         .as_slice()
     {
-        ["testkit", "localtx", "assert_commit"] => Some(BackendProbe::Commit),
-        ["testkit", "localtx", "assert_rollback"] => Some(BackendProbe::Rollback),
-        ["testkit", "localtx", "assert_rejected_no_write"] => Some(BackendProbe::RejectedNoWrite),
+        ["rss_conformance", "localtx", "assert_commit"] => Some(BackendProbe::Commit),
+        ["rss_conformance", "localtx", "assert_rollback"] => Some(BackendProbe::Rollback),
+        ["rss_conformance", "localtx", "assert_rejected_no_write"] => {
+            Some(BackendProbe::RejectedNoWrite)
+        }
         ["testkit", "tenant_conformance", "assert_tenant_isolation"] => {
             Some(BackendProbe::TenantIsolation)
         }
@@ -5728,12 +5738,16 @@ fn backend_probe_from_call(call: &ExprCall, resolver: &Resolver) -> Option<Backe
             "repo_conformance",
             "assert_retry_boundary_policy",
         ] => Some(BackendProbe::RetryBoundary),
-        ["testkit", "localtx", "assert_commit_unknown_no_replay"] => {
-            Some(BackendProbe::CommitUnknownNoReplay)
-        }
-        ["testkit", "localtx", "assert_rollback_failed_no_replay"] => {
-            Some(BackendProbe::RollbackFailedNoReplay)
-        }
+        [
+            "rss_conformance",
+            "localtx",
+            "assert_commit_unknown_no_replay",
+        ] => Some(BackendProbe::CommitUnknownNoReplay),
+        [
+            "rss_conformance",
+            "localtx",
+            "assert_rollback_failed_no_replay",
+        ] => Some(BackendProbe::RollbackFailedNoReplay),
         _ => None,
     }
 }
@@ -7453,8 +7467,8 @@ mod tests {
         fs::write(
             &profile,
             source.replacen(
-                "::testkit::localtx::assert_rollback(",
-                "::testkit::localtx::ignored_rollback(",
+                "::rss_conformance::localtx::assert_rollback(",
+                "::rss_conformance::localtx::ignored_rollback(",
                 1,
             ),
         )?;
@@ -7477,13 +7491,13 @@ mod tests {
             &profile,
             source
                 .replacen(
-                    "::testkit::localtx::assert_rollback(",
-                    "::testkit::localtx::ignored_rollback(",
+                    "::rss_conformance::localtx::assert_rollback(",
+                    "::rss_conformance::localtx::ignored_rollback(",
                     1,
                 )
                 .replacen(
-                    "::testkit::localtx::assert_rollback_failed_no_replay(",
-                    "::testkit::localtx::ignored_rollback_failed_no_replay(",
+                    "::rss_conformance::localtx::assert_rollback_failed_no_replay(",
+                    "::rss_conformance::localtx::ignored_rollback_failed_no_replay(",
                     1,
                 ),
         )?;
@@ -7518,13 +7532,13 @@ mod tests {
             &profile,
             source
                 .replacen(
-                    "::testkit::localtx::assert_rollback(",
-                    "::testkit::localtx::ignored_rollback(",
+                    "::rss_conformance::localtx::assert_rollback(",
+                    "::rss_conformance::localtx::ignored_rollback(",
                     1,
                 )
                 .replacen(
-                    "::testkit::localtx::assert_rollback_failed_no_replay(",
-                    "::testkit::localtx::ignored_rollback_failed_no_replay(",
+                    "::rss_conformance::localtx::assert_rollback_failed_no_replay(",
+                    "::rss_conformance::localtx::ignored_rollback_failed_no_replay(",
                     1,
                 ),
         )?;
@@ -7597,7 +7611,7 @@ mod tests {
         let profile = temp.path.join("adapters/pg/src/lib.rs");
         let mut source = fs::read_to_string(&profile)?;
         let probe = source
-            .find("::testkit::localtx::assert_rollback(")
+            .find("::rss_conformance::localtx::assert_rollback(")
             .context("green rollback probe")?;
         let await_suffix = "\n        .await?;";
         let awaited = probe
@@ -7620,7 +7634,9 @@ mod tests {
         let source = fs::read_to_string(&manifest)?;
         fs::write(
             &manifest,
-            format!("{source}\n[dev-dependencies]\ntestkit = {{ path = \"../testkit\" }}\n"),
+            format!(
+                "{source}\n[dev-dependencies]\nrss_conformance = {{ package = \"rss-conformance\", path = \"../conformance\" }}\ntestkit = {{ path = \"../testkit\" }}\n"
+            ),
         )?;
         let owner = temp.path.join("crates/demo/src/lib.rs");
         let source = fs::read_to_string(&owner)?;
@@ -7736,8 +7752,8 @@ mod tests {
                     DemoProviderFixture,
                 )> = ::std::marker::PhantomData;
                 let fixture = DemoProviderFixture::from_unverified_for_test(&store);
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
+                ::rss_conformance::localtx::assert_commit(
+                    ::rss_conformance::localtx::CommitCase::new(|| async {
                         let result = fixture.execute().await;
                         result
                     })
@@ -7774,8 +7790,8 @@ mod tests {
                     DemoProviderFixture,
                 )> = ::std::marker::PhantomData;
                 let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
+                ::rss_conformance::localtx::assert_commit(
+                    ::rss_conformance::localtx::CommitCase::new(|| async {
                         let _ = &fixture;
                         Ok::<(), ()>(())
                     })
@@ -7816,8 +7832,8 @@ mod tests {
                     DemoProviderFixture,
                 )> = ::std::marker::PhantomData;
                 let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
+                ::rss_conformance::localtx::assert_commit(
+                    ::rss_conformance::localtx::CommitCase::new(|| async {
                         fixture.execute().await;
                         Ok::<(), ()>(())
                     })
@@ -7858,8 +7874,8 @@ mod tests {
                     DemoProviderFixture,
                 )> = ::std::marker::PhantomData;
                 let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
+                ::rss_conformance::localtx::assert_commit(
+                    ::rss_conformance::localtx::CommitCase::new(|| async {
                         execute_provider(&fixture).await
                     })
                 ).await?;
@@ -7894,8 +7910,8 @@ mod tests {
                     DemoProviderFixture,
                 )> = ::std::marker::PhantomData;
                 let fixture = DemoProviderFixture::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
+                ::rss_conformance::localtx::assert_commit(
+                    ::rss_conformance::localtx::CommitCase::new(|| async {
                         async { fixture.execute().await };
                         Ok::<(), ()>(())
                     })
@@ -7926,7 +7942,7 @@ mod tests {
                     ::generated::http::demo_v1::write::RouteMarker,
                     ::vocab::http::LocalTx,
                 > = ::generated::http::demo_v1::write::ROUTE;
-                ::testkit::localtx::assert_commit().await?;
+                ::rss_conformance::localtx::assert_commit().await?;
                 Ok(())
             }"#,
         )?;
@@ -7958,8 +7974,8 @@ mod tests {
                     crate::PgAuthAuditSink,
                 )> = ::std::marker::PhantomData;
                 let sink = fake::PgAuthAuditSink::from_unverified_for_test(&store);
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async { sink.append().await })
+                ::rss_conformance::localtx::assert_commit(
+                    ::rss_conformance::localtx::CommitCase::new(|| async { sink.append().await })
                 ).await?;
                 Ok(())
             }"#,
@@ -7997,8 +8013,8 @@ mod tests {
                     let _bait = crate::PgAuthAuditSink::new();
                     fake::PgAuthAuditSink::new()
                 };
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async { sink.append().await })
+                ::rss_conformance::localtx::assert_commit(
+                    ::rss_conformance::localtx::CommitCase::new(|| async { sink.append().await })
                 ).await?;
                 Ok(())
             }"#,
@@ -8031,8 +8047,8 @@ mod tests {
                     crate::PgAuthAuditSink,
                 )> = ::std::marker::PhantomData;
                 let _sink = crate::PgAuthAuditSink::new();
-                ::testkit::localtx::assert_commit(
-                    ::testkit::localtx::CommitCase::new(|| async {
+                ::rss_conformance::localtx::assert_commit(
+                    ::rss_conformance::localtx::CommitCase::new(|| async {
                         Err(AuditLocalTxProfileError::synthetic())
                     })
                 ).await?;
@@ -8068,8 +8084,8 @@ mod tests {
                     crate::DemoProvider,
                 )> = ::std::marker::PhantomData;
                 let provider = crate::DemoProvider::new();
-                ::testkit::localtx::assert_rejected_no_write(
-                    ::testkit::localtx::RejectedNoWriteCase::new(
+                ::rss_conformance::localtx::assert_rejected_no_write(
+                    ::rss_conformance::localtx::RejectedNoWriteCase::new(
                         || async { Err::<(), ()>(()) },
                         || async { provider.snapshot().await },
                     )
@@ -8726,8 +8742,8 @@ impl ::bootstrap::Domain for Demo {
                 fs::write(
                     path,
                     source.replacen(
-                        "::testkit::localtx::assert_rollback(",
-                        "::testkit::localtx::ignored_rollback(",
+                        "::rss_conformance::localtx::assert_rollback(",
+                        "::rss_conformance::localtx::ignored_rollback(",
                         1,
                     ),
                 )?;

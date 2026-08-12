@@ -1444,30 +1444,30 @@ pub(in super::super) async fn tenant_reader_gate_verdict(
 
 pub(in super::super) fn secret_repo_conformance_category(
     error: &SecretRepoError,
-) -> testkit::ConformanceErrorCategory {
+) -> rss_conformance::ConformanceErrorCategory {
     match error {
-        SecretRepoError::VersionConflict => testkit::ConformanceErrorCategory::Conflict,
-        SecretRepoError::Storage(_) => testkit::ConformanceErrorCategory::Storage,
-        _ => testkit::ConformanceErrorCategory::Other,
+        SecretRepoError::VersionConflict => rss_conformance::ConformanceErrorCategory::Conflict,
+        SecretRepoError::Storage(_) => rss_conformance::ConformanceErrorCategory::Storage,
+        _ => rss_conformance::ConformanceErrorCategory::Other,
     }
 }
 
 pub(in super::super) fn secret_repo_classified(
     error: SecretRepoError,
-) -> testkit::localtx::ClassifiedError<SecretRepoError> {
+) -> rss_conformance::localtx::ClassifiedError<SecretRepoError> {
     let category = secret_repo_conformance_category(&error);
-    testkit::localtx::ClassifiedError::new(category, error)
+    rss_conformance::localtx::ClassifiedError::new(category, error)
 }
 
 #[derive(Debug)]
 pub(in super::super) struct AuditLocalTxProfileError {
-    pub(in super::super) category: testkit::ConformanceErrorCategory,
+    pub(in super::super) category: rss_conformance::ConformanceErrorCategory,
     pub(in super::super) source: Box<dyn std::error::Error + Send + Sync>,
 }
 
 impl AuditLocalTxProfileError {
     pub(in super::super) fn provider(
-        category: testkit::ConformanceErrorCategory,
+        category: rss_conformance::ConformanceErrorCategory,
         source: diport::AuditSinkError,
     ) -> Self {
         Self {
@@ -1480,7 +1480,7 @@ impl AuditLocalTxProfileError {
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
         Self {
-            category: testkit::ConformanceErrorCategory::Storage,
+            category: rss_conformance::ConformanceErrorCategory::Storage,
             source: Box::new(source),
         }
     }
@@ -1504,14 +1504,14 @@ impl std::error::Error for AuditLocalTxProfileError {
 
 pub(in super::super) fn audit_profile_category(
     error: &AuditLocalTxProfileError,
-) -> testkit::ConformanceErrorCategory {
+) -> rss_conformance::ConformanceErrorCategory {
     error.category
 }
 
 pub(in super::super) fn audit_profile_classified(
     error: AuditLocalTxProfileError,
-) -> testkit::localtx::ClassifiedError<AuditLocalTxProfileError> {
-    testkit::localtx::ClassifiedError::new(error.category, error)
+) -> rss_conformance::localtx::ClassifiedError<AuditLocalTxProfileError> {
+    rss_conformance::localtx::ClassifiedError::new(error.category, error)
 }
 
 pub(in super::super) fn audit_list_tenant_command(

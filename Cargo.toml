@@ -6,6 +6,8 @@ resolver = "2"
 members = [
   # Platform Public：零 workspace 生产依赖的 provider-free 进程内应用内核。
   "crates/platform",
+  # Provider-neutral public LocalTx conformance assertions.
+  "crates/conformance",
   # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 architecture.md）
   "crates/vocab",
   "crates/ids",
@@ -102,6 +104,7 @@ exclude = ["lints"]
 # Positive Release Surface selection. Unlisted packages and profile artifacts remain internal.
 [workspace.metadata.release-surface]
 packages = [
+  { package = "rss-conformance", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
   { package = "rss-platform", public-api-owner = "platform-public", api-stability = "experimental", profiles = [] },
   { package = "rss-diag-context", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
   { package = "rss-trace-context", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },

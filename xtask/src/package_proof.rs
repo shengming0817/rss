@@ -180,6 +180,7 @@ struct PackageArtifact<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProofBehavior {
+    Conformance,
     Platform,
     DiagContext,
     TraceContext,
@@ -188,6 +189,7 @@ enum ProofBehavior {
 impl ProofBehavior {
     fn for_package(package: &str) -> Result<Self> {
         match package {
+            "rss-conformance" => Ok(Self::Conformance),
             "rss-platform" => Ok(Self::Platform),
             "rss-diag-context" => Ok(Self::DiagContext),
             "rss-trace-context" => Ok(Self::TraceContext),
@@ -197,6 +199,7 @@ impl ProofBehavior {
 
     const fn fixture(self) -> &'static str {
         match self {
+            Self::Conformance => "conformance",
             Self::Platform => "platform",
             Self::DiagContext => "diag-context",
             Self::TraceContext => "trace-context",
@@ -205,6 +208,7 @@ impl ProofBehavior {
 
     fn validate_receipt(self, receipt: &serde_json::Value) -> Result<()> {
         let expected = match self {
+            Self::Conformance => conformance_receipt(),
             Self::Platform => platform_receipt(),
             Self::DiagContext => diag_context_receipt(),
             Self::TraceContext => trace_context_receipt(),
@@ -359,6 +363,18 @@ fn platform_receipt() -> serde_json::Value {
         "diagnosticsRead": true,
         "shutdown": true,
         "stoppedFailClosed": true
+    })
+}
+
+fn conformance_receipt() -> serde_json::Value {
+    json!({
+        "package": "rss-conformance",
+        "commit": true,
+        "rollback": true,
+        "rejectedNoWrite": true,
+        "commitUnknownNoReplay": true,
+        "rollbackFailedNoReplay": true,
+        "sanitizedErrors": true
     })
 }
 
@@ -1388,6 +1404,7 @@ mod tests {
         assert_eq!(
             projected,
             BTreeMap::from([
+                ("rss-conformance", ProofBehavior::Conformance),
                 ("rss-diag-context", ProofBehavior::DiagContext),
                 ("rss-platform", ProofBehavior::Platform),
                 ("rss-trace-context", ProofBehavior::TraceContext),
@@ -1406,6 +1423,10 @@ mod tests {
     #[test]
     fn proof_behavior_is_closed_and_unknown_release_packages_fail() {
         assert_eq!(
+            ProofBehavior::for_package("rss-conformance").expect("conformance behavior"),
+            ProofBehavior::Conformance
+        );
+        assert_eq!(
             ProofBehavior::for_package("rss-platform").expect("platform behavior"),
             ProofBehavior::Platform
         );
@@ -1418,6 +1439,24 @@ mod tests {
             ProofBehavior::TraceContext
         );
         assert!(ProofBehavior::for_package("future-release").is_err());
+    }
+
+    #[test]
+    fn conformance_receipt_requires_all_five_behaviors_and_sanitization() {
+        let green = conformance_receipt();
+        assert!(ProofBehavior::Conformance.validate_receipt(&green).is_ok());
+        for field in [
+            "commit",
+            "rollback",
+            "rejectedNoWrite",
+            "commitUnknownNoReplay",
+            "rollbackFailedNoReplay",
+            "sanitizedErrors",
+        ] {
+            let mut red = green.clone();
+            red.as_object_mut().expect("receipt object").remove(field);
+            assert!(ProofBehavior::Conformance.validate_receipt(&red).is_err());
+        }
     }
 
     #[test]
