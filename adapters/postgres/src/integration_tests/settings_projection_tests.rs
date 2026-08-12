@@ -3215,7 +3215,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
     .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
     .fetch_one(&mut *observe_tx)
     .await?;
-    let observed: (Option<i64>, Option<i64>, Option<i64>, i64) =
+    let observed: (Option<i64>, Option<i64>, Option<i64>, i64, Option<String>) =
         sqlx::query_as(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
             .bind(tenant.to_string())
             .bind(SETTINGS_PROJECTION_ID)
@@ -3227,6 +3227,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
             .await?;
     assert_eq!(observed.0, expected_high_water);
     assert_eq!(observed.1, Some(40));
+    assert_eq!(observed.4.as_deref(), Some("provider_permanent"));
     let expected_updated: i64 = sqlx::query_scalar(
         "SELECT (pg_catalog.date_part('epoch', updated_at) * 1000000)::bigint \
          FROM public.checkpoint WHERE owner = $1 AND checkpoint_id = $2",
@@ -3241,9 +3242,10 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         "projection-origin DLQ backlog must be visible"
     );
     let foreign = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let cross_tenant = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
-        crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
-    )
+    let cross_tenant = sqlx::query_as::<
+        _,
+        (Option<i64>, Option<i64>, Option<i64>, i64, Option<String>),
+    >(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
     .bind(foreign.to_string())
     .bind(SETTINGS_PROJECTION_ID)
     .bind(rollback_generation)
@@ -3263,9 +3265,10 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         .bind(tenant.to_string())
         .execute(&mut *wrong_generation_tx)
         .await?;
-    let wrong_generation = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
-        crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
-    )
+    let wrong_generation = sqlx::query_as::<
+        _,
+        (Option<i64>, Option<i64>, Option<i64>, i64, Option<String>),
+    >(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
     .bind(tenant.to_string())
     .bind(SETTINGS_PROJECTION_ID)
     .bind("not-the-active-generation")
@@ -3285,9 +3288,10 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         .bind(tenant.to_string())
         .execute(&mut *wrong_digest_tx)
         .await?;
-    let wrong_digest = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
-        crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
-    )
+    let wrong_digest = sqlx::query_as::<
+        _,
+        (Option<i64>, Option<i64>, Option<i64>, i64, Option<String>),
+    >(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
     .bind(tenant.to_string())
     .bind(SETTINGS_PROJECTION_ID)
     .bind(rollback_generation)
@@ -3313,7 +3317,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         .bind(tenant.to_string())
         .execute(&mut *missing_tx)
         .await?;
-    let missing_cp: (Option<i64>, Option<i64>, Option<i64>, i64) =
+    let missing_cp: (Option<i64>, Option<i64>, Option<i64>, i64, Option<String>) =
         sqlx::query_as(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
             .bind(tenant.to_string())
             .bind(SETTINGS_PROJECTION_ID)
@@ -3325,6 +3329,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
             .await?;
     assert_eq!(missing_cp.1, None);
     assert_eq!(missing_cp.2, None);
+    assert_eq!(missing_cp.4.as_deref(), Some("provider_permanent"));
     missing_tx.rollback().await?;
 
     worker.shutdown_for_integration().await?;
@@ -3391,6 +3396,59 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         healthy,
     )
     .await?;
+
+    let observe_acl: (String, bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT owner.rolname, procedure.prosecdef, \
+                procedure.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[], \
+                has_function_privilege('rss_projection_worker', procedure.oid, 'EXECUTE'), \
+                has_function_privilege('rss_app', procedure.oid, 'EXECUTE'), \
+                has_function_privilege('rss_app_read', procedure.oid, 'EXECUTE'), \
+                has_function_privilege('rss_projection_operator', procedure.oid, 'EXECUTE'), \
+                has_function_privilege('public', procedure.oid, 'EXECUTE') \
+         FROM pg_catalog.pg_proc AS procedure \
+         JOIN pg_catalog.pg_roles AS owner ON owner.oid = procedure.proowner \
+         WHERE procedure.oid = \
+           'public.rss_projection_worker_observe_tenant(uuid,text,text,text,text,text)'::regprocedure",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        observe_acl,
+        (
+            "rss_projection_worker_owner".to_owned(),
+            true,
+            true,
+            true,
+            false,
+            false,
+            false,
+            false,
+        ),
+        "observe function must retain its exact SECURITY DEFINER owner, search_path and ACL",
+    );
+
+    let mut unauthorized = app.pool.begin().await?;
+    sqlx::query("SELECT pg_catalog.set_config('rss.tenant_id', $1, true)")
+        .bind(quarantined.to_string())
+        .execute(&mut *unauthorized)
+        .await?;
+    let denied_observe = sqlx::query_as::<
+        _,
+        (Option<i64>, Option<i64>, Option<i64>, i64, Option<String>),
+    >(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
+    .bind(quarantined.to_string())
+    .bind(SETTINGS_PROJECTION_ID)
+    .bind(quarantined_generation)
+    .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+    .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+    .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+    .fetch_one(&mut *unauthorized)
+    .await;
+    assert!(
+        matches!(denied_observe, Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("42501")),
+        "rss_app must not execute the worker-only observation function: {denied_observe:?}",
+    );
+    unauthorized.rollback().await?;
 
     let worker_config = crate::PgProjectionWorkerConfig::new(runtime_pg_config(
         fixture.owner_params(),
@@ -3638,10 +3696,25 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
     .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
     .fetch_one(&mut *restarted_probe)
     .await?;
+    let restarted_observation: (Option<i64>, Option<i64>, Option<i64>, i64, Option<String>) =
+        sqlx::query_as(crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL)
+            .bind(quarantined.to_string())
+            .bind(SETTINGS_PROJECTION_ID)
+            .bind(quarantined_generation)
+            .bind(SETTINGS_PROJECTION_DEFINITION_VERSION)
+            .bind(SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST)
+            .bind(SETTINGS_PROJECTION_INPUT_GENERATION)
+            .fetch_one(&mut *restarted_probe)
+            .await?;
     restarted_probe.rollback().await?;
     assert!(
         has_quarantine,
         "restart must preserve degraded aggregate state"
+    );
+    assert_eq!(
+        restarted_observation.4.as_deref(),
+        Some("provider_permanent"),
+        "a newly connected worker must recover the durable closed quarantine reason",
     );
 
     let projection = eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?;

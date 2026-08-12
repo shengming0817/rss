@@ -252,7 +252,7 @@ pub struct ActivatedWorkflowObservation {
     id: String,
     definition_version: String,
     definition_schema_digest: observation::CanonicalSha256Digest,
-    activation: InventoryWorkflowActivation,
+    shape: ActivatedWorkflowObservationShape,
 }
 
 impl ActivatedWorkflowObservation {
@@ -268,26 +268,24 @@ impl ActivatedWorkflowObservation {
         self.definition_schema_digest.as_str()
     }
 
-    pub const fn activation(&self) -> InventoryWorkflowActivation {
-        self.activation
+    pub const fn shape(&self) -> &ActivatedWorkflowObservationShape {
+        &self.shape
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InventoryWorkflowActivation {
-    Projection(InventoryProjectionActivation),
-    Saga(InventorySagaActivation),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivatedWorkflowObservationShape {
+    ProjectionCapture,
+    ProjectionExecuting {
+        activation: InventoryExecutingProjectionActivation,
+        execution: eventexec::ProjectionExecutionObservation,
+    },
+    SagaActive,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InventoryProjectionActivation {
-    CaptureOnly,
+pub enum InventoryExecutingProjectionActivation {
     Shadow,
-    Active,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InventorySagaActivation {
     Active,
 }
 
@@ -446,31 +444,27 @@ impl RuntimeInventorySeed {
             .workflows()
             .iter()
             .map(|workflow| {
-                let activation = match workflow.activation() {
-                    eventexec::ActivatedWorkflowActivation::Projection(
-                        assembly_schema::ProjectionActivation::CaptureOnly,
-                    ) => InventoryWorkflowActivation::Projection(
-                        InventoryProjectionActivation::CaptureOnly,
-                    ),
-                    eventexec::ActivatedWorkflowActivation::Projection(
-                        assembly_schema::ProjectionActivation::Shadow,
-                    ) => InventoryWorkflowActivation::Projection(
-                        InventoryProjectionActivation::Shadow,
-                    ),
-                    eventexec::ActivatedWorkflowActivation::Projection(
-                        assembly_schema::ProjectionActivation::Active,
-                    ) => InventoryWorkflowActivation::Projection(
-                        InventoryProjectionActivation::Active,
-                    ),
-                    eventexec::ActivatedWorkflowActivation::Saga(
-                        assembly_schema::SagaActivation::Active,
-                    ) => InventoryWorkflowActivation::Saga(InventorySagaActivation::Active),
-                    eventexec::ActivatedWorkflowActivation::Projection(
-                        assembly_schema::ProjectionActivation::Disabled,
-                    )
-                    | eventexec::ActivatedWorkflowActivation::Saga(
-                        assembly_schema::SagaActivation::Disabled,
-                    ) => return Err(InventoryError::ActivatedWorkflow),
+                let shape = match workflow.shape() {
+                    eventexec::ActivatedWorkflowShape::ProjectionCapture => {
+                        ActivatedWorkflowObservationShape::ProjectionCapture
+                    }
+                    eventexec::ActivatedWorkflowShape::ProjectionExecuting {
+                        activation,
+                        execution,
+                    } => ActivatedWorkflowObservationShape::ProjectionExecuting {
+                        activation: match activation {
+                            eventexec::ActivatedExecutingProjectionActivation::Shadow => {
+                                InventoryExecutingProjectionActivation::Shadow
+                            }
+                            eventexec::ActivatedExecutingProjectionActivation::Active => {
+                                InventoryExecutingProjectionActivation::Active
+                            }
+                        },
+                        execution: execution.clone(),
+                    },
+                    eventexec::ActivatedWorkflowShape::SagaActive => {
+                        ActivatedWorkflowObservationShape::SagaActive
+                    }
                 };
                 Ok(ActivatedWorkflowObservation {
                     id: workflow.id().to_owned(),
@@ -479,7 +473,7 @@ impl RuntimeInventorySeed {
                         workflow.definition_schema_digest(),
                     )
                     .map_err(|_| InventoryError::ActivatedWorkflow)?,
-                    activation,
+                    shape,
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -772,32 +766,210 @@ fn endpoint_observation(
 fn workflow_observation(
     workflow: &ActivatedWorkflowObservation,
 ) -> observation::RuntimeInventoryActivatedWorkflow {
-    let activation = match workflow.activation {
-        InventoryWorkflowActivation::Projection(InventoryProjectionActivation::CaptureOnly) => {
-            observation::RuntimeInventoryWorkflowActivation::Projection(
-                observation::RuntimeInventoryProjectionActivation::CaptureOnly,
+    match &workflow.shape {
+        ActivatedWorkflowObservationShape::ProjectionCapture => {
+            observation::RuntimeInventoryActivatedWorkflow::capture_only_projection(
+                workflow.id.clone(),
+                workflow.definition_version.clone(),
+                workflow.definition_schema_digest.clone(),
             )
         }
-        InventoryWorkflowActivation::Projection(InventoryProjectionActivation::Shadow) => {
-            observation::RuntimeInventoryWorkflowActivation::Projection(
-                observation::RuntimeInventoryProjectionActivation::Shadow,
+        ActivatedWorkflowObservationShape::ProjectionExecuting {
+            activation,
+            execution,
+        } => {
+            let activation = match activation {
+                InventoryExecutingProjectionActivation::Shadow => {
+                    observation::RuntimeInventoryExecutingProjectionActivation::Shadow
+                }
+                InventoryExecutingProjectionActivation::Active => {
+                    observation::RuntimeInventoryExecutingProjectionActivation::Active
+                }
+            };
+            projection_workflow_observation(workflow, activation, execution)
+        }
+        ActivatedWorkflowObservationShape::SagaActive => {
+            observation::RuntimeInventoryActivatedWorkflow::active_saga(
+                workflow.id.clone(),
+                workflow.definition_version.clone(),
+                workflow.definition_schema_digest.clone(),
             )
         }
-        InventoryWorkflowActivation::Projection(InventoryProjectionActivation::Active) => {
-            observation::RuntimeInventoryWorkflowActivation::Projection(
-                observation::RuntimeInventoryProjectionActivation::Active,
-            )
-        }
-        InventoryWorkflowActivation::Saga(InventorySagaActivation::Active) => {
-            observation::RuntimeInventoryWorkflowActivation::SagaActive
-        }
-    };
-    observation::RuntimeInventoryActivatedWorkflow::new(
+    }
+}
+
+fn projection_workflow_observation(
+    workflow: &ActivatedWorkflowObservation,
+    activation: observation::RuntimeInventoryExecutingProjectionActivation,
+    execution: &eventexec::ProjectionExecutionObservation,
+) -> observation::RuntimeInventoryActivatedWorkflow {
+    observation::RuntimeInventoryActivatedWorkflow::executing_projection(
         workflow.id.clone(),
         workflow.definition_version.clone(),
         workflow.definition_schema_digest.clone(),
         activation,
+        observation::RuntimeInventoryProjectionExecution::new(
+            execution.target_generation().as_str().to_owned(),
+            projection_worker_status(execution.status()),
+        ),
     )
+}
+
+fn projection_worker_status(
+    status: eventexec::ProjectionWorkerStatus,
+) -> observation::RuntimeInventoryProjectionWorkerStatus {
+    use eventexec::ProjectionWorkerStatus as Source;
+    use observation::RuntimeInventoryProjectionWorkerStatus as Target;
+    match status {
+        Source::Starting => Target::Starting,
+        Source::Healthy {
+            selected_generation,
+            max_lag,
+        } => Target::Healthy {
+            selected_generation: selected_generation_observation(selected_generation),
+            max_lag,
+        },
+        Source::Retryable {
+            selected_generation,
+            max_lag,
+            reasons,
+        } => Target::Retryable {
+            selected_generation: selected_generation_observation(selected_generation),
+            max_lag,
+            reasons: retryable_posture_observation(reasons),
+        },
+        Source::Quarantined {
+            selected_generation,
+            max_lag,
+            reasons,
+        } => Target::Quarantined {
+            selected_generation: selected_generation_observation(selected_generation),
+            max_lag,
+            reasons: quarantine_posture_observation(reasons),
+        },
+        Source::Mixed {
+            selected_generation,
+            max_lag,
+            retryable_reasons,
+            quarantine_reasons,
+        } => Target::Mixed {
+            selected_generation: selected_generation_observation(selected_generation),
+            max_lag,
+            retryable_reasons: retryable_posture_observation(retryable_reasons),
+            quarantine_reasons: quarantine_posture_observation(quarantine_reasons),
+        },
+        Source::Unavailable(reason) => Target::Unavailable(match reason {
+            eventexec::ProjectionUnavailableReason::StartupObservation => {
+                observation::RuntimeInventoryUnavailableReason::StartupObservation
+            }
+            eventexec::ProjectionUnavailableReason::SweepIncomplete => {
+                observation::RuntimeInventoryUnavailableReason::SweepIncomplete
+            }
+            eventexec::ProjectionUnavailableReason::TenantObservation => {
+                observation::RuntimeInventoryUnavailableReason::TenantObservation
+            }
+        }),
+        Source::Stopped(reason) => Target::Stopped(stopped_reason_observation(reason)),
+    }
+}
+
+fn selected_generation_observation(
+    value: eventexec::ProjectionSelectedGeneration,
+) -> observation::RuntimeInventorySelectedGeneration {
+    match value {
+        eventexec::ProjectionSelectedGeneration::None => {
+            observation::RuntimeInventorySelectedGeneration::None
+        }
+        eventexec::ProjectionSelectedGeneration::Uniform(generation) => {
+            observation::RuntimeInventorySelectedGeneration::Uniform(generation.as_str().to_owned())
+        }
+        eventexec::ProjectionSelectedGeneration::Mixed => {
+            observation::RuntimeInventorySelectedGeneration::Mixed
+        }
+    }
+}
+
+fn retryable_posture_observation(
+    value: eventexec::ProjectionReasonPosture<eventexec::ProjectionRetryableReason>,
+) -> observation::RuntimeInventoryReasonPosture<observation::RuntimeInventoryRetryableReason> {
+    match value {
+        eventexec::ProjectionReasonPosture::Mixed => {
+            observation::RuntimeInventoryReasonPosture::Mixed
+        }
+        eventexec::ProjectionReasonPosture::Uniform(reason) => {
+            observation::RuntimeInventoryReasonPosture::Uniform(match reason {
+                eventexec::ProjectionRetryableReason::CheckpointUnread => {
+                    observation::RuntimeInventoryRetryableReason::CheckpointUnread
+                }
+                eventexec::ProjectionRetryableReason::CheckpointUnsaved => {
+                    observation::RuntimeInventoryRetryableReason::CheckpointUnsaved
+                }
+                eventexec::ProjectionRetryableReason::DeadLetterUnsaved => {
+                    observation::RuntimeInventoryRetryableReason::DeadLetterUnsaved
+                }
+                eventexec::ProjectionRetryableReason::ApplyTransient => {
+                    observation::RuntimeInventoryRetryableReason::ApplyTransient
+                }
+                eventexec::ProjectionRetryableReason::CommitUnknown => {
+                    observation::RuntimeInventoryRetryableReason::CommitUnknown
+                }
+                eventexec::ProjectionRetryableReason::SourceTransient => {
+                    observation::RuntimeInventoryRetryableReason::SourceTransient
+                }
+                eventexec::ProjectionRetryableReason::QuarantinePersistence => {
+                    observation::RuntimeInventoryRetryableReason::QuarantinePersistence
+                }
+            })
+        }
+    }
+}
+
+fn quarantine_posture_observation(
+    value: eventexec::ProjectionReasonPosture<eventexec::ProjectionQuarantineReason>,
+) -> observation::RuntimeInventoryReasonPosture<observation::RuntimeInventoryQuarantineReason> {
+    use eventexec::ProjectionQuarantineReason as Source;
+    use observation::RuntimeInventoryQuarantineReason as Target;
+    match value {
+        eventexec::ProjectionReasonPosture::Mixed => {
+            observation::RuntimeInventoryReasonPosture::Mixed
+        }
+        eventexec::ProjectionReasonPosture::Uniform(reason) => {
+            observation::RuntimeInventoryReasonPosture::Uniform(match reason {
+                Source::TargetDefinitionDrift => Target::TargetDefinitionDrift,
+                Source::InputBindingDrift => Target::InputBindingDrift,
+                Source::TenantDrift => Target::TenantDrift,
+                Source::PayloadMalformed => Target::PayloadMalformed,
+                Source::PayloadValueInvalid => Target::PayloadValueInvalid,
+                Source::VersionRegression => Target::VersionRegression,
+                Source::ProviderInvariant => Target::ProviderInvariant,
+                Source::ProviderPermanent => Target::ProviderPermanent,
+                Source::Conflict => Target::Conflict,
+                Source::ApplyOutOfOrder => Target::ApplyOutOfOrder,
+                Source::RollbackFailed => Target::RollbackFailed,
+                Source::SourceOutOfOrder => Target::SourceOutOfOrder,
+            })
+        }
+    }
+}
+
+fn stopped_reason_observation(
+    reason: eventexec::ProjectionStoppedReason,
+) -> observation::RuntimeInventoryStoppedReason {
+    use eventexec::ProjectionStoppedReason as Source;
+    use observation::RuntimeInventoryStoppedReason as Target;
+    match reason {
+        Source::RuntimeBuildFailed => Target::RuntimeBuildFailed,
+        Source::WorkerPanicked => Target::WorkerPanicked,
+        Source::TenantCatalogUnavailable => Target::TenantCatalogUnavailable,
+        Source::SelectedGenerationUnavailable => Target::SelectedGenerationUnavailable,
+        Source::SelectedGenerationIdentityInvalid => Target::SelectedGenerationIdentityInvalid,
+        Source::InvalidTenant => Target::InvalidTenant,
+        Source::TenantQuarantineUnavailable => Target::TenantQuarantineUnavailable,
+        Source::StartupSourceUnavailable => Target::StartupSourceUnavailable,
+        Source::ProjectionOutcomeInvalid => Target::ProjectionOutcomeInvalid,
+        Source::CoordinateOverflow => Target::CoordinateOverflow,
+        Source::TargetConfigInvalid => Target::TargetConfigInvalid,
+    }
 }
 
 fn listener_observation(
@@ -1354,6 +1526,76 @@ mod tests {
         publisher.publish(exact_listeners(&runtime)?)?;
 
         assert!(reader.read()?.activated_workflows().is_empty());
+        Ok(())
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn executing_projection_observation_is_resampled_and_fatal_is_terminal() -> TestResult {
+        let (execution, publisher) = eventexec::ProjectionExecutionObservation::fixture(
+            eventexec::ProjectionVersion::parse("v3")?,
+        );
+        let workflow = ActivatedWorkflowObservation {
+            id: "settings.config-projection".to_owned(),
+            definition_version: "v3".to_owned(),
+            definition_schema_digest: observation::CanonicalSha256Digest::parse(&format!(
+                "sha256:{}",
+                "a".repeat(64)
+            ))?,
+            shape: ActivatedWorkflowObservationShape::ProjectionExecuting {
+                activation: InventoryExecutingProjectionActivation::Active,
+                execution,
+            },
+        };
+
+        let starting = workflow_observation(&workflow);
+        let observation::RuntimeInventoryActivatedWorkflowShape::ProjectionExecuting {
+            execution,
+            ..
+        } = starting.shape()
+        else {
+            return Err("active projection execution".into());
+        };
+        assert!(matches!(
+            execution.worker_status(),
+            observation::RuntimeInventoryProjectionWorkerStatus::Starting
+        ));
+
+        publisher.publish(eventexec::ProjectionWorkerStatus::Healthy {
+            selected_generation: eventexec::ProjectionSelectedGeneration::Uniform(
+                eventexec::ProjectionVersion::parse("v3")?,
+            ),
+            max_lag: 7,
+        });
+        let healthy = workflow_observation(&workflow);
+        let observation::RuntimeInventoryActivatedWorkflowShape::ProjectionExecuting {
+            execution,
+            ..
+        } = healthy.shape()
+        else {
+            return Err("active projection execution".into());
+        };
+        assert!(matches!(
+            execution.worker_status(),
+            observation::RuntimeInventoryProjectionWorkerStatus::Healthy { max_lag: 7, .. }
+        ));
+
+        publisher.stop(eventexec::ProjectionStoppedReason::InvalidTenant);
+        publisher.publish(eventexec::ProjectionWorkerStatus::Starting);
+        let stopped = workflow_observation(&workflow);
+        let observation::RuntimeInventoryActivatedWorkflowShape::ProjectionExecuting {
+            execution,
+            ..
+        } = stopped.shape()
+        else {
+            return Err("active projection execution".into());
+        };
+        assert!(matches!(
+            execution.worker_status(),
+            observation::RuntimeInventoryProjectionWorkerStatus::Stopped(
+                observation::RuntimeInventoryStoppedReason::InvalidTenant
+            )
+        ));
         Ok(())
     }
 

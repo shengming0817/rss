@@ -10,7 +10,7 @@ workspace = true
 
 [features]
 default = []
-test-support = ["tokio/sync"]
+test-support = ["eventexec/test-support", "tokio/sync"]
 
 [dependencies]
 rss-platform.workspace = true

@@ -958,6 +958,28 @@ fn is_runtime_inventory_v1(c: &GovernedContract) -> bool {
         && c.manifest().version == "v1"
 }
 
+fn runtime_inventory_schema_version(c: &GovernedContract) -> Result<i64> {
+    let response_schema = c
+        .manifest()
+        .schemas
+        .response(200)
+        .context("runtime.inventory@v1 must declare its 200 response schema")?;
+    let schema = c
+        .schema(response_schema)
+        .with_context(|| format!("resolve runtime inventory response schema {response_schema}"))?;
+    let version = schema
+        .pointer("/properties/data/properties/schemaVersion/const")
+        .and_then(serde_json::Value::as_i64)
+        .context(
+            "runtime.inventory@v1 response schema must declare integer data.schemaVersion.const",
+        )?;
+    anyhow::ensure!(
+        version > 0,
+        "runtime.inventory@v1 data.schemaVersion.const must be positive"
+    );
+    Ok(version)
+}
+
 fn seal_runtime_inventory_response(c: &GovernedContract, file: &mut syn::File) -> Result<()> {
     if !is_runtime_inventory_v1(c) {
         return Ok(());
@@ -969,6 +991,60 @@ fn seal_runtime_inventory_response(c: &GovernedContract, file: &mut syn::File) -
     let response = response
         .context("runtime.inventory@v1 response schema must generate RuntimeInventoryResponse")?;
     response.attrs.push(syn::parse_quote!(#[non_exhaustive]));
+    let data = file
+        .items
+        .iter_mut()
+        .find_map(|item| match item {
+            syn::Item::Struct(item) if item.ident == "RuntimeInventoryData" => Some(item),
+            _ => None,
+        })
+        .context("runtime.inventory@v1 response schema must generate RuntimeInventoryData")?;
+    let schema_version = data
+        .fields
+        .iter_mut()
+        .find(|field| {
+            field
+                .ident
+                .as_ref()
+                .is_some_and(|ident| ident == "schema_version")
+        })
+        .context("RuntimeInventoryData must contain schema_version")?;
+    schema_version.ty = syn::parse_quote!(RuntimeInventorySchemaVersion);
+    let version = runtime_inventory_schema_version(c)?;
+    let version_variant = syn::Ident::new(&format!("V{version}"), proc_macro2::Span::call_site());
+    let version_error = syn::LitStr::new(
+        &format!("runtime inventory schemaVersion must be {version}"),
+        proc_macro2::Span::call_site(),
+    );
+    let redacted_version = syn::LitStr::new(
+        &format!("RuntimeInventorySchemaVersion::{version_variant}"),
+        proc_macro2::Span::call_site(),
+    );
+    file.items.push(syn::parse_quote! {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
+        #[serde(try_from = "i64", into = "i64")]
+        pub enum RuntimeInventorySchemaVersion { #version_variant }
+    });
+    file.items.push(syn::parse_quote! {
+        impl ::std::convert::TryFrom<i64> for RuntimeInventorySchemaVersion {
+            type Error = &'static str;
+            fn try_from(value: i64) -> Result<Self, Self::Error> {
+                if value == #version { Ok(Self::#version_variant) } else { Err(#version_error) }
+            }
+        }
+    });
+    file.items.push(syn::parse_quote! {
+        impl ::std::convert::From<RuntimeInventorySchemaVersion> for i64 {
+            fn from(_: RuntimeInventorySchemaVersion) -> Self { #version }
+        }
+    });
+    file.items.push(syn::parse_quote! {
+        impl ::secure::Redact for RuntimeInventorySchemaVersion {
+            fn redact_scoped(&self, _scope: ::secure::RedactScope) -> ::std::string::String {
+                #redacted_version.to_owned()
+            }
+        }
+    });
     Ok(())
 }
 
@@ -976,20 +1052,8 @@ fn render_runtime_inventory_projection(c: &GovernedContract) -> Result<String> {
     if !is_runtime_inventory_v1(c) {
         return Ok(String::new());
     }
-    let response_schema = c
-        .manifest()
-        .schemas
-        .response(200)
-        .context("runtime.inventory@v1 must declare its 200 response schema")?;
-    let schema = c
-        .schema(response_schema)
-        .with_context(|| format!("resolve runtime inventory response schema {response_schema}"))?;
-    let schema_version = schema
-        .pointer("/properties/data/properties/schemaVersion/const")
-        .and_then(serde_json::Value::as_i64)
-        .context(
-            "runtime.inventory@v1 response schema must declare integer data.schemaVersion.const",
-        )?;
+    let schema_version = runtime_inventory_schema_version(c)?;
+    let schema_version_variant = format!("V{schema_version}");
     Ok(r#"
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 /// Closed, non-sensitive stages at which neutral facts can fail wire projection.
@@ -997,6 +1061,8 @@ pub enum RuntimeInventoryProjectionStage {
     ActivatedWorkflowDefinitionSchemaDigest,
     ActivatedWorkflowDefinitionVersion,
     ActivatedWorkflowId,
+    ActivatedWorkflowTargetGeneration,
+    ActivatedWorkflowSelectedGeneration,
     ListenerEndpointHost,
     ListenerEndpointPort,
     ListenerId,
@@ -1018,6 +1084,8 @@ impl RuntimeInventoryProjectionStage {
             Self::ActivatedWorkflowDefinitionSchemaDigest => "projection.activated_workflow.definition_schema_digest",
             Self::ActivatedWorkflowDefinitionVersion => "projection.activated_workflow.definition_version",
             Self::ActivatedWorkflowId => "projection.activated_workflow.id",
+            Self::ActivatedWorkflowTargetGeneration => "projection.activated_workflow.target_generation",
+            Self::ActivatedWorkflowSelectedGeneration => "projection.activated_workflow.selected_generation",
             Self::ListenerEndpointHost => "projection.listener.endpoint.host",
             Self::ListenerEndpointPort => "projection.listener.endpoint.port",
             Self::ListenerId => "projection.listener.id",
@@ -1080,6 +1148,85 @@ fn runtime_inventory_endpoint(
     })
 }
 
+fn runtime_inventory_selected_generation(
+    selected: &::assembly_schema::runtime_inventory::RuntimeInventorySelectedGeneration,
+) -> Result<RuntimeProjectionSelectedGeneration, RuntimeInventoryProjectionError> {
+    use ::assembly_schema::runtime_inventory::RuntimeInventorySelectedGeneration as Source;
+    Ok(match selected {
+        Source::None => RuntimeProjectionSelectedGeneration::None(RuntimeProjectionSelectedGenerationNone { state: RuntimeProjectionSelectedGenerationNoneState::None }),
+        Source::Uniform(generation) => RuntimeProjectionSelectedGeneration::Uniform(RuntimeProjectionSelectedGenerationUniform {
+            generation: runtime_inventory_parse(generation, RuntimeInventoryProjectionStage::ActivatedWorkflowSelectedGeneration)?,
+            state: RuntimeProjectionSelectedGenerationUniformState::Uniform,
+        }),
+        Source::Mixed => RuntimeProjectionSelectedGeneration::Mixed(RuntimeProjectionSelectedGenerationMixed { state: RuntimeProjectionSelectedGenerationMixedState::Mixed }),
+    })
+}
+
+fn runtime_inventory_retryable_reason(reason: ::assembly_schema::runtime_inventory::RuntimeInventoryRetryableReason) -> RuntimeProjectionRetryableReason {
+    use ::assembly_schema::runtime_inventory::RuntimeInventoryRetryableReason as Source;
+    match reason {
+        Source::CheckpointUnread => RuntimeProjectionRetryableReason::CheckpointUnread,
+        Source::CheckpointUnsaved => RuntimeProjectionRetryableReason::CheckpointUnsaved,
+        Source::DeadLetterUnsaved => RuntimeProjectionRetryableReason::DeadLetterUnsaved,
+        Source::ApplyTransient => RuntimeProjectionRetryableReason::ApplyTransient,
+        Source::CommitUnknown => RuntimeProjectionRetryableReason::CommitUnknown,
+        Source::SourceTransient => RuntimeProjectionRetryableReason::SourceTransient,
+        Source::QuarantinePersistence => RuntimeProjectionRetryableReason::QuarantinePersistence,
+    }
+}
+
+fn runtime_inventory_retryable_reasons(reasons: &::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture<::assembly_schema::runtime_inventory::RuntimeInventoryRetryableReason>) -> RuntimeProjectionRetryableReasons {
+    match reasons {
+        ::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture::Uniform(reason) => RuntimeProjectionRetryableReasons::Uniform(RuntimeProjectionRetryableReasonsUniform { reason: runtime_inventory_retryable_reason(*reason), state: RuntimeProjectionRetryableReasonsUniformState::Uniform }),
+        ::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture::Mixed => RuntimeProjectionRetryableReasons::Mixed(RuntimeProjectionRetryableReasonsMixed { state: RuntimeProjectionRetryableReasonsMixedState::Mixed }),
+    }
+}
+
+fn runtime_inventory_quarantine_reason(reason: ::assembly_schema::runtime_inventory::RuntimeInventoryQuarantineReason) -> RuntimeProjectionQuarantineReason {
+    use ::assembly_schema::runtime_inventory::RuntimeInventoryQuarantineReason as Source;
+    match reason {
+        Source::TargetDefinitionDrift => RuntimeProjectionQuarantineReason::TargetDefinitionDrift,
+        Source::InputBindingDrift => RuntimeProjectionQuarantineReason::InputBindingDrift,
+        Source::TenantDrift => RuntimeProjectionQuarantineReason::TenantDrift,
+        Source::PayloadMalformed => RuntimeProjectionQuarantineReason::PayloadMalformed,
+        Source::PayloadValueInvalid => RuntimeProjectionQuarantineReason::PayloadValueInvalid,
+        Source::VersionRegression => RuntimeProjectionQuarantineReason::VersionRegression,
+        Source::ProviderInvariant => RuntimeProjectionQuarantineReason::ProviderInvariant,
+        Source::ProviderPermanent => RuntimeProjectionQuarantineReason::ProviderPermanent,
+        Source::Conflict => RuntimeProjectionQuarantineReason::Conflict,
+        Source::ApplyOutOfOrder => RuntimeProjectionQuarantineReason::ApplyOutOfOrder,
+        Source::RollbackFailed => RuntimeProjectionQuarantineReason::RollbackFailed,
+        Source::SourceOutOfOrder => RuntimeProjectionQuarantineReason::SourceOutOfOrder,
+    }
+}
+
+fn runtime_inventory_quarantine_reasons(reasons: &::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture<::assembly_schema::runtime_inventory::RuntimeInventoryQuarantineReason>) -> RuntimeProjectionQuarantineReasons {
+    match reasons {
+        ::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture::Uniform(reason) => RuntimeProjectionQuarantineReasons::Uniform(RuntimeProjectionQuarantineReasonsUniform { reason: runtime_inventory_quarantine_reason(*reason), state: RuntimeProjectionQuarantineReasonsUniformState::Uniform }),
+        ::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture::Mixed => RuntimeProjectionQuarantineReasons::Mixed(RuntimeProjectionQuarantineReasonsMixed { state: RuntimeProjectionQuarantineReasonsMixedState::Mixed }),
+    }
+}
+
+fn runtime_inventory_worker_status(status: &::assembly_schema::runtime_inventory::RuntimeInventoryProjectionWorkerStatus) -> Result<RuntimeProjectionWorkerStatus, RuntimeInventoryProjectionError> {
+    use ::assembly_schema::runtime_inventory::RuntimeInventoryProjectionWorkerStatus as Source;
+    Ok(match status {
+        Source::Starting => RuntimeProjectionWorkerStatus::Starting(RuntimeProjectionWorkerStarting { state: RuntimeProjectionWorkerStartingState::Starting }),
+        Source::Healthy { selected_generation, max_lag } => RuntimeProjectionWorkerStatus::Healthy(RuntimeProjectionWorkerHealthy { max_lag: *max_lag, selected_generation: runtime_inventory_selected_generation(selected_generation)?, state: RuntimeProjectionWorkerHealthyState::Healthy }),
+        Source::Retryable { selected_generation, max_lag, reasons } => RuntimeProjectionWorkerStatus::Retryable(RuntimeProjectionWorkerRetryable { max_lag: *max_lag, reasons: runtime_inventory_retryable_reasons(reasons), selected_generation: runtime_inventory_selected_generation(selected_generation)?, state: RuntimeProjectionWorkerRetryableState::Retryable }),
+        Source::Quarantined { selected_generation, max_lag, reasons } => RuntimeProjectionWorkerStatus::Quarantined(RuntimeProjectionWorkerQuarantined { max_lag: *max_lag, reasons: runtime_inventory_quarantine_reasons(reasons), selected_generation: runtime_inventory_selected_generation(selected_generation)?, state: RuntimeProjectionWorkerQuarantinedState::Quarantined }),
+        Source::Mixed { selected_generation, max_lag, retryable_reasons, quarantine_reasons } => RuntimeProjectionWorkerStatus::Mixed(RuntimeProjectionWorkerMixed { max_lag: *max_lag, quarantine_reasons: runtime_inventory_quarantine_reasons(quarantine_reasons), retryable_reasons: runtime_inventory_retryable_reasons(retryable_reasons), selected_generation: runtime_inventory_selected_generation(selected_generation)?, state: RuntimeProjectionWorkerMixedState::Mixed }),
+        Source::Unavailable(reason) => RuntimeProjectionWorkerStatus::Unavailable(RuntimeProjectionWorkerUnavailable {
+            reason: match reason { ::assembly_schema::runtime_inventory::RuntimeInventoryUnavailableReason::StartupObservation => RuntimeProjectionWorkerUnavailableReason::StartupObservation, ::assembly_schema::runtime_inventory::RuntimeInventoryUnavailableReason::SweepIncomplete => RuntimeProjectionWorkerUnavailableReason::SweepIncomplete, ::assembly_schema::runtime_inventory::RuntimeInventoryUnavailableReason::TenantObservation => RuntimeProjectionWorkerUnavailableReason::TenantObservation },
+            state: RuntimeProjectionWorkerUnavailableState::Unavailable,
+        }),
+        Source::Stopped(reason) => RuntimeProjectionWorkerStatus::Stopped(RuntimeProjectionWorkerStopped {
+            reason: match reason { ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::RuntimeBuildFailed => RuntimeProjectionWorkerStoppedReason::RuntimeBuildFailed, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::WorkerPanicked => RuntimeProjectionWorkerStoppedReason::WorkerPanicked, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::TenantCatalogUnavailable => RuntimeProjectionWorkerStoppedReason::TenantCatalogUnavailable, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::SelectedGenerationUnavailable => RuntimeProjectionWorkerStoppedReason::SelectedGenerationUnavailable, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::SelectedGenerationIdentityInvalid => RuntimeProjectionWorkerStoppedReason::SelectedGenerationIdentityInvalid, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::InvalidTenant => RuntimeProjectionWorkerStoppedReason::InvalidTenant, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::TenantQuarantineUnavailable => RuntimeProjectionWorkerStoppedReason::TenantQuarantineUnavailable, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::StartupSourceUnavailable => RuntimeProjectionWorkerStoppedReason::StartupSourceUnavailable, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::ProjectionOutcomeInvalid => RuntimeProjectionWorkerStoppedReason::ProjectionOutcomeInvalid, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::CoordinateOverflow => RuntimeProjectionWorkerStoppedReason::CoordinateOverflow, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::TargetConfigInvalid => RuntimeProjectionWorkerStoppedReason::TargetConfigInvalid },
+            state: RuntimeProjectionWorkerStoppedState::Stopped,
+            stop_class: RuntimeProjectionWorkerStoppedStopClass::Fatal,
+        }),
+    })
+}
+
 impl ::std::convert::TryFrom<::assembly_schema::runtime_inventory::RuntimeInventoryObservation>
     for RuntimeInventoryResponse
 {
@@ -1090,21 +1237,24 @@ impl ::std::convert::TryFrom<::assembly_schema::runtime_inventory::RuntimeInvent
     ) -> Result<Self, Self::Error> {
         use ::assembly_schema::runtime_inventory as model;
         let activated_workflows = observation.activated_workflows().iter().map(|workflow| {
-            match workflow.activation() {
-                model::RuntimeInventoryWorkflowActivation::Projection(activation) => {
-                    Ok(RuntimeActivatedWorkflow::Projection(RuntimeActivatedProjection {
-                        activation: match activation {
-                            model::RuntimeInventoryProjectionActivation::CaptureOnly => RuntimeActivatedProjectionActivation::CaptureOnly,
-                            model::RuntimeInventoryProjectionActivation::Shadow => RuntimeActivatedProjectionActivation::Shadow,
-                            model::RuntimeInventoryProjectionActivation::Active => RuntimeActivatedProjectionActivation::Active,
-                        },
+            match workflow.shape() {
+                model::RuntimeInventoryActivatedWorkflowShape::ProjectionCapture => {
+                    Ok(RuntimeActivatedWorkflow::ProjectionCapture(RuntimeActivatedProjectionCapture {
+                        activation: RuntimeActivatedProjectionCaptureActivation::CaptureOnly,
                         definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
-                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?,
-                        id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?,
-                        mode: RuntimeActivatedProjectionMode::Projection,
+                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?, id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?, mode: RuntimeActivatedProjectionCaptureMode::Projection,
                     }))
                 }
-                model::RuntimeInventoryWorkflowActivation::SagaActive => {
+                model::RuntimeInventoryActivatedWorkflowShape::ProjectionExecuting { activation, execution } => {
+                    Ok(RuntimeActivatedWorkflow::ProjectionExecuting(RuntimeActivatedProjectionExecuting {
+                        activation: match activation { model::RuntimeInventoryExecutingProjectionActivation::Shadow => RuntimeActivatedProjectionExecutingActivation::Shadow, model::RuntimeInventoryExecutingProjectionActivation::Active => RuntimeActivatedProjectionExecutingActivation::Active },
+                        definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
+                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?, id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?, mode: RuntimeActivatedProjectionExecutingMode::Projection,
+                        target_generation: runtime_inventory_parse(execution.target_generation(), RuntimeInventoryProjectionStage::ActivatedWorkflowTargetGeneration)?,
+                        worker_status: runtime_inventory_worker_status(execution.worker_status())?,
+                    }))
+                }
+                model::RuntimeInventoryActivatedWorkflowShape::SagaActive => {
                     Ok(RuntimeActivatedWorkflow::Saga(RuntimeActivatedSaga {
                         activation: RuntimeActivatedSagaActivation::Active,
                         definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
@@ -1188,7 +1338,7 @@ impl ::std::convert::TryFrom<::assembly_schema::runtime_inventory::RuntimeInvent
                 placements,
                 provider_posture,
                 runtime_plan_fingerprint: runtime_inventory_parse(observation.runtime_plan_fingerprint().as_str(), RuntimeInventoryProjectionStage::RuntimePlanFingerprint)?,
-                schema_version: __RUNTIME_INVENTORY_SCHEMA_VERSION__,
+                schema_version: RuntimeInventorySchemaVersion::__RUNTIME_INVENTORY_SCHEMA_VERSION_VARIANT__,
             },
         })
     }
@@ -1260,8 +1410,8 @@ pub fn project_read_result(
 }
 "#
     .replace(
-        "__RUNTIME_INVENTORY_SCHEMA_VERSION__",
-        &schema_version.to_string(),
+        "__RUNTIME_INVENTORY_SCHEMA_VERSION_VARIANT__",
+        &schema_version_variant,
     ))
 }
 
@@ -6668,7 +6818,7 @@ mod tests {
             .pop()
             .context("runtime inventory contract missing")?;
         let rendered = render_runtime_inventory_projection(&contract)?;
-        assert!(rendered.contains("schema_version: 7"));
+        assert!(rendered.contains("schema_version: RuntimeInventorySchemaVersion::V7"));
 
         let schema_path = dir.join("response.schema.json");
         let schema = std::fs::read_to_string(&schema_path)?.replace("\"const\":7", "\"minimum\":1");

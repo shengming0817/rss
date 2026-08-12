@@ -96,6 +96,9 @@ event、command、saga 与 projection 的 resolved schema hash 会进入 durable
 JSON Schema 集合论 diff 看似兼容，只要 hash 旋转也必须产生 `RESOLVED_SCHEMA_HASH_CHANGED`。`format`
 从无到有会改变 generated scalar，同样属于 `FIELD_FORMAT_CHANGED`，两者均服从上述精确 intentional
 breaking authorization，不接受“仅文档”或 pre-GA 作为隐式豁免。
+JSON Schema `const` 的值变化会直接改变可接受实例集合，必须产生 `CONST_VALUE_CHANGED`，并服从同一
+base-bound intentional breaking authorization；不得把 discriminator 或 schemaVersion 的 const 切换降级为
+普通 schema hash 漂移。
 
 intentional breaking authorization 与 review ack 正交：前者只授权 fingerprint 中精确列出的 deny，
 后者只确认固定 review-only posture findings。两者都不接受 flag、环境变量、自由文本或 lifecycle 降级；

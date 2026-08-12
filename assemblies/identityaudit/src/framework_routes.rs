@@ -378,7 +378,10 @@ mod tests {
             ),
         ])?;
         let response = wire::RuntimeInventoryResponse::try_from(reader.read()?)?;
-        assert_eq!(response.data.schema_version, 1);
+        assert_eq!(
+            response.data.schema_version,
+            wire::RuntimeInventorySchemaVersion::V2
+        );
         assert!(response.data.activated_workflows.is_empty());
         assert_eq!(response.data.listeners.len(), 3);
         assert_eq!(response.data.provider_posture.len(), 9);

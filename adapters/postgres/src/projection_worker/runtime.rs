@@ -1,6 +1,6 @@
 //! Runtime orchestration for the Settings-owned Projection worker capability.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{BTreeSet, HashSet, VecDeque};
 use std::future::Future;
 use std::sync::Arc;
 #[cfg(test)]
@@ -71,23 +71,27 @@ impl PgProjectionWorkerDeps {
         let worker = self.worker;
         let payload_protector = self.payload_protector;
         let clock = self.clock;
-        binding.issue_runtime(Arc::new(target), move |target, token, health, admission| {
-            spawn_settings_projection_worker(
-                SettingsProjectionWorkerLaunch {
-                    worker_store: worker.clone(),
-                    target_scope: target_scope.clone(),
-                    target,
-                    payload_protector: payload_protector.clone(),
-                    runner,
-                    metrics: Arc::clone(&metrics),
-                    metric_scope,
-                    clock: Arc::clone(&clock),
-                    admission,
-                },
-                token,
-                health,
-            )
-        })
+        binding.issue_runtime(
+            Arc::new(target),
+            move |target, token, health, admission, observation| {
+                spawn_settings_projection_worker(
+                    SettingsProjectionWorkerLaunch {
+                        worker_store: worker.clone(),
+                        target_scope: target_scope.clone(),
+                        target,
+                        payload_protector: payload_protector.clone(),
+                        runner,
+                        metrics: Arc::clone(&metrics),
+                        metric_scope,
+                        clock: Arc::clone(&clock),
+                        admission,
+                        observation,
+                    },
+                    token,
+                    health,
+                )
+            },
+        )
     }
 }
 
@@ -109,7 +113,7 @@ const PROJECTION_WORKER_BATCH_BUDGET: Duration = Duration::from_secs(40);
 /// definition_version, definition_schema_digest, input_generation).
 #[cfg(feature = "domain-settings")]
 pub(crate) const PROJECTION_WORKER_OBSERVE_TENANT_SQL: &str = "SELECT source_high_water, checkpoint_offset_lsn, \
-     checkpoint_updated_at_epoch_micros, projection_dlq_backlog \
+     checkpoint_updated_at_epoch_micros, projection_dlq_backlog, quarantine_reason \
      FROM public.rss_projection_worker_observe_tenant(\
          $1::uuid, $2, $3, $4, $5, $6)";
 #[cfg(feature = "domain-settings")]
@@ -154,6 +158,8 @@ enum PgProjectionWorkerRuntimeError {
     TenantObservation(#[source] sqlx::Error),
     #[error("projection worker tenant observation timed out")]
     TenantObservationTimeout,
+    #[error("projection worker tenant observation identity is invalid")]
+    TenantObservationIdentity,
     #[error("projection worker fatal lsn is outside the postgres coordinate range")]
     FailedLsnOverflow,
     #[error("projection worker target execution binding is invalid")]
@@ -198,6 +204,7 @@ struct SettingsProjectionWorkerLaunch {
     metric_scope: eventexec::ProjectionMetricScope,
     clock: Arc<dyn Clock>,
     admission: primitives::WriteAdmission,
+    observation: eventexec::ProjectionObservationPublisher,
 }
 
 #[cfg(feature = "domain-settings")]
@@ -208,11 +215,19 @@ fn spawn_settings_projection_worker(
 ) -> Box<DynManagedResource<'static>> {
     let store = launch.worker_store.clone();
     let worker_health = Arc::clone(&health);
-    let worker = eventexec::spawn_on_dedicated_runtime(
+    let build_failure_observation = launch.observation.clone();
+    let panic_observation = launch.observation.clone();
+    let worker = eventexec::spawn_on_dedicated_runtime_with_failure_observers(
         "postgres-settings-projection-worker",
         token,
         health,
         PROJECTION_WORKER_JOIN_TIMEOUT,
+        move |_| {
+            build_failure_observation.stop(eventexec::ProjectionStoppedReason::RuntimeBuildFailed);
+        },
+        move || {
+            panic_observation.stop(eventexec::ProjectionStoppedReason::WorkerPanicked);
+        },
         move |token| async move {
             projection_worker_loop(launch, token, worker_health)
                 .await
@@ -228,6 +243,20 @@ async fn projection_worker_loop(
     token: CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
 ) -> Result<(), PgProjectionWorkerRuntimeError> {
+    let observation = launch.observation.clone();
+    let result = projection_worker_loop_inner(launch, token, health).await;
+    if let Err(error) = &result {
+        observation.stop(projection_stopped_reason(error));
+    }
+    result
+}
+
+#[cfg(feature = "domain-settings")]
+async fn projection_worker_loop_inner(
+    launch: SettingsProjectionWorkerLaunch,
+    token: CancellationToken,
+    health: Arc<eventexec::WorkerHealth>,
+) -> Result<(), PgProjectionWorkerRuntimeError> {
     let SettingsProjectionWorkerLaunch {
         worker_store: worker,
         target_scope,
@@ -238,6 +267,7 @@ async fn projection_worker_loop(
         metric_scope,
         clock,
         admission,
+        observation,
     } = launch;
     let mut ticker = tokio::time::interval(runner.poll_interval());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -262,6 +292,9 @@ async fn projection_worker_loop(
                 Err(error) if projection_startup_observation_is_retryable(&error) => {
                     log_projection_worker_retry(&error, "startup observation");
                     record_projection_worker_health(&health, true);
+                    observation.publish(eventexec::ProjectionWorkerStatus::Unavailable(
+                        eventexec::ProjectionUnavailableReason::StartupObservation,
+                    ));
                 }
                 Err(error) => return Err(error),
             }
@@ -279,10 +312,55 @@ async fn projection_worker_loop(
                 metrics: metrics.as_ref(),
                 scope: &metric_scope,
                 clock: clock.as_ref(),
+                observation: Some(&observation),
             },
         )
         .await?;
         record_projection_worker_health(&health, retryable_failure);
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn projection_stopped_reason(
+    error: &PgProjectionWorkerRuntimeError,
+) -> eventexec::ProjectionStoppedReason {
+    match error {
+        PgProjectionWorkerRuntimeError::TenantCatalog(_)
+        | PgProjectionWorkerRuntimeError::TenantCatalogTimeout => {
+            eventexec::ProjectionStoppedReason::TenantCatalogUnavailable
+        }
+        PgProjectionWorkerRuntimeError::ActiveGeneration(_)
+        | PgProjectionWorkerRuntimeError::ActiveGenerationTimeout => {
+            eventexec::ProjectionStoppedReason::SelectedGenerationUnavailable
+        }
+        PgProjectionWorkerRuntimeError::ActiveGenerationIdentity => {
+            eventexec::ProjectionStoppedReason::SelectedGenerationIdentityInvalid
+        }
+        PgProjectionWorkerRuntimeError::InvalidTenant => {
+            eventexec::ProjectionStoppedReason::InvalidTenant
+        }
+        PgProjectionWorkerRuntimeError::TenantQuarantine(_)
+        | PgProjectionWorkerRuntimeError::TenantQuarantineTimeout => {
+            eventexec::ProjectionStoppedReason::TenantQuarantineUnavailable
+        }
+        PgProjectionWorkerRuntimeError::StartupSource(_)
+        | PgProjectionWorkerRuntimeError::StartupCheckpoint(_) => {
+            eventexec::ProjectionStoppedReason::StartupSourceUnavailable
+        }
+        PgProjectionWorkerRuntimeError::FatalProjection => {
+            eventexec::ProjectionStoppedReason::ProjectionOutcomeInvalid
+        }
+        PgProjectionWorkerRuntimeError::FailedLsnOverflow => {
+            eventexec::ProjectionStoppedReason::CoordinateOverflow
+        }
+        PgProjectionWorkerRuntimeError::TargetConfig(_) => {
+            eventexec::ProjectionStoppedReason::TargetConfigInvalid
+        }
+        PgProjectionWorkerRuntimeError::TenantObservation(_)
+        | PgProjectionWorkerRuntimeError::TenantObservationTimeout
+        | PgProjectionWorkerRuntimeError::TenantObservationIdentity => {
+            eventexec::ProjectionStoppedReason::TenantCatalogUnavailable
+        }
     }
 }
 
@@ -326,6 +404,7 @@ fn projection_startup_observation_is_retryable(error: &PgProjectionWorkerRuntime
         | PgProjectionWorkerRuntimeError::FatalProjection
         | PgProjectionWorkerRuntimeError::FailedLsnOverflow
         | PgProjectionWorkerRuntimeError::TargetConfig(_) => false,
+        PgProjectionWorkerRuntimeError::TenantObservationIdentity => false,
     }
 }
 
@@ -424,6 +503,7 @@ async fn run_projection_sweep(
                     Err(error) => return Err(error),
                 },
             };
+            sweep.gauges.record_outcome(outcome);
             retryable_failure |= projection_tenant_run_health(outcome, tenant, &mut more_work);
         }
         after = tenants.last().copied();
@@ -432,20 +512,26 @@ async fn run_projection_sweep(
             break;
         }
     }
-    match drive_projection_round_robin(more_work, deadline, token, |tenant| {
-        run_and_settle_projection_tenant(
-            worker,
-            target_scope,
-            Arc::clone(&target),
-            payload_protector.clone(),
-            runner,
-            tenant,
-            ProjectionTenantQuantum {
-                metric_ctx,
-                gauges: None,
-            },
-        )
-    })
+    match drive_projection_round_robin(
+        more_work,
+        deadline,
+        token,
+        |tenant| {
+            run_and_settle_projection_tenant(
+                worker,
+                target_scope,
+                Arc::clone(&target),
+                payload_protector.clone(),
+                runner,
+                tenant,
+                ProjectionTenantQuantum {
+                    metric_ctx,
+                    gauges: None,
+                },
+            )
+        },
+        |outcome| sweep.gauges.record_outcome(outcome),
+    )
     .await
     {
         Ok(more_retryable) => {
@@ -462,6 +548,7 @@ struct ProjectionWorkerMetricCtx<'a> {
     metrics: &'a dyn eventexec::ProjectionMetrics,
     scope: &'a eventexec::ProjectionMetricScope,
     clock: &'a dyn Clock,
+    observation: Option<&'a eventexec::ProjectionObservationPublisher>,
 }
 
 /// Always emits sweep gauges on drop. Incomplete sweeps force the NaN triple (never 0 or stale).
@@ -477,6 +564,9 @@ impl Drop for ProjectionSweepGaugeEmit<'_> {
     fn drop(&mut self) {
         seal_projection_sweep_completeness(self.complete, &mut self.gauges);
         emit_projection_sweep_gauges(self.metric_ctx, &self.gauges);
+        if let Some(observation) = self.metric_ctx.observation {
+            observation.publish(self.gauges.worker_status());
+        }
     }
 }
 
@@ -492,7 +582,7 @@ enum ProjectionTenantRun {
     Clean,
     MoreWork,
     Fenced,
-    Retryable,
+    Retryable(eventexec::ProjectionRetryableReason),
     Quarantined(ProjectionTenantFatal),
 }
 
@@ -522,6 +612,22 @@ enum ProjectionTenantFatalReason {
 
 #[cfg(feature = "domain-settings")]
 impl ProjectionTenantFatalReason {
+    #[cfg(test)]
+    const ALL: [Self; 12] = [
+        Self::TargetDefinitionDrift,
+        Self::InputBindingDrift,
+        Self::TenantDrift,
+        Self::PayloadMalformed,
+        Self::PayloadValueInvalid,
+        Self::VersionRegression,
+        Self::ProviderInvariant,
+        Self::ProviderPermanent,
+        Self::Conflict,
+        Self::ApplyOutOfOrder,
+        Self::RollbackFailed,
+        Self::SourceOutOfOrder,
+    ];
+
     const fn from_apply(reason: consistency::ProjectionApplyErrorReason) -> Option<Self> {
         match reason {
             consistency::ProjectionApplyErrorReason::TargetDefinitionDrift => {
@@ -570,6 +676,43 @@ impl ProjectionTenantFatalReason {
             Self::SourceOutOfOrder => "source_out_of_order",
         }
     }
+
+    fn parse_label(value: &str) -> Option<Self> {
+        Some(match value {
+            "target_definition_drift" => Self::TargetDefinitionDrift,
+            "input_binding_drift" => Self::InputBindingDrift,
+            "tenant_drift" => Self::TenantDrift,
+            "payload_malformed" => Self::PayloadMalformed,
+            "payload_value_invalid" => Self::PayloadValueInvalid,
+            "version_regression" => Self::VersionRegression,
+            "provider_invariant" => Self::ProviderInvariant,
+            "provider_permanent" => Self::ProviderPermanent,
+            "conflict" => Self::Conflict,
+            "apply_out_of_order" => Self::ApplyOutOfOrder,
+            "rollback_failed" => Self::RollbackFailed,
+            "source_out_of_order" => Self::SourceOutOfOrder,
+            _ => return None,
+        })
+    }
+
+    const fn as_observation_reason(self) -> eventexec::ProjectionQuarantineReason {
+        match self {
+            Self::TargetDefinitionDrift => {
+                eventexec::ProjectionQuarantineReason::TargetDefinitionDrift
+            }
+            Self::InputBindingDrift => eventexec::ProjectionQuarantineReason::InputBindingDrift,
+            Self::TenantDrift => eventexec::ProjectionQuarantineReason::TenantDrift,
+            Self::PayloadMalformed => eventexec::ProjectionQuarantineReason::PayloadMalformed,
+            Self::PayloadValueInvalid => eventexec::ProjectionQuarantineReason::PayloadValueInvalid,
+            Self::VersionRegression => eventexec::ProjectionQuarantineReason::VersionRegression,
+            Self::ProviderInvariant => eventexec::ProjectionQuarantineReason::ProviderInvariant,
+            Self::ProviderPermanent => eventexec::ProjectionQuarantineReason::ProviderPermanent,
+            Self::Conflict => eventexec::ProjectionQuarantineReason::Conflict,
+            Self::ApplyOutOfOrder => eventexec::ProjectionQuarantineReason::ApplyOutOfOrder,
+            Self::RollbackFailed => eventexec::ProjectionQuarantineReason::RollbackFailed,
+            Self::SourceOutOfOrder => eventexec::ProjectionQuarantineReason::SourceOutOfOrder,
+        }
+    }
 }
 
 #[cfg(feature = "domain-settings")]
@@ -584,7 +727,7 @@ fn projection_tenant_run_health(
             more_work.push_back(tenant);
             false
         }
-        ProjectionTenantRun::Retryable | ProjectionTenantRun::Quarantined(_) => true,
+        ProjectionTenantRun::Retryable(_) | ProjectionTenantRun::Quarantined(_) => true,
     }
 }
 
@@ -593,15 +736,17 @@ fn projection_tenant_run_health(
     clippy::disallowed_methods,
     reason = "Tokio Instant compares the same monotonic worker-sweep deadline; no domain timestamp or persisted fact is derived from it"
 )]
-async fn drive_projection_round_robin<F, Fut>(
+async fn drive_projection_round_robin<F, Fut, O>(
     mut tenants: VecDeque<rss_request_context::TenantId>,
     deadline: tokio::time::Instant,
     token: &CancellationToken,
     mut run: F,
+    mut observe: O,
 ) -> Result<bool, PgProjectionWorkerRuntimeError>
 where
     F: FnMut(rss_request_context::TenantId) -> Fut,
     Fut: Future<Output = Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError>>,
+    O: FnMut(ProjectionTenantRun),
 {
     let mut degraded = false;
     while let Some(tenant) = tenants.pop_front() {
@@ -612,6 +757,7 @@ where
             () = tokio::time::sleep_until(deadline) => break,
             outcome = run(tenant) => outcome?,
         };
+        observe(outcome);
         degraded |= projection_tenant_run_health(outcome, tenant, &mut tenants);
     }
     Ok(degraded)
@@ -693,6 +839,13 @@ enum ProjectionWorkerGeneration {
 
 #[cfg(feature = "domain-settings")]
 impl ProjectionWorkerGeneration {
+    fn generation(&self) -> Option<&eventexec::ProjectionVersion> {
+        match self {
+            Self::Uninitialized => None,
+            Self::Active(snapshot) => Some(&snapshot.generation),
+        }
+    }
+
     fn bind(self, plan: &ProjectionWorkerTarget) -> Option<ProjectionWorkerTarget> {
         match self {
             Self::Uninitialized => None,
@@ -769,12 +922,15 @@ async fn run_and_settle_projection_tenant(
     payload_protector: DlxPayloadProtector,
     runner: eventexec::ProjectionRunnerConfig,
     tenant: rss_request_context::TenantId,
-    quantum: ProjectionTenantQuantum<'_>,
+    mut quantum: ProjectionTenantQuantum<'_>,
 ) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
     // Resolve/bind first: observe SQL requires the selected active generation. Uninitialized /
     // fenced tenants skip observation; observe the exact selected scope before quarantine so
     // backlog remains visible.
     let selected = resolve_projection_worker_generation(worker, target_scope, tenant).await?;
+    if let Some(gauges) = quantum.gauges.as_deref_mut() {
+        gauges.record_selected_generation(selected.generation());
+    }
     let Some(selected_scope) = selected.bind(target_scope) else {
         return Ok(ProjectionTenantRun::Fenced);
     };
@@ -789,7 +945,7 @@ async fn run_and_settle_projection_tenant(
         .await;
     }
     if projection_worker_tenant_is_quarantined(worker, &selected_scope, tenant).await? {
-        return Ok(ProjectionTenantRun::Retryable);
+        return Ok(ProjectionTenantRun::Fenced);
     }
     let outcome = run_projection_tenant(
         worker,
@@ -808,7 +964,9 @@ async fn run_and_settle_projection_tenant(
         Ok(()) => Ok(outcome),
         Err(error) if projection_startup_observation_is_retryable(&error) => {
             log_projection_worker_retry(&error, "tenant quarantine");
-            Ok(ProjectionTenantRun::Retryable)
+            Ok(ProjectionTenantRun::Retryable(
+                eventexec::ProjectionRetryableReason::QuarantinePersistence,
+            ))
         }
         Err(error) => Err(error),
     }
@@ -887,10 +1045,116 @@ async fn run_projection_tenant(
 #[derive(Debug, Default)]
 struct ProjectionSweepGaugeAcc {
     observe_failed: bool,
-    max_lag: f64,
+    incomplete: bool,
+    max_lag: u64,
     max_freshness_secs: Option<f64>,
     sum_dlq: f64,
     observed_tenants: HashSet<rss_request_context::TenantId>,
+    selected_none_seen: bool,
+    selected_generation: Option<eventexec::ProjectionVersion>,
+    selected_mixed: bool,
+    retryable_reasons: BTreeSet<eventexec::ProjectionRetryableReason>,
+    quarantine_reasons: BTreeSet<eventexec::ProjectionQuarantineReason>,
+}
+
+#[cfg(feature = "domain-settings")]
+impl ProjectionSweepGaugeAcc {
+    fn record_selected_generation(&mut self, generation: Option<&eventexec::ProjectionVersion>) {
+        match generation {
+            None => {
+                self.selected_none_seen = true;
+                self.selected_mixed |= self.selected_generation.is_some();
+            }
+            Some(generation) => {
+                self.selected_mixed |= self.selected_none_seen
+                    || self
+                        .selected_generation
+                        .as_ref()
+                        .is_some_and(|selected| selected != generation);
+                if self.selected_generation.is_none() {
+                    self.selected_generation = Some(generation.clone());
+                }
+            }
+        }
+    }
+
+    fn record_outcome(&mut self, outcome: ProjectionTenantRun) {
+        match outcome {
+            ProjectionTenantRun::Retryable(reason) => {
+                self.retryable_reasons.insert(reason);
+            }
+            ProjectionTenantRun::Quarantined(fatal) => {
+                self.quarantine_reasons
+                    .insert(fatal.reason.as_observation_reason());
+            }
+            ProjectionTenantRun::Clean
+            | ProjectionTenantRun::MoreWork
+            | ProjectionTenantRun::Fenced => {}
+        }
+    }
+
+    fn selected_generation_posture(&self) -> eventexec::ProjectionSelectedGeneration {
+        if self.selected_mixed {
+            eventexec::ProjectionSelectedGeneration::Mixed
+        } else if let Some(generation) = &self.selected_generation {
+            eventexec::ProjectionSelectedGeneration::Uniform(generation.clone())
+        } else {
+            eventexec::ProjectionSelectedGeneration::None
+        }
+    }
+
+    fn worker_status(&self) -> eventexec::ProjectionWorkerStatus {
+        if self.observe_failed {
+            return eventexec::ProjectionWorkerStatus::Unavailable(if self.incomplete {
+                eventexec::ProjectionUnavailableReason::SweepIncomplete
+            } else {
+                eventexec::ProjectionUnavailableReason::TenantObservation
+            });
+        }
+        let selected_generation = self.selected_generation_posture();
+        let max_lag = self.max_lag;
+        match (
+            reason_posture(&self.retryable_reasons),
+            reason_posture(&self.quarantine_reasons),
+        ) {
+            (None, None) => eventexec::ProjectionWorkerStatus::Healthy {
+                selected_generation,
+                max_lag,
+            },
+            (Some(reasons), None) => eventexec::ProjectionWorkerStatus::Retryable {
+                selected_generation,
+                max_lag,
+                reasons,
+            },
+            (None, Some(reasons)) => eventexec::ProjectionWorkerStatus::Quarantined {
+                selected_generation,
+                max_lag,
+                reasons,
+            },
+            (Some(retryable_reasons), Some(quarantine_reasons)) => {
+                eventexec::ProjectionWorkerStatus::Mixed {
+                    selected_generation,
+                    max_lag,
+                    retryable_reasons,
+                    quarantine_reasons,
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn reason_posture<R: Copy + Ord>(
+    reasons: &BTreeSet<R>,
+) -> Option<eventexec::ProjectionReasonPosture<R>> {
+    match reasons.len() {
+        0 => None,
+        1 => reasons
+            .first()
+            .copied()
+            .map(eventexec::ProjectionReasonPosture::Uniform),
+        _ => Some(eventexec::ProjectionReasonPosture::Mixed),
+    }
 }
 
 #[cfg(feature = "domain-settings")]
@@ -900,6 +1164,7 @@ struct ProjectionTenantObservation {
     checkpoint_offset_lsn: Option<i64>,
     checkpoint_updated_at_epoch_micros: Option<i64>,
     projection_dlq_backlog: i64,
+    quarantine_reason: Option<ProjectionTenantFatalReason>,
 }
 
 #[cfg(feature = "domain-settings")]
@@ -937,7 +1202,7 @@ async fn load_projection_tenant_observation(
     tokio::time::timeout(PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT, async {
         let mut tx = worker.0.pool.begin().await?;
         crate::cotx::set_local_tenant(&mut tx, tenant).await?;
-        let row: (Option<i64>, Option<i64>, Option<i64>, i64) =
+        let row: (Option<i64>, Option<i64>, Option<i64>, i64, Option<String>) =
             sqlx::query_as(PROJECTION_WORKER_OBSERVE_TENANT_SQL)
                 .bind(tenant.to_string())
                 .bind(target.projection_id())
@@ -948,16 +1213,27 @@ async fn load_projection_tenant_observation(
                 .fetch_one(&mut *tx)
                 .await?;
         tx.commit().await?;
+        Ok::<_, sqlx::Error>(row)
+    })
+    .await
+    .map_err(|_| PgProjectionWorkerRuntimeError::TenantObservationTimeout)?
+    .map_err(PgProjectionWorkerRuntimeError::TenantObservation)
+    .and_then(|row| {
+        let quarantine_reason = match row.4.as_deref() {
+            Some(reason) => Some(
+                ProjectionTenantFatalReason::parse_label(reason)
+                    .ok_or(PgProjectionWorkerRuntimeError::TenantObservationIdentity)?,
+            ),
+            None => None,
+        };
         Ok(ProjectionTenantObservation {
             source_high_water: row.0,
             checkpoint_offset_lsn: row.1,
             checkpoint_updated_at_epoch_micros: row.2,
             projection_dlq_backlog: row.3,
+            quarantine_reason,
         })
     })
-    .await
-    .map_err(|_| PgProjectionWorkerRuntimeError::TenantObservationTimeout)?
-    .map_err(PgProjectionWorkerRuntimeError::TenantObservation)
 }
 
 #[cfg(feature = "domain-settings")]
@@ -970,9 +1246,14 @@ fn accumulate_projection_tenant_observation(
     // (never saved) both behave as offset 0 for lag math.
     let high_water = observation.source_high_water.unwrap_or(0);
     let checkpoint = observation.checkpoint_offset_lsn.unwrap_or(0);
-    let lag = i64::max(high_water - checkpoint, 0) as f64;
+    let lag = u64::try_from(i64::max(high_water - checkpoint, 0)).unwrap_or(u64::MAX);
     gauges.max_lag = gauges.max_lag.max(lag);
     gauges.sum_dlq += observation.projection_dlq_backlog.max(0) as f64;
+    if let Some(reason) = observation.quarantine_reason {
+        gauges
+            .quarantine_reasons
+            .insert(reason.as_observation_reason());
+    }
     // Missing/invalid updated_at stays absent — emit path exports NaN, never freshness=0.
     if let Some(age) = observation
         .checkpoint_updated_at_epoch_micros
@@ -1011,6 +1292,7 @@ fn emit_projection_sweep_gauges(
 fn seal_projection_sweep_completeness(complete: bool, gauges: &mut ProjectionSweepGaugeAcc) {
     if !complete {
         gauges.observe_failed = true;
+        gauges.incomplete = true;
     }
 }
 
@@ -1021,7 +1303,7 @@ fn projection_sweep_gauge_values(gauges: &ProjectionSweepGaugeAcc) -> (f64, f64,
         (f64::NAN, f64::NAN, f64::NAN)
     } else {
         (
-            gauges.max_lag,
+            gauges.max_lag as f64,
             gauges.max_freshness_secs.unwrap_or(f64::NAN),
             gauges.sum_dlq,
         )
@@ -1099,7 +1381,9 @@ fn classify_projection_tenant_quantum(
             kind: consistency::EngineErrorKind::Transient,
         } => {
             log_projection_tenant_retry(&run.stop);
-            Ok(ProjectionTenantRun::Retryable)
+            Ok(ProjectionTenantRun::Retryable(projection_retryable_reason(
+                &run.stop,
+            )))
         }
         eventexec::ProjectionStop::ApplyFailed {
             failed_at,
@@ -1128,6 +1412,34 @@ fn classify_projection_tenant_quantum(
             log_projection_tenant_fatal(&run.stop);
             Err(PgProjectionWorkerRuntimeError::FatalProjection)
         }
+    }
+}
+
+#[cfg(feature = "domain-settings")]
+fn projection_retryable_reason(
+    stop: &eventexec::ProjectionStop,
+) -> eventexec::ProjectionRetryableReason {
+    match stop {
+        eventexec::ProjectionStop::CheckpointUnread => {
+            eventexec::ProjectionRetryableReason::CheckpointUnread
+        }
+        eventexec::ProjectionStop::CheckpointUnsaved => {
+            eventexec::ProjectionRetryableReason::CheckpointUnsaved
+        }
+        eventexec::ProjectionStop::DeadLetterUnsaved { .. } => {
+            eventexec::ProjectionRetryableReason::DeadLetterUnsaved
+        }
+        eventexec::ProjectionStop::ApplyFailed {
+            kind: consistency::ProjectionApplyErrorKind::CommitUnknown,
+            ..
+        } => eventexec::ProjectionRetryableReason::CommitUnknown,
+        eventexec::ProjectionStop::ApplyFailed { .. } => {
+            eventexec::ProjectionRetryableReason::ApplyTransient
+        }
+        eventexec::ProjectionStop::SourceReadFailed { .. } => {
+            eventexec::ProjectionRetryableReason::SourceTransient
+        }
+        _ => unreachable!("only retryable projection stops are mapped"),
     }
 }
 
@@ -1254,7 +1566,7 @@ mod projection_worker_tests {
                 ),
                 limit,
             ),
-            Ok(ProjectionTenantRun::Retryable)
+            Ok(ProjectionTenantRun::Retryable(_))
         ));
         assert!(matches!(
             classify_projection_tenant_quantum(
@@ -1340,6 +1652,7 @@ mod projection_worker_tests {
                 checkpoint_offset_lsn: Some(40),
                 checkpoint_updated_at_epoch_micros: Some(1_700_000_000_i64 * 1_000_000),
                 projection_dlq_backlog: 2,
+                quarantine_reason: None,
             },
         );
         accumulate_projection_tenant_observation(
@@ -1350,9 +1663,10 @@ mod projection_worker_tests {
                 checkpoint_offset_lsn: Some(45),
                 checkpoint_updated_at_epoch_micros: Some(1_700_000_050_i64 * 1_000_000),
                 projection_dlq_backlog: 3,
+                quarantine_reason: None,
             },
         );
-        assert_eq!(gauges.max_lag, 60.0);
+        assert_eq!(gauges.max_lag, 60);
         assert_eq!(gauges.max_freshness_secs, Some(100.0));
         assert_eq!(gauges.sum_dlq, 5.0);
     }
@@ -1369,9 +1683,10 @@ mod projection_worker_tests {
                 checkpoint_offset_lsn: Some(40),
                 checkpoint_updated_at_epoch_micros: Some(1_700_000_000_i64 * 1_000_000),
                 projection_dlq_backlog: -5,
+                quarantine_reason: None,
             },
         );
-        assert_eq!(gauges.max_lag, 0.0);
+        assert_eq!(gauges.max_lag, 0);
         assert_eq!(gauges.sum_dlq, 0.0);
         accumulate_projection_tenant_observation(
             &mut gauges,
@@ -1381,9 +1696,10 @@ mod projection_worker_tests {
                 checkpoint_offset_lsn: Some(40),
                 checkpoint_updated_at_epoch_micros: None,
                 projection_dlq_backlog: 4,
+                quarantine_reason: None,
             },
         );
-        assert_eq!(gauges.max_lag, 10.0);
+        assert_eq!(gauges.max_lag, 10);
         assert_eq!(gauges.sum_dlq, 4.0, "negative dlq must not reduce the sum");
         assert_eq!(gauges.max_freshness_secs, Some(100.0));
     }
@@ -1400,9 +1716,10 @@ mod projection_worker_tests {
                 checkpoint_offset_lsn: None,
                 checkpoint_updated_at_epoch_micros: None,
                 projection_dlq_backlog: 0,
+                quarantine_reason: None,
             },
         );
-        assert_eq!(gauges.max_lag, 0.0);
+        assert_eq!(gauges.max_lag, 0);
         assert_eq!(gauges.max_freshness_secs, None);
         assert!(!gauges.observe_failed);
         accumulate_projection_tenant_observation(
@@ -1413,11 +1730,171 @@ mod projection_worker_tests {
                 checkpoint_offset_lsn: None,
                 checkpoint_updated_at_epoch_micros: None,
                 projection_dlq_backlog: 1,
+                quarantine_reason: None,
             },
         );
-        assert_eq!(gauges.max_lag, 80.0);
+        assert_eq!(gauges.max_lag, 80);
         assert_eq!(gauges.max_freshness_secs, None);
         assert_eq!(gauges.sum_dlq, 1.0);
+    }
+
+    #[test]
+    fn worker_status_uses_paired_lag_and_reports_mixed_generations() {
+        let clock = FixedClock(UNIX_EPOCH);
+        let mut gauges = ProjectionSweepGaugeAcc::default();
+        let first = eventexec::ProjectionVersion::parse("generation-v1")
+            .expect("test generation is canonical");
+        let second = eventexec::ProjectionVersion::parse("generation-v2")
+            .expect("test generation is canonical");
+        gauges.record_selected_generation(Some(&first));
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: Some(100),
+                checkpoint_offset_lsn: Some(90),
+                checkpoint_updated_at_epoch_micros: None,
+                projection_dlq_backlog: 0,
+                quarantine_reason: None,
+            },
+        );
+        gauges.record_selected_generation(Some(&second));
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: Some(50),
+                checkpoint_offset_lsn: Some(0),
+                checkpoint_updated_at_epoch_micros: None,
+                projection_dlq_backlog: 0,
+                quarantine_reason: None,
+            },
+        );
+
+        assert_eq!(
+            gauges.worker_status(),
+            eventexec::ProjectionWorkerStatus::Healthy {
+                selected_generation: eventexec::ProjectionSelectedGeneration::Mixed,
+                max_lag: 50,
+            }
+        );
+    }
+
+    #[test]
+    fn worker_status_reports_uniform_generation_and_retryable_reason_postures() {
+        let generation = eventexec::ProjectionVersion::parse("generation-v1")
+            .expect("test generation is canonical");
+        let mut gauges = ProjectionSweepGaugeAcc::default();
+        gauges.record_selected_generation(Some(&generation));
+        gauges.record_selected_generation(Some(&generation));
+        gauges.max_lag = 9;
+        gauges.record_outcome(ProjectionTenantRun::Retryable(
+            eventexec::ProjectionRetryableReason::SourceTransient,
+        ));
+        assert_eq!(
+            gauges.worker_status(),
+            eventexec::ProjectionWorkerStatus::Retryable {
+                selected_generation: eventexec::ProjectionSelectedGeneration::Uniform(
+                    generation.clone(),
+                ),
+                max_lag: 9,
+                reasons: eventexec::ProjectionReasonPosture::Uniform(
+                    eventexec::ProjectionRetryableReason::SourceTransient,
+                ),
+            }
+        );
+
+        gauges.record_outcome(ProjectionTenantRun::Retryable(
+            eventexec::ProjectionRetryableReason::CheckpointUnread,
+        ));
+        assert_eq!(
+            gauges.worker_status(),
+            eventexec::ProjectionWorkerStatus::Retryable {
+                selected_generation: eventexec::ProjectionSelectedGeneration::Uniform(generation),
+                max_lag: 9,
+                reasons: eventexec::ProjectionReasonPosture::Mixed,
+            }
+        );
+    }
+
+    #[test]
+    fn worker_status_is_bounded_for_none_reasons_quarantine_and_incomplete_sweep() {
+        let mut gauges = ProjectionSweepGaugeAcc::default();
+        assert_eq!(
+            gauges.worker_status(),
+            eventexec::ProjectionWorkerStatus::Healthy {
+                selected_generation: eventexec::ProjectionSelectedGeneration::None,
+                max_lag: 0,
+            }
+        );
+
+        gauges
+            .retryable_reasons
+            .insert(eventexec::ProjectionRetryableReason::SourceTransient);
+        gauges
+            .retryable_reasons
+            .insert(eventexec::ProjectionRetryableReason::CheckpointUnread);
+        gauges
+            .quarantine_reasons
+            .insert(eventexec::ProjectionQuarantineReason::PayloadMalformed);
+        gauges
+            .quarantine_reasons
+            .insert(eventexec::ProjectionQuarantineReason::TenantDrift);
+        assert_eq!(
+            gauges.worker_status(),
+            eventexec::ProjectionWorkerStatus::Mixed {
+                selected_generation: eventexec::ProjectionSelectedGeneration::None,
+                max_lag: 0,
+                retryable_reasons: eventexec::ProjectionReasonPosture::Mixed,
+                quarantine_reasons: eventexec::ProjectionReasonPosture::Mixed,
+            }
+        );
+
+        seal_projection_sweep_completeness(false, &mut gauges);
+        assert_eq!(
+            gauges.worker_status(),
+            eventexec::ProjectionWorkerStatus::Unavailable(
+                eventexec::ProjectionUnavailableReason::SweepIncomplete,
+            )
+        );
+    }
+
+    #[test]
+    fn durable_quarantine_observation_restores_closed_reason_posture() {
+        let clock = FixedClock(UNIX_EPOCH);
+        let mut gauges = ProjectionSweepGaugeAcc::default();
+        accumulate_projection_tenant_observation(
+            &mut gauges,
+            &clock,
+            ProjectionTenantObservation {
+                source_high_water: None,
+                checkpoint_offset_lsn: None,
+                checkpoint_updated_at_epoch_micros: None,
+                projection_dlq_backlog: 0,
+                quarantine_reason: Some(ProjectionTenantFatalReason::ProviderPermanent),
+            },
+        );
+        assert!(matches!(
+            gauges.worker_status(),
+            eventexec::ProjectionWorkerStatus::Quarantined {
+                reasons: eventexec::ProjectionReasonPosture::Uniform(
+                    eventexec::ProjectionQuarantineReason::ProviderPermanent
+                ),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn durable_quarantine_reason_labels_round_trip_exhaustively() {
+        for reason in ProjectionTenantFatalReason::ALL {
+            assert_eq!(
+                ProjectionTenantFatalReason::parse_label(reason.as_label()),
+                Some(reason),
+                "durable quarantine label must restore {reason:?} after restart"
+            );
+        }
+        assert_eq!(ProjectionTenantFatalReason::parse_label("other"), None);
     }
 
     #[derive(Default)]
@@ -1548,6 +2025,7 @@ mod projection_worker_tests {
             metrics: &metrics,
             scope: &scope,
             clock: &clock,
+            observation: None,
         };
         let failed = eventexec::ProjectionRun {
             scanned: 15,
@@ -1583,6 +2061,7 @@ mod projection_worker_tests {
             metrics: &completed_metrics,
             scope: &scope,
             clock: &clock,
+            observation: None,
         };
         let completed = eventexec::ProjectionRun {
             scanned: 5,
@@ -1615,10 +2094,11 @@ mod projection_worker_tests {
         let metrics = RecordingProjectionMetrics::default();
         let gauges = ProjectionSweepGaugeAcc {
             observe_failed: true,
-            max_lag: 9.0,
+            max_lag: 9,
             max_freshness_secs: Some(3.0),
             sum_dlq: 4.0,
             observed_tenants: HashSet::new(),
+            ..ProjectionSweepGaugeAcc::default()
         };
         metrics.record_sample(&gauges);
         assert!(metrics.lag().expect("lag").is_nan());
@@ -1636,16 +2116,18 @@ mod projection_worker_tests {
             metrics: &metrics,
             scope: &scope,
             clock: &clock,
+            observation: None,
         };
         {
             let _sweep = ProjectionSweepGaugeEmit {
                 metric_ctx: &metric_ctx,
                 gauges: ProjectionSweepGaugeAcc {
                     observe_failed: false,
-                    max_lag: 12.0,
+                    max_lag: 12,
                     max_freshness_secs: Some(5.0),
                     sum_dlq: 7.0,
                     observed_tenants: HashSet::new(),
+                    ..ProjectionSweepGaugeAcc::default()
                 },
                 complete: false,
             };
@@ -1665,6 +2147,7 @@ mod projection_worker_tests {
             metrics: &metrics,
             scope: &scope,
             clock: &clock,
+            observation: None,
         };
         {
             let mut sweep = ProjectionSweepGaugeEmit {
@@ -1680,6 +2163,7 @@ mod projection_worker_tests {
                     checkpoint_offset_lsn: Some(40),
                     checkpoint_updated_at_epoch_micros: None,
                     projection_dlq_backlog: 2,
+                    quarantine_reason: None,
                 },
             );
             accumulate_projection_tenant_observation(
@@ -1690,6 +2174,7 @@ mod projection_worker_tests {
                     checkpoint_offset_lsn: Some(45),
                     checkpoint_updated_at_epoch_micros: None,
                     projection_dlq_backlog: -3,
+                    quarantine_reason: None,
                 },
             );
         }
@@ -1708,6 +2193,7 @@ mod projection_worker_tests {
             metrics: &metrics,
             scope: &scope,
             clock: &clock,
+            observation: None,
         };
         {
             let mut sweep = ProjectionSweepGaugeEmit {
@@ -1723,6 +2209,7 @@ mod projection_worker_tests {
                     checkpoint_offset_lsn: Some(40),
                     checkpoint_updated_at_epoch_micros: Some(1_700_000_000_i64 * 1_000_000),
                     projection_dlq_backlog: 2,
+                    quarantine_reason: None,
                 },
             );
             accumulate_projection_tenant_observation(
@@ -1733,6 +2220,7 @@ mod projection_worker_tests {
                     checkpoint_offset_lsn: Some(45),
                     checkpoint_updated_at_epoch_micros: Some(1_700_000_050_i64 * 1_000_000),
                     projection_dlq_backlog: 3,
+                    quarantine_reason: None,
                 },
             );
         }
@@ -1775,6 +2263,7 @@ mod projection_worker_tests {
                     ProjectionTenantRun::Clean
                 }))
             },
+            |_| {},
         )
         .await
         .expect("round robin sweep");
@@ -1790,6 +2279,7 @@ mod projection_worker_tests {
                 overdue_visits += 1;
                 std::future::ready(Ok(ProjectionTenantRun::MoreWork))
             },
+            |_| {},
         )
         .await
         .expect("expired sweep");
@@ -1813,6 +2303,7 @@ mod projection_worker_tests {
                 visits += 1;
                 std::future::ready(Ok(ProjectionTenantRun::MoreWork))
             },
+            |_| {},
         )
         .await
         .expect("cancelled sweep");
@@ -1829,6 +2320,7 @@ mod projection_worker_tests {
                 token.cancel();
                 std::future::ready(Ok(ProjectionTenantRun::MoreWork))
             },
+            |_| {},
         )
         .await
         .expect("cancel after admitted quantum");

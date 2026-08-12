@@ -138,24 +138,194 @@ impl RuntimeInventoryBuildMetadata {
     }
 }
 
-/// Activation posture for a projection workflow.
+/// Execution-only projection activation; capture-only cannot enter this constructor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeInventoryProjectionActivation {
-    /// Capture inputs without executing the projection.
-    CaptureOnly,
-    /// Execute without making results authoritative.
+pub enum RuntimeInventoryExecutingProjectionActivation {
+    /// Execute without authoritative serving.
     Shadow,
-    /// Execute as the active projection.
+    /// Execute as the authoritative projection.
     Active,
 }
 
-/// Closed activated-workflow vocabulary.
+/// Selected-generation posture across one complete tenant sweep.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeInventorySelectedGeneration {
+    /// No tenant selected an executable generation during the complete sweep.
+    None,
+    /// Every selected tenant used the supplied generation.
+    Uniform(String),
+    /// Selected generations differed, including selected and uninitialized tenants coexisting.
+    Mixed,
+}
+
+/// Bounded reason posture without tenant identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeInventoryReasonPosture<R> {
+    /// Every reported tenant produced the same closed reason.
+    Uniform(R),
+    /// Multiple closed reasons occurred without exposing tenant-level facts.
+    Mixed,
+}
+
+/// Closed retryable reason vocabulary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RuntimeInventoryWorkflowActivation {
-    /// Projection activation with its exact posture.
-    Projection(RuntimeInventoryProjectionActivation),
-    /// Active saga; disabled workflows are excluded from inventory.
-    SagaActive,
+pub enum RuntimeInventoryRetryableReason {
+    /// The durable checkpoint could not be read.
+    CheckpointUnread,
+    /// The durable checkpoint could not be saved after processing.
+    CheckpointUnsaved,
+    /// A rejected event could not be written to the dead-letter store.
+    DeadLetterUnsaved,
+    /// Applying an event failed transiently.
+    ApplyTransient,
+    /// The apply commit outcome is unknown.
+    CommitUnknown,
+    /// Reading the projection source failed transiently.
+    SourceTransient,
+    /// Persisting durable quarantine failed transiently.
+    QuarantinePersistence,
+}
+
+/// Closed durable tenant-quarantine reason vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeInventoryQuarantineReason {
+    /// Target definition identity drifted.
+    TargetDefinitionDrift,
+    /// Input binding identity drifted.
+    InputBindingDrift,
+    /// Provider state belongs to a different tenant.
+    TenantDrift,
+    /// An input payload could not be decoded.
+    PayloadMalformed,
+    /// A decoded payload violated value constraints.
+    PayloadValueInvalid,
+    /// An input attempted to regress the projection version.
+    VersionRegression,
+    /// The provider violated an invariant.
+    ProviderInvariant,
+    /// The provider rejected the operation permanently.
+    ProviderPermanent,
+    /// Applying the event conflicted with durable state.
+    Conflict,
+    /// The apply store observed an out-of-order write.
+    ApplyOutOfOrder,
+    /// Compensation could not restore durable state.
+    RollbackFailed,
+    /// The source delivered an event behind the accepted coordinate.
+    SourceOutOfOrder,
+}
+
+/// Closed observation-unavailable reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeInventoryUnavailableReason {
+    /// Initial source/checkpoint observation has not completed successfully.
+    StartupObservation,
+    /// The tenant sweep ended before every selected tenant was observed.
+    SweepIncomplete,
+    /// At least one tenant's bounded observation failed.
+    TenantObservation,
+}
+
+/// Closed process-fatal reasons.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeInventoryStoppedReason {
+    /// The dedicated worker runtime could not be constructed.
+    RuntimeBuildFailed,
+    /// The worker unwound while being polled.
+    WorkerPanicked,
+    /// The tenant catalog is unavailable.
+    TenantCatalogUnavailable,
+    /// The selected generation cannot be resolved.
+    SelectedGenerationUnavailable,
+    /// The selected generation identity is invalid.
+    SelectedGenerationIdentityInvalid,
+    /// The tenant catalog returned an invalid tenant identity.
+    InvalidTenant,
+    /// Durable tenant quarantine cannot be read or written.
+    TenantQuarantineUnavailable,
+    /// The initial projection source is unavailable.
+    StartupSourceUnavailable,
+    /// A projection run returned an inconsistent outcome.
+    ProjectionOutcomeInvalid,
+    /// A provider coordinate cannot be represented by the runtime.
+    CoordinateOverflow,
+    /// The plan-issued target configuration is invalid.
+    TargetConfigInvalid,
+}
+
+/// Current process-wide worker status.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeInventoryProjectionWorkerStatus {
+    /// The worker has not completed its first reportable observation.
+    Starting,
+    /// A complete sweep observed neither retryable work nor durable quarantine.
+    Healthy {
+        /// Aggregated selected-generation posture for the complete sweep.
+        selected_generation: RuntimeInventorySelectedGeneration,
+        /// Maximum paired per-tenant lag in provider offset units.
+        max_lag: u64,
+    },
+    /// A complete sweep observed retryable work but no durable quarantine.
+    Retryable {
+        /// Aggregated selected-generation posture for the complete sweep.
+        selected_generation: RuntimeInventorySelectedGeneration,
+        /// Maximum paired per-tenant lag in provider offset units.
+        max_lag: u64,
+        /// Bounded aggregate of retryable reasons.
+        reasons: RuntimeInventoryReasonPosture<RuntimeInventoryRetryableReason>,
+    },
+    /// A complete sweep observed durable quarantine but no retryable work.
+    Quarantined {
+        /// Aggregated selected-generation posture for the complete sweep.
+        selected_generation: RuntimeInventorySelectedGeneration,
+        /// Maximum paired per-tenant lag in provider offset units.
+        max_lag: u64,
+        /// Bounded aggregate of durable quarantine reasons.
+        reasons: RuntimeInventoryReasonPosture<RuntimeInventoryQuarantineReason>,
+    },
+    /// A complete sweep observed both retryable work and durable quarantine.
+    Mixed {
+        /// Aggregated selected-generation posture for the complete sweep.
+        selected_generation: RuntimeInventorySelectedGeneration,
+        /// Maximum paired per-tenant lag in provider offset units.
+        max_lag: u64,
+        /// Bounded aggregate of retryable reasons.
+        retryable_reasons: RuntimeInventoryReasonPosture<RuntimeInventoryRetryableReason>,
+        /// Bounded aggregate of durable quarantine reasons.
+        quarantine_reasons: RuntimeInventoryReasonPosture<RuntimeInventoryQuarantineReason>,
+    },
+    /// No complete current snapshot is available; stale generation and lag are suppressed.
+    Unavailable(RuntimeInventoryUnavailableReason),
+    /// The worker stopped fatally and the terminal status cannot be overwritten.
+    Stopped(RuntimeInventoryStoppedReason),
+}
+
+/// Required runtime portion of a shadow/active projection observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RuntimeInventoryProjectionExecution {
+    target_generation: String,
+    worker_status: RuntimeInventoryProjectionWorkerStatus,
+}
+
+impl RuntimeInventoryProjectionExecution {
+    /// Seal the target generation and its live worker sample into one execution observation.
+    pub fn new(
+        target_generation: String,
+        worker_status: RuntimeInventoryProjectionWorkerStatus,
+    ) -> Self {
+        Self {
+            target_generation,
+            worker_status,
+        }
+    }
+    /// Return the plan-selected target generation.
+    pub fn target_generation(&self) -> &str {
+        &self.target_generation
+    }
+    /// Return the sampled worker status.
+    pub fn worker_status(&self) -> &RuntimeInventoryProjectionWorkerStatus {
+        &self.worker_status
+    }
 }
 
 /// One activated workflow copied from the sealed runtime plan.
@@ -164,22 +334,70 @@ pub struct RuntimeInventoryActivatedWorkflow {
     id: String,
     definition_version: String,
     definition_schema_digest: CanonicalSha256Digest,
-    activation: RuntimeInventoryWorkflowActivation,
+    shape: RuntimeInventoryActivatedWorkflowShape,
+}
+
+/// Closed activated-workflow shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RuntimeInventoryActivatedWorkflowShape {
+    /// Capture-only projection with no execution capability.
+    ProjectionCapture,
+    /// Shadow or active projection with its required execution observation.
+    ProjectionExecuting {
+        /// Exact executing activation posture.
+        activation: RuntimeInventoryExecutingProjectionActivation,
+        /// Live execution facts sampled by RuntimeExec.
+        execution: RuntimeInventoryProjectionExecution,
+    },
+    /// Active saga; disabled workflows are excluded from inventory.
+    SagaActive,
 }
 
 impl RuntimeInventoryActivatedWorkflow {
     /// Build workflow parts; the enclosing observation validates identifier and version.
-    pub fn new(
+    pub fn capture_only_projection(
         id: String,
         definition_version: String,
         definition_schema_digest: CanonicalSha256Digest,
-        activation: RuntimeInventoryWorkflowActivation,
     ) -> Self {
         Self {
             id,
             definition_version,
             definition_schema_digest,
-            activation,
+            shape: RuntimeInventoryActivatedWorkflowShape::ProjectionCapture,
+        }
+    }
+
+    /// Build a shadow or active projection with its required execution observation.
+    pub fn executing_projection(
+        id: String,
+        definition_version: String,
+        definition_schema_digest: CanonicalSha256Digest,
+        activation: RuntimeInventoryExecutingProjectionActivation,
+        projection_execution: RuntimeInventoryProjectionExecution,
+    ) -> Self {
+        Self {
+            id,
+            definition_version,
+            definition_schema_digest,
+            shape: RuntimeInventoryActivatedWorkflowShape::ProjectionExecuting {
+                activation,
+                execution: projection_execution,
+            },
+        }
+    }
+
+    /// Build an active saga observation.
+    pub fn active_saga(
+        id: String,
+        definition_version: String,
+        definition_schema_digest: CanonicalSha256Digest,
+    ) -> Self {
+        Self {
+            id,
+            definition_version,
+            definition_schema_digest,
+            shape: RuntimeInventoryActivatedWorkflowShape::SagaActive,
         }
     }
 
@@ -198,9 +416,9 @@ impl RuntimeInventoryActivatedWorkflow {
         &self.definition_schema_digest
     }
 
-    /// Return the closed activation posture.
-    pub const fn activation(&self) -> RuntimeInventoryWorkflowActivation {
-        self.activation
+    /// Return the closed workflow shape.
+    pub const fn shape(&self) -> &RuntimeInventoryActivatedWorkflowShape {
+        &self.shape
     }
 }
 
@@ -588,11 +806,10 @@ mod tests {
             RuntimeInventoryIdentity::for_test(digest('a')?, digest('b')?),
             None,
             vec![AssemblyDomain::Identity],
-            vec![RuntimeInventoryActivatedWorkflow::new(
+            vec![RuntimeInventoryActivatedWorkflow::active_saga(
                 "identity.rotate".to_owned(),
                 "v1".to_owned(),
                 digest('c')?,
-                RuntimeInventoryWorkflowActivation::SagaActive,
             )],
             vec![RuntimeInventoryListener::new(
                 "admin".to_owned(),
@@ -670,6 +887,38 @@ mod tests {
                 RuntimeInventoryInvariantKind::BuildMetadata
             ))
         );
+        Ok(())
+    }
+
+    #[test]
+    fn workflow_constructors_mint_only_closed_shapes() -> TestResult {
+        let capture = RuntimeInventoryActivatedWorkflow::capture_only_projection(
+            "settings.capture".to_owned(),
+            "v3".to_owned(),
+            digest('e')?,
+        );
+        assert!(matches!(
+            capture.shape(),
+            RuntimeInventoryActivatedWorkflowShape::ProjectionCapture
+        ));
+
+        let executing = RuntimeInventoryActivatedWorkflow::executing_projection(
+            "settings.execute".to_owned(),
+            "v3".to_owned(),
+            digest('f')?,
+            RuntimeInventoryExecutingProjectionActivation::Active,
+            RuntimeInventoryProjectionExecution::new(
+                "v3".to_owned(),
+                RuntimeInventoryProjectionWorkerStatus::Starting,
+            ),
+        );
+        assert!(matches!(
+            executing.shape(),
+            RuntimeInventoryActivatedWorkflowShape::ProjectionExecuting {
+                activation: RuntimeInventoryExecutingProjectionActivation::Active,
+                execution,
+            } if matches!(execution.worker_status(), RuntimeInventoryProjectionWorkerStatus::Starting)
+        ));
         Ok(())
     }
 }

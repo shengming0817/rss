@@ -140,22 +140,75 @@ where
     M: FnOnce(CancellationToken) -> Fut + Send + 'static,
     Fut: std::future::Future<Output = Result<(), diport::ShutdownError>>,
 {
+    spawn_on_dedicated_runtime_with_failure_observers(
+        name,
+        token,
+        health,
+        shutdown_timeout,
+        on_build_failure,
+        || {},
+        make_body,
+    )
+}
+
+/// Spawn through the canonical runtime policy and observe runtime construction or worker panic.
+///
+/// Both observers run inside the supervised worker thread before its closed shutdown result is
+/// completed. The panic payload is deliberately not exposed to either observer.
+pub fn spawn_on_dedicated_runtime_with_failure_observers<N, O, P, M, Fut>(
+    name: N,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+    shutdown_timeout: Duration,
+    on_build_failure: O,
+    on_panic: P,
+    make_body: M,
+) -> ManagedBlockingWorker
+where
+    N: Into<String>,
+    O: FnOnce(&std::io::Error) + Send + 'static,
+    P: FnOnce() + Send + 'static,
+    M: FnOnce(CancellationToken) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), diport::ShutdownError>>,
+{
     let name = name.into();
     let runtime_worker_name = name.clone();
     ManagedBlockingWorker::spawn(name, token, health, shutdown_timeout, move |run_token| {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| {
-                on_build_failure(&error);
-                tracing::error!(
-                    worker = runtime_worker_name,
-                    error = %error,
-                    "managed blocking worker runtime build failed"
-                );
-                diport::ShutdownError::new(error)
-            })?;
-        runtime.block_on(make_body(run_token))
+        let runtime = observe_runtime_build_result(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build(),
+            on_build_failure,
+            &runtime_worker_name,
+        )?;
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            runtime.block_on(make_body(run_token))
+        })) {
+            Ok(result) => result,
+            Err(_) => {
+                on_panic();
+                Err(diport::ShutdownError::task_panicked(BlockingWorkerPanicked))
+            }
+        }
+    })
+}
+
+fn observe_runtime_build_result<T, O>(
+    result: std::io::Result<T>,
+    on_build_failure: O,
+    worker_name: &str,
+) -> Result<T, diport::ShutdownError>
+where
+    O: FnOnce(&std::io::Error),
+{
+    result.map_err(|error| {
+        on_build_failure(&error);
+        tracing::error!(
+            worker = worker_name,
+            error = %error,
+            "managed blocking worker runtime build failed"
+        );
+        diport::ShutdownError::new(error)
     })
 }
 
@@ -193,7 +246,10 @@ mod tests {
     use primitives::HealthStatus;
     use tokio_util::sync::CancellationToken;
 
-    use super::{ManagedBlockingWorker, spawn_on_dedicated_runtime};
+    use super::{
+        ManagedBlockingWorker, observe_runtime_build_result, spawn_on_dedicated_runtime,
+        spawn_on_dedicated_runtime_with_failure_observers,
+    };
     use crate::WorkerHealth;
 
     #[tokio::test]
@@ -271,6 +327,54 @@ mod tests {
         );
 
         assert!(worker.shutdown().await.is_err());
+    }
+
+    #[test]
+    fn dedicated_runtime_build_failure_notifies_observer() {
+        let observed = AtomicBool::new(false);
+        let result = observe_runtime_build_result::<(), _>(
+            Err(std::io::Error::other("runtime unavailable")),
+            |_| observed.store(true, Ordering::Release),
+            "test-worker",
+        );
+        assert!(result.is_err());
+        assert!(observed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    // reason: panic supervision is the behavior under test.
+    async fn dedicated_runtime_distinguishes_panic_from_normal_cancellation() {
+        let panic_observed = Arc::new(AtomicBool::new(false));
+        let panic_observed_run = Arc::clone(&panic_observed);
+        let panicked = spawn_on_dedicated_runtime_with_failure_observers(
+            "managed-async-panic",
+            CancellationToken::new(),
+            Arc::new(WorkerHealth::starting()),
+            Duration::from_secs(1),
+            |_| {},
+            move || panic_observed_run.store(true, Ordering::Release),
+            |_token| async { panic!("redacted async panic") },
+        );
+        assert!(panicked.shutdown().await.is_err());
+        assert!(panic_observed.load(Ordering::Acquire));
+
+        let cancellation_observed = Arc::new(AtomicBool::new(false));
+        let cancellation_observed_run = Arc::clone(&cancellation_observed);
+        let cancelled = spawn_on_dedicated_runtime_with_failure_observers(
+            "managed-async-cancel",
+            CancellationToken::new(),
+            Arc::new(WorkerHealth::starting()),
+            Duration::from_secs(1),
+            |_| {},
+            move || cancellation_observed_run.store(true, Ordering::Release),
+            |token| async move {
+                token.cancelled().await;
+                Ok(())
+            },
+        );
+        assert!(cancelled.shutdown().await.is_ok());
+        assert!(!cancellation_observed.load(Ordering::Acquire));
     }
 
     #[test]

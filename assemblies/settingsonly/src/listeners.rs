@@ -464,10 +464,43 @@ impl runtimeexec::LaunchAdapter<FinalizedProbeReceipt> for LaunchAdapter {
 }
 
 #[cfg(feature = "test-support")]
-pub(crate) struct InventoryJourneyHttpResult {
+pub(crate) struct InventoryJourneyHttpResponse {
     pub(crate) status: reqwest::StatusCode,
     pub(crate) body: Vec<u8>,
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) struct InventoryJourneyHttpResult {
+    pub(crate) responses: Vec<InventoryJourneyHttpResponse>,
     pub(crate) serving_address: SocketAddr,
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) struct InventoryJourneyRequestPlan {
+    observation: Option<Arc<std::sync::Mutex<Option<eventexec::ProjectionObservationPublisher>>>>,
+    statuses: Vec<Option<eventexec::ProjectionWorkerStatus>>,
+}
+
+#[cfg(feature = "test-support")]
+impl InventoryJourneyRequestPlan {
+    pub(crate) fn single() -> Self {
+        Self {
+            observation: None,
+            statuses: vec![None],
+        }
+    }
+
+    pub(crate) fn projection_statuses(
+        observation: Arc<std::sync::Mutex<Option<eventexec::ProjectionObservationPublisher>>>,
+        statuses: impl IntoIterator<Item = eventexec::ProjectionWorkerStatus>,
+    ) -> Self {
+        Self {
+            observation: Some(observation),
+            statuses: std::iter::once(None)
+                .chain(statuses.into_iter().map(Some))
+                .collect(),
+        }
+    }
 }
 
 /// Drive an inventory request through the production listener bind, publish and activation
@@ -479,6 +512,9 @@ pub(crate) async fn serve_inventory_journey(
     reporter: Arc<bootstrap::HealthReporter>,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
     bearer: String,
+    domain_lifecycle: bootstrap::DomainModuleResult,
+    expected_workers: bootstrap::ExpectedWorkerInventory,
+    request_plan: InventoryJourneyRequestPlan,
 ) -> anyhow::Result<InventoryJourneyHttpResult> {
     struct JourneyMetrics;
     impl diport::MetricsExporter for JourneyMetrics {
@@ -526,20 +562,34 @@ pub(crate) async fn serve_inventory_journey(
         FinalizedProbeReceipt { reporter },
         move |inventory: ListenerInventory| async move {
             let result = async {
-                let response = reqwest::Client::new()
-                    .get(format!(
-                        "http://{}{}",
-                        inventory.admin,
-                        generated::http::runtime_v1::inventory::PATH
-                    ))
-                    .bearer_auth(bearer)
-                    .send()
-                    .await?;
-                let status = response.status();
-                let body = response.bytes().await?.to_vec();
+                let client = reqwest::Client::new();
+                let url = format!(
+                    "http://{}{}",
+                    inventory.admin,
+                    generated::http::runtime_v1::inventory::PATH
+                );
+                let mut responses = Vec::with_capacity(request_plan.statuses.len());
+                for status in request_plan.statuses {
+                    if let Some(status) = status {
+                        let publisher = request_plan
+                            .observation
+                            .as_ref()
+                            .and_then(|observation| {
+                                observation
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .clone()
+                            })
+                            .context("projection observation publisher was not plan-issued")?;
+                        publisher.publish(status);
+                    }
+                    let response = client.get(&url).bearer_auth(&bearer).send().await?;
+                    let status = response.status();
+                    let body = response.bytes().await?.to_vec();
+                    responses.push(InventoryJourneyHttpResponse { status, body });
+                }
                 Ok(InventoryJourneyHttpResult {
-                    status,
-                    body,
+                    responses,
                     serving_address: inventory.admin,
                 })
             }
@@ -551,10 +601,8 @@ pub(crate) async fn serve_inventory_journey(
             runtimeexec::ProviderLifecycleBatch::from_provider_output(
                 bootstrap::DomainModuleResult::default(),
             ),
-            runtimeexec::DomainLifecycleBatch::from_domain_output(
-                bootstrap::DomainModuleResult::default(),
-            ),
-            Some(bootstrap::ExpectedWorkerInventory::closed([])?),
+            runtimeexec::DomainLifecycleBatch::from_domain_output(domain_lifecycle),
+            Some(expected_workers),
         ),
         crate::runtime::total_drain_budget()?,
     );

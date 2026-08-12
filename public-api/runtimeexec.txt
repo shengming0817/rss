@@ -103,6 +103,27 @@ pub fn runtimeexec::config::capture_serving_frontend<P>(impl core::ops::function
 pub fn runtimeexec::config::rate_limit_quota_from_values(core::option::Option<&str>, core::option::Option<&str>) -> diport::rate_limiter::RateLimitQuota
 pub fn runtimeexec::config::read_secret_document(&std::path::Path) -> std::io::error::Result<runtimeexec::config::SecretDocument>
 pub mod runtimeexec::inventory
+pub enum runtimeexec::inventory::ActivatedWorkflowObservationShape
+pub runtimeexec::inventory::ActivatedWorkflowObservationShape::ProjectionCapture
+pub runtimeexec::inventory::ActivatedWorkflowObservationShape::ProjectionExecuting
+pub runtimeexec::inventory::ActivatedWorkflowObservationShape::ProjectionExecuting::activation: runtimeexec::inventory::InventoryExecutingProjectionActivation
+pub runtimeexec::inventory::ActivatedWorkflowObservationShape::ProjectionExecuting::execution: eventexec::workflow_runtime::ProjectionExecutionObservation
+pub runtimeexec::inventory::ActivatedWorkflowObservationShape::SagaActive
+impl core::clone::Clone for runtimeexec::inventory::ActivatedWorkflowObservationShape
+pub fn runtimeexec::inventory::ActivatedWorkflowObservationShape::clone(&self) -> runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::cmp::Eq for runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::cmp::PartialEq for runtimeexec::inventory::ActivatedWorkflowObservationShape
+pub fn runtimeexec::inventory::ActivatedWorkflowObservationShape::eq(&self, &runtimeexec::inventory::ActivatedWorkflowObservationShape) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::ActivatedWorkflowObservationShape
+pub fn runtimeexec::inventory::ActivatedWorkflowObservationShape::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::marker::Freeze for runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::marker::Send for runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::marker::Sync for runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::marker::Unpin for runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::ActivatedWorkflowObservationShape
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::ActivatedWorkflowObservationShape
 pub enum runtimeexec::inventory::InventoryEndpointScheme
 pub runtimeexec::inventory::InventoryEndpointScheme::Http
 pub runtimeexec::inventory::InventoryEndpointScheme::Https
@@ -155,6 +176,25 @@ impl core::marker::Unpin for runtimeexec::inventory::InventoryError
 impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryError
 impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryError
 impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryError
+pub enum runtimeexec::inventory::InventoryExecutingProjectionActivation
+pub runtimeexec::inventory::InventoryExecutingProjectionActivation::Active
+pub runtimeexec::inventory::InventoryExecutingProjectionActivation::Shadow
+impl core::clone::Clone for runtimeexec::inventory::InventoryExecutingProjectionActivation
+pub fn runtimeexec::inventory::InventoryExecutingProjectionActivation::clone(&self) -> runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::cmp::Eq for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::cmp::PartialEq for runtimeexec::inventory::InventoryExecutingProjectionActivation
+pub fn runtimeexec::inventory::InventoryExecutingProjectionActivation::eq(&self, &runtimeexec::inventory::InventoryExecutingProjectionActivation) -> bool
+impl core::fmt::Debug for runtimeexec::inventory::InventoryExecutingProjectionActivation
+pub fn runtimeexec::inventory::InventoryExecutingProjectionActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::marker::Freeze for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::marker::Send for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::marker::Sync for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::marker::Unpin for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryExecutingProjectionActivation
+impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryExecutingProjectionActivation
 pub enum runtimeexec::inventory::InventoryPlacementMode
 pub runtimeexec::inventory::InventoryPlacementMode::Local
 pub runtimeexec::inventory::InventoryPlacementMode::Remote
@@ -201,69 +241,12 @@ impl core::marker::Unpin for runtimeexec::inventory::InventoryPlacementReadiness
 impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryPlacementReadiness
 impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryPlacementReadiness
 impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryPlacementReadiness
-pub enum runtimeexec::inventory::InventoryProjectionActivation
-pub runtimeexec::inventory::InventoryProjectionActivation::Active
-pub runtimeexec::inventory::InventoryProjectionActivation::CaptureOnly
-pub runtimeexec::inventory::InventoryProjectionActivation::Shadow
-impl core::clone::Clone for runtimeexec::inventory::InventoryProjectionActivation
-pub fn runtimeexec::inventory::InventoryProjectionActivation::clone(&self) -> runtimeexec::inventory::InventoryProjectionActivation
-impl core::cmp::Eq for runtimeexec::inventory::InventoryProjectionActivation
-impl core::cmp::PartialEq for runtimeexec::inventory::InventoryProjectionActivation
-pub fn runtimeexec::inventory::InventoryProjectionActivation::eq(&self, &runtimeexec::inventory::InventoryProjectionActivation) -> bool
-impl core::fmt::Debug for runtimeexec::inventory::InventoryProjectionActivation
-pub fn runtimeexec::inventory::InventoryProjectionActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for runtimeexec::inventory::InventoryProjectionActivation
-impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryProjectionActivation
-impl core::marker::Freeze for runtimeexec::inventory::InventoryProjectionActivation
-impl core::marker::Send for runtimeexec::inventory::InventoryProjectionActivation
-impl core::marker::Sync for runtimeexec::inventory::InventoryProjectionActivation
-impl core::marker::Unpin for runtimeexec::inventory::InventoryProjectionActivation
-impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryProjectionActivation
-impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryProjectionActivation
-impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryProjectionActivation
-pub enum runtimeexec::inventory::InventorySagaActivation
-pub runtimeexec::inventory::InventorySagaActivation::Active
-impl core::clone::Clone for runtimeexec::inventory::InventorySagaActivation
-pub fn runtimeexec::inventory::InventorySagaActivation::clone(&self) -> runtimeexec::inventory::InventorySagaActivation
-impl core::cmp::Eq for runtimeexec::inventory::InventorySagaActivation
-impl core::cmp::PartialEq for runtimeexec::inventory::InventorySagaActivation
-pub fn runtimeexec::inventory::InventorySagaActivation::eq(&self, &runtimeexec::inventory::InventorySagaActivation) -> bool
-impl core::fmt::Debug for runtimeexec::inventory::InventorySagaActivation
-pub fn runtimeexec::inventory::InventorySagaActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for runtimeexec::inventory::InventorySagaActivation
-impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventorySagaActivation
-impl core::marker::Freeze for runtimeexec::inventory::InventorySagaActivation
-impl core::marker::Send for runtimeexec::inventory::InventorySagaActivation
-impl core::marker::Sync for runtimeexec::inventory::InventorySagaActivation
-impl core::marker::Unpin for runtimeexec::inventory::InventorySagaActivation
-impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventorySagaActivation
-impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventorySagaActivation
-impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventorySagaActivation
-pub enum runtimeexec::inventory::InventoryWorkflowActivation
-pub runtimeexec::inventory::InventoryWorkflowActivation::Projection(runtimeexec::inventory::InventoryProjectionActivation)
-pub runtimeexec::inventory::InventoryWorkflowActivation::Saga(runtimeexec::inventory::InventorySagaActivation)
-impl core::clone::Clone for runtimeexec::inventory::InventoryWorkflowActivation
-pub fn runtimeexec::inventory::InventoryWorkflowActivation::clone(&self) -> runtimeexec::inventory::InventoryWorkflowActivation
-impl core::cmp::Eq for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::cmp::PartialEq for runtimeexec::inventory::InventoryWorkflowActivation
-pub fn runtimeexec::inventory::InventoryWorkflowActivation::eq(&self, &runtimeexec::inventory::InventoryWorkflowActivation) -> bool
-impl core::fmt::Debug for runtimeexec::inventory::InventoryWorkflowActivation
-pub fn runtimeexec::inventory::InventoryWorkflowActivation::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::marker::StructuralPartialEq for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::marker::Freeze for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::marker::Send for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::marker::Sync for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::marker::Unpin for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::marker::UnsafeUnpin for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::panic::unwind_safe::RefUnwindSafe for runtimeexec::inventory::InventoryWorkflowActivation
-impl core::panic::unwind_safe::UnwindSafe for runtimeexec::inventory::InventoryWorkflowActivation
 pub struct runtimeexec::inventory::ActivatedWorkflowObservation
 impl runtimeexec::inventory::ActivatedWorkflowObservation
-pub const fn runtimeexec::inventory::ActivatedWorkflowObservation::activation(&self) -> runtimeexec::inventory::InventoryWorkflowActivation
 pub fn runtimeexec::inventory::ActivatedWorkflowObservation::definition_schema_digest(&self) -> &str
 pub fn runtimeexec::inventory::ActivatedWorkflowObservation::definition_version(&self) -> &str
 pub fn runtimeexec::inventory::ActivatedWorkflowObservation::id(&self) -> &str
+pub const fn runtimeexec::inventory::ActivatedWorkflowObservation::shape(&self) -> &runtimeexec::inventory::ActivatedWorkflowObservationShape
 impl core::clone::Clone for runtimeexec::inventory::ActivatedWorkflowObservation
 pub fn runtimeexec::inventory::ActivatedWorkflowObservation::clone(&self) -> runtimeexec::inventory::ActivatedWorkflowObservation
 impl core::cmp::Eq for runtimeexec::inventory::ActivatedWorkflowObservation

@@ -124,7 +124,11 @@ fn assert_allow(
     assert!(audit_calls > 0, "{name} allow must record audit evidence");
     let response: wire::RuntimeInventoryResponse = serde_json::from_slice(body)?;
     let data = response.data;
-    assert_eq!(data.schema_version, 1, "{name} schema version");
+    assert_eq!(
+        data.schema_version,
+        wire::RuntimeInventorySchemaVersion::V2,
+        "{name} schema version"
+    );
     assert_eq!(data.assembly_fingerprint.as_str(), expected_assembly);
     let build_metadata = data
         .build_metadata
@@ -277,9 +281,72 @@ inventory_journey!(
 
 #[tokio::test]
 async fn runtime_inventory_live_journeys_are_port_exact_and_serial() -> anyhow::Result<()> {
+    settingsonly_projection_status_live_journey().await?;
     runtime_inventory_live_journey().await?;
     settingsonly_inventory_live_journey().await?;
     identityaudit_inventory_live_journey().await?;
+    Ok(())
+}
+
+async fn settingsonly_projection_status_live_journey() -> anyhow::Result<()> {
+    let journey =
+        settingsonly::runtime_inventory_test_support::run_projection_status_journey().await?;
+    assert_eq!(journey.responses.len(), 5);
+    assert_eq!(
+        journey.audit_calls,
+        journey.responses.len(),
+        "every authorized live resample must traverse the audit funnel exactly once"
+    );
+    let expected = [
+        serde_json::json!({"state": "starting"}),
+        serde_json::json!({
+            "state": "healthy",
+            "selectedGeneration": {"state": "uniform", "generation": "v3"},
+            "maxLag": 7
+        }),
+        serde_json::json!({
+            "state": "retryable",
+            "selectedGeneration": {"state": "uniform", "generation": "v3"},
+            "maxLag": 8,
+            "reasons": {"state": "uniform", "reason": "source-transient"}
+        }),
+        serde_json::json!({
+            "state": "quarantined",
+            "selectedGeneration": {"state": "uniform", "generation": "v3"},
+            "maxLag": 9,
+            "reasons": {"state": "uniform", "reason": "provider-permanent"}
+        }),
+        serde_json::json!({
+            "state": "stopped",
+            "stopClass": "fatal",
+            "reason": "invalid-tenant"
+        }),
+    ];
+    for (response, expected_status) in journey.responses.into_iter().zip(expected) {
+        assert_eq!(response.status, reqwest::StatusCode::OK);
+        let response: wire::RuntimeInventoryResponse = serde_json::from_slice(&response.body)?;
+        let value = serde_json::to_value(response)?;
+        let workflows = value["data"]["activatedWorkflows"]
+            .as_array()
+            .context("SettingsOnly activated workflows")?;
+        let projection = workflows
+            .iter()
+            .find(|workflow| workflow["id"] == "settings.config-projection")
+            .context("SettingsOnly active projection")?;
+        assert_eq!(projection["activation"], "active");
+        assert_eq!(projection["targetGeneration"], "v3");
+        assert_eq!(projection["workerStatus"], expected_status);
+        let admin = value["data"]["listeners"]
+            .as_array()
+            .context("SettingsOnly listeners")?
+            .iter()
+            .find(|listener| listener["kind"] == "admin")
+            .context("SettingsOnly Admin listener")?;
+        assert_eq!(
+            admin["endpoint"]["port"],
+            u64::from(journey.serving_address.port())
+        );
+    }
     Ok(())
 }
 inventory_journey!(

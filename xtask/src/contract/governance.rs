@@ -303,6 +303,7 @@ contract_governance_catalog! {
         RequiredFieldAdded => ("REQUIRED_FIELD_ADDED", Contract, Schema, Schema, Lifecycle, "required input field addition"),
         FieldTypeChanged => ("FIELD_TYPE_CHANGED", Contract, Schema, Schema, Lifecycle, "schema field type narrowing"),
         FieldFormatChanged => ("FIELD_FORMAT_CHANGED", Contract, Schema, Schema, Lifecycle, "schema field format change"),
+        ConstValueChanged => ("CONST_VALUE_CHANGED", Contract, Schema, Schema, Lifecycle, "schema const value change"),
         ResolvedSchemaHashChanged => ("RESOLVED_SCHEMA_HASH_CHANGED", Contract, Schema, Schema, Lifecycle, "durable wire resolved schema hash rotation"),
         StringLengthUnitTightened => ("STRING_LENGTH_UNIT_TIGHTENED", Contract, Schema, Schema, Lifecycle, "string length unit tightening"),
         EnumValueDeleted => ("ENUM_VALUE_DELETED", Contract, Schema, Schema, Lifecycle, "schema enum value removal"),

@@ -26,6 +26,7 @@ pub mod managed_blocking_worker;
 pub use managed_blocking_worker::{
     ManagedBlockingWorker, managed_panic_scope_active, spawn_on_dedicated_runtime,
     spawn_on_dedicated_runtime_with_build_failure,
+    spawn_on_dedicated_runtime_with_failure_observers,
 };
 
 // 命令分发 runtime：generated seam → reviewed command capability → provider store，命令不再借事件 emitter。
@@ -57,6 +58,13 @@ pub mod projection_metrics;
 pub use projection_metrics::{
     MetricsProjectionMetrics, ProjectionMetric, ProjectionMetricActivation, ProjectionMetricScope,
     ProjectionMetrics, ProjectionProcessedOutcome,
+};
+
+mod projection_observation;
+pub use projection_observation::{
+    ProjectionObservationPublisher, ProjectionObservationReader, ProjectionQuarantineReason,
+    ProjectionReasonPosture, ProjectionRetryableReason, ProjectionSelectedGeneration,
+    ProjectionStoppedReason, ProjectionUnavailableReason, ProjectionWorkerStatus,
 };
 
 pub mod dlq;
@@ -129,8 +137,9 @@ pub use projection::{
 
 mod workflow_runtime;
 pub use workflow_runtime::{
-    ActivatedWorkflow, ActivatedWorkflowActivation, ActivatedWorkflowsView,
-    ProjectionActivationPermit, ProjectionBackgroundExecutionIssuer, ProjectionCaptureView,
+    ActivatedExecutingProjectionActivation, ActivatedWorkflow, ActivatedWorkflowShape,
+    ActivatedWorkflowsView, ProjectionActivationPermit, ProjectionBackgroundExecutionIssuer,
+    ProjectionCaptureDefinition, ProjectionCaptureView, ProjectionExecutionObservation,
     ProjectionMaintenanceBinding, ProjectionMaintenanceCapability, ProjectionRuntime,
     ProjectionRuntimeBinding, ProjectionRuntimeCapability, ProjectionServingEvidence,
     ProjectionSourceScope, ProjectionTargetEntry, ProjectionTargetView, SagaActivationPermit,

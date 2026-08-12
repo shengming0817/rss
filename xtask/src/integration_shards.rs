@@ -139,6 +139,8 @@ pub(crate) enum ImpactMarker {
     IdentityPackage,
     IdentityCompositionPackage,
     DeviceIdentityPackage,
+    SettingsOnlyPackage,
+    IdentityAuditPackage,
     IotDevicePackage,
     SettingsPackage,
     AmqpPackage,
@@ -161,7 +163,7 @@ pub(crate) enum ImpactMarker {
 }
 
 impl ImpactMarker {
-    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 22] = [
+    pub(crate) const PACKAGE_RELATIONS: [(&'static str, Self); 24] = [
         ("postgres", Self::PostgresPackage),
         ("postgres-migration", Self::PostgresMigrationPackage),
         ("audit", Self::AuditPackage),
@@ -169,6 +171,8 @@ impl ImpactMarker {
         ("identity", Self::IdentityPackage),
         ("identity-composition", Self::IdentityCompositionPackage),
         ("deviceidentity", Self::DeviceIdentityPackage),
+        ("settingsonly", Self::SettingsOnlyPackage),
+        ("identityaudit", Self::IdentityAuditPackage),
         ("iotdevice", Self::IotDevicePackage),
         ("settings", Self::SettingsPackage),
         ("amqp", Self::AmqpPackage),
@@ -195,6 +199,8 @@ impl ImpactMarker {
             Self::IdentityPackage => "package:identity",
             Self::IdentityCompositionPackage => "package:identity-composition",
             Self::DeviceIdentityPackage => "package:deviceidentity",
+            Self::SettingsOnlyPackage => "package:settingsonly",
+            Self::IdentityAuditPackage => "package:identityaudit",
             Self::IotDevicePackage => "package:iotdevice",
             Self::SettingsPackage => "package:settings",
             Self::AmqpPackage => "package:amqp",
@@ -893,6 +899,7 @@ integration_shard_catalog! {
             PostgresMigration0104AbacPolicyOperatorValuesUpgrade => ("postgres-migration-0104-abac-policy-operator-values-upgrade", ReleaseCheck, "postgres", "migration_0104_abac_policy_operator_values_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
             PostgresMigration0105ProjectionGeneration => ("postgres-migration-0105-projection-generation", ReleaseCheck, "postgres", "migration_0105_projection_generation", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresMigration0105ProjectionGenerationUpgrade => ("postgres-migration-0105-projection-generation-upgrade", ReleaseCheck, "postgres", "migration_0105_projection_generation_upgrade", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
+            PostgresMigration0108ProjectionWorkerStatus => ("postgres-migration-0108-projection-worker-status", ReleaseCheck, "postgres", "migration_0108_projection_worker_status", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             PostgresTenantTransactionTrybuild => ("postgres-tenant-transaction-trybuild", ReleaseCheck, "postgres", "tenant_transaction_trybuild", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
             AuditListTenantEntriesLocalTxJourney => ("audit-list-tenant-entries-local-tx-journey", IntegrationCritical, "journeys", "audit_list_tenant_entries_localtx_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, PostgresPackage, LocalTxContract], capabilities: []),
             IdentityLogoutGrantJourney => ("identity-logout-grant-journey", ReleaseCheck, "journeys", "identity_logout_grant_journey", Test, Parallel, RemoteOnly, resources: [Postgres], impact_packages: [], capabilities: []),
@@ -924,7 +931,7 @@ integration_shard_catalog! {
             EventTransportJourney => ("event-transport-journey", ReleaseCheck, "journeys", "eventtransport_journey", Test, Parallel, Affected, resources: [Postgres, Redis, Amqp, Mqtt], impact_packages: [], capabilities: [Docker]),
             IdentityLoginAuditDurableJourney => ("identity-login-audit-durable-journey", IntegrationCritical, "journeys", "identity_login_audit_durable_journey", Test, Serial, RemoteOnly, resources: [Postgres], impact_packages: [AuditPackage, EventexecPackage, IdentityPackage, PostgresPackage], capabilities: []),
             IdentityLoginAuditJourney => ("identity-login-audit-journey", ReleaseCheck, "journeys", "identity_login_audit_journey", Test, Parallel, Affected, resources: [Postgres, Amqp], impact_packages: [], capabilities: []),
-            IdentityAuditRuntimeJourney => ("identity-audit-runtime-journey", ReleaseCheck, "journeys", "identityaudit_runtime", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [], capabilities: []),
+            IdentityAuditRuntimeJourney => ("identity-audit-runtime-journey", ReleaseCheck, "journeys", "identityaudit_runtime", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [IdentityAuditPackage], capabilities: []),
             EventTransportDurableE2e => ("event-transport-durable-e2e", IntegrationCritical, "runtime", "event_transport_durable_e2e", Test, Serial, RemoteOnly, resources: [Postgres, Redis, Amqp], impact_packages: [AmqpPackage, EventexecPackage, MqttPackage, PostgresPackage, RedisAdapterPackage, RuntimePackage, RuntimeSurface], capabilities: [Docker]),
         ],
     },
@@ -933,11 +940,11 @@ integration_shard_catalog! {
         local_feature_scopes: [Journeys, Runtime, SettingsOnly, IdentityAudit],
         units: [
             SecurityProviderCloseoutJourney => ("security-provider-closeout-journey", ReleaseCheck, "journeys", "security_provider_closeout", Test, Parallel, Affected, resources: [Postgres, Vault], impact_packages: [], capabilities: []),
-            SettingsOnlyRuntimeJourney => ("settings-only-runtime-journey", ReleaseCheck, "journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly, resources: [Vault], impact_packages: [], capabilities: []),
-            SettingsOnlyLib => ("settings-only-lib", ReleaseCheck, "settingsonly", "settingsonly", Lib, Serial, Affected, resources: [Vault], impact_packages: [], capabilities: []),
-            IdentityAuditLib => ("identity-audit-lib", ReleaseCheck, "identityaudit", "identityaudit", Lib, Serial, Affected, resources: [], impact_packages: [], capabilities: []),
-            IdentityAuditArtifactAcceptance => ("identity-audit-artifact-acceptance", ReleaseCheck, "identityaudit", "artifact_acceptance", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
-            IdentityAuditRuntimeImageAcceptance => ("identity-audit-runtime-image-acceptance", ReleaseCheck, "identityaudit", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
+            SettingsOnlyRuntimeJourney => ("settings-only-runtime-journey", ReleaseCheck, "journeys", "settingsonly_runtime", Test, Parallel, RemoteOnly, resources: [Vault], impact_packages: [SettingsOnlyPackage], capabilities: []),
+            SettingsOnlyLib => ("settings-only-lib", ReleaseCheck, "settingsonly", "settingsonly", Lib, Serial, Affected, resources: [Vault], impact_packages: [SettingsOnlyPackage], capabilities: []),
+            IdentityAuditLib => ("identity-audit-lib", ReleaseCheck, "identityaudit", "identityaudit", Lib, Serial, Affected, resources: [], impact_packages: [IdentityAuditPackage], capabilities: []),
+            IdentityAuditArtifactAcceptance => ("identity-audit-artifact-acceptance", ReleaseCheck, "identityaudit", "artifact_acceptance", Test, Parallel, Affected, resources: [], impact_packages: [IdentityAuditPackage], capabilities: []),
+            IdentityAuditRuntimeImageAcceptance => ("identity-audit-runtime-image-acceptance", ReleaseCheck, "identityaudit", "runtime_image_acceptance", Test, Serial, RemoteOnly, resources: [], impact_packages: [IdentityAuditPackage], capabilities: [Docker]),
             RuntimeLib => ("runtime-lib", ReleaseCheck, "runtime", "runtime", Lib, Serial, Affected, resources: [Postgres, Redis, Vault], impact_packages: [DeviceCertificateCandidate], capabilities: []),
             AuthE2e => ("auth-e2e", ReleaseCheck, "runtime", "auth_e2e", Test, Parallel, Affected, resources: [Postgres], impact_packages: [], capabilities: []),
             AuthBridgeStructure => ("auth-bridge-structure", ReleaseCheck, "runtime", "auth_bridge_structure", Test, Parallel, Affected, resources: [], impact_packages: [], capabilities: []),
@@ -1001,7 +1008,7 @@ integration_shard_catalog! {
         name: "production-runtime",
         local_feature_scopes: [Journeys],
         units: [
-            SettingsOnlyProductionArtifact => ("settings-only-production-artifact", ReleaseCheck, "journeys", "settingsonly_production_artifact", Test, Serial, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
+            SettingsOnlyProductionArtifact => ("settings-only-production-artifact", ReleaseCheck, "journeys", "settingsonly_production_artifact", Test, Serial, RemoteOnly, resources: [], impact_packages: [SettingsOnlyPackage], capabilities: [Docker]),
             TwoReplicaRuntimeJourney => ("two-replica-runtime-journey", ReleaseCheck, "journeys", "two_replica_runtime", Test, Serial, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
             ProductionRuntimeJourney => ("production-runtime-journey", ReleaseCheck, "journeys", "production_runtime", Test, Parallel, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),
             RuntimeInventoryJourney => ("runtime-inventory-journey", ReleaseCheck, "journeys", "runtime_inventory", Test, Parallel, RemoteOnly, resources: [], impact_packages: [], capabilities: [Docker]),

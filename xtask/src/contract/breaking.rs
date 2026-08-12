@@ -13,7 +13,8 @@
 //! ref: getsentry/json-schema-diff@main —— 集合论 permissive/restrictive：type 收紧 = newType 须为 oldType 超集。
 //!
 //! INVARIANT: WIRE-BREAKING-01 { level = "Medium", exec = "check", source = "code" }—— typed catalog 中的 schema breaking rules 对 base↔working
-//!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧 / 隐私·保护策略漂移**（新增可选字段不报，向后兼容语义）。
+//!   两版 schema 递归 diff，**只报既有字段的删除 / 收紧、`const` 值切换、隐私·保护策略漂移**
+//!   （新增可选字段不报，向后兼容语义）。
 //!   durable event/command/saga/projection 的 resolved schema hash 旋转单独 fail-closed，因为该
 //!   identity 会进入持久消息或实例并由 consumer 精确匹配；语义 diff 兼容不能绕过 identity 变更。
 //!   manifest wire 投影另覆盖 HTTP、L2 topology、L4 DeviceLatent topology、subscription 与
@@ -158,6 +159,7 @@ fn compare_node(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
     check_required_added(old, new, path, out);
     check_type_and_nullable(old, new, path, out);
     check_format(old, new, path, out);
+    check_const_value(old, new, path, out);
     check_enum(old, new, path, out);
     check_additional_props(old, new, path, out);
 
@@ -193,6 +195,7 @@ fn compare_output_node(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBr
     check_required_removed(old, new, path, out);
     check_output_type_and_nullable(old, new, path, out);
     check_format(old, new, path, out);
+    check_const_value(old, new, path, out);
     check_output_enum(old, new, path, out);
     check_additional_props_loosened(old, new, path, out);
 
@@ -214,6 +217,23 @@ fn compare_output_node(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBr
     }
     compare_named_schema_children(old, new, path, "definitions", out, compare_output_node);
     compare_named_schema_children(old, new, path, "$defs", out, compare_output_node);
+}
+
+fn check_const_value(old: &Value, new: &Value, path: &str, out: &mut Vec<RawBreak>) {
+    if let (Some(old_value), Some(new_value)) = (old.get("const"), new.get("const"))
+        && old_value != new_value
+    {
+        out.push(RawBreak {
+            rule: BreakingRule::ConstValueChanged,
+            pointer: path.to_owned(),
+            detail: format!(
+                "{} const value changed from {} to {}",
+                show(path),
+                old_value,
+                new_value
+            ),
+        });
+    }
 }
 
 fn compare_named_schema_children(
@@ -2829,6 +2849,17 @@ mod tests {
         );
 
         // green：required 不变。
+        assert!(compare_schemas(&old, &old).is_empty());
+    }
+
+    #[test]
+    fn const_value_changed_red_and_green() {
+        let old = json!({"properties": {"schemaVersion": {"type": "integer", "const": 1}}});
+        let changed = json!({"properties": {"schemaVersion": {"type": "integer", "const": 2}}});
+        assert_eq!(
+            rules(&compare_schemas(&old, &changed)),
+            vec![BreakingRule::ConstValueChanged]
+        );
         assert!(compare_schemas(&old, &old).is_empty());
     }
 

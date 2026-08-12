@@ -854,7 +854,7 @@ fn register_lifecycle_outputs(
         Err(error) => {
             register_module_resources(stack, &mut provider.0);
             register_module_resources(stack, &mut domain.0);
-            return Err(error.into());
+            return Err(error);
         }
     };
     tracing::info!(

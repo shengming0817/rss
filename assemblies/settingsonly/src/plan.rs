@@ -179,6 +179,20 @@ impl SettingsOnlyPlan {
         )
     }
 
+    #[cfg(feature = "test-support")]
+    fn bind_fixture_projection_with_observation(
+        self,
+        publisher: std::sync::Arc<
+            std::sync::Mutex<Option<eventexec::ProjectionObservationPublisher>>,
+        >,
+    ) -> anyhow::Result<BoundSettingsOnlyPlan> {
+        self.bind_projection_with_evidence(
+            move |binding| fixture_projection_runtime(binding, Some(publisher)),
+            std::sync::Arc::new(FixtureProjectionServing),
+            SettingsV3ServingHandoff::Fixture,
+        )
+    }
+
     pub(crate) fn provider_build(
         &self,
     ) -> anyhow::Result<crate::providers_gen::ProviderRoleBatches> {
@@ -210,6 +224,55 @@ impl SettingsOnlyPlan {
                 &"a".repeat(40),
                 &format!("sha256:{}", "b".repeat(64)),
             )?))
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn into_live_inventory_fixture(
+        self,
+        provider_bindings: Vec<runtimeexec::inventory::ProviderProbeBinding>,
+    ) -> anyhow::Result<LiveInventoryFixture> {
+        let observation = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let bound =
+            self.bind_fixture_projection_with_observation(std::sync::Arc::clone(&observation))?;
+        let (_control, _relay, _consumer, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        let lifecycle = crate::projection::ProjectionLifecycleBatch::from_runtime_plan(
+            bound.workflow_runtime(),
+            &write_admission,
+        )?
+        .into_output();
+        let seed = bound
+            .inventory_seed_with_bindings(provider_bindings)?
+            .with_build_metadata(runtimeexec::inventory::BuildMetadata::parse(
+                &"a".repeat(40),
+                &format!("sha256:{}", "b".repeat(64)),
+            )?);
+        Ok(LiveInventoryFixture {
+            seed,
+            lifecycle,
+            observation,
+        })
+    }
+}
+
+#[cfg(feature = "test-support")]
+pub(crate) struct LiveInventoryFixture {
+    seed: runtimeexec::inventory::RuntimeInventorySeed,
+    lifecycle: bootstrap::DomainModuleResult,
+    observation:
+        std::sync::Arc<std::sync::Mutex<Option<eventexec::ProjectionObservationPublisher>>>,
+}
+
+#[cfg(feature = "test-support")]
+impl LiveInventoryFixture {
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        runtimeexec::inventory::RuntimeInventorySeed,
+        bootstrap::DomainModuleResult,
+        std::sync::Arc<std::sync::Mutex<Option<eventexec::ProjectionObservationPublisher>>>,
+    ) {
+        (self.seed, self.lifecycle, self.observation)
     }
 }
 
@@ -250,6 +313,16 @@ impl SettingsProjectionMaintenancePlan {
 fn fixture_projection_factory(
     binding: eventexec::ProjectionRuntimeBinding,
 ) -> Result<eventexec::ProjectionRuntime, eventexec::WorkflowRuntimeError> {
+    fixture_projection_runtime(binding, None)
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn fixture_projection_runtime(
+    binding: eventexec::ProjectionRuntimeBinding,
+    observation: Option<
+        std::sync::Arc<std::sync::Mutex<Option<eventexec::ProjectionObservationPublisher>>>,
+    >,
+) -> Result<eventexec::ProjectionRuntime, eventexec::WorkflowRuntimeError> {
     let definition = eventexec::ProjectionTargetDefinition::new(
         binding.definition(),
         binding.input_generation(),
@@ -263,7 +336,12 @@ fn fixture_projection_factory(
     .expect("generated settings projection bindings must be canonical");
     binding.issue_runtime(
         std::sync::Arc::new(target),
-        |_target, _token, _health, _admission| {
+        move |_target, _token, _health, _admission, publisher| {
+            if let Some(observation) = &observation {
+                *observation
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(publisher);
+            }
             diport::DynManagedResource::new_box(FixtureProjectionResource)
         },
     )

@@ -161,9 +161,9 @@ pub mod test_support {
         }
     }
 
-    fn journey_probe_chain(
+    fn journey_probe_registry(
         case: JourneyCase,
-    ) -> anyhow::Result<(primitives::ProbeName, Arc<bootstrap::HealthReporter>)> {
+    ) -> anyhow::Result<(primitives::ProbeName, bootstrap::Registry)> {
         let name = primitives::ProbeName::parse("inventory_journey_provider")?;
         let status = match case {
             JourneyCase::ProbeDegraded => primitives::HealthStatus::Degraded,
@@ -180,7 +180,7 @@ pub mod test_support {
                 status,
             }),
         )?;
-        Ok((name, Arc::new(registry.take_health_reporter())))
+        Ok((name, registry))
     }
 
     pub struct JourneyResult {
@@ -190,12 +190,56 @@ pub mod test_support {
         pub audit_calls: usize,
     }
 
+    pub struct ProjectionStatusJourneyResult {
+        pub responses: Vec<ProjectionStatusHttpResult>,
+        pub serving_address: std::net::SocketAddr,
+        pub audit_calls: usize,
+    }
+
+    pub struct ProjectionStatusHttpResult {
+        pub status: reqwest::StatusCode,
+        pub body: Vec<u8>,
+    }
+
     /// Exercise the assembly-owned Admin route over the same bound socket represented in the
     /// published inventory. Authentication and authorization use the production listener funnel;
     /// only the credential PDP and durable audit outcome are controlled test evidence.
     pub async fn run_journey(case: JourneyCase) -> anyhow::Result<JourneyResult> {
+        let (response, audit_calls) = run_journey_requests(case, false).await?;
+        let serving_address = response.serving_address;
+        let mut responses = response.responses.into_iter();
+        let response = responses.next().context("single inventory response")?;
+        anyhow::ensure!(responses.next().is_none(), "unexpected inventory response");
+        Ok(JourneyResult {
+            status: response.status,
+            body: response.body,
+            serving_address,
+            audit_calls,
+        })
+    }
+
+    pub async fn run_projection_status_journey() -> anyhow::Result<ProjectionStatusJourneyResult> {
+        let (response, audit_calls) = run_journey_requests(JourneyCase::Allow, true).await?;
+        Ok(ProjectionStatusJourneyResult {
+            responses: response
+                .responses
+                .into_iter()
+                .map(|response| ProjectionStatusHttpResult {
+                    status: response.status,
+                    body: response.body,
+                })
+                .collect(),
+            serving_address: response.serving_address,
+            audit_calls,
+        })
+    }
+
+    async fn run_journey_requests(
+        case: JourneyCase,
+        projection_statuses: bool,
+    ) -> anyhow::Result<(crate::listeners::InventoryJourneyHttpResult, usize)> {
         let plan = crate::plan::SettingsOnlyPlan::bundled()?;
-        let (probe_name, reporter) = journey_probe_chain(case)?;
+        let (probe_name, mut registry) = journey_probe_registry(case)?;
         let bindings = crate::providers_gen::PROVIDER_CATALOG
             .iter()
             .map(|provider| {
@@ -210,7 +254,64 @@ pub mod test_support {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let seed = plan.into_inventory_seed_fixture(bindings)?;
+        let (seed, mut lifecycle, expected_workers, request_plan) = if projection_statuses {
+            let (seed, lifecycle, observation) =
+                plan.into_live_inventory_fixture(bindings)?.into_parts();
+            let generation = eventexec::ProjectionVersion::parse("v3")?;
+            (
+                seed,
+                lifecycle,
+                bootstrap::ExpectedWorkerInventory::closed([
+                    bootstrap::WorkerDescriptor::expected(
+                        "assemblies.settingsonly.src.projection.01",
+                        bootstrap::WorkerAdmissionLane::Writes,
+                    ),
+                ])?,
+                crate::listeners::InventoryJourneyRequestPlan::projection_statuses(
+                    observation,
+                    [
+                        eventexec::ProjectionWorkerStatus::Healthy {
+                            selected_generation: eventexec::ProjectionSelectedGeneration::Uniform(
+                                generation.clone(),
+                            ),
+                            max_lag: 7,
+                        },
+                        eventexec::ProjectionWorkerStatus::Retryable {
+                            selected_generation: eventexec::ProjectionSelectedGeneration::Uniform(
+                                generation.clone(),
+                            ),
+                            max_lag: 8,
+                            reasons: eventexec::ProjectionReasonPosture::Uniform(
+                                eventexec::ProjectionRetryableReason::SourceTransient,
+                            ),
+                        },
+                        eventexec::ProjectionWorkerStatus::Quarantined {
+                            selected_generation: eventexec::ProjectionSelectedGeneration::Uniform(
+                                generation,
+                            ),
+                            max_lag: 9,
+                            reasons: eventexec::ProjectionReasonPosture::Uniform(
+                                eventexec::ProjectionQuarantineReason::ProviderPermanent,
+                            ),
+                        },
+                        eventexec::ProjectionWorkerStatus::Stopped(
+                            eventexec::ProjectionStoppedReason::InvalidTenant,
+                        ),
+                    ],
+                ),
+            )
+        } else {
+            (
+                plan.into_inventory_seed_fixture(bindings)?,
+                bootstrap::DomainModuleResult::default(),
+                bootstrap::ExpectedWorkerInventory::closed([])?,
+                crate::listeners::InventoryJourneyRequestPlan::single(),
+            )
+        };
+        for (name, probe) in lifecycle.probes.drain(..) {
+            registry.probe(name, probe)?;
+        }
+        let reporter = Arc::new(registry.take_health_reporter());
         let (publisher, reader) = model::inventory_channel(seed, Arc::clone(&reporter));
         let mut registry = bootstrap::Registry::new();
         crate::modules_gen::register_framework_routes(
@@ -246,14 +347,12 @@ pub mod test_support {
             Arc::clone(&reporter),
             publisher,
             crate::test_support::valid_federated_token().to_owned(),
+            lifecycle,
+            expected_workers,
+            request_plan,
         )
         .await?;
-        Ok(JourneyResult {
-            status: response.status,
-            body: response.body,
-            serving_address: response.serving_address,
-            audit_calls: audit_calls.load(Ordering::Acquire),
-        })
+        Ok((response, audit_calls.load(Ordering::Acquire)))
     }
 }
 
@@ -481,7 +580,10 @@ mod tests {
     fn framework_route_and_generated_dto_mapping_are_exact() -> anyhow::Result<()> {
         let (reader, _) = published_inventory_routes()?;
         let response = wire::RuntimeInventoryResponse::try_from(reader.read()?)?;
-        assert_eq!(response.data.schema_version, 1);
+        assert_eq!(
+            response.data.schema_version,
+            wire::RuntimeInventorySchemaVersion::V2
+        );
         assert_eq!(response.data.activated_workflows.len(), 1);
         assert_eq!(response.data.domains, [wire::RuntimeDomain::Settings]);
         assert_eq!(response.data.listeners.len(), 3);
@@ -498,7 +600,9 @@ mod tests {
                 "definitionSchemaDigest": "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8",
                 "definitionVersion": "v3",
                 "id": "settings.config-projection",
-                "mode": "projection"
+                "mode": "projection",
+                "targetGeneration": "v3",
+                "workerStatus": { "state": "starting" }
             }])
         );
         Ok(())

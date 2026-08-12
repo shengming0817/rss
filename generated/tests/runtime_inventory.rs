@@ -18,19 +18,25 @@ fn observation() -> Result<
         )),
         vec![assembly_schema::AssemblyDomain::Identity],
         vec![
-            model::RuntimeInventoryActivatedWorkflow::new(
+            model::RuntimeInventoryActivatedWorkflow::executing_projection(
                 "settings.config-projection".to_owned(),
                 "v1".to_owned(),
                 digest('c')?,
-                model::RuntimeInventoryWorkflowActivation::Projection(
-                    model::RuntimeInventoryProjectionActivation::Shadow,
+                model::RuntimeInventoryExecutingProjectionActivation::Shadow,
+                model::RuntimeInventoryProjectionExecution::new(
+                    "v3".to_owned(),
+                    model::RuntimeInventoryProjectionWorkerStatus::Healthy {
+                        selected_generation: model::RuntimeInventorySelectedGeneration::Uniform(
+                            "v3".to_owned(),
+                        ),
+                        max_lag: 7,
+                    },
                 ),
             ),
-            model::RuntimeInventoryActivatedWorkflow::new(
+            model::RuntimeInventoryActivatedWorkflow::active_saga(
                 "identity.rotate-credential".to_owned(),
                 "v2".to_owned(),
                 digest('f')?,
-                model::RuntimeInventoryWorkflowActivation::SagaActive,
             ),
         ],
         vec![model::RuntimeInventoryListener::new(
@@ -75,13 +81,19 @@ fn valid_response() -> serde_json::Value {
                 "imageDigest": format!("sha256:{}", "e".repeat(64))
             },
             "runtimePlanFingerprint": format!("sha256:{}", "b".repeat(64)),
-            "schemaVersion": 1,
+            "schemaVersion": 2,
             "activatedWorkflows": [{
                 "mode": "projection",
                 "id": "settings.config-projection",
                 "definitionVersion": "v1",
                 "definitionSchemaDigest": format!("sha256:{}", "c".repeat(64)),
-                "activation": "shadow"
+                "activation": "shadow",
+                "targetGeneration": "v3",
+                "workerStatus": {
+                    "state": "healthy",
+                    "selectedGeneration": { "state": "uniform", "generation": "v3" },
+                    "maxLag": 7
+                }
             }, {
                 "mode": "saga",
                 "id": "identity.rotate-credential",
@@ -186,6 +198,83 @@ fn runtime_inventory_instances_obey_response_schema() -> Result<(), Box<dyn std:
     );
     assert!(serde_json::from_value::<RuntimeInventoryResponse>(mismatched_tag).is_err());
 
+    let mut legacy_version = valid.clone();
+    legacy_version["data"]["schemaVersion"] = serde_json::json!(1);
+    assert!(validator.validate(&legacy_version).is_err());
+    assert!(serde_json::from_value::<RuntimeInventoryResponse>(legacy_version).is_err());
+
+    for missing in ["targetGeneration", "workerStatus"] {
+        let mut executing_missing_required = valid.clone();
+        executing_missing_required["data"]["activatedWorkflows"][0]
+            .as_object_mut()
+            .ok_or_else(|| std::io::Error::other("projection fixture must be an object"))?
+            .remove(missing);
+        assert!(
+            validator.validate(&executing_missing_required).is_err(),
+            "executing projection must require {missing}"
+        );
+        assert!(
+            serde_json::from_value::<RuntimeInventoryResponse>(executing_missing_required).is_err(),
+            "generated DTO must require {missing}"
+        );
+    }
+
+    let mut valid_capture_only = valid.clone();
+    valid_capture_only["data"]["activatedWorkflows"][0]["activation"] =
+        serde_json::json!("capture-only");
+    let capture = valid_capture_only["data"]["activatedWorkflows"][0]
+        .as_object_mut()
+        .ok_or_else(|| std::io::Error::other("projection fixture must be an object"))?;
+    let target_generation = capture
+        .remove("targetGeneration")
+        .ok_or_else(|| std::io::Error::other("executing fixture must have targetGeneration"))?;
+    let worker_status = capture
+        .remove("workerStatus")
+        .ok_or_else(|| std::io::Error::other("executing fixture must have workerStatus"))?;
+    assert!(validator.validate(&valid_capture_only).is_ok());
+    assert!(serde_json::from_value::<RuntimeInventoryResponse>(valid_capture_only.clone()).is_ok());
+
+    for (forbidden, value) in [
+        ("targetGeneration", target_generation),
+        ("workerStatus", worker_status),
+    ] {
+        let mut capture_with_execution_field = valid_capture_only.clone();
+        capture_with_execution_field["data"]["activatedWorkflows"][0][forbidden] = value;
+        assert!(
+            validator.validate(&capture_with_execution_field).is_err(),
+            "capture-only projection must reject {forbidden}"
+        );
+        assert!(
+            serde_json::from_value::<RuntimeInventoryResponse>(capture_with_execution_field)
+                .is_err(),
+            "generated DTO must reject capture-only {forbidden}"
+        );
+    }
+
+    for invalid_status in [
+        serde_json::json!({"state": "starting", "maxLag": 0}),
+        serde_json::json!({
+            "state": "unavailable",
+            "reason": "sweep-incomplete",
+            "selectedGeneration": {"state": "none"}
+        }),
+        serde_json::json!({
+            "state": "stopped",
+            "stopClass": "fatal",
+            "reason": "other"
+        }),
+        serde_json::json!({
+            "state": "healthy",
+            "selectedGeneration": {"state": "uniform"},
+            "maxLag": 0
+        }),
+    ] {
+        let mut instance = valid.clone();
+        instance["data"]["activatedWorkflows"][0]["workerStatus"] = invalid_status;
+        assert!(validator.validate(&instance).is_err());
+        assert!(serde_json::from_value::<RuntimeInventoryResponse>(instance).is_err());
+    }
+
     let mut missing_readiness = valid;
     missing_readiness["data"]["placements"][0]
         .as_object_mut()
@@ -241,7 +330,7 @@ fn runtime_inventory_projection_is_complete_and_owns_schema_version()
     let schema = response_schema()?;
     let validator = jsonschema::draft7::options().build(&schema)?;
     assert!(validator.validate(&value).is_ok());
-    assert_eq!(value["data"]["schemaVersion"], 1);
+    assert_eq!(value["data"]["schemaVersion"], 2);
     assert_eq!(value["data"]["providerPosture"][0]["state"], "unobserved");
     assert_eq!(
         value["data"]["activatedWorkflows"].as_array().map(Vec::len),

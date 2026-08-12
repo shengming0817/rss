@@ -39,11 +39,20 @@ type ProjectionSpawn = dyn Fn(
 pub struct ProjectionRuntime {
     target: Arc<dyn ProjectionTarget>,
     spawn: Arc<ProjectionSpawn>,
+    target_generation: crate::ProjectionVersion,
+    observation: crate::ProjectionObservationReader,
 }
 
 impl ProjectionRuntime {
     fn target(&self) -> Arc<dyn ProjectionTarget> {
         Arc::clone(&self.target)
+    }
+
+    fn execution_observation(&self) -> ProjectionExecutionObservation {
+        ProjectionExecutionObservation {
+            target_generation: self.target_generation.clone(),
+            reader: self.observation.clone(),
+        }
     }
 
     pub fn spawn(
@@ -310,6 +319,7 @@ impl ProjectionRuntimeBinding {
                 CancellationToken,
                 Arc<WorkerHealth>,
                 primitives::WriteAdmission,
+                crate::ProjectionObservationPublisher,
             ) -> Box<DynManagedResource<'static>>
             + Send
             + Sync
@@ -326,11 +336,22 @@ impl ProjectionRuntimeBinding {
             });
         }
         let worker_target = Arc::clone(&target);
+        let target_generation = self.target_generation;
+        let (publisher, observation) =
+            crate::projection_observation::projection_observation_channel();
         Ok(ProjectionRuntime {
             target,
             spawn: Arc::new(move |token, health, admission| {
-                spawn(Arc::clone(&worker_target), token, health, admission)
+                spawn(
+                    Arc::clone(&worker_target),
+                    token,
+                    health,
+                    admission,
+                    publisher.clone(),
+                )
             }),
+            target_generation,
+            observation,
         })
     }
 }
@@ -997,13 +1018,10 @@ impl WorkflowRuntimePlan {
         let projection_captures = generated::event::PROJECTION_DEFINITIONS
             .iter()
             .map(|definition| SelectedProjectionCapture {
-                workflow: ActivatedWorkflow {
+                definition: ProjectionCaptureDefinition {
                     id: definition.contract_id().to_owned(),
                     definition_version: definition.version().to_owned(),
                     definition_schema_digest: definition.schema_hash().to_owned(),
-                    activation: ActivatedWorkflowActivation::Projection(
-                        ProjectionActivation::CaptureOnly,
-                    ),
                 },
                 inputs: projection_inputs
                     .iter()
@@ -1014,7 +1032,12 @@ impl WorkflowRuntimePlan {
             .collect::<Vec<_>>();
         let activated = projection_captures
             .iter()
-            .map(|capture| capture.workflow.clone())
+            .map(|capture| ActivatedWorkflow {
+                id: capture.definition.id.clone(),
+                definition_version: capture.definition.definition_version.clone(),
+                definition_schema_digest: capture.definition.definition_schema_digest.clone(),
+                shape: ActivatedWorkflowShape::ProjectionCapture,
+            })
             .collect();
         Self {
             source_runtime_plan_fingerprint: String::new(),
@@ -1124,11 +1147,15 @@ impl<'a> ProjectionCaptureView<'a> {
     /// assembly plan, including `CaptureOnly` workflows that intentionally have no runtime target.
     pub fn entries(
         self,
-    ) -> impl ExactSizeIterator<Item = (&'a ActivatedWorkflow, &'a [ProjectionInputBinding])> + 'a
-    {
+    ) -> impl ExactSizeIterator<
+        Item = (
+            &'a ProjectionCaptureDefinition,
+            &'a [ProjectionInputBinding],
+        ),
+    > + 'a {
         self.captures
             .iter()
-            .map(|capture| (&capture.workflow, capture.inputs.as_slice()))
+            .map(|capture| (&capture.definition, capture.inputs.as_slice()))
     }
 }
 
@@ -1227,7 +1254,7 @@ impl ProjectionSourceScope {
 }
 
 struct SelectedProjectionCapture {
-    workflow: ActivatedWorkflow,
+    definition: ProjectionCaptureDefinition,
     inputs: Vec<ProjectionInputBinding>,
 }
 
@@ -1391,13 +1418,91 @@ pub struct ActivatedWorkflow {
     id: String,
     definition_version: String,
     definition_schema_digest: String,
-    activation: ActivatedWorkflowActivation,
+    shape: ActivatedWorkflowShape,
+}
+
+/// Static projection identity used by capture independently of execution capability.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionCaptureDefinition {
+    id: String,
+    definition_version: String,
+    definition_schema_digest: String,
+}
+
+impl ProjectionCaptureDefinition {
+    /// Return the generated projection contract identifier.
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Return the generated projection definition version.
+    pub fn definition_version(&self) -> &str {
+        &self.definition_version
+    }
+
+    /// Return the generated projection definition schema digest.
+    pub fn definition_schema_digest(&self) -> &str {
+        &self.definition_schema_digest
+    }
+}
+
+/// Runtime status capability present only for shadow/active projections.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectionExecutionObservation {
+    target_generation: crate::ProjectionVersion,
+    reader: crate::ProjectionObservationReader,
+}
+
+impl ProjectionExecutionObservation {
+    /// Return the plan-selected target generation paired with this worker observation.
+    pub fn target_generation(&self) -> &crate::ProjectionVersion {
+        &self.target_generation
+    }
+
+    /// Sample the worker's latest bounded process-wide status.
+    pub fn status(&self) -> crate::ProjectionWorkerStatus {
+        self.reader.read()
+    }
+
+    /// Mint a paired observation only for cross-crate integration tests.
+    #[cfg(feature = "test-support")]
+    #[doc(hidden)]
+    pub fn fixture(
+        target_generation: crate::ProjectionVersion,
+    ) -> (Self, crate::ProjectionObservationPublisher) {
+        let (publisher, reader) = crate::projection_observation::projection_observation_channel();
+        (
+            Self {
+                target_generation,
+                reader,
+            },
+            publisher,
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActivatedWorkflowActivation {
-    Projection(ProjectionActivation),
-    Saga(SagaActivation),
+pub enum ActivatedExecutingProjectionActivation {
+    /// Execute without authoritative serving.
+    Shadow,
+    /// Execute as the authoritative projection.
+    Active,
+}
+
+/// Closed runtime workflow shape. Executing projections necessarily carry their live reader.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ActivatedWorkflowShape {
+    /// Capture projection inputs without executing a worker.
+    ProjectionCapture,
+    /// Execute a projection with the observation capability issued to its worker.
+    ProjectionExecuting {
+        /// Exact executing posture selected by the sealed runtime plan.
+        activation: ActivatedExecutingProjectionActivation,
+        /// Live worker observation paired with the executing runtime.
+        execution: ProjectionExecutionObservation,
+    },
+    /// Execute an active saga.
+    SagaActive,
 }
 
 impl ActivatedWorkflow {
@@ -1413,8 +1518,8 @@ impl ActivatedWorkflow {
         &self.definition_schema_digest
     }
 
-    pub const fn activation(&self) -> ActivatedWorkflowActivation {
-        self.activation
+    pub const fn shape(&self) -> &ActivatedWorkflowShape {
+        &self.shape
     }
 }
 
@@ -1508,24 +1613,27 @@ fn compile_activations(
                         workflow: id.clone(),
                     });
                 }
-                if *activation == ProjectionActivation::Disabled {
-                    continue;
-                }
+                let execution_activation = match activation {
+                    ProjectionActivation::Disabled => continue,
+                    ProjectionActivation::CaptureOnly => None,
+                    ProjectionActivation::Shadow => {
+                        Some(ActivatedExecutingProjectionActivation::Shadow)
+                    }
+                    ProjectionActivation::Active => {
+                        Some(ActivatedExecutingProjectionActivation::Active)
+                    }
+                };
                 selected_inputs.extend(inputs.iter().copied());
-                let observation = ActivatedWorkflow {
+                let capture_definition = ProjectionCaptureDefinition {
                     id: id.clone(),
                     definition_version: definition_version.clone(),
                     definition_schema_digest: definition_schema_digest.to_string(),
-                    activation: ActivatedWorkflowActivation::Projection(*activation),
                 };
                 selected_captures.push(SelectedProjectionCapture {
-                    workflow: observation.clone(),
+                    definition: capture_definition.clone(),
                     inputs: inputs.clone(),
                 });
-                if matches!(
-                    activation,
-                    ProjectionActivation::Shadow | ProjectionActivation::Active
-                ) {
+                let observation = if let Some(execution_activation) = execution_activation {
                     let bundle = capabilities.projection.remove(id).ok_or_else(|| {
                         WorkflowRuntimeError::MissingCapability {
                             workflow: id.clone(),
@@ -1539,6 +1647,15 @@ fn compile_activations(
                             capability: "projection-runtime-factory",
                         });
                     };
+                    let observation = ActivatedWorkflow {
+                        id: capture_definition.id,
+                        definition_version: capture_definition.definition_version,
+                        definition_schema_digest: capture_definition.definition_schema_digest,
+                        shape: ActivatedWorkflowShape::ProjectionExecuting {
+                            activation: execution_activation,
+                            execution: runtime.execution_observation(),
+                        },
+                    };
                     let target = runtime.target();
                     selected_targets.push(SelectedProjectionTarget {
                         definition: bundle.definition,
@@ -1548,7 +1665,15 @@ fn compile_activations(
                         target,
                         serving_evidence: bundle.serving_evidence,
                     });
-                }
+                    observation
+                } else {
+                    ActivatedWorkflow {
+                        id: capture_definition.id,
+                        definition_version: capture_definition.definition_version,
+                        definition_schema_digest: capture_definition.definition_schema_digest,
+                        shape: ActivatedWorkflowShape::ProjectionCapture,
+                    }
+                };
                 activated.push(observation);
             }
             WorkflowActivation::Saga {
@@ -1591,14 +1716,14 @@ fn compile_activations(
                     id: id.clone(),
                     definition_version: definition_version.clone(),
                     definition_schema_digest: definition_schema_digest.to_string(),
-                    activation: ActivatedWorkflowActivation::Saga(*activation),
+                    shape: ActivatedWorkflowShape::SagaActive,
                 });
             }
         }
     }
     activated.sort_by(|left, right| left.id.cmp(&right.id));
     selected_targets.sort_by(|left, right| left.workflow.id.cmp(&right.workflow.id));
-    selected_captures.sort_by(|left, right| left.workflow.id.cmp(&right.workflow.id));
+    selected_captures.sort_by(|left, right| left.definition.id.cmp(&right.definition.id));
     selected_inputs.sort_by(|left, right| {
         (
             left.projection_id(),
@@ -1845,9 +1970,14 @@ mod tests {
     }
 
     fn projection_runtime_for(target: Arc<dyn ProjectionTarget>) -> Arc<ProjectionRuntime> {
+        let (_publisher, observation) =
+            crate::projection_observation::projection_observation_channel();
         Arc::new(ProjectionRuntime {
             target,
             spawn: Arc::new(|_, _, _| panic!("test runtime must not spawn")),
+            target_generation: crate::ProjectionVersion::parse("materialized-v7")
+                .expect("test target generation is canonical"),
+            observation,
         })
     }
 
@@ -2253,6 +2383,10 @@ mod tests {
         );
         assert_eq!(plan.projection_targets().entries().len(), 0);
         assert_eq!(plan.activated_workflows().workflows().len(), 1);
+        assert!(matches!(
+            plan.activated_workflows().workflows()[0].shape(),
+            ActivatedWorkflowShape::ProjectionCapture
+        ));
         Ok(())
     }
 
@@ -2374,7 +2508,7 @@ mod tests {
             assert_eq!(binding.target_generation().as_str(), "materialized-v7");
             binding.issue_runtime(
                 Arc::clone(&expected_target),
-                move |worker_target, _, _, _| {
+                move |worker_target, _, _, _, _| {
                     worker_received_exact_target_for_spawn.store(
                         Arc::ptr_eq(&worker_target, &expected_worker_target),
                         Ordering::SeqCst,
@@ -2418,7 +2552,7 @@ mod tests {
         let capability = ProjectionRuntimeCapability::bind_active(
             permit,
             |binding| {
-                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _| {
+                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _, _| {
                     DynManagedResource::new_box(NoopManagedResource)
                 })
             },
@@ -2454,7 +2588,7 @@ mod tests {
                 crate::ProjectionMetricActivation::Shadow
             );
             assert_eq!(binding.metric_scope().activation().as_label(), "shadow");
-            binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _| {
+            binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _, _| {
                 DynManagedResource::new_box(NoopManagedResource)
             })
         })?;
@@ -2483,7 +2617,7 @@ mod tests {
                     crate::ProjectionMetricActivation::Active
                 );
                 assert_eq!(binding.metric_scope().activation().as_label(), "active");
-                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _| {
+                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _, _| {
                     DynManagedResource::new_box(NoopManagedResource)
                 })
             },
@@ -2725,7 +2859,7 @@ mod tests {
             "identity",
             "identity.session.created",
             "v1",
-            "sha256:unknown",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             "identity.session.created",
         );
         assert!(matches!(
@@ -2757,8 +2891,12 @@ mod tests {
             Err(WorkflowRuntimeError::DuplicateCapabilityWorkflow { .. })
         ));
 
-        let unknown =
-            ContractBinding::from_static("unknown", "unknown.projection", "v1", "sha256:unknown");
+        let unknown = ContractBinding::from_static(
+            "unknown",
+            "unknown.projection",
+            "v1",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
         let mut catalog = SelectedWorkflowCapabilities::empty();
         let runtime = projection_runtime_for(projection_target_for(definition));
         catalog

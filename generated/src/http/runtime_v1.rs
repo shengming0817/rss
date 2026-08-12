@@ -29,13 +29,13 @@ pub mod inventory {
             }
         }
     }
-    ///`RuntimeActivatedProjection`
+    ///`RuntimeActivatedProjectionCapture`
     ///
     /// <details><summary>JSON schema</summary>
     ///
     /// ```json
     ///{
-    ///  "title": "RuntimeActivatedProjection",
+    ///  "title": "RuntimeActivatedProjectionCapture",
     ///  "type": "object",
     ///  "required": [
     ///    "activation",
@@ -48,9 +48,7 @@ pub mod inventory {
     ///    "activation": {
     ///      "type": "string",
     ///      "enum": [
-    ///        "capture-only",
-    ///        "shadow",
-    ///        "active"
+    ///        "capture-only"
     ///      ]
     ///    },
     ///    "definitionSchemaDigest": {
@@ -77,21 +75,21 @@ pub mod inventory {
     /// </details>
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
     #[serde(deny_unknown_fields)]
-    pub struct RuntimeActivatedProjection {
+    pub struct RuntimeActivatedProjectionCapture {
         #[redact(sensitivity = public)]
-        pub activation: RuntimeActivatedProjectionActivation,
+        pub activation: RuntimeActivatedProjectionCaptureActivation,
         #[serde(rename = "definitionSchemaDigest")]
         #[redact(sensitivity = public)]
         pub definition_schema_digest: Sha256Fingerprint,
         #[serde(rename = "definitionVersion")]
         #[redact(sensitivity = public)]
-        pub definition_version: RuntimeActivatedProjectionDefinitionVersion,
+        pub definition_version: RuntimeActivatedProjectionCaptureDefinitionVersion,
         #[redact(sensitivity = public)]
-        pub id: RuntimeActivatedProjectionId,
+        pub id: RuntimeActivatedProjectionCaptureId,
         #[redact(sensitivity = public)]
-        pub mode: RuntimeActivatedProjectionMode,
+        pub mode: RuntimeActivatedProjectionCaptureMode,
     }
-    ///`RuntimeActivatedProjectionActivation`
+    ///`RuntimeActivatedProjectionCaptureActivation`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -99,9 +97,7 @@ pub mod inventory {
     ///{
     ///  "type": "string",
     ///  "enum": [
-    ///    "capture-only",
-    ///    "shadow",
-    ///    "active"
+    ///    "capture-only"
     ///  ]
     ///}
     /// ```
@@ -118,41 +114,35 @@ pub mod inventory {
         PartialEq,
         PartialOrd,
     )]
-    pub enum RuntimeActivatedProjectionActivation {
+    pub enum RuntimeActivatedProjectionCaptureActivation {
         #[serde(rename = "capture-only")]
         CaptureOnly,
-        #[serde(rename = "shadow")]
-        Shadow,
-        #[serde(rename = "active")]
-        Active,
     }
-    impl ::std::fmt::Display for RuntimeActivatedProjectionActivation {
+    impl ::std::fmt::Display for RuntimeActivatedProjectionCaptureActivation {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::CaptureOnly => f.write_str("capture-only"),
-                Self::Shadow => f.write_str("shadow"),
-                Self::Active => f.write_str("active"),
             }
         }
     }
-    impl ::std::str::FromStr for RuntimeActivatedProjectionActivation {
+    impl ::std::str::FromStr for RuntimeActivatedProjectionCaptureActivation {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
                 "capture-only" => Ok(Self::CaptureOnly),
-                "shadow" => Ok(Self::Shadow),
-                "active" => Ok(Self::Active),
                 _ => Err("invalid value".into()),
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionActivation {
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionCaptureActivation {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionActivation {
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeActivatedProjectionCaptureActivation
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -160,7 +150,9 @@ pub mod inventory {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionActivation {
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeActivatedProjectionCaptureActivation
+    {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -168,7 +160,7 @@ pub mod inventory {
             value.parse()
         }
     }
-    ///`RuntimeActivatedProjectionDefinitionVersion`
+    ///`RuntimeActivatedProjectionCaptureDefinitionVersion`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -181,21 +173,23 @@ pub mod inventory {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct RuntimeActivatedProjectionDefinitionVersion(
+    pub struct RuntimeActivatedProjectionCaptureDefinitionVersion(
         #[redact(sensitivity = public)] ::std::string::String,
     );
-    impl ::std::ops::Deref for RuntimeActivatedProjectionDefinitionVersion {
+    impl ::std::ops::Deref for RuntimeActivatedProjectionCaptureDefinitionVersion {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<RuntimeActivatedProjectionDefinitionVersion> for ::std::string::String {
-        fn from(value: RuntimeActivatedProjectionDefinitionVersion) -> Self {
+    impl ::std::convert::From<RuntimeActivatedProjectionCaptureDefinitionVersion>
+        for ::std::string::String
+    {
+        fn from(value: RuntimeActivatedProjectionCaptureDefinitionVersion) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for RuntimeActivatedProjectionDefinitionVersion {
+    impl ::std::str::FromStr for RuntimeActivatedProjectionCaptureDefinitionVersion {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
@@ -206,14 +200,14 @@ pub mod inventory {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionDefinitionVersion {
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionCaptureDefinitionVersion {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
     impl ::std::convert::TryFrom<&::std::string::String>
-        for RuntimeActivatedProjectionDefinitionVersion
+        for RuntimeActivatedProjectionCaptureDefinitionVersion
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -223,7 +217,7 @@ pub mod inventory {
         }
     }
     impl ::std::convert::TryFrom<::std::string::String>
-        for RuntimeActivatedProjectionDefinitionVersion
+        for RuntimeActivatedProjectionCaptureDefinitionVersion
     {
         type Error = self::error::ConversionError;
         fn try_from(
@@ -232,7 +226,7 @@ pub mod inventory {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionDefinitionVersion {
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionCaptureDefinitionVersion {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -244,7 +238,7 @@ pub mod inventory {
                 })
         }
     }
-    ///`RuntimeActivatedProjectionId`
+    ///`RuntimeActivatedProjectionCaptureId`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -257,19 +251,21 @@ pub mod inventory {
     /// </details>
     #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
     #[serde(transparent)]
-    pub struct RuntimeActivatedProjectionId(#[redact(sensitivity = public)] ::std::string::String);
-    impl ::std::ops::Deref for RuntimeActivatedProjectionId {
+    pub struct RuntimeActivatedProjectionCaptureId(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeActivatedProjectionCaptureId {
         type Target = ::std::string::String;
         fn deref(&self) -> &::std::string::String {
             &self.0
         }
     }
-    impl ::std::convert::From<RuntimeActivatedProjectionId> for ::std::string::String {
-        fn from(value: RuntimeActivatedProjectionId) -> Self {
+    impl ::std::convert::From<RuntimeActivatedProjectionCaptureId> for ::std::string::String {
+        fn from(value: RuntimeActivatedProjectionCaptureId) -> Self {
             value.0
         }
     }
-    impl ::std::str::FromStr for RuntimeActivatedProjectionId {
+    impl ::std::str::FromStr for RuntimeActivatedProjectionCaptureId {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             if value.chars().count() < 1usize {
@@ -278,13 +274,13 @@ pub mod inventory {
             Ok(Self(value.to_string()))
         }
     }
-    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionId {
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionCaptureId {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionId {
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionCaptureId {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -292,7 +288,7 @@ pub mod inventory {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionId {
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionCaptureId {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
@@ -300,7 +296,7 @@ pub mod inventory {
             value.parse()
         }
     }
-    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionId {
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionCaptureId {
         fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
         where
             D: ::serde::Deserializer<'de>,
@@ -312,7 +308,7 @@ pub mod inventory {
                 })
         }
     }
-    ///`RuntimeActivatedProjectionMode`
+    ///`RuntimeActivatedProjectionCaptureMode`
     ///
     /// <details><summary>JSON schema</summary>
     ///
@@ -337,18 +333,18 @@ pub mod inventory {
         PartialEq,
         PartialOrd,
     )]
-    pub enum RuntimeActivatedProjectionMode {
+    pub enum RuntimeActivatedProjectionCaptureMode {
         #[serde(rename = "projection")]
         Projection,
     }
-    impl ::std::fmt::Display for RuntimeActivatedProjectionMode {
+    impl ::std::fmt::Display for RuntimeActivatedProjectionCaptureMode {
         fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
             match *self {
                 Self::Projection => f.write_str("projection"),
             }
         }
     }
-    impl ::std::str::FromStr for RuntimeActivatedProjectionMode {
+    impl ::std::str::FromStr for RuntimeActivatedProjectionCaptureMode {
         type Err = self::error::ConversionError;
         fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             match value {
@@ -357,13 +353,13 @@ pub mod inventory {
             }
         }
     }
-    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionMode {
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionCaptureMode {
         type Error = self::error::ConversionError;
         fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionMode {
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionCaptureMode {
         type Error = self::error::ConversionError;
         fn try_from(
             value: &::std::string::String,
@@ -371,12 +367,460 @@ pub mod inventory {
             value.parse()
         }
     }
-    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionMode {
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionCaptureMode {
         type Error = self::error::ConversionError;
         fn try_from(
             value: ::std::string::String,
         ) -> ::std::result::Result<Self, self::error::ConversionError> {
             value.parse()
+        }
+    }
+    ///`RuntimeActivatedProjectionExecuting`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeActivatedProjectionExecuting",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "activation",
+    ///    "definitionSchemaDigest",
+    ///    "definitionVersion",
+    ///    "id",
+    ///    "mode",
+    ///    "targetGeneration",
+    ///    "workerStatus"
+    ///  ],
+    ///  "properties": {
+    ///    "activation": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "shadow",
+    ///        "active"
+    ///      ]
+    ///    },
+    ///    "definitionSchemaDigest": {
+    ///      "$ref": "#/definitions/Sha256Fingerprint"
+    ///    },
+    ///    "definitionVersion": {
+    ///      "type": "string",
+    ///      "pattern": "^v[0-9]+$"
+    ///    },
+    ///    "id": {
+    ///      "type": "string",
+    ///      "minLength": 1
+    ///    },
+    ///    "mode": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "projection"
+    ///      ]
+    ///    },
+    ///    "targetGeneration": {
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "minLength": 1
+    ///    },
+    ///    "workerStatus": {
+    ///      "$ref": "#/definitions/RuntimeProjectionWorkerStatus"
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeActivatedProjectionExecuting {
+        #[redact(sensitivity = public)]
+        pub activation: RuntimeActivatedProjectionExecutingActivation,
+        #[serde(rename = "definitionSchemaDigest")]
+        #[redact(sensitivity = public)]
+        pub definition_schema_digest: Sha256Fingerprint,
+        #[serde(rename = "definitionVersion")]
+        #[redact(sensitivity = public)]
+        pub definition_version: RuntimeActivatedProjectionExecutingDefinitionVersion,
+        #[redact(sensitivity = public)]
+        pub id: RuntimeActivatedProjectionExecutingId,
+        #[redact(sensitivity = public)]
+        pub mode: RuntimeActivatedProjectionExecutingMode,
+        #[serde(rename = "targetGeneration")]
+        #[redact(sensitivity = public)]
+        pub target_generation: RuntimeActivatedProjectionExecutingTargetGeneration,
+        #[serde(rename = "workerStatus")]
+        #[redact(sensitivity = public)]
+        pub worker_status: RuntimeProjectionWorkerStatus,
+    }
+    ///`RuntimeActivatedProjectionExecutingActivation`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "shadow",
+    ///    "active"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeActivatedProjectionExecutingActivation {
+        #[serde(rename = "shadow")]
+        Shadow,
+        #[serde(rename = "active")]
+        Active,
+    }
+    impl ::std::fmt::Display for RuntimeActivatedProjectionExecutingActivation {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Shadow => f.write_str("shadow"),
+                Self::Active => f.write_str("active"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionExecutingActivation {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "shadow" => Ok(Self::Shadow),
+                "active" => Ok(Self::Active),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionExecutingActivation {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeActivatedProjectionExecutingActivation
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeActivatedProjectionExecutingActivation
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeActivatedProjectionExecutingDefinitionVersion`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "pattern": "^v[0-9]+$"
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeActivatedProjectionExecutingDefinitionVersion(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeActivatedProjectionExecutingDefinitionVersion {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedProjectionExecutingDefinitionVersion>
+        for ::std::string::String
+    {
+        fn from(value: RuntimeActivatedProjectionExecutingDefinitionVersion) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionExecutingDefinitionVersion {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            static PATTERN: ::std::sync::LazyLock<::regress::Regex> =
+                ::std::sync::LazyLock::new(|| ::regress::Regex::new("^v[0-9]+$").unwrap());
+            if PATTERN.find(value).is_none() {
+                return Err("doesn't match pattern \"^v[0-9]+$\"".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionExecutingDefinitionVersion {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeActivatedProjectionExecutingDefinitionVersion
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeActivatedProjectionExecutingDefinitionVersion
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionExecutingDefinitionVersion {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeActivatedProjectionExecutingId`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeActivatedProjectionExecutingId(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeActivatedProjectionExecutingId {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedProjectionExecutingId> for ::std::string::String {
+        fn from(value: RuntimeActivatedProjectionExecutingId) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionExecutingId {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionExecutingId {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionExecutingId {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionExecutingId {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionExecutingId {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeActivatedProjectionExecutingMode`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "projection"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeActivatedProjectionExecutingMode {
+        #[serde(rename = "projection")]
+        Projection,
+    }
+    impl ::std::fmt::Display for RuntimeActivatedProjectionExecutingMode {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Projection => f.write_str("projection"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionExecutingMode {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "projection" => Ok(Self::Projection),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionExecutingMode {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeActivatedProjectionExecutingMode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeActivatedProjectionExecutingMode {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeActivatedProjectionExecutingTargetGeneration`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeActivatedProjectionExecutingTargetGeneration(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeActivatedProjectionExecutingTargetGeneration {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedProjectionExecutingTargetGeneration>
+        for ::std::string::String
+    {
+        fn from(value: RuntimeActivatedProjectionExecutingTargetGeneration) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeActivatedProjectionExecutingTargetGeneration {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeActivatedProjectionExecutingTargetGeneration {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeActivatedProjectionExecutingTargetGeneration
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeActivatedProjectionExecutingTargetGeneration
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeActivatedProjectionExecutingTargetGeneration {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
         }
     }
     ///`RuntimeActivatedSaga`
@@ -723,7 +1167,10 @@ pub mod inventory {
     ///  "description": "A sealed non-disabled workflow activation.",
     ///  "oneOf": [
     ///    {
-    ///      "$ref": "#/definitions/RuntimeActivatedProjection"
+    ///      "$ref": "#/definitions/RuntimeActivatedProjectionCapture"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeActivatedProjectionExecuting"
     ///    },
     ///    {
     ///      "$ref": "#/definitions/RuntimeActivatedSaga"
@@ -735,12 +1182,18 @@ pub mod inventory {
     #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
     #[serde(untagged)]
     pub enum RuntimeActivatedWorkflow {
-        Projection(RuntimeActivatedProjection),
+        ProjectionCapture(RuntimeActivatedProjectionCapture),
+        ProjectionExecuting(RuntimeActivatedProjectionExecuting),
         Saga(RuntimeActivatedSaga),
     }
-    impl ::std::convert::From<RuntimeActivatedProjection> for RuntimeActivatedWorkflow {
-        fn from(value: RuntimeActivatedProjection) -> Self {
-            Self::Projection(value)
+    impl ::std::convert::From<RuntimeActivatedProjectionCapture> for RuntimeActivatedWorkflow {
+        fn from(value: RuntimeActivatedProjectionCapture) -> Self {
+            Self::ProjectionCapture(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeActivatedProjectionExecuting> for RuntimeActivatedWorkflow {
+        fn from(value: RuntimeActivatedProjectionExecuting) -> Self {
+            Self::ProjectionExecuting(value)
         }
     }
     impl ::std::convert::From<RuntimeActivatedSaga> for RuntimeActivatedWorkflow {
@@ -1103,7 +1556,7 @@ pub mod inventory {
     ///    },
     ///    "schemaVersion": {
     ///      "type": "integer",
-    ///      "const": 1
+    ///      "const": 2
     ///    }
     ///  },
     ///  "additionalProperties": false
@@ -1145,7 +1598,7 @@ pub mod inventory {
         pub runtime_plan_fingerprint: Sha256Fingerprint,
         #[serde(rename = "schemaVersion")]
         #[redact(sensitivity = public)]
-        pub schema_version: i64,
+        pub schema_version: RuntimeInventorySchemaVersion,
     }
     ///`RuntimeInventoryInternalServerError`
     ///
@@ -1790,7 +2243,7 @@ pub mod inventory {
     ///        },
     ///        "schemaVersion": {
     ///          "type": "integer",
-    ///          "const": 1
+    ///          "const": 2
     ///        }
     ///      },
     ///      "additionalProperties": false
@@ -2545,6 +2998,2294 @@ pub mod inventory {
                 })
         }
     }
+    ///`RuntimeProjectionQuarantineReason`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "target-definition-drift",
+    ///    "input-binding-drift",
+    ///    "tenant-drift",
+    ///    "payload-malformed",
+    ///    "payload-value-invalid",
+    ///    "version-regression",
+    ///    "provider-invariant",
+    ///    "provider-permanent",
+    ///    "conflict",
+    ///    "apply-out-of-order",
+    ///    "rollback-failed",
+    ///    "source-out-of-order"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionQuarantineReason {
+        #[serde(rename = "target-definition-drift")]
+        TargetDefinitionDrift,
+        #[serde(rename = "input-binding-drift")]
+        InputBindingDrift,
+        #[serde(rename = "tenant-drift")]
+        TenantDrift,
+        #[serde(rename = "payload-malformed")]
+        PayloadMalformed,
+        #[serde(rename = "payload-value-invalid")]
+        PayloadValueInvalid,
+        #[serde(rename = "version-regression")]
+        VersionRegression,
+        #[serde(rename = "provider-invariant")]
+        ProviderInvariant,
+        #[serde(rename = "provider-permanent")]
+        ProviderPermanent,
+        #[serde(rename = "conflict")]
+        Conflict,
+        #[serde(rename = "apply-out-of-order")]
+        ApplyOutOfOrder,
+        #[serde(rename = "rollback-failed")]
+        RollbackFailed,
+        #[serde(rename = "source-out-of-order")]
+        SourceOutOfOrder,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionQuarantineReason {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::TargetDefinitionDrift => f.write_str("target-definition-drift"),
+                Self::InputBindingDrift => f.write_str("input-binding-drift"),
+                Self::TenantDrift => f.write_str("tenant-drift"),
+                Self::PayloadMalformed => f.write_str("payload-malformed"),
+                Self::PayloadValueInvalid => f.write_str("payload-value-invalid"),
+                Self::VersionRegression => f.write_str("version-regression"),
+                Self::ProviderInvariant => f.write_str("provider-invariant"),
+                Self::ProviderPermanent => f.write_str("provider-permanent"),
+                Self::Conflict => f.write_str("conflict"),
+                Self::ApplyOutOfOrder => f.write_str("apply-out-of-order"),
+                Self::RollbackFailed => f.write_str("rollback-failed"),
+                Self::SourceOutOfOrder => f.write_str("source-out-of-order"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionQuarantineReason {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "target-definition-drift" => Ok(Self::TargetDefinitionDrift),
+                "input-binding-drift" => Ok(Self::InputBindingDrift),
+                "tenant-drift" => Ok(Self::TenantDrift),
+                "payload-malformed" => Ok(Self::PayloadMalformed),
+                "payload-value-invalid" => Ok(Self::PayloadValueInvalid),
+                "version-regression" => Ok(Self::VersionRegression),
+                "provider-invariant" => Ok(Self::ProviderInvariant),
+                "provider-permanent" => Ok(Self::ProviderPermanent),
+                "conflict" => Ok(Self::Conflict),
+                "apply-out-of-order" => Ok(Self::ApplyOutOfOrder),
+                "rollback-failed" => Ok(Self::RollbackFailed),
+                "source-out-of-order" => Ok(Self::SourceOutOfOrder),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionQuarantineReason {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionQuarantineReason {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionQuarantineReason {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionQuarantineReasons`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionQuarantineReasons",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionQuarantineReasonsUniform"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionQuarantineReasonsMixed"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum RuntimeProjectionQuarantineReasons {
+        Uniform(RuntimeProjectionQuarantineReasonsUniform),
+        Mixed(RuntimeProjectionQuarantineReasonsMixed),
+    }
+    impl ::std::convert::From<RuntimeProjectionQuarantineReasonsUniform>
+        for RuntimeProjectionQuarantineReasons
+    {
+        fn from(value: RuntimeProjectionQuarantineReasonsUniform) -> Self {
+            Self::Uniform(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionQuarantineReasonsMixed>
+        for RuntimeProjectionQuarantineReasons
+    {
+        fn from(value: RuntimeProjectionQuarantineReasonsMixed) -> Self {
+            Self::Mixed(value)
+        }
+    }
+    ///`RuntimeProjectionQuarantineReasonsMixed`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionQuarantineReasonsMixed",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "mixed"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionQuarantineReasonsMixed {
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionQuarantineReasonsMixedState,
+    }
+    ///`RuntimeProjectionQuarantineReasonsMixedState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "mixed"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionQuarantineReasonsMixedState {
+        #[serde(rename = "mixed")]
+        Mixed,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionQuarantineReasonsMixedState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Mixed => f.write_str("mixed"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionQuarantineReasonsMixedState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "mixed" => Ok(Self::Mixed),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionQuarantineReasonsMixedState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeProjectionQuarantineReasonsMixedState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeProjectionQuarantineReasonsMixedState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionQuarantineReasonsUniform`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionQuarantineReasonsUniform",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "reason",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "reason": {
+    ///      "$ref": "#/definitions/RuntimeProjectionQuarantineReason"
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "uniform"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionQuarantineReasonsUniform {
+        #[redact(sensitivity = public)]
+        pub reason: RuntimeProjectionQuarantineReason,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionQuarantineReasonsUniformState,
+    }
+    ///`RuntimeProjectionQuarantineReasonsUniformState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "uniform"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionQuarantineReasonsUniformState {
+        #[serde(rename = "uniform")]
+        Uniform,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionQuarantineReasonsUniformState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Uniform => f.write_str("uniform"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionQuarantineReasonsUniformState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "uniform" => Ok(Self::Uniform),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionQuarantineReasonsUniformState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeProjectionQuarantineReasonsUniformState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeProjectionQuarantineReasonsUniformState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionRetryableReason`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "checkpoint-unread",
+    ///    "checkpoint-unsaved",
+    ///    "dead-letter-unsaved",
+    ///    "apply-transient",
+    ///    "commit-unknown",
+    ///    "source-transient",
+    ///    "quarantine-persistence"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionRetryableReason {
+        #[serde(rename = "checkpoint-unread")]
+        CheckpointUnread,
+        #[serde(rename = "checkpoint-unsaved")]
+        CheckpointUnsaved,
+        #[serde(rename = "dead-letter-unsaved")]
+        DeadLetterUnsaved,
+        #[serde(rename = "apply-transient")]
+        ApplyTransient,
+        #[serde(rename = "commit-unknown")]
+        CommitUnknown,
+        #[serde(rename = "source-transient")]
+        SourceTransient,
+        #[serde(rename = "quarantine-persistence")]
+        QuarantinePersistence,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionRetryableReason {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::CheckpointUnread => f.write_str("checkpoint-unread"),
+                Self::CheckpointUnsaved => f.write_str("checkpoint-unsaved"),
+                Self::DeadLetterUnsaved => f.write_str("dead-letter-unsaved"),
+                Self::ApplyTransient => f.write_str("apply-transient"),
+                Self::CommitUnknown => f.write_str("commit-unknown"),
+                Self::SourceTransient => f.write_str("source-transient"),
+                Self::QuarantinePersistence => f.write_str("quarantine-persistence"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionRetryableReason {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "checkpoint-unread" => Ok(Self::CheckpointUnread),
+                "checkpoint-unsaved" => Ok(Self::CheckpointUnsaved),
+                "dead-letter-unsaved" => Ok(Self::DeadLetterUnsaved),
+                "apply-transient" => Ok(Self::ApplyTransient),
+                "commit-unknown" => Ok(Self::CommitUnknown),
+                "source-transient" => Ok(Self::SourceTransient),
+                "quarantine-persistence" => Ok(Self::QuarantinePersistence),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionRetryableReason {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionRetryableReason {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionRetryableReason {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionRetryableReasons`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionRetryableReasons",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionRetryableReasonsUniform"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionRetryableReasonsMixed"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum RuntimeProjectionRetryableReasons {
+        Uniform(RuntimeProjectionRetryableReasonsUniform),
+        Mixed(RuntimeProjectionRetryableReasonsMixed),
+    }
+    impl ::std::convert::From<RuntimeProjectionRetryableReasonsUniform>
+        for RuntimeProjectionRetryableReasons
+    {
+        fn from(value: RuntimeProjectionRetryableReasonsUniform) -> Self {
+            Self::Uniform(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionRetryableReasonsMixed>
+        for RuntimeProjectionRetryableReasons
+    {
+        fn from(value: RuntimeProjectionRetryableReasonsMixed) -> Self {
+            Self::Mixed(value)
+        }
+    }
+    ///`RuntimeProjectionRetryableReasonsMixed`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionRetryableReasonsMixed",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "mixed"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionRetryableReasonsMixed {
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionRetryableReasonsMixedState,
+    }
+    ///`RuntimeProjectionRetryableReasonsMixedState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "mixed"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionRetryableReasonsMixedState {
+        #[serde(rename = "mixed")]
+        Mixed,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionRetryableReasonsMixedState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Mixed => f.write_str("mixed"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionRetryableReasonsMixedState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "mixed" => Ok(Self::Mixed),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionRetryableReasonsMixedState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeProjectionRetryableReasonsMixedState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeProjectionRetryableReasonsMixedState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionRetryableReasonsUniform`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionRetryableReasonsUniform",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "reason",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "reason": {
+    ///      "$ref": "#/definitions/RuntimeProjectionRetryableReason"
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "uniform"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionRetryableReasonsUniform {
+        #[redact(sensitivity = public)]
+        pub reason: RuntimeProjectionRetryableReason,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionRetryableReasonsUniformState,
+    }
+    ///`RuntimeProjectionRetryableReasonsUniformState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "uniform"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionRetryableReasonsUniformState {
+        #[serde(rename = "uniform")]
+        Uniform,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionRetryableReasonsUniformState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Uniform => f.write_str("uniform"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionRetryableReasonsUniformState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "uniform" => Ok(Self::Uniform),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionRetryableReasonsUniformState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeProjectionRetryableReasonsUniformState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeProjectionRetryableReasonsUniformState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionSelectedGeneration`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionSelectedGeneration",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionSelectedGenerationNone"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionSelectedGenerationUniform"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionSelectedGenerationMixed"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum RuntimeProjectionSelectedGeneration {
+        None(RuntimeProjectionSelectedGenerationNone),
+        Uniform(RuntimeProjectionSelectedGenerationUniform),
+        Mixed(RuntimeProjectionSelectedGenerationMixed),
+    }
+    impl ::std::convert::From<RuntimeProjectionSelectedGenerationNone>
+        for RuntimeProjectionSelectedGeneration
+    {
+        fn from(value: RuntimeProjectionSelectedGenerationNone) -> Self {
+            Self::None(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionSelectedGenerationUniform>
+        for RuntimeProjectionSelectedGeneration
+    {
+        fn from(value: RuntimeProjectionSelectedGenerationUniform) -> Self {
+            Self::Uniform(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionSelectedGenerationMixed>
+        for RuntimeProjectionSelectedGeneration
+    {
+        fn from(value: RuntimeProjectionSelectedGenerationMixed) -> Self {
+            Self::Mixed(value)
+        }
+    }
+    ///`RuntimeProjectionSelectedGenerationMixed`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionSelectedGenerationMixed",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "mixed"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionSelectedGenerationMixed {
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionSelectedGenerationMixedState,
+    }
+    ///`RuntimeProjectionSelectedGenerationMixedState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "mixed"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionSelectedGenerationMixedState {
+        #[serde(rename = "mixed")]
+        Mixed,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionSelectedGenerationMixedState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Mixed => f.write_str("mixed"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionSelectedGenerationMixedState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "mixed" => Ok(Self::Mixed),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionSelectedGenerationMixedState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeProjectionSelectedGenerationMixedState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeProjectionSelectedGenerationMixedState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionSelectedGenerationNone`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionSelectedGenerationNone",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "none"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionSelectedGenerationNone {
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionSelectedGenerationNoneState,
+    }
+    ///`RuntimeProjectionSelectedGenerationNoneState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "none"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionSelectedGenerationNoneState {
+        #[serde(rename = "none")]
+        None,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionSelectedGenerationNoneState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::None => f.write_str("none"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionSelectedGenerationNoneState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "none" => Ok(Self::None),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionSelectedGenerationNoneState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeProjectionSelectedGenerationNoneState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeProjectionSelectedGenerationNoneState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionSelectedGenerationUniform`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionSelectedGenerationUniform",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "generation",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "generation": {
+    ///      "type": "string",
+    ///      "maxLength": 256,
+    ///      "minLength": 1
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "uniform"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionSelectedGenerationUniform {
+        #[redact(sensitivity = public)]
+        pub generation: RuntimeProjectionSelectedGenerationUniformGeneration,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionSelectedGenerationUniformState,
+    }
+    ///`RuntimeProjectionSelectedGenerationUniformGeneration`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "maxLength": 256,
+    ///  "minLength": 1
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Serialize, Clone, Eq, Hash, Ord, PartialEq, PartialOrd, ::secure::Redact)]
+    #[serde(transparent)]
+    pub struct RuntimeProjectionSelectedGenerationUniformGeneration(
+        #[redact(sensitivity = public)] ::std::string::String,
+    );
+    impl ::std::ops::Deref for RuntimeProjectionSelectedGenerationUniformGeneration {
+        type Target = ::std::string::String;
+        fn deref(&self) -> &::std::string::String {
+            &self.0
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionSelectedGenerationUniformGeneration>
+        for ::std::string::String
+    {
+        fn from(value: RuntimeProjectionSelectedGenerationUniformGeneration) -> Self {
+            value.0
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionSelectedGenerationUniformGeneration {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            if value.chars().count() > 256usize {
+                return Err("longer than 256 characters".into());
+            }
+            if value.chars().count() < 1usize {
+                return Err("shorter than 1 characters".into());
+            }
+            Ok(Self(value.to_string()))
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionSelectedGenerationUniformGeneration {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeProjectionSelectedGenerationUniformGeneration
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeProjectionSelectedGenerationUniformGeneration
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl<'de> ::serde::Deserialize<'de> for RuntimeProjectionSelectedGenerationUniformGeneration {
+        fn deserialize<D>(deserializer: D) -> ::std::result::Result<Self, D::Error>
+        where
+            D: ::serde::Deserializer<'de>,
+        {
+            ::std::string::String::deserialize(deserializer)?
+                .parse()
+                .map_err(|e: self::error::ConversionError| {
+                    <D::Error as ::serde::de::Error>::custom(e.to_string())
+                })
+        }
+    }
+    ///`RuntimeProjectionSelectedGenerationUniformState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "uniform"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionSelectedGenerationUniformState {
+        #[serde(rename = "uniform")]
+        Uniform,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionSelectedGenerationUniformState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Uniform => f.write_str("uniform"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionSelectedGenerationUniformState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "uniform" => Ok(Self::Uniform),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionSelectedGenerationUniformState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String>
+        for RuntimeProjectionSelectedGenerationUniformState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String>
+        for RuntimeProjectionSelectedGenerationUniformState
+    {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerHealthy`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionWorkerHealthy",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "maxLag",
+    ///    "selectedGeneration",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "maxLag": {
+    ///      "type": "integer",
+    ///      "minimum": 0.0
+    ///    },
+    ///    "selectedGeneration": {
+    ///      "$ref": "#/definitions/RuntimeProjectionSelectedGeneration"
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "healthy"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionWorkerHealthy {
+        #[serde(rename = "maxLag")]
+        #[redact(sensitivity = public)]
+        pub max_lag: u64,
+        #[serde(rename = "selectedGeneration")]
+        #[redact(sensitivity = public)]
+        pub selected_generation: RuntimeProjectionSelectedGeneration,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionWorkerHealthyState,
+    }
+    ///`RuntimeProjectionWorkerHealthyState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "healthy"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerHealthyState {
+        #[serde(rename = "healthy")]
+        Healthy,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerHealthyState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Healthy => f.write_str("healthy"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerHealthyState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "healthy" => Ok(Self::Healthy),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerHealthyState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerHealthyState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerHealthyState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerMixed`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionWorkerMixed",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "maxLag",
+    ///    "quarantineReasons",
+    ///    "retryableReasons",
+    ///    "selectedGeneration",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "maxLag": {
+    ///      "type": "integer",
+    ///      "minimum": 0.0
+    ///    },
+    ///    "quarantineReasons": {
+    ///      "$ref": "#/definitions/RuntimeProjectionQuarantineReasons"
+    ///    },
+    ///    "retryableReasons": {
+    ///      "$ref": "#/definitions/RuntimeProjectionRetryableReasons"
+    ///    },
+    ///    "selectedGeneration": {
+    ///      "$ref": "#/definitions/RuntimeProjectionSelectedGeneration"
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "mixed"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionWorkerMixed {
+        #[serde(rename = "maxLag")]
+        #[redact(sensitivity = public)]
+        pub max_lag: u64,
+        #[serde(rename = "quarantineReasons")]
+        #[redact(sensitivity = public)]
+        pub quarantine_reasons: RuntimeProjectionQuarantineReasons,
+        #[serde(rename = "retryableReasons")]
+        #[redact(sensitivity = public)]
+        pub retryable_reasons: RuntimeProjectionRetryableReasons,
+        #[serde(rename = "selectedGeneration")]
+        #[redact(sensitivity = public)]
+        pub selected_generation: RuntimeProjectionSelectedGeneration,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionWorkerMixedState,
+    }
+    ///`RuntimeProjectionWorkerMixedState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "mixed"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerMixedState {
+        #[serde(rename = "mixed")]
+        Mixed,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerMixedState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Mixed => f.write_str("mixed"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerMixedState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "mixed" => Ok(Self::Mixed),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerMixedState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerMixedState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerMixedState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerQuarantined`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionWorkerQuarantined",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "maxLag",
+    ///    "reasons",
+    ///    "selectedGeneration",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "maxLag": {
+    ///      "type": "integer",
+    ///      "minimum": 0.0
+    ///    },
+    ///    "reasons": {
+    ///      "$ref": "#/definitions/RuntimeProjectionQuarantineReasons"
+    ///    },
+    ///    "selectedGeneration": {
+    ///      "$ref": "#/definitions/RuntimeProjectionSelectedGeneration"
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "quarantined"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionWorkerQuarantined {
+        #[serde(rename = "maxLag")]
+        #[redact(sensitivity = public)]
+        pub max_lag: u64,
+        #[redact(sensitivity = public)]
+        pub reasons: RuntimeProjectionQuarantineReasons,
+        #[serde(rename = "selectedGeneration")]
+        #[redact(sensitivity = public)]
+        pub selected_generation: RuntimeProjectionSelectedGeneration,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionWorkerQuarantinedState,
+    }
+    ///`RuntimeProjectionWorkerQuarantinedState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "quarantined"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerQuarantinedState {
+        #[serde(rename = "quarantined")]
+        Quarantined,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerQuarantinedState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Quarantined => f.write_str("quarantined"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerQuarantinedState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "quarantined" => Ok(Self::Quarantined),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerQuarantinedState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerQuarantinedState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerQuarantinedState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerRetryable`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionWorkerRetryable",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "maxLag",
+    ///    "reasons",
+    ///    "selectedGeneration",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "maxLag": {
+    ///      "type": "integer",
+    ///      "minimum": 0.0
+    ///    },
+    ///    "reasons": {
+    ///      "$ref": "#/definitions/RuntimeProjectionRetryableReasons"
+    ///    },
+    ///    "selectedGeneration": {
+    ///      "$ref": "#/definitions/RuntimeProjectionSelectedGeneration"
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "retryable"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionWorkerRetryable {
+        #[serde(rename = "maxLag")]
+        #[redact(sensitivity = public)]
+        pub max_lag: u64,
+        #[redact(sensitivity = public)]
+        pub reasons: RuntimeProjectionRetryableReasons,
+        #[serde(rename = "selectedGeneration")]
+        #[redact(sensitivity = public)]
+        pub selected_generation: RuntimeProjectionSelectedGeneration,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionWorkerRetryableState,
+    }
+    ///`RuntimeProjectionWorkerRetryableState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "retryable"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerRetryableState {
+        #[serde(rename = "retryable")]
+        Retryable,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerRetryableState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Retryable => f.write_str("retryable"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerRetryableState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "retryable" => Ok(Self::Retryable),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerRetryableState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerRetryableState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerRetryableState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerStarting`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionWorkerStarting",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "starting"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionWorkerStarting {
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionWorkerStartingState,
+    }
+    ///`RuntimeProjectionWorkerStartingState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "starting"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerStartingState {
+        #[serde(rename = "starting")]
+        Starting,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerStartingState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Starting => f.write_str("starting"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerStartingState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "starting" => Ok(Self::Starting),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerStartingState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerStartingState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerStartingState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerStatus`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionWorkerStatus",
+    ///  "oneOf": [
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionWorkerStarting"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionWorkerHealthy"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionWorkerRetryable"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionWorkerQuarantined"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionWorkerMixed"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionWorkerUnavailable"
+    ///    },
+    ///    {
+    ///      "$ref": "#/definitions/RuntimeProjectionWorkerStopped"
+    ///    }
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, Debug)]
+    #[serde(untagged)]
+    pub enum RuntimeProjectionWorkerStatus {
+        Starting(RuntimeProjectionWorkerStarting),
+        Healthy(RuntimeProjectionWorkerHealthy),
+        Retryable(RuntimeProjectionWorkerRetryable),
+        Quarantined(RuntimeProjectionWorkerQuarantined),
+        Mixed(RuntimeProjectionWorkerMixed),
+        Unavailable(RuntimeProjectionWorkerUnavailable),
+        Stopped(RuntimeProjectionWorkerStopped),
+    }
+    impl ::std::convert::From<RuntimeProjectionWorkerStarting> for RuntimeProjectionWorkerStatus {
+        fn from(value: RuntimeProjectionWorkerStarting) -> Self {
+            Self::Starting(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionWorkerHealthy> for RuntimeProjectionWorkerStatus {
+        fn from(value: RuntimeProjectionWorkerHealthy) -> Self {
+            Self::Healthy(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionWorkerRetryable> for RuntimeProjectionWorkerStatus {
+        fn from(value: RuntimeProjectionWorkerRetryable) -> Self {
+            Self::Retryable(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionWorkerQuarantined> for RuntimeProjectionWorkerStatus {
+        fn from(value: RuntimeProjectionWorkerQuarantined) -> Self {
+            Self::Quarantined(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionWorkerMixed> for RuntimeProjectionWorkerStatus {
+        fn from(value: RuntimeProjectionWorkerMixed) -> Self {
+            Self::Mixed(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionWorkerUnavailable> for RuntimeProjectionWorkerStatus {
+        fn from(value: RuntimeProjectionWorkerUnavailable) -> Self {
+            Self::Unavailable(value)
+        }
+    }
+    impl ::std::convert::From<RuntimeProjectionWorkerStopped> for RuntimeProjectionWorkerStatus {
+        fn from(value: RuntimeProjectionWorkerStopped) -> Self {
+            Self::Stopped(value)
+        }
+    }
+    ///`RuntimeProjectionWorkerStopped`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionWorkerStopped",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "reason",
+    ///    "state",
+    ///    "stopClass"
+    ///  ],
+    ///  "properties": {
+    ///    "reason": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "runtime-build-failed",
+    ///        "worker-panicked",
+    ///        "tenant-catalog-unavailable",
+    ///        "selected-generation-unavailable",
+    ///        "selected-generation-identity-invalid",
+    ///        "invalid-tenant",
+    ///        "tenant-quarantine-unavailable",
+    ///        "startup-source-unavailable",
+    ///        "projection-outcome-invalid",
+    ///        "coordinate-overflow",
+    ///        "target-config-invalid"
+    ///      ]
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "stopped"
+    ///      ]
+    ///    },
+    ///    "stopClass": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "fatal"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionWorkerStopped {
+        #[redact(sensitivity = public)]
+        pub reason: RuntimeProjectionWorkerStoppedReason,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionWorkerStoppedState,
+        #[serde(rename = "stopClass")]
+        #[redact(sensitivity = public)]
+        pub stop_class: RuntimeProjectionWorkerStoppedStopClass,
+    }
+    ///`RuntimeProjectionWorkerStoppedReason`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "runtime-build-failed",
+    ///    "worker-panicked",
+    ///    "tenant-catalog-unavailable",
+    ///    "selected-generation-unavailable",
+    ///    "selected-generation-identity-invalid",
+    ///    "invalid-tenant",
+    ///    "tenant-quarantine-unavailable",
+    ///    "startup-source-unavailable",
+    ///    "projection-outcome-invalid",
+    ///    "coordinate-overflow",
+    ///    "target-config-invalid"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerStoppedReason {
+        #[serde(rename = "runtime-build-failed")]
+        RuntimeBuildFailed,
+        #[serde(rename = "worker-panicked")]
+        WorkerPanicked,
+        #[serde(rename = "tenant-catalog-unavailable")]
+        TenantCatalogUnavailable,
+        #[serde(rename = "selected-generation-unavailable")]
+        SelectedGenerationUnavailable,
+        #[serde(rename = "selected-generation-identity-invalid")]
+        SelectedGenerationIdentityInvalid,
+        #[serde(rename = "invalid-tenant")]
+        InvalidTenant,
+        #[serde(rename = "tenant-quarantine-unavailable")]
+        TenantQuarantineUnavailable,
+        #[serde(rename = "startup-source-unavailable")]
+        StartupSourceUnavailable,
+        #[serde(rename = "projection-outcome-invalid")]
+        ProjectionOutcomeInvalid,
+        #[serde(rename = "coordinate-overflow")]
+        CoordinateOverflow,
+        #[serde(rename = "target-config-invalid")]
+        TargetConfigInvalid,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerStoppedReason {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::RuntimeBuildFailed => f.write_str("runtime-build-failed"),
+                Self::WorkerPanicked => f.write_str("worker-panicked"),
+                Self::TenantCatalogUnavailable => f.write_str("tenant-catalog-unavailable"),
+                Self::SelectedGenerationUnavailable => {
+                    f.write_str("selected-generation-unavailable")
+                }
+                Self::SelectedGenerationIdentityInvalid => {
+                    f.write_str("selected-generation-identity-invalid")
+                }
+                Self::InvalidTenant => f.write_str("invalid-tenant"),
+                Self::TenantQuarantineUnavailable => f.write_str("tenant-quarantine-unavailable"),
+                Self::StartupSourceUnavailable => f.write_str("startup-source-unavailable"),
+                Self::ProjectionOutcomeInvalid => f.write_str("projection-outcome-invalid"),
+                Self::CoordinateOverflow => f.write_str("coordinate-overflow"),
+                Self::TargetConfigInvalid => f.write_str("target-config-invalid"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerStoppedReason {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "runtime-build-failed" => Ok(Self::RuntimeBuildFailed),
+                "worker-panicked" => Ok(Self::WorkerPanicked),
+                "tenant-catalog-unavailable" => Ok(Self::TenantCatalogUnavailable),
+                "selected-generation-unavailable" => Ok(Self::SelectedGenerationUnavailable),
+                "selected-generation-identity-invalid" => {
+                    Ok(Self::SelectedGenerationIdentityInvalid)
+                }
+                "invalid-tenant" => Ok(Self::InvalidTenant),
+                "tenant-quarantine-unavailable" => Ok(Self::TenantQuarantineUnavailable),
+                "startup-source-unavailable" => Ok(Self::StartupSourceUnavailable),
+                "projection-outcome-invalid" => Ok(Self::ProjectionOutcomeInvalid),
+                "coordinate-overflow" => Ok(Self::CoordinateOverflow),
+                "target-config-invalid" => Ok(Self::TargetConfigInvalid),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerStoppedReason {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerStoppedReason {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerStoppedReason {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerStoppedState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "stopped"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerStoppedState {
+        #[serde(rename = "stopped")]
+        Stopped,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerStoppedState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Stopped => f.write_str("stopped"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerStoppedState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "stopped" => Ok(Self::Stopped),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerStoppedState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerStoppedState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerStoppedState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerStoppedStopClass`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "fatal"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerStoppedStopClass {
+        #[serde(rename = "fatal")]
+        Fatal,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerStoppedStopClass {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Fatal => f.write_str("fatal"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerStoppedStopClass {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "fatal" => Ok(Self::Fatal),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerStoppedStopClass {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerStoppedStopClass {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerStoppedStopClass {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerUnavailable`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "title": "RuntimeProjectionWorkerUnavailable",
+    ///  "type": "object",
+    ///  "required": [
+    ///    "reason",
+    ///    "state"
+    ///  ],
+    ///  "properties": {
+    ///    "reason": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "startup-observation",
+    ///        "sweep-incomplete",
+    ///        "tenant-observation"
+    ///      ]
+    ///    },
+    ///    "state": {
+    ///      "type": "string",
+    ///      "enum": [
+    ///        "unavailable"
+    ///      ]
+    ///    }
+    ///  },
+    ///  "additionalProperties": false
+    ///}
+    /// ```
+    /// </details>
+    #[derive(::serde::Deserialize, ::serde::Serialize, Clone, ::secure::Redact)]
+    #[serde(deny_unknown_fields)]
+    pub struct RuntimeProjectionWorkerUnavailable {
+        #[redact(sensitivity = public)]
+        pub reason: RuntimeProjectionWorkerUnavailableReason,
+        #[redact(sensitivity = public)]
+        pub state: RuntimeProjectionWorkerUnavailableState,
+    }
+    ///`RuntimeProjectionWorkerUnavailableReason`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "startup-observation",
+    ///    "sweep-incomplete",
+    ///    "tenant-observation"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerUnavailableReason {
+        #[serde(rename = "startup-observation")]
+        StartupObservation,
+        #[serde(rename = "sweep-incomplete")]
+        SweepIncomplete,
+        #[serde(rename = "tenant-observation")]
+        TenantObservation,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerUnavailableReason {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::StartupObservation => f.write_str("startup-observation"),
+                Self::SweepIncomplete => f.write_str("sweep-incomplete"),
+                Self::TenantObservation => f.write_str("tenant-observation"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerUnavailableReason {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "startup-observation" => Ok(Self::StartupObservation),
+                "sweep-incomplete" => Ok(Self::SweepIncomplete),
+                "tenant-observation" => Ok(Self::TenantObservation),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerUnavailableReason {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerUnavailableReason {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerUnavailableReason {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    ///`RuntimeProjectionWorkerUnavailableState`
+    ///
+    /// <details><summary>JSON schema</summary>
+    ///
+    /// ```json
+    ///{
+    ///  "type": "string",
+    ///  "enum": [
+    ///    "unavailable"
+    ///  ]
+    ///}
+    /// ```
+    /// </details>
+    #[derive(
+        ::serde::Deserialize,
+        ::serde::Serialize,
+        Clone,
+        Copy,
+        Debug,
+        Eq,
+        Hash,
+        Ord,
+        PartialEq,
+        PartialOrd,
+    )]
+    pub enum RuntimeProjectionWorkerUnavailableState {
+        #[serde(rename = "unavailable")]
+        Unavailable,
+    }
+    impl ::std::fmt::Display for RuntimeProjectionWorkerUnavailableState {
+        fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+            match *self {
+                Self::Unavailable => f.write_str("unavailable"),
+            }
+        }
+    }
+    impl ::std::str::FromStr for RuntimeProjectionWorkerUnavailableState {
+        type Err = self::error::ConversionError;
+        fn from_str(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            match value {
+                "unavailable" => Ok(Self::Unavailable),
+                _ => Err("invalid value".into()),
+            }
+        }
+    }
+    impl ::std::convert::TryFrom<&str> for RuntimeProjectionWorkerUnavailableState {
+        type Error = self::error::ConversionError;
+        fn try_from(value: &str) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<&::std::string::String> for RuntimeProjectionWorkerUnavailableState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: &::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
+    impl ::std::convert::TryFrom<::std::string::String> for RuntimeProjectionWorkerUnavailableState {
+        type Error = self::error::ConversionError;
+        fn try_from(
+            value: ::std::string::String,
+        ) -> ::std::result::Result<Self, self::error::ConversionError> {
+            value.parse()
+        }
+    }
     ///`RuntimeProviderPosture`
     ///
     /// <details><summary>JSON schema</summary>
@@ -2806,6 +5547,31 @@ pub mod inventory {
                 })
         }
     }
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, ::serde::Serialize, ::serde::Deserialize)]
+    #[serde(try_from = "i64", into = "i64")]
+    pub enum RuntimeInventorySchemaVersion {
+        V2,
+    }
+    impl ::std::convert::TryFrom<i64> for RuntimeInventorySchemaVersion {
+        type Error = &'static str;
+        fn try_from(value: i64) -> Result<Self, Self::Error> {
+            if value == 2i64 {
+                Ok(Self::V2)
+            } else {
+                Err("runtime inventory schemaVersion must be 2")
+            }
+        }
+    }
+    impl ::std::convert::From<RuntimeInventorySchemaVersion> for i64 {
+        fn from(_: RuntimeInventorySchemaVersion) -> Self {
+            2i64
+        }
+    }
+    impl ::secure::Redact for RuntimeInventorySchemaVersion {
+        fn redact_scoped(&self, _scope: ::secure::RedactScope) -> ::std::string::String {
+            "RuntimeInventorySchemaVersion::V2".to_owned()
+        }
+    }
 
     /// HTTP 契约 ID（`contract.toml` `id` 字段，单一事实源）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const CONTRACT_ID: &str = "runtime.inventory";
@@ -2815,7 +5581,7 @@ pub mod inventory {
         ::rss_contract::ContractDescriptor::from_static_version(
             "runtime.inventory",
             "v1",
-            "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b",
+            "sha256:5602af09b781f133d009ed514ad62f92c2fa671be9f8e32c75049a60acb56fd5",
         );
 
     pub const CONTRACT: ::vocab::ContractBinding =
@@ -3091,6 +5857,8 @@ pub mod inventory {
         ActivatedWorkflowDefinitionSchemaDigest,
         ActivatedWorkflowDefinitionVersion,
         ActivatedWorkflowId,
+        ActivatedWorkflowTargetGeneration,
+        ActivatedWorkflowSelectedGeneration,
         ListenerEndpointHost,
         ListenerEndpointPort,
         ListenerId,
@@ -3116,6 +5884,12 @@ pub mod inventory {
                     "projection.activated_workflow.definition_version"
                 }
                 Self::ActivatedWorkflowId => "projection.activated_workflow.id",
+                Self::ActivatedWorkflowTargetGeneration => {
+                    "projection.activated_workflow.target_generation"
+                }
+                Self::ActivatedWorkflowSelectedGeneration => {
+                    "projection.activated_workflow.selected_generation"
+                }
                 Self::ListenerEndpointHost => "projection.listener.endpoint.host",
                 Self::ListenerEndpointPort => "projection.listener.endpoint.port",
                 Self::ListenerId => "projection.listener.id",
@@ -3188,6 +5962,138 @@ pub mod inventory {
         })
     }
 
+    fn runtime_inventory_selected_generation(
+        selected: &::assembly_schema::runtime_inventory::RuntimeInventorySelectedGeneration,
+    ) -> Result<RuntimeProjectionSelectedGeneration, RuntimeInventoryProjectionError> {
+        use ::assembly_schema::runtime_inventory::RuntimeInventorySelectedGeneration as Source;
+        Ok(match selected {
+            Source::None => {
+                RuntimeProjectionSelectedGeneration::None(RuntimeProjectionSelectedGenerationNone {
+                    state: RuntimeProjectionSelectedGenerationNoneState::None,
+                })
+            }
+            Source::Uniform(generation) => RuntimeProjectionSelectedGeneration::Uniform(
+                RuntimeProjectionSelectedGenerationUniform {
+                    generation: runtime_inventory_parse(
+                        generation,
+                        RuntimeInventoryProjectionStage::ActivatedWorkflowSelectedGeneration,
+                    )?,
+                    state: RuntimeProjectionSelectedGenerationUniformState::Uniform,
+                },
+            ),
+            Source::Mixed => RuntimeProjectionSelectedGeneration::Mixed(
+                RuntimeProjectionSelectedGenerationMixed {
+                    state: RuntimeProjectionSelectedGenerationMixedState::Mixed,
+                },
+            ),
+        })
+    }
+
+    fn runtime_inventory_retryable_reason(
+        reason: ::assembly_schema::runtime_inventory::RuntimeInventoryRetryableReason,
+    ) -> RuntimeProjectionRetryableReason {
+        use ::assembly_schema::runtime_inventory::RuntimeInventoryRetryableReason as Source;
+        match reason {
+            Source::CheckpointUnread => RuntimeProjectionRetryableReason::CheckpointUnread,
+            Source::CheckpointUnsaved => RuntimeProjectionRetryableReason::CheckpointUnsaved,
+            Source::DeadLetterUnsaved => RuntimeProjectionRetryableReason::DeadLetterUnsaved,
+            Source::ApplyTransient => RuntimeProjectionRetryableReason::ApplyTransient,
+            Source::CommitUnknown => RuntimeProjectionRetryableReason::CommitUnknown,
+            Source::SourceTransient => RuntimeProjectionRetryableReason::SourceTransient,
+            Source::QuarantinePersistence => {
+                RuntimeProjectionRetryableReason::QuarantinePersistence
+            }
+        }
+    }
+
+    fn runtime_inventory_retryable_reasons(
+        reasons: &::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture<
+            ::assembly_schema::runtime_inventory::RuntimeInventoryRetryableReason,
+        >,
+    ) -> RuntimeProjectionRetryableReasons {
+        match reasons {
+            ::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture::Uniform(
+                reason,
+            ) => RuntimeProjectionRetryableReasons::Uniform(
+                RuntimeProjectionRetryableReasonsUniform {
+                    reason: runtime_inventory_retryable_reason(*reason),
+                    state: RuntimeProjectionRetryableReasonsUniformState::Uniform,
+                },
+            ),
+            ::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture::Mixed => {
+                RuntimeProjectionRetryableReasons::Mixed(RuntimeProjectionRetryableReasonsMixed {
+                    state: RuntimeProjectionRetryableReasonsMixedState::Mixed,
+                })
+            }
+        }
+    }
+
+    fn runtime_inventory_quarantine_reason(
+        reason: ::assembly_schema::runtime_inventory::RuntimeInventoryQuarantineReason,
+    ) -> RuntimeProjectionQuarantineReason {
+        use ::assembly_schema::runtime_inventory::RuntimeInventoryQuarantineReason as Source;
+        match reason {
+            Source::TargetDefinitionDrift => {
+                RuntimeProjectionQuarantineReason::TargetDefinitionDrift
+            }
+            Source::InputBindingDrift => RuntimeProjectionQuarantineReason::InputBindingDrift,
+            Source::TenantDrift => RuntimeProjectionQuarantineReason::TenantDrift,
+            Source::PayloadMalformed => RuntimeProjectionQuarantineReason::PayloadMalformed,
+            Source::PayloadValueInvalid => RuntimeProjectionQuarantineReason::PayloadValueInvalid,
+            Source::VersionRegression => RuntimeProjectionQuarantineReason::VersionRegression,
+            Source::ProviderInvariant => RuntimeProjectionQuarantineReason::ProviderInvariant,
+            Source::ProviderPermanent => RuntimeProjectionQuarantineReason::ProviderPermanent,
+            Source::Conflict => RuntimeProjectionQuarantineReason::Conflict,
+            Source::ApplyOutOfOrder => RuntimeProjectionQuarantineReason::ApplyOutOfOrder,
+            Source::RollbackFailed => RuntimeProjectionQuarantineReason::RollbackFailed,
+            Source::SourceOutOfOrder => RuntimeProjectionQuarantineReason::SourceOutOfOrder,
+        }
+    }
+
+    fn runtime_inventory_quarantine_reasons(
+        reasons: &::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture<
+            ::assembly_schema::runtime_inventory::RuntimeInventoryQuarantineReason,
+        >,
+    ) -> RuntimeProjectionQuarantineReasons {
+        match reasons {
+            ::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture::Uniform(
+                reason,
+            ) => RuntimeProjectionQuarantineReasons::Uniform(
+                RuntimeProjectionQuarantineReasonsUniform {
+                    reason: runtime_inventory_quarantine_reason(*reason),
+                    state: RuntimeProjectionQuarantineReasonsUniformState::Uniform,
+                },
+            ),
+            ::assembly_schema::runtime_inventory::RuntimeInventoryReasonPosture::Mixed => {
+                RuntimeProjectionQuarantineReasons::Mixed(RuntimeProjectionQuarantineReasonsMixed {
+                    state: RuntimeProjectionQuarantineReasonsMixedState::Mixed,
+                })
+            }
+        }
+    }
+
+    fn runtime_inventory_worker_status(
+        status: &::assembly_schema::runtime_inventory::RuntimeInventoryProjectionWorkerStatus,
+    ) -> Result<RuntimeProjectionWorkerStatus, RuntimeInventoryProjectionError> {
+        use ::assembly_schema::runtime_inventory::RuntimeInventoryProjectionWorkerStatus as Source;
+        Ok(match status {
+        Source::Starting => RuntimeProjectionWorkerStatus::Starting(RuntimeProjectionWorkerStarting { state: RuntimeProjectionWorkerStartingState::Starting }),
+        Source::Healthy { selected_generation, max_lag } => RuntimeProjectionWorkerStatus::Healthy(RuntimeProjectionWorkerHealthy { max_lag: *max_lag, selected_generation: runtime_inventory_selected_generation(selected_generation)?, state: RuntimeProjectionWorkerHealthyState::Healthy }),
+        Source::Retryable { selected_generation, max_lag, reasons } => RuntimeProjectionWorkerStatus::Retryable(RuntimeProjectionWorkerRetryable { max_lag: *max_lag, reasons: runtime_inventory_retryable_reasons(reasons), selected_generation: runtime_inventory_selected_generation(selected_generation)?, state: RuntimeProjectionWorkerRetryableState::Retryable }),
+        Source::Quarantined { selected_generation, max_lag, reasons } => RuntimeProjectionWorkerStatus::Quarantined(RuntimeProjectionWorkerQuarantined { max_lag: *max_lag, reasons: runtime_inventory_quarantine_reasons(reasons), selected_generation: runtime_inventory_selected_generation(selected_generation)?, state: RuntimeProjectionWorkerQuarantinedState::Quarantined }),
+        Source::Mixed { selected_generation, max_lag, retryable_reasons, quarantine_reasons } => RuntimeProjectionWorkerStatus::Mixed(RuntimeProjectionWorkerMixed { max_lag: *max_lag, quarantine_reasons: runtime_inventory_quarantine_reasons(quarantine_reasons), retryable_reasons: runtime_inventory_retryable_reasons(retryable_reasons), selected_generation: runtime_inventory_selected_generation(selected_generation)?, state: RuntimeProjectionWorkerMixedState::Mixed }),
+        Source::Unavailable(reason) => RuntimeProjectionWorkerStatus::Unavailable(RuntimeProjectionWorkerUnavailable {
+            reason: match reason { ::assembly_schema::runtime_inventory::RuntimeInventoryUnavailableReason::StartupObservation => RuntimeProjectionWorkerUnavailableReason::StartupObservation, ::assembly_schema::runtime_inventory::RuntimeInventoryUnavailableReason::SweepIncomplete => RuntimeProjectionWorkerUnavailableReason::SweepIncomplete, ::assembly_schema::runtime_inventory::RuntimeInventoryUnavailableReason::TenantObservation => RuntimeProjectionWorkerUnavailableReason::TenantObservation },
+            state: RuntimeProjectionWorkerUnavailableState::Unavailable,
+        }),
+        Source::Stopped(reason) => RuntimeProjectionWorkerStatus::Stopped(RuntimeProjectionWorkerStopped {
+            reason: match reason { ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::RuntimeBuildFailed => RuntimeProjectionWorkerStoppedReason::RuntimeBuildFailed, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::WorkerPanicked => RuntimeProjectionWorkerStoppedReason::WorkerPanicked, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::TenantCatalogUnavailable => RuntimeProjectionWorkerStoppedReason::TenantCatalogUnavailable, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::SelectedGenerationUnavailable => RuntimeProjectionWorkerStoppedReason::SelectedGenerationUnavailable, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::SelectedGenerationIdentityInvalid => RuntimeProjectionWorkerStoppedReason::SelectedGenerationIdentityInvalid, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::InvalidTenant => RuntimeProjectionWorkerStoppedReason::InvalidTenant, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::TenantQuarantineUnavailable => RuntimeProjectionWorkerStoppedReason::TenantQuarantineUnavailable, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::StartupSourceUnavailable => RuntimeProjectionWorkerStoppedReason::StartupSourceUnavailable, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::ProjectionOutcomeInvalid => RuntimeProjectionWorkerStoppedReason::ProjectionOutcomeInvalid, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::CoordinateOverflow => RuntimeProjectionWorkerStoppedReason::CoordinateOverflow, ::assembly_schema::runtime_inventory::RuntimeInventoryStoppedReason::TargetConfigInvalid => RuntimeProjectionWorkerStoppedReason::TargetConfigInvalid },
+            state: RuntimeProjectionWorkerStoppedState::Stopped,
+            stop_class: RuntimeProjectionWorkerStoppedStopClass::Fatal,
+        }),
+    })
+    }
+
     impl ::std::convert::TryFrom<::assembly_schema::runtime_inventory::RuntimeInventoryObservation>
         for RuntimeInventoryResponse
     {
@@ -3198,21 +6104,24 @@ pub mod inventory {
         ) -> Result<Self, Self::Error> {
             use ::assembly_schema::runtime_inventory as model;
             let activated_workflows = observation.activated_workflows().iter().map(|workflow| {
-            match workflow.activation() {
-                model::RuntimeInventoryWorkflowActivation::Projection(activation) => {
-                    Ok(RuntimeActivatedWorkflow::Projection(RuntimeActivatedProjection {
-                        activation: match activation {
-                            model::RuntimeInventoryProjectionActivation::CaptureOnly => RuntimeActivatedProjectionActivation::CaptureOnly,
-                            model::RuntimeInventoryProjectionActivation::Shadow => RuntimeActivatedProjectionActivation::Shadow,
-                            model::RuntimeInventoryProjectionActivation::Active => RuntimeActivatedProjectionActivation::Active,
-                        },
+            match workflow.shape() {
+                model::RuntimeInventoryActivatedWorkflowShape::ProjectionCapture => {
+                    Ok(RuntimeActivatedWorkflow::ProjectionCapture(RuntimeActivatedProjectionCapture {
+                        activation: RuntimeActivatedProjectionCaptureActivation::CaptureOnly,
                         definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
-                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?,
-                        id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?,
-                        mode: RuntimeActivatedProjectionMode::Projection,
+                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?, id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?, mode: RuntimeActivatedProjectionCaptureMode::Projection,
                     }))
                 }
-                model::RuntimeInventoryWorkflowActivation::SagaActive => {
+                model::RuntimeInventoryActivatedWorkflowShape::ProjectionExecuting { activation, execution } => {
+                    Ok(RuntimeActivatedWorkflow::ProjectionExecuting(RuntimeActivatedProjectionExecuting {
+                        activation: match activation { model::RuntimeInventoryExecutingProjectionActivation::Shadow => RuntimeActivatedProjectionExecutingActivation::Shadow, model::RuntimeInventoryExecutingProjectionActivation::Active => RuntimeActivatedProjectionExecutingActivation::Active },
+                        definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
+                        definition_version: runtime_inventory_parse(workflow.definition_version(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionVersion)?, id: runtime_inventory_parse(workflow.id(), RuntimeInventoryProjectionStage::ActivatedWorkflowId)?, mode: RuntimeActivatedProjectionExecutingMode::Projection,
+                        target_generation: runtime_inventory_parse(execution.target_generation(), RuntimeInventoryProjectionStage::ActivatedWorkflowTargetGeneration)?,
+                        worker_status: runtime_inventory_worker_status(execution.worker_status())?,
+                    }))
+                }
+                model::RuntimeInventoryActivatedWorkflowShape::SagaActive => {
                     Ok(RuntimeActivatedWorkflow::Saga(RuntimeActivatedSaga {
                         activation: RuntimeActivatedSagaActivation::Active,
                         definition_schema_digest: runtime_inventory_parse(workflow.definition_schema_digest().as_str(), RuntimeInventoryProjectionStage::ActivatedWorkflowDefinitionSchemaDigest)?,
@@ -3396,7 +6305,7 @@ pub mod inventory {
                         observation.runtime_plan_fingerprint().as_str(),
                         RuntimeInventoryProjectionStage::RuntimePlanFingerprint,
                     )?,
-                    schema_version: 1,
+                    schema_version: RuntimeInventorySchemaVersion::V2,
                 },
             })
         }

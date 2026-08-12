@@ -18,7 +18,7 @@
         "placements"
       ],
       "properties": {
-        "schemaVersion": { "type": "integer", "const": 1 },
+        "schemaVersion": { "type": "integer", "const": 2 },
         "assemblyFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
         "buildMetadata": { "$ref": "#/definitions/RuntimeBuildMetadata" },
         "runtimePlanFingerprint": { "$ref": "#/definitions/Sha256Fingerprint" },
@@ -126,12 +126,13 @@
       "title": "RuntimeActivatedWorkflow",
       "description": "A sealed non-disabled workflow activation.",
       "oneOf": [
-        { "$ref": "#/definitions/RuntimeActivatedProjection" },
+        { "$ref": "#/definitions/RuntimeActivatedProjectionCapture" },
+        { "$ref": "#/definitions/RuntimeActivatedProjectionExecuting" },
         { "$ref": "#/definitions/RuntimeActivatedSaga" }
       ]
     },
-    "RuntimeActivatedProjection": {
-      "title": "RuntimeActivatedProjection",
+    "RuntimeActivatedProjectionCapture": {
+      "title": "RuntimeActivatedProjectionCapture",
       "type": "object",
       "required": [
         "mode",
@@ -147,10 +148,112 @@
         "definitionSchemaDigest": { "$ref": "#/definitions/Sha256Fingerprint" },
         "activation": {
           "type": "string",
-          "enum": ["capture-only", "shadow", "active"]
+          "enum": ["capture-only"]
         }
       },
       "additionalProperties": false
+    },
+    "RuntimeActivatedProjectionExecuting": {
+      "title": "RuntimeActivatedProjectionExecuting",
+      "type": "object",
+      "required": ["mode", "id", "definitionVersion", "definitionSchemaDigest", "activation", "targetGeneration", "workerStatus"],
+      "properties": {
+        "mode": { "type": "string", "enum": ["projection"] },
+        "id": { "type": "string", "minLength": 1 },
+        "definitionVersion": { "type": "string", "pattern": "^v[0-9]+$" },
+        "definitionSchemaDigest": { "$ref": "#/definitions/Sha256Fingerprint" },
+        "activation": { "type": "string", "enum": ["shadow", "active"] },
+        "targetGeneration": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "workerStatus": { "$ref": "#/definitions/RuntimeProjectionWorkerStatus" }
+      },
+      "additionalProperties": false
+    },
+    "RuntimeProjectionSelectedGeneration": {
+      "title": "RuntimeProjectionSelectedGeneration",
+      "oneOf": [
+        { "$ref": "#/definitions/RuntimeProjectionSelectedGenerationNone" },
+        { "$ref": "#/definitions/RuntimeProjectionSelectedGenerationUniform" },
+        { "$ref": "#/definitions/RuntimeProjectionSelectedGenerationMixed" }
+      ]
+    },
+    "RuntimeProjectionSelectedGenerationNone": {
+      "title": "RuntimeProjectionSelectedGenerationNone", "type": "object", "required": ["state"],
+      "properties": { "state": { "type": "string", "enum": ["none"] } }, "additionalProperties": false
+    },
+    "RuntimeProjectionSelectedGenerationUniform": {
+      "title": "RuntimeProjectionSelectedGenerationUniform", "type": "object", "required": ["state", "generation"],
+      "properties": { "state": { "type": "string", "enum": ["uniform"] }, "generation": { "type": "string", "minLength": 1, "maxLength": 256 } }, "additionalProperties": false
+    },
+    "RuntimeProjectionSelectedGenerationMixed": {
+      "title": "RuntimeProjectionSelectedGenerationMixed", "type": "object", "required": ["state"],
+      "properties": { "state": { "type": "string", "enum": ["mixed"] } }, "additionalProperties": false
+    },
+    "RuntimeProjectionRetryableReason": {
+      "type": "string", "enum": ["checkpoint-unread", "checkpoint-unsaved", "dead-letter-unsaved", "apply-transient", "commit-unknown", "source-transient", "quarantine-persistence"]
+    },
+    "RuntimeProjectionQuarantineReason": {
+      "type": "string", "enum": ["target-definition-drift", "input-binding-drift", "tenant-drift", "payload-malformed", "payload-value-invalid", "version-regression", "provider-invariant", "provider-permanent", "conflict", "apply-out-of-order", "rollback-failed", "source-out-of-order"]
+    },
+    "RuntimeProjectionRetryableReasons": {
+      "title": "RuntimeProjectionRetryableReasons", "oneOf": [
+        { "$ref": "#/definitions/RuntimeProjectionRetryableReasonsUniform" }, { "$ref": "#/definitions/RuntimeProjectionRetryableReasonsMixed" }
+      ]
+    },
+    "RuntimeProjectionRetryableReasonsUniform": {
+      "title": "RuntimeProjectionRetryableReasonsUniform", "type": "object", "required": ["state", "reason"],
+      "properties": { "state": { "type": "string", "enum": ["uniform"] }, "reason": { "$ref": "#/definitions/RuntimeProjectionRetryableReason" } }, "additionalProperties": false
+    },
+    "RuntimeProjectionRetryableReasonsMixed": {
+      "title": "RuntimeProjectionRetryableReasonsMixed", "type": "object", "required": ["state"],
+      "properties": { "state": { "type": "string", "enum": ["mixed"] } }, "additionalProperties": false
+    },
+    "RuntimeProjectionQuarantineReasons": {
+      "title": "RuntimeProjectionQuarantineReasons", "oneOf": [
+        { "$ref": "#/definitions/RuntimeProjectionQuarantineReasonsUniform" }, { "$ref": "#/definitions/RuntimeProjectionQuarantineReasonsMixed" }
+      ]
+    },
+    "RuntimeProjectionQuarantineReasonsUniform": {
+      "title": "RuntimeProjectionQuarantineReasonsUniform", "type": "object", "required": ["state", "reason"],
+      "properties": { "state": { "type": "string", "enum": ["uniform"] }, "reason": { "$ref": "#/definitions/RuntimeProjectionQuarantineReason" } }, "additionalProperties": false
+    },
+    "RuntimeProjectionQuarantineReasonsMixed": {
+      "title": "RuntimeProjectionQuarantineReasonsMixed", "type": "object", "required": ["state"],
+      "properties": { "state": { "type": "string", "enum": ["mixed"] } }, "additionalProperties": false
+    },
+    "RuntimeProjectionWorkerStatus": {
+      "title": "RuntimeProjectionWorkerStatus", "oneOf": [
+        { "$ref": "#/definitions/RuntimeProjectionWorkerStarting" }, { "$ref": "#/definitions/RuntimeProjectionWorkerHealthy" },
+        { "$ref": "#/definitions/RuntimeProjectionWorkerRetryable" }, { "$ref": "#/definitions/RuntimeProjectionWorkerQuarantined" },
+        { "$ref": "#/definitions/RuntimeProjectionWorkerMixed" }, { "$ref": "#/definitions/RuntimeProjectionWorkerUnavailable" },
+        { "$ref": "#/definitions/RuntimeProjectionWorkerStopped" }
+      ]
+    },
+    "RuntimeProjectionWorkerStarting": {
+      "title": "RuntimeProjectionWorkerStarting", "type": "object", "required": ["state"], "properties": { "state": { "type": "string", "enum": ["starting"] } }, "additionalProperties": false
+    },
+    "RuntimeProjectionWorkerHealthy": {
+      "title": "RuntimeProjectionWorkerHealthy", "type": "object", "required": ["state", "selectedGeneration", "maxLag"],
+      "properties": { "state": { "type": "string", "enum": ["healthy"] }, "selectedGeneration": { "$ref": "#/definitions/RuntimeProjectionSelectedGeneration" }, "maxLag": { "type": "integer", "minimum": 0 } }, "additionalProperties": false
+    },
+    "RuntimeProjectionWorkerRetryable": {
+      "title": "RuntimeProjectionWorkerRetryable", "type": "object", "required": ["state", "selectedGeneration", "maxLag", "reasons"],
+      "properties": { "state": { "type": "string", "enum": ["retryable"] }, "selectedGeneration": { "$ref": "#/definitions/RuntimeProjectionSelectedGeneration" }, "maxLag": { "type": "integer", "minimum": 0 }, "reasons": { "$ref": "#/definitions/RuntimeProjectionRetryableReasons" } }, "additionalProperties": false
+    },
+    "RuntimeProjectionWorkerQuarantined": {
+      "title": "RuntimeProjectionWorkerQuarantined", "type": "object", "required": ["state", "selectedGeneration", "maxLag", "reasons"],
+      "properties": { "state": { "type": "string", "enum": ["quarantined"] }, "selectedGeneration": { "$ref": "#/definitions/RuntimeProjectionSelectedGeneration" }, "maxLag": { "type": "integer", "minimum": 0 }, "reasons": { "$ref": "#/definitions/RuntimeProjectionQuarantineReasons" } }, "additionalProperties": false
+    },
+    "RuntimeProjectionWorkerMixed": {
+      "title": "RuntimeProjectionWorkerMixed", "type": "object", "required": ["state", "selectedGeneration", "maxLag", "retryableReasons", "quarantineReasons"],
+      "properties": { "state": { "type": "string", "enum": ["mixed"] }, "selectedGeneration": { "$ref": "#/definitions/RuntimeProjectionSelectedGeneration" }, "maxLag": { "type": "integer", "minimum": 0 }, "retryableReasons": { "$ref": "#/definitions/RuntimeProjectionRetryableReasons" }, "quarantineReasons": { "$ref": "#/definitions/RuntimeProjectionQuarantineReasons" } }, "additionalProperties": false
+    },
+    "RuntimeProjectionWorkerUnavailable": {
+      "title": "RuntimeProjectionWorkerUnavailable", "type": "object", "required": ["state", "reason"],
+      "properties": { "state": { "type": "string", "enum": ["unavailable"] }, "reason": { "type": "string", "enum": ["startup-observation", "sweep-incomplete", "tenant-observation"] } }, "additionalProperties": false
+    },
+    "RuntimeProjectionWorkerStopped": {
+      "title": "RuntimeProjectionWorkerStopped", "type": "object", "required": ["state", "stopClass", "reason"],
+      "properties": { "state": { "type": "string", "enum": ["stopped"] }, "stopClass": { "type": "string", "enum": ["fatal"] }, "reason": { "type": "string", "enum": ["runtime-build-failed", "worker-panicked", "tenant-catalog-unavailable", "selected-generation-unavailable", "selected-generation-identity-invalid", "invalid-tenant", "tenant-quarantine-unavailable", "startup-source-unavailable", "projection-outcome-invalid", "coordinate-overflow", "target-config-invalid"] } }, "additionalProperties": false
     },
     "RuntimeActivatedSaga": {
       "title": "RuntimeActivatedSaga",
