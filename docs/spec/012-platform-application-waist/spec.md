@@ -42,9 +42,9 @@ condition variable, signal path or shutdown state machine.
 
 ## Breaking cutover
 
-vNext is a breaking 0.x Release API change. #2107 deletes duplicate identities, Platform JWT/JWKS authority,
+vNext is an in-version breaking replacement while the package remains experimental at 0.2.0. #2107 deletes duplicate identities, Platform JWT/JWKS authority,
 synchronous Handler/lifecycle ownership and the old baseline in the same merge that introduces their final owners.
-No alias, shim, conversion compatibility, feature flag, dual read/write, dual dispatch or v0.2 fallback is permitted.
+No alias, shim, conversion compatibility, feature flag, dual read/write, dual dispatch or pre-cutover 0.2 fallback is permitted.
 The concrete package version is derived from Cargo metadata.
 
 The cutover-specific order and exact-check additions are defined in [`plan.md`](plan.md). The canonical cross-repository
@@ -70,6 +70,6 @@ version/checksum/lock tuple.
 ## Acceptance
 
 - Every public identity/value and every authority/lifecycle action has exactly one owner above.
-- The old v0.2 model appears only as labelled history, never as a normative alternative.
+- The pre-cutover 0.2 model appears only as labelled history, never as a normative alternative or compatibility promise.
 - Atomic delivery and external proof conform to the single protocol in `plan.md`.
 - Cargo/rustc and deterministic T1/T2 proofs implement all carrier rows in `plan.md`; documentation is not enforcement.

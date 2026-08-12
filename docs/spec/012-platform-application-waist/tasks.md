@@ -6,7 +6,7 @@
 - [x] Record the complete RSS-CP disposition once in `research.md`.
 - [x] Record the atomic cutover increment in `plan.md` while consuming ADR-026's canonical receipt/lifecycle.
 - [x] Hand planned AI-HARD carriers to their implementation owners without claiming activation.
-- [x] Align stable scope/API rules and mark v0.2 owner text as history.
+- [x] Align stable scope/API rules and mark pre-cutover 0.2 owner text as history.
 - [x] Align Azure Boards and read back status, comments and relationships.
 - [ ] Complete the docs PR, built-in review and ship handoff.
 

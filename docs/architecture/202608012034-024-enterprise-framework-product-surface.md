@@ -14,8 +14,8 @@ RSS 已具备 contract/codegen、静态 assembly、L0–L4 primitive、多租户
 
 ### 2026-08-11 amendment：Platform vNext 唯一 owner 与原子 cutover
 
-本 amendment 取代 2026-08-09 Platform v0.2 实现 amendment 作为 vNext 规范；旧实现只作为迁移基线保留，
-不授予兼容入口。Platform vNext 是 breaking 0.x cutover，具体 package 版本从 Cargo metadata 派生。
+本 amendment 取代 2026-08-09 Platform pre-cutover 0.2 实现 amendment 作为 vNext 规范；旧实现只作为迁移基线保留，
+不授予兼容入口。Platform 仍在实验阶段，vNext 直接替换同一 0.2.0 package 的 API；具体 package 版本从 Cargo metadata 派生。
 不得保留 alias、shim、`From`/`TryFrom`、feature flag、双读写、双 dispatch 或旧 baseline fallback。
 
 vNext 的唯一 owner 固定如下：
@@ -42,7 +42,7 @@ first-green receipt shape 与 artifact lifecycle 继续唯一由
 
 回退遵循 ADR-026 的不可变 artifact lifecycle：未发布 candidate 可拒绝；发布后先阻断产品发布并将 incubator
 pin/lock 回上一已知绿色 artifact、重跑 canonical CI，再由 RSS 发布修复版本或按 registry 能力 yank。必要时才整体
-revert RSS cutover 到一致的 v0.2 revision/baseline；不得恢复 RSS-owned submodule，也不得在部分 vNext 中恢复旧 API、
+revert RSS cutover 到一致的 pre-cutover revision/baseline；不得恢复 RSS-owned submodule，也不得在部分 vNext 中恢复旧 API、
 兼容层、双 authority 或双 baseline。
 完整 backlog 映射只由
 [`Spec 012 research.md`](../spec/012-platform-application-waist/research.md) 持有，cutover 增量 DAG 与 AI-HARD carrier
@@ -54,19 +54,19 @@ canonical receipt schema 或 artifact rollback owner。
 Release Surface/package-proof；**AI-HARD**，永久约束交给 Cargo/rustc visibility、私有 mint、分层依赖、Release API
 与确定性 T1/T2 proof，Markdown 只记录决策和尚未激活的 carrier handoff。
 
-### 2026-08-09 amendment：Platform Public v0.2 历史实现（已被 vNext 取代）
+### 2026-08-09 amendment：Platform Public pre-cutover 0.2 历史实现（已被 vNext 取代）
 
-以下内容仅描述 v0.2 当前实现，不再是 vNext 规范，也不得被解释为兼容承诺。本 amendment 曾取代 Spec 012
+以下内容仅描述同一 0.2.0 package 在 cutover 前的 API，不再是 vNext 规范，也不得被解释为兼容承诺。本 amendment 曾取代 Spec 012
 旧版的 “thin façade / exact API frozen / 不改变 runtime” 实施解释。
 `rss-platform` 0.2.0 是 provider-free、进程内 typed application kernel，原子拥有 canonical contract
 admission、静态 federated ES256 authority、typed handler dispatch 与 bounded drain/shutdown。它不是
 publish=false internals 的 wrapper，也不提供 DI container、Host/Provider SPI 或第二 composition root。
 
-`core`/`eventing` 仍是候选 official profile，但尚未激活，不进入 Platform v0.2 API；kernel conditions 只报告
+`core`/`eventing` 仍是候选 official profile，但尚未激活，不进入 Platform pre-cutover 0.2 API；kernel conditions 只报告
 自身真实 handler/dispatch/drain/stopped 状态，不映射 provider/runtime readiness。Platform crate 位于新的最低位
 `PlatformPublic` layer，无 workspace normal/build dependency；internal layers 只能反向消费其稳定值面。
 
-framework-owned active HTTP manifests 经同一 `cargo xtask codegen` 投影 sealed public contract set；v0.2 exact set
+framework-owned active HTTP manifests 经同一 `cargo xtask codegen` 投影 sealed public contract set；pre-cutover 0.2 exact set
 为 `runtime.inventory`。Release Surface、真实 `.crate` local-registry consumer 与 locked/offline T2 是同一合并门。
 旧 #2045 fixture、开放 Contract、core/eventing marker 与兼容 path 全部删除，不保留 shim/alias。
 

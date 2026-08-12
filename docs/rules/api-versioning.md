@@ -31,10 +31,11 @@ compensation effect scope、idempotency/compensation/retry class 或 retry polic
 package 不继承历史 internal `pub` 承诺；从清单显式移除 package 即终止其后续轴 A 承诺，不扫描其 internal
 历史、不生成 shim，也不引入双读或退出 metadata。仍在 base/current 交集内的 package 必须完成 SemVer 证明。
 
-Platform Application vNext 是由 #2107 原子激活的 breaking 0.x cutover；具体 package 版本从 Cargo metadata 派生，
-不在规则文档复制。v0.2 exported surface 仅是历史，不构成 compatibility authority。Foundation identity/context
+Platform Application vNext 是由 #2107 原子激活的实验阶段 breaking replacement；具体 package 版本从 Cargo metadata 派生，
+不在规则文档复制。pre-cutover 0.2 exported surface 仅是历史，不构成 compatibility authority；当前 package 可在同一
+实验版本内直接替换 API。Foundation identity/context
 提取、Platform async waist、Auth/RuntimeExec bridge 与旧 baseline 已原子切换；禁止 alias、deprecated re-export、
-shim、`From`/`TryFrom`、feature flag、双读写、双 dispatch 或 v0.2
+shim、`From`/`TryFrom`、feature flag、双读写、双 dispatch 或 pre-cutover 0.2
 fallback。旧 #2045 executable contract 已原子删除，同样不构成 compatibility authority。
 
 `cargo xtask public-api release --check`
