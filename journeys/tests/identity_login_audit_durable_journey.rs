@@ -76,6 +76,14 @@ fn login_producer_receipt() -> LoginProducerReceipt {
     ProducerMarker::for_test(LOGIN_PRODUCER).into_receipt()
 }
 
+fn consumer_admission() -> Result<primitives::ConsumerAdmission> {
+    let (control, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+    control
+        .start_running()
+        .context("start durable journey consumer admission")?;
+    Ok(consumer)
+}
+
 fn finish_with_pg_cleanup(body: Result<()>, cleanup: Result<()>) -> Result<()> {
     match (body, cleanup) {
         (Ok(()), Ok(())) => Ok(()),
@@ -368,6 +376,7 @@ async fn login_audit_durable_topology() -> Result<()> {
             consumer_handler(audit_repo, captured.clone()),
             // 续租间隔派生自 PgInboxStore 后端 claim TTL（同源，杜绝 mismatch footgun，#1213 review #3）。
             LeaseConfig::from_ttl(lease_ttl),
+            consumer_admission()?,
         );
 
         // 生产侧：login → PgAuthGrantLifecycle **co-tx**（grant + initial refresh + outbox）durable 落库；relay
@@ -425,7 +434,8 @@ async fn login_audit_durable_topology() -> Result<()> {
             )
             .await?;
             // F1 后：idem_key = 独立 EventId（非 session_id）；以 payload.sessionId 关联本轮 entry（F6）。
-            let session_id = response.data.session_id.clone();
+            let session_id = uuid::Uuid::parse_str(&response.data.session_id)
+                .context("login response sessionId is not a valid UUID")?;
 
             // bounded claim（最多 50 次 × 100ms），逐条按值 relay 后从 broker-visible capture 解码匹配
             // 本轮 session_id。对抗其它可投递行且不依赖批次数量/顺序；opaque claim 不暴露观察 accessor。

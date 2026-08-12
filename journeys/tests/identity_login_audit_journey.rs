@@ -159,6 +159,9 @@ where
     let name = format!("{EVENT_CONSUMER_PROBE}:audit:{topic}");
     // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
     let lease_cfg = LeaseConfig::from_ttl(std::time::Duration::from_secs(60));
+    let (admission_control, _, consumer_admission, _) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
     let worker = spawn_consumer(
         name,
         stream,
@@ -169,6 +172,7 @@ where
         lease_cfg,
         token,
         health.clone(),
+        consumer_admission,
     );
     stack.register_detached(DynManagedResource::new_box(worker));
     Ok(health)
