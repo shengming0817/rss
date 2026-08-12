@@ -9,8 +9,8 @@ use workspacefacts::testing::{
 };
 use workspacefacts::{
     ApiStability, DependencyKind, DependencyResolution, DependencySource, GitDependencyReq,
-    OfficialProfile, PackageKey, PublicApiOwner, PublishPolicy, TargetKind, WorkspaceFacts,
-    WorkspaceFactsError,
+    OfficialProfile, PackageKey, PublicApiOwner, PublishPolicy, ResolvedPackageSource, TargetKind,
+    WorkspaceFacts, WorkspaceFactsError,
 };
 
 fn synthetic_metadata() -> String {
@@ -214,6 +214,37 @@ fn reverse_closure_path_ownership_and_target_catalog_are_owned() -> Result<(), B
     assert_eq!(by_name("demo"), Some(TargetKind::Example));
     assert_eq!(by_name("throughput"), Some(TargetKind::Benchmark));
     assert_eq!(by_name("build-script"), Some(TargetKind::BuildScript));
+    Ok(())
+}
+
+#[test]
+fn resolved_package_graph_is_an_owned_exact_identity_projection() -> Result<(), Box<dyn Error>> {
+    let facts = WorkspaceFacts::from_metadata_json(Path::new("/workspace"), &synthetic_metadata())?;
+    let packages = facts.resolved_packages()?;
+    let serde = packages
+        .iter()
+        .find(|package| package.id().name() == "serde")
+        .ok_or("serde resolved package missing")?;
+
+    assert_eq!(serde.id().version().to_string(), "1.0.0");
+    assert_eq!(
+        serde.id().source(),
+        &ResolvedPackageSource::External(
+            "registry+https://github.com/rust-lang/crates.io-index".to_owned()
+        )
+    );
+    assert!(serde.direct_dependencies().is_empty());
+    let top = packages
+        .iter()
+        .find(|package| package.id().name() == "top")
+        .ok_or("top resolved package missing")?;
+    assert_eq!(
+        top.direct_dependencies()
+            .iter()
+            .map(|dependency| dependency.name())
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["consumer"])
+    );
     Ok(())
 }
 

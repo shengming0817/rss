@@ -1,6 +1,8 @@
 //! Synthetic Cargo metadata JSON builders shared by façade and xtask tests.
 
+use crate::{ResolvedPackageFacts, ResolvedPackageId, ResolvedPackageSource};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 /// Build a Cargo metadata target object.
 pub fn target(
@@ -231,4 +233,28 @@ pub fn metadata_json(
 /// Convenience path-package id for fixtures rooted at `/workspace/...`.
 pub fn path_package_id(absolute_path: &str) -> String {
     format!("path+file://{absolute_path}#0.0.0")
+}
+
+/// Build an exact external package identity for resolved-graph consumer tests.
+pub fn external_package_id(
+    name: &str,
+    version: &str,
+    source: &str,
+) -> Result<ResolvedPackageId, semver::Error> {
+    Ok(ResolvedPackageId {
+        name: name.to_owned(),
+        version: version.parse()?,
+        source: ResolvedPackageSource::External(source.to_owned()),
+    })
+}
+
+/// Build an owned resolved package for consumer tests.
+pub fn external_resolved_package(
+    id: ResolvedPackageId,
+    direct_dependencies: &[ResolvedPackageId],
+) -> ResolvedPackageFacts {
+    ResolvedPackageFacts {
+        id,
+        direct_dependencies: direct_dependencies.iter().cloned().collect::<BTreeSet<_>>(),
+    }
 }

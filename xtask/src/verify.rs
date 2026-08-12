@@ -626,7 +626,8 @@ fn step_deny_advisories() -> Step {
 ///
 /// `--ignore` = cargo-audit 侧 ignore 单源（cwd-无关、机器可见，不依赖 audit.toml 自动发现——已实测 cargo-audit
 /// 不从 cwd 加载 `audit.toml`）。两门 ignore 一致性（deny.toml ⊆ 本 ignore 集）由
-/// `deny_audit_ignore_lists_reconciled` 守。
+/// `deny_audit_ignore_lists_reconciled` 守。#2139 临时接受 rumqttc 图内五项 advisory；官方修复后必须与
+/// `deny.toml` 同步删除。
 ///
 /// **RUSTSEC-2023-0071（rsa Marvin Attack）**：rsa 是 **phantom Cargo.lock 条目**——`cargo audit`（扫 Cargo.lock
 /// 全量）报，但 `cargo deny advisories`（按 feature-resolved 依赖图，all-features）**不**报，且
@@ -635,7 +636,21 @@ fn step_deny_advisories() -> Step {
 fn step_cargo_audit() -> Step {
     Step {
         id: GateId::CargoAudit,
-        args: &["audit", "--ignore", "RUSTSEC-2023-0071"],
+        args: &[
+            "audit",
+            "--ignore",
+            "RUSTSEC-2023-0071",
+            "--ignore",
+            "RUSTSEC-2025-0134",
+            "--ignore",
+            "RUSTSEC-2026-0049",
+            "--ignore",
+            "RUSTSEC-2026-0098",
+            "--ignore",
+            "RUSTSEC-2026-0099",
+            "--ignore",
+            "RUSTSEC-2026-0104",
+        ],
         kind: StepKind::Cargo,
         env: &[],
     }
@@ -941,6 +956,141 @@ crate::ci_lanes::gate_catalog!(define_step_dispatch);
 /// Audit 亦经统一动态 executor 委托（不内联门命令），由 `CI-ADAPTIVE-WORKFLOW-01` 守。
 fn audit_plan() -> Vec<Step> {
     plan_for(PlanProjection::Lane(GateGroup::Nightly))
+}
+
+const CRATES_IO_REGISTRY: &str = "registry+https://github.com/rust-lang/crates.io-index";
+
+struct TemporaryAdvisoryException {
+    advisory: &'static str,
+    package: &'static str,
+    allowed_version: &'static str,
+    patched: &'static [&'static str],
+    unaffected: &'static [&'static str],
+}
+
+const TEMPORARY_RUMQTTC_EXCEPTIONS: &[TemporaryAdvisoryException] = &[
+    TemporaryAdvisoryException {
+        advisory: "RUSTSEC-2025-0134",
+        package: "rustls-pemfile",
+        allowed_version: "2.2.0",
+        patched: &[],
+        unaffected: &[],
+    },
+    TemporaryAdvisoryException {
+        advisory: "RUSTSEC-2026-0049",
+        package: "rustls-webpki",
+        allowed_version: "0.102.8",
+        patched: &[">=0.103.10"],
+        unaffected: &["<0.102.0-alpha.0"],
+    },
+    TemporaryAdvisoryException {
+        advisory: "RUSTSEC-2026-0098",
+        package: "rustls-webpki",
+        allowed_version: "0.102.8",
+        patched: &[">=0.103.12, <0.104.0-alpha.1", ">=0.104.0-alpha.6"],
+        unaffected: &[],
+    },
+    TemporaryAdvisoryException {
+        advisory: "RUSTSEC-2026-0099",
+        package: "rustls-webpki",
+        allowed_version: "0.102.8",
+        patched: &[">=0.103.12, <0.104.0-alpha.1", ">=0.104.0-alpha.6"],
+        unaffected: &[],
+    },
+    TemporaryAdvisoryException {
+        advisory: "RUSTSEC-2026-0104",
+        package: "rustls-webpki",
+        allowed_version: "0.102.8",
+        patched: &[">=0.103.13, <0.104.0-alpha.1", ">=0.104.0-alpha.7"],
+        unaffected: &[],
+    },
+];
+
+fn version_matches_any(version: &semver::Version, requirements: &[&str]) -> Result<bool> {
+    requirements.iter().try_fold(false, |matched, requirement| {
+        Ok(matched || semver::VersionReq::parse(requirement)?.matches(version))
+    })
+}
+
+/// #2139 temporary global ignores must match the complete affected PackageId set exactly.
+fn validate_temporary_rumqttc_advisory_source(
+    packages: &[workspacefacts::ResolvedPackageFacts],
+) -> Result<()> {
+    use workspacefacts::ResolvedPackageSource;
+
+    let is_exact = |package: &workspacefacts::ResolvedPackageFacts, name: &str, version: &str| {
+        package.id().name() == name
+            && package.id().version().to_string() == version
+            && package.id().source()
+                == &ResolvedPackageSource::External(CRATES_IO_REGISTRY.to_owned())
+    };
+    for exception in TEMPORARY_RUMQTTC_EXCEPTIONS {
+        let affected = packages
+            .iter()
+            .filter(|package| package.id().name() == exception.package)
+            .map(|package| {
+                let version = package.id().version();
+                let patched = version_matches_any(version, exception.patched)?;
+                let unaffected = version_matches_any(version, exception.unaffected)?;
+                Ok((!patched && !unaffected).then_some(package))
+            })
+            .collect::<Result<Vec<Option<_>>>>()?
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            affected.len() == 1
+                && is_exact(affected[0], exception.package, exception.allowed_version),
+            "#2139 {} ignore requires affected PackageIds to equal exactly {} {} from crates.io; found {:?}",
+            exception.advisory,
+            exception.package,
+            exception.allowed_version,
+            affected
+                .iter()
+                .map(|package| package.id())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    let rumqttc = packages
+        .iter()
+        .filter(|package| is_exact(package, "rumqttc", "0.25.1"))
+        .collect::<Vec<_>>();
+    anyhow::ensure!(
+        rumqttc.len() == 1,
+        "#2139 risk acceptance requires exactly rumqttc 0.25.1 from crates.io; found {}",
+        rumqttc.len()
+    );
+    for (name, version) in [("rustls-pemfile", "2.2.0"), ("rustls-webpki", "0.102.8")] {
+        let vulnerable = packages
+            .iter()
+            .filter(|package| is_exact(package, name, version))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            vulnerable.len() == 1,
+            "#2139 risk acceptance requires exactly {name} {version} from crates.io; found {}",
+            vulnerable.len()
+        );
+        anyhow::ensure!(
+            rumqttc[0]
+                .direct_dependencies()
+                .contains(vulnerable[0].id()),
+            "#2139 risk acceptance is stale: rumqttc no longer depends on {name} {version}"
+        );
+        let parents = packages
+            .iter()
+            .filter(|package| package.direct_dependencies().contains(vulnerable[0].id()))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            parents.len() == 1 && parents[0].id() == rumqttc[0].id(),
+            "#2139 risk acceptance for {name} {version} escaped its reviewed source; parents={:?}",
+            parents
+                .iter()
+                .map(|package| package.id())
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(())
 }
 
 /// docker daemon 是否可达（容器 self-provision 前置；`docker version` 退出 0）。经 [`crate::cmd::external_cmd`]
@@ -1287,6 +1437,16 @@ fn run_one(
                 .ok_or_else(|| {
                     anyhow::anyhow!("{}: typed cargo subcommand 与 argv 漂移", step.label())
                 })?;
+            if step.id == GateId::CargoAudit {
+                let resolved_packages = command_facts
+                    .get()
+                    .context(command_scope_facts_context(
+                        "#2139 risk-acceptance source guard",
+                    ))?
+                    .resolved_packages()
+                    .context("project resolved package facts for #2139 risk acceptance")?;
+                validate_temporary_rumqttc_advisory_source(&resolved_packages)?;
+            }
             run_step(
                 lane,
                 step.label(),
@@ -5256,6 +5416,90 @@ mod tests {
         assert_eq!(labels(&audit_plan()), vec!["deny-advisories", "audit"]);
     }
 
+    fn rumqttc_advisory_facts_fixture() -> anyhow::Result<Vec<workspacefacts::ResolvedPackageFacts>>
+    {
+        use workspacefacts::testing::{external_package_id, external_resolved_package};
+
+        let pemfile = external_package_id("rustls-pemfile", "2.2.0", CRATES_IO_REGISTRY)?;
+        let webpki = external_package_id("rustls-webpki", "0.102.8", CRATES_IO_REGISTRY)?;
+        let rumqttc = external_package_id("rumqttc", "0.25.1", CRATES_IO_REGISTRY)?;
+        Ok(vec![
+            external_resolved_package(rumqttc, &[pemfile.clone(), webpki.clone()]),
+            external_resolved_package(pemfile, &[]),
+            external_resolved_package(webpki, &[]),
+        ])
+    }
+
+    #[test]
+    fn temporary_rumqttc_advisory_source_is_exact_and_stale_fail_closed() -> anyhow::Result<()> {
+        use workspacefacts::testing::{external_package_id, external_resolved_package};
+
+        let green = rumqttc_advisory_facts_fixture()?;
+        validate_temporary_rumqttc_advisory_source(&green)?;
+
+        let mut second_version = green.clone();
+        second_version.push(external_resolved_package(
+            external_package_id("rustls-webpki", "0.103.11", CRATES_IO_REGISTRY)?,
+            &[],
+        ));
+        assert!(
+            validate_temporary_rumqttc_advisory_source(&second_version).is_err(),
+            "a second affected version covered by a global advisory ignore must fail closed"
+        );
+
+        let mut second_unmaintained = green.clone();
+        second_unmaintained.push(external_resolved_package(
+            external_package_id("rustls-pemfile", "2.1.3", CRATES_IO_REGISTRY)?,
+            &[],
+        ));
+        assert!(
+            validate_temporary_rumqttc_advisory_source(&second_unmaintained).is_err(),
+            "the unmaintained advisory ignore must reject every additional package version"
+        );
+
+        let mut patched = green.clone();
+        patched.push(external_resolved_package(
+            external_package_id("rustls-webpki", "0.103.13", CRATES_IO_REGISTRY)?,
+            &[],
+        ));
+        validate_temporary_rumqttc_advisory_source(&patched)?;
+
+        let mut second_source = green.clone();
+        second_source.push(external_resolved_package(
+            external_package_id(
+                "rustls-webpki",
+                "0.102.8",
+                "git+https://example.invalid/webpki?rev=bad#deadbeef",
+            )?,
+            &[],
+        ));
+        assert!(
+            validate_temporary_rumqttc_advisory_source(&second_source).is_err(),
+            "the same affected version from another source must fail closed"
+        );
+
+        let webpki = external_package_id("rustls-webpki", "0.102.8", CRATES_IO_REGISTRY)?;
+        let mut second_parent = green.clone();
+        second_parent.push(external_resolved_package(
+            external_package_id("other-client", "1.0.0", CRATES_IO_REGISTRY)?,
+            &[webpki],
+        ));
+        assert!(
+            validate_temporary_rumqttc_advisory_source(&second_parent).is_err(),
+            "an additional parent of the allowed package must fail closed"
+        );
+
+        let stale = green
+            .into_iter()
+            .filter(|package| package.id().name() == "rumqttc")
+            .collect::<Vec<_>>();
+        assert!(
+            validate_temporary_rumqttc_advisory_source(&stale).is_err(),
+            "an upstream-fixed graph must expose stale advisory ignores"
+        );
+        Ok(())
+    }
+
     /// integration-compile（默认 verify 抓编译漂移）`--no-run` 覆盖各 adapter + journeys durable journey
     /// （F7 + #1137：原仅 postgres；#1010 加 mqtt；#1298 加 runtime assembly integration 测试）。
     #[test]
@@ -7267,6 +7511,13 @@ mod tests {
     /// anti-vacuity：构造 deny ⊄ audit 的反例 → 判定返回 false（守卫非恒真）。
     #[test]
     fn deny_audit_ignore_lists_reconciled() -> anyhow::Result<()> {
+        const TEMPORARILY_ACCEPTED_RUMQTTC_ADVISORIES: &[&str] = &[
+            "RUSTSEC-2025-0134",
+            "RUSTSEC-2026-0049",
+            "RUSTSEC-2026-0098",
+            "RUSTSEC-2026-0099",
+            "RUSTSEC-2026-0104",
+        ];
         // 解析 deny.toml `[advisories].ignore`：兼容裸字符串形 `"RUSTSEC-..."` 与结构化形
         // `{ id = "RUSTSEC-...", reason = "..." }`（cargo-deny 0.16+）——否则对结构化条目静默返回空、守卫恒真。
         fn deny_advisory_ignores(toml_src: &str) -> Result<Vec<String>> {
@@ -7307,6 +7558,28 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("读 {} 失败: {e}", path.display()))?;
         let deny = deny_advisory_ignores(&toml_src)?;
         let audit = cargo_audit_ignored_ids();
+        let deny_toml = toml::from_str::<toml::Value>(&toml_src)?;
+        for advisory in TEMPORARILY_ACCEPTED_RUMQTTC_ADVISORIES {
+            let entry = deny_toml["advisories"]["ignore"]
+                .as_array()
+                .and_then(|entries| {
+                    entries.iter().find(|entry| {
+                        entry.get("id").and_then(toml::Value::as_str) == Some(*advisory)
+                    })
+                })
+                .ok_or_else(|| anyhow::anyhow!("deny.toml 缺少 rumqttc 临时风险接受 {advisory}"))?;
+            assert!(
+                entry
+                    .get("reason")
+                    .and_then(toml::Value::as_str)
+                    .is_some_and(|reason| !reason.trim().is_empty()),
+                "deny.toml rumqttc 临时风险接受 {advisory} 必须使用非空 reason 的结构化 ignore"
+            );
+            assert!(
+                audit.contains(advisory),
+                "cargo-audit 侧未同步 rumqttc 临时风险接受 {advisory}"
+            );
+        }
         // anti-vacuity ③：args 解析必须真解析出 cargo-audit 侧 ignore（含已知 phantom rsa）——否则 args 解析
         // 静默失效时 audit=[] 会让「空 deny ⊆ 空 audit」恒真，对账失去意义。锁住 parser 有效。
         assert!(

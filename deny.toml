@@ -19,8 +19,15 @@ yanked = "deny"
 # `--ignore`（在 xtask `step_cargo_audit`，扫 Cargo.lock 全量——会多报 phantom 条目，如 rsa RUSTSEC-2023-0071）。
 # 不变式（守卫 `deny_audit_ignore_lists_reconciled`，xtask/src/verify.rs，Medium）：**本 ignore ⊆ cargo-audit
 # --ignore**——deny 接受的任一**图内** advisory 必须同步到 cargo-audit 侧，否则 deny 绿而 audit 红（一过一红、
-# 阻断合入）。反向 audit 可多 ignore（phantom-only，本图里没有，无需在此 ignore）。故本表当前为空（无图内豁免）。
-ignore = []
+# 阻断合入）。反向 audit 可多 ignore（phantom-only，deny 图里没有，无需在此 ignore）。
+# DEFER(#2139) owner=adapters/mqtt; blocked-by=trigger:rumqttc 官方版本同时升级 rustls-webpki 并移除 rustls-pemfile; closes-when=升级 rumqttc 后删除下列五项 ignore
+ignore = [
+  { id = "RUSTSEC-2025-0134", reason = "#2139: rumqttc 0.25.1 仍传递依赖已停维的 rustls-pemfile；等待官方移除" },
+  { id = "RUSTSEC-2026-0049", reason = "#2139: rumqttc 0.25.1 固定 rustls-webpki 0.102.8；等待官方安全版本" },
+  { id = "RUSTSEC-2026-0098", reason = "#2139: rumqttc 0.25.1 固定 rustls-webpki 0.102.8；等待官方安全版本" },
+  { id = "RUSTSEC-2026-0099", reason = "#2139: rumqttc 0.25.1 固定 rustls-webpki 0.102.8；等待官方安全版本" },
+  { id = "RUSTSEC-2026-0104", reason = "#2139: rumqttc 0.25.1 固定 rustls-webpki 0.102.8；等待官方安全版本" },
+]
 
 [licenses]
 confidence-threshold = 0.93

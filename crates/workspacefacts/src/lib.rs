@@ -25,7 +25,8 @@ use declarations::{
     PackageIndexes, index_resolve_nodes, parse_raw_metadata, project_direct_declarations,
 };
 use guppy::graph::{
-    BuildTargetId, BuildTargetKind, DependencyDirection, PackageGraph, PackagePublish,
+    BuildTargetId, BuildTargetKind, DependencyDirection, PackageGraph, PackageMetadata,
+    PackagePublish, PackageSource,
 };
 use semver::{Version, VersionReq};
 use std::collections::{BTreeMap, BTreeSet};
@@ -234,6 +235,58 @@ pub enum DependencySource {
     UnknownExternal {
         source: String,
     },
+}
+
+/// Exact owned source identity for a package in Cargo's resolved graph.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum ResolvedPackageSource {
+    Workspace(PathBuf),
+    Path(PathBuf),
+    External(String),
+}
+
+/// Exact owned package identity from Cargo metadata's resolved graph.
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ResolvedPackageId {
+    name: String,
+    version: Version,
+    source: ResolvedPackageSource,
+}
+
+impl ResolvedPackageId {
+    #[must_use]
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    #[must_use]
+    pub fn version(&self) -> &Version {
+        &self.version
+    }
+
+    #[must_use]
+    pub fn source(&self) -> &ResolvedPackageSource {
+        &self.source
+    }
+}
+
+/// A resolved package and its exact direct dependency identities.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedPackageFacts {
+    id: ResolvedPackageId,
+    direct_dependencies: BTreeSet<ResolvedPackageId>,
+}
+
+impl ResolvedPackageFacts {
+    #[must_use]
+    pub fn id(&self) -> &ResolvedPackageId {
+        &self.id
+    }
+
+    #[must_use]
+    pub fn direct_dependencies(&self) -> &BTreeSet<ResolvedPackageId> {
+        &self.direct_dependencies
+    }
 }
 
 /// Manifest dependency 到 resolve graph 的关联结果。
@@ -628,6 +681,27 @@ impl WorkspaceFacts {
             .collect()
     }
 
+    /// Return the complete Cargo resolved graph as stable owned package identities and edges.
+    pub fn resolved_packages(&self) -> Result<Vec<ResolvedPackageFacts>, WorkspaceFactsError> {
+        let mut packages = self
+            .graph
+            .packages()
+            .map(|package| {
+                let id = project_resolved_package_id(package)?;
+                let direct_dependencies = package
+                    .direct_links()
+                    .map(|link| project_resolved_package_id(link.to()))
+                    .collect::<Result<BTreeSet<_>, WorkspaceFactsError>>()?;
+                Ok(ResolvedPackageFacts {
+                    id,
+                    direct_dependencies,
+                })
+            })
+            .collect::<Result<Vec<_>, WorkspaceFactsError>>()?;
+        packages.sort_by(|left, right| left.id.cmp(&right.id));
+        Ok(packages)
+    }
+
     /// 返回拥有给定仓库路径的 workspace package。
     ///
     /// `path` 必须是相对 workspace root 的 repo-relative 路径；绝对路径或含 `..` 的路径会被拒绝。
@@ -730,6 +804,25 @@ impl WorkspaceFacts {
             .map(|record| record.repo_relative_root.as_path())
             .ok_or_else(|| WorkspaceFactsError::UnknownPackage(package.as_str().to_owned()))
     }
+}
+
+fn project_resolved_package_id(
+    package: PackageMetadata<'_>,
+) -> Result<ResolvedPackageId, WorkspaceFactsError> {
+    let source = match package.source() {
+        PackageSource::Workspace(path) => {
+            ResolvedPackageSource::Workspace(normalize_relative_path(path.as_std_path())?)
+        }
+        PackageSource::Path(path) => {
+            ResolvedPackageSource::Path(normalize_relative_path(path.as_std_path())?)
+        }
+        PackageSource::External(source) => ResolvedPackageSource::External(source.to_owned()),
+    };
+    Ok(ResolvedPackageId {
+        name: package.name().to_owned(),
+        version: package.version().clone(),
+        source,
+    })
 }
 
 fn validate_workspace_root(root: &Path) -> Result<(), WorkspaceFactsError> {

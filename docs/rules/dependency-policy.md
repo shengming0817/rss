@@ -48,6 +48,20 @@
 | license、advisory 与 source policy | `deny.toml`、`cargo deny` |
 | `server`/`rss` shipped binary 的已登记 feature policy | `WorkspaceFacts` CargoSet root selection、`shipped-feature-guard` |
 
+### 临时 advisory 风险接受
+
+图内 RustSec advisory 默认不得 ignore。若修复被上游发布阻塞且产品决定临时接受风险，必须同时满足：
+
+- `deny.toml [advisories].ignore` 使用含 issue 与风险原因的结构化条目，并以完整 `DEFER`
+  元数据声明 owner、阻塞条件和撤销条件；
+- canonical cargo-audit 步骤同步每个 `--ignore`，保持双扫描器对账；
+- 机器守卫必须通过 `WorkspaceFacts` owned resolved-package/edge DTO，对每项 advisory 的完整
+  受影响 PackageId 集合与唯一允许集合做精确比较，并锁定唯一依赖根；出现第二脆弱版本、第二
+  source、额外父依赖或上游已移除该依赖时 fail-closed，暴露扩大或过期的豁免；
+- 独立 follow-up issue 保持 open，上游修复可用后升级依赖并在同一变更中删除两侧豁免。
+
+该机制仅表示显式风险接受，不得宣称漏洞已修复，也不得扩大到没有独立跟踪项的其它依赖。
+
 ## Wrapper 与 adapter
 
 薄适配至少承载一项 RSS 语义：
