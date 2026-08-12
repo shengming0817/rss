@@ -1084,7 +1084,7 @@ impl<A: SagaOperatorAction> SagaOperatorAuthorization<A> {
     pub const fn instance(&self) -> SagaInstanceRef {
         self.instance
     }
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.instance.tenant()
     }
     pub const fn evidence(&self) -> &A::Evidence {
@@ -1555,7 +1555,7 @@ pub trait SagaDurableStoreLocal: Send + Sync {
     async fn list_runnable(
         &self,
         identity: &SagaWorkerIdentity,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         limit: NonZeroUsize,
     ) -> Result<Vec<SagaRunnableInstance>, SagaDurableStoreError>;
 
@@ -1640,15 +1640,15 @@ pub trait SagaOperatorStoreLocal {
 /// Stable keyset cursor for runnable-tenant discovery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SagaTenantCursor {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 impl SagaTenantCursor {
-    pub const fn new(tenant: vocab::TenantId) -> Self {
+    pub const fn new(tenant: rss_request_context::TenantId) -> Self {
         Self { tenant }
     }
 
-    pub const fn tenant(self) -> vocab::TenantId {
+    pub const fn tenant(self) -> rss_request_context::TenantId {
         self.tenant
     }
 }
@@ -1656,16 +1656,19 @@ impl SagaTenantCursor {
 /// One deterministic page of runnable Saga tenants.
 #[derive(Debug, PartialEq, Eq)]
 pub struct SagaTenantPage {
-    tenants: Vec<vocab::TenantId>,
+    tenants: Vec<rss_request_context::TenantId>,
     next: Option<SagaTenantCursor>,
 }
 
 impl SagaTenantPage {
-    pub fn new(tenants: Vec<vocab::TenantId>, next: Option<SagaTenantCursor>) -> Self {
+    pub fn new(
+        tenants: Vec<rss_request_context::TenantId>,
+        next: Option<SagaTenantCursor>,
+    ) -> Self {
         Self { tenants, next }
     }
 
-    pub fn tenants(&self) -> &[vocab::TenantId] {
+    pub fn tenants(&self) -> &[rss_request_context::TenantId] {
         &self.tenants
     }
 
@@ -1673,7 +1676,7 @@ impl SagaTenantPage {
         self.next
     }
 
-    pub fn into_parts(self) -> (Vec<vocab::TenantId>, Option<SagaTenantCursor>) {
+    pub fn into_parts(self) -> (Vec<rss_request_context::TenantId>, Option<SagaTenantCursor>) {
         (self.tenants, self.next)
     }
 }
@@ -1835,7 +1838,8 @@ mod tests {
     #[test]
     #[allow(clippy::unwrap_used)]
     fn operator_authorization_is_action_tenant_and_instance_bound() {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001926").unwrap();
+        let tenant =
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000001926").unwrap();
         let instance = SagaInstanceRef::new(
             tenant,
             consistency::SagaId::new(uuid::Uuid::from_u128(1926)),

@@ -11,6 +11,7 @@ use mqtt::{
     MqttSession, MqttSessionConfig, MqttSessionError, MqttTlsMaterial, MqttTopicPolicy,
     MqttsEndpoint, NegativeAckPollBarrier, SessionExpiry,
 };
+use rss_request_context::TenantId;
 use rumqttc::v5::mqttbytes::QoS;
 use rumqttc::v5::mqttbytes::v5::{Filter, Packet, PublishProperties};
 use rumqttc::v5::{AsyncClient, Event, EventLoop, MqttOptions};
@@ -19,7 +20,6 @@ use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::pem::PemObject as _;
 use rustls_pki_types::{CertificateDer, PrivateKeyDer};
 use testkit::{MqttAssertionFault, MqttCredential, MqttMtlsFixture};
-use vocab::TenantId;
 
 const TENANT: &str = "11111111-1111-4111-8111-111111111111";
 const CROSS_TENANT: &str = "33333333-3333-4333-8333-333333333333";
@@ -726,7 +726,7 @@ async fn downlink_resolves_session_scope_and_returns_transport_only_puback() -> 
     let session = connect_session(&fixture, fixture.rss_a()).await;
     let accepted = session
         .send_command(
-            vocab::TenantId::parse(TENANT)?,
+            rss_request_context::TenantId::parse(TENANT)?,
             ids::DeviceId::parse(DEVICE)?,
             &MessageId::new("cmd-1"),
             br#"{"op":"apply"}"#.to_vec(),

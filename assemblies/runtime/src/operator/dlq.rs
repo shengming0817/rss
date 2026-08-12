@@ -42,8 +42,8 @@ pub(super) const UNAUTHENTICATED_DLQ_ATTEMPT: &str = "unauthenticated-dlq-attemp
 pub(super) struct DlqCliArgs {
     pub(super) command: DlqCliCommand,
     pub(super) operator_service_token: OperatorServiceToken,
-    pub(super) operator_tenant: vocab::TenantId,
-    pub(super) tenant: vocab::TenantId,
+    pub(super) operator_tenant: rss_request_context::TenantId,
+    pub(super) tenant: rss_request_context::TenantId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,7 +108,7 @@ impl DlqCliCommand {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct DlqMaintenanceGrant {
     pub(super) action: DlqMaintenanceAction,
-    pub(super) tenant: vocab::TenantId,
+    pub(super) tenant: rss_request_context::TenantId,
 }
 
 pub(super) fn parse_dlq_limit(raw: &str) -> anyhow::Result<u32> {
@@ -480,7 +480,7 @@ pub(super) fn parse_dlq_operator_grants(raw: &str) -> anyhow::Result<Vec<DlqMain
                     "unknown DLQ maintenance action in {DLQ_OPERATOR_GRANTS_ENV}: {action}"
                 )
             })?,
-            tenant: vocab::TenantId::parse(tenant).with_context(|| {
+            tenant: rss_request_context::TenantId::parse(tenant).with_context(|| {
                 format!("{DLQ_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
             })?,
         });
@@ -570,7 +570,7 @@ pub(super) fn dlq_command_resource_id(parsed: &DlqCliArgs) -> String {
 
 pub(super) async fn authenticate_dlq_operator_principal(
     service_token: &str,
-    operator_tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
     pdp: &diport::DynPdp<'_>,
 ) -> anyhow::Result<authn::Principal> {
     let (_token, principal) = authn::verify_service_token(
@@ -590,7 +590,7 @@ pub(super) async fn authenticate_dlq_operator_principal(
 pub(super) async fn record_dlq_maintenance_finish_audit(
     pg: &PgMaintenanceDeps,
     operator_subject: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     start_audit_id: &DlqOperatorStartAuditId,
     action: &str,
     resource_id: &str,
@@ -745,7 +745,7 @@ impl DlqCommandExecution {
 }
 
 pub(super) fn dlq_redrive_result_line(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &IdemKey,
     outcome: DlqRedriveOutcome,
 ) -> String {
@@ -797,7 +797,7 @@ enum AuthorizedDlqRequest {
 
 pub(super) struct DlqFinishAuditContext {
     operator_subject: String,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     start_audit_id: DlqOperatorStartAuditId,
     action: String,
     resource_id: String,
@@ -825,7 +825,7 @@ pub(super) fn authorized_dlq_operator_for_test(
 
 fn issue_dlq_authorization<A: diport::DlqOperatorAction>(
     operator: &AuthorizedDlqOperator,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     start_audit_id: DlqOperatorStartAuditId,
 ) -> DlqOperatorAuthorization<A> {
     DlqOperatorAuthorization::issue(
@@ -1072,7 +1072,7 @@ pub(super) trait DlqControlRuntime {
         &self,
         session: &Self::Session,
         operator_subject: &str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         start_audit_id: &DlqOperatorStartAuditId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -1134,7 +1134,7 @@ impl DlqControlRuntime for ProductionDlqControlRuntime<'_> {
         &self,
         session: &Self::Session,
         operator_subject: &str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         start_audit_id: &DlqOperatorStartAuditId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,

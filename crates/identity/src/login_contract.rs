@@ -42,9 +42,9 @@ fn user_id() -> ids::UserId {
     ids::UserId::parse(CANON_USER).expect("canonical user id")
 }
 
-fn tenant_id() -> vocab::TenantId {
+fn tenant_id() -> rss_request_context::TenantId {
     #[allow(clippy::expect_used)]
-    vocab::TenantId::parse(CANON_TENANT).expect("canonical tenant")
+    rss_request_context::TenantId::parse(CANON_TENANT).expect("canonical tenant")
 }
 
 /// 最小 Signer 替身（固定字节签名；域 crate 单测不依赖 adapter）。

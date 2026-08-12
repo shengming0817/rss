@@ -383,7 +383,7 @@ async fn dlx_verified_receipt_concurrent_cas_behavior() -> TestResult {
 
     let (_fixture, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let message_id = unique_event_id("dlx-receipt-cas");
     store
         .dead_letter(test_dlx_payload_protector())

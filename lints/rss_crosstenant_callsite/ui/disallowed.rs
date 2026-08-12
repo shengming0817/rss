@@ -19,7 +19,7 @@ fn main() {
     let new_cross_tenant = vocab::tenant::RowVisibility::new_cross_tenant;
 
     // G1（specificity anti-vacuity）：调别的 vocab fn 不触发——证明 lint 非「任意 vocab 调用」。
-    let _ = vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479");
+    let _ = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479");
 
     // G2（逃生门）：item-level #[allow] 抑制。
     allowed_by_attr();

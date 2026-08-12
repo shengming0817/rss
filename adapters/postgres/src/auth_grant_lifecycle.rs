@@ -289,7 +289,7 @@ impl AuthGrantLifecycle for PgAuthGrantLifecycle {
 
 fn validate_login_binding(
     scope: TenantRepoScope,
-    envelope_tenant: vocab::TenantId,
+    envelope_tenant: rss_request_context::TenantId,
     grant: &AuthGrant,
     refresh: &RefreshTokenRecord,
 ) -> Result<(), std::io::Error> {
@@ -335,7 +335,7 @@ async fn write_initial_refresh(
 
 #[derive(Clone)]
 pub(crate) struct GrantCloseCas {
-    pub(crate) tenant: vocab::TenantId,
+    pub(crate) tenant: rss_request_context::TenantId,
     pub(crate) grant_id: String,
     pub(crate) user_id: String,
     pub(crate) epoch: i64,

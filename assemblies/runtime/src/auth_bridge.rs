@@ -31,7 +31,7 @@
 //!   `Poll::Pending` 由 serving runtime 正常恢复，不转换为认证结果。唯一 bindable HTTP funnel 的必填
 //!   `ServerRequestBudget` / request cancellation drop 包含 verifier 的整条请求 future；bridge 不拥有局部
 //!   timeout，无成功产物即不注证据，保持 fail-closed。
-//! - **无 PII 埋点**：成功记 `authz.decision=allow` + `principal.kind`（[`vocab::PrincipalKind`] 脱敏枚举）；
+//! - **无 PII 埋点**：成功记 `authz.decision=allow` + `principal.kind`（[`rss_request_context::PrincipalKind`] 脱敏枚举）；
 //!   失败记 `authz.decision=deny` + 九个固定 `authz.deny_reason` 标签（见 [`deny_reason`]）+ `AuthnError`
 //!   变体；**绝不**记 token / subject / claims。
 //!
@@ -54,8 +54,8 @@ use axum::middleware::{self, Next};
 use axum::response::Response;
 use httpserve::{Authenticated, AuthenticatedRoutes};
 use primitives::RequiredScheme;
+use rss_request_context::{PrincipalKind, TenantId};
 use tracing::Instrument as _;
-use vocab::{PrincipalKind, TenantId};
 
 /// One listener-fixed token profile and its matching verifier.
 ///
@@ -837,7 +837,7 @@ mod tests {
     use axum::body::Body;
     use axum::http::Request;
     use primitives::RequiredScheme;
-    use vocab::PrincipalKind;
+    use rss_request_context::PrincipalKind;
 
     /// `deny_reason` 闭值映射全臂覆盖（含 `_` 兜底）：五路一一保真（含 `PrincipalInvalid`→`principal_invalid`，
     /// #1275 review F1：验签后良性失败不记 `signature_invalid`）+ 本桥不可达的 `Forbidden`

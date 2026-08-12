@@ -2,7 +2,7 @@
 
 **Created**: 2026-08-08
 **Rebased**: 2026-08-11
-**Status**: Decision accepted; implementation pending #2107/#2108
+**Status**: RSS cutover implemented by #2107; merge pending #2108 first-green receipt
 **Decision owner**: #2102
 **Implementation owners**: #2107 (RSS atomic cutover), #2108 (external first-green)
 

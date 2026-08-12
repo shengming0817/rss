@@ -56,6 +56,7 @@ impl ReleaseSurface {
             };
             let owner = match package.public_api_owner() {
                 PublicApiOwner::StandaloneComponent => "standalone-component",
+                PublicApiOwner::FoundationPublic => "foundation-public",
                 PublicApiOwner::PlatformPublic => "platform-public",
             };
             let stability = match package.api_stability() {

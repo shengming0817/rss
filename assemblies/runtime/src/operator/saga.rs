@@ -106,7 +106,7 @@ impl SagaOperatorCliAction {
 #[derive(Debug)]
 pub(super) struct SagaCliRequest {
     action: SagaOperatorCliAction,
-    operator_tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
     identity: diport::SagaWorkerIdentity,
     instance: consistency::SagaInstanceRef,
     expected_journal_position: Option<u64>,
@@ -145,7 +145,7 @@ pub enum SagaCommandPreparation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct SagaOperatorGrant {
     action: SagaOperatorCliAction,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     identity: diport::SagaWorkerIdentity,
 }
 
@@ -415,7 +415,7 @@ fn parse_saga_operator_grants(raw: &str) -> anyhow::Result<Vec<SagaOperatorGrant
                 "{SAGA_OPERATOR_GRANTS_ENV} entries must be action|tenant|owner|contract"
             );
             let action = SagaOperatorCliAction::parse(parts[0])?;
-            let tenant = vocab::TenantId::parse(parts[1])
+            let tenant = rss_request_context::TenantId::parse(parts[1])
                 .context("Saga operator grant tenant must be a UUID")?;
             let contract = diport::SagaContractId::parse(parts[3])
                 .context("Saga operator grant contract is invalid")?;
@@ -509,7 +509,7 @@ trait SagaCommandRuntime {
     async fn audit(
         &self,
         session: &Self::ControlSession,
-        target_tenant: vocab::TenantId,
+        target_tenant: rss_request_context::TenantId,
         subject: &str,
         action: &'static str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -598,7 +598,7 @@ impl SagaCommandRuntime for ProductionSagaCommandRuntime<'_> {
     async fn audit(
         &self,
         session: &Self::ControlSession,
-        target_tenant: vocab::TenantId,
+        target_tenant: rss_request_context::TenantId,
         subject: &str,
         action: &'static str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -1353,7 +1353,7 @@ mod tests {
         async fn audit(
             &self,
             _session: &Self::ControlSession,
-            target_tenant: vocab::TenantId,
+            target_tenant: rss_request_context::TenantId,
             _subject: &str,
             action: &'static str,
             outcome: MaintenanceAuditOutcome<'_>,
@@ -1499,7 +1499,7 @@ mod tests {
     }
 
     fn compensation_failed_status() -> anyhow::Result<diport::SagaOperatorStatusOutcome> {
-        let tenant = vocab::TenantId::parse(TENANT)?;
+        let tenant = rss_request_context::TenantId::parse(TENANT)?;
         let instance = consistency::SagaInstanceRef::new(
             tenant,
             consistency::SagaId::new(uuid::Uuid::parse_str(SAGA_ID)?),

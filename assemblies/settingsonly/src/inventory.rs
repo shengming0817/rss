@@ -93,14 +93,15 @@ pub mod test_support {
             &self,
             _: &diport::RawCredential,
         ) -> Result<diport::VerifiedClaims, diport::PdpError> {
-            let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000179")
-                .map_err(|_| diport::PdpError::InvalidSignature)?;
+            let tenant =
+                rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000179")
+                    .map_err(|_| diport::PdpError::InvalidSignature)?;
             let kind = match self.0 {
-                JourneyCase::Deny => vocab::PrincipalKind::User,
+                JourneyCase::Deny => rss_request_context::PrincipalKind::User,
                 JourneyCase::Allow
                 | JourneyCase::AuditFail
                 | JourneyCase::ProbeDegraded
-                | JourneyCase::ProbeUnavailable => vocab::PrincipalKind::Admin,
+                | JourneyCase::ProbeUnavailable => rss_request_context::PrincipalKind::Admin,
             };
             diport::VerifiedClaims::federated_access(
                 "settingsonly-inventory-journey",
@@ -384,7 +385,7 @@ mod tests {
     }
 
     fn authenticated_inventory_router(
-        kind: vocab::PrincipalKind,
+        kind: rss_request_context::PrincipalKind,
         audit_fails: bool,
         permission: vocab::RoutePermissionId,
     ) -> anyhow::Result<axum::Router> {
@@ -398,10 +399,10 @@ mod tests {
             primitives::ListenerKind::Admin,
             primitives::AuthScheme::FederatedAccessToken,
         )?;
-        let tenant = if kind == vocab::PrincipalKind::SuperAdmin {
+        let tenant = if kind == rss_request_context::PrincipalKind::SuperAdmin {
             None
         } else {
-            Some(vocab::TenantId::parse(
+            Some(rss_request_context::TenantId::parse(
                 "00000000-0000-4000-8000-000000000001",
             )?)
         };
@@ -433,7 +434,10 @@ mod tests {
             vocab::http::HttpResourceSharing::Global
         );
         assert_eq!(wire::ROUTE.evidence().resource(), Some("runtimeInventory"));
-        for kind in [vocab::PrincipalKind::User, vocab::PrincipalKind::Admin] {
+        for kind in [
+            rss_request_context::PrincipalKind::User,
+            rss_request_context::PrincipalKind::Admin,
+        ] {
             testkit::call(
                 authenticated_inventory_router(
                     kind,
@@ -447,7 +451,7 @@ mod tests {
         }
         testkit::call(
             authenticated_inventory_router(
-                vocab::PrincipalKind::SuperAdmin,
+                rss_request_context::PrincipalKind::SuperAdmin,
                 false,
                 vocab::RoutePermissionId::SettingsConfigPublish,
             )?,
@@ -462,7 +466,7 @@ mod tests {
     async fn generated_global_inventory_audit_failure_remains_fail_closed() -> anyhow::Result<()> {
         testkit::call(
             authenticated_inventory_router(
-                vocab::PrincipalKind::SuperAdmin,
+                rss_request_context::PrincipalKind::SuperAdmin,
                 true,
                 vocab::RoutePermissionId::RuntimeInventoryRead,
             )?,
@@ -533,10 +537,11 @@ mod tests {
             .into_plaintext_router_for_test()
             .layer(::axum::Extension(httpserve::Authenticated::new(
                 httpserve::NonRssTestScheme::FederatedAccessToken,
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "runtime-inventory-test",
                 Some(
-                    vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant"),
+                    rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
+                        .expect("tenant"),
                 ),
             )));
         (router, proof)

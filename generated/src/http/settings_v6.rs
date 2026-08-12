@@ -148,12 +148,15 @@ pub struct SettingsConfigRollbackResponse {
 pub const CONTRACT_ID: &str = "settings.config-rollback";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "settings",
-    "settings.config-rollback",
-    "v6",
-    "sha256:a2eda735265214dd862362ba9af6abd2fef7cda483e87ebc0ed8e0995fdeb6f3",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "settings.config-rollback",
+        "v6",
+        "sha256:a2eda735265214dd862362ba9af6abd2fef7cda483e87ebc0ed8e0995fdeb6f3",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("settings", DESCRIPTOR, "v6");
 
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/settings/configs/{key}/rollbacks";

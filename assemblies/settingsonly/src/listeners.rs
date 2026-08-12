@@ -628,7 +628,7 @@ mod tests {
             contract_id,
             permission,
             tenant_id: None,
-            principal_kind: vocab::PrincipalKind::User,
+            principal_kind: rss_request_context::PrincipalKind::User,
             principal_id: "operator".to_owned(),
             resource: None,
             federated_permissions: permissions,
@@ -658,7 +658,7 @@ mod tests {
             ),
         ] {
             let mut authorized = request(contract, permission, grant(permission));
-            authorized.tenant_id = Some(vocab::TenantId::parse(
+            authorized.tenant_id = Some(rss_request_context::TenantId::parse(
                 "00000000-0000-4000-8000-000000001836",
             )?);
             assert_eq!(

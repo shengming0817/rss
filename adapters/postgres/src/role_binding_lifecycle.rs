@@ -7,8 +7,9 @@ use diport::{Clock, OutboxEmitError, OutboxEnvelopeParts};
 use eventexec::event::ReviewedEvent;
 use identity::ports::{
     ROLE_ASSIGNED_CONTRACT, ROLE_REVOKED_CONTRACT, RoleBinding, RoleBindingLifecycle, RoleId,
-    RolesAssignProducerReceipt, RolesRevokeProducerReceipt, TenantId, TenantRepoScope,
+    RolesAssignProducerReceipt, RolesRevokeProducerReceipt, TenantRepoScope,
 };
+use rss_request_context::TenantId;
 
 #[cfg(all(test, feature = "integration"))]
 use crate::PgStore;

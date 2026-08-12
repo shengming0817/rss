@@ -23,9 +23,10 @@
 //!
 //! ref: adapters/postgres/src/config_repo.rs（版本历史 + CAS + tombstone + tenant_scoped 范式）
 
+use rss_request_context::TenantId;
 use settings::ports::{
     SecretEntry, SecretInternalPublishCommand, SecretKey, SecretPublishCommand, SecretRef,
-    SecretRepo, SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId, TenantId,
+    SecretRepo, SecretRepoError, SecretRepublishCommand, SecretUnitOfWork, StoreId,
     TenantRepoScope,
 };
 #[cfg(all(test, feature = "integration"))]

@@ -28,9 +28,9 @@ use diport::OutboxEmitError;
 use futures::future::BoxFuture;
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use httpserve::ProducerAuthorization;
+use rss_request_context::TenantId;
 use sqlx::{Acquire, PgConnection, PgPool, Postgres, Transaction};
 use tokio::time::Instant;
-use vocab::TenantId;
 
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
 use crate::outbox::{OutboxAppendError, OutboxEnvelope, append_outbox_with_projection};
@@ -926,7 +926,7 @@ async fn set_local_deadline_timeouts(
 /// （`Option<PgRow>` / 标量 / tuple），hydrate（域类型转换 / 域错误映射）在 tx 外执行，保持域错误
 /// 语义不变且不依赖 sqlx。失败时 rollback（不覆盖原错误）。
 ///
-/// `tenant`：类型化租户标识（`vocab::TenantId`）；funnel 内部 stringify 成 canonical UUID 后
+/// `tenant`：类型化租户标识（`rss_request_context::TenantId`）；funnel 内部 stringify 成 canonical UUID 后
 /// 经 `set_config` 参数化绑定（防注入）。非 `TenantId` 的裸字符串无法进入 funnel（Hard 收口，
 /// `POSTGRES-TX-TYPE-01` / sealed lane）。
 ///
@@ -1116,7 +1116,7 @@ async fn begin_tenant_repeatable_read<L: ReadLane>(
 /// producer 写（serving-write `TenantDb::producer_tx`）与 plain tenant-scoped 写
 /// 共享，保证所有 postgres 写路径经统一 SET LOCAL 收口（未来 RLS policy 的 current_setting 锚点，不留绕过面）。
 ///
-/// 这是 postgres 生产路径的 canonical private typed funnel：入参类型化为 `vocab::TenantId`
+/// 这是 postgres 生产路径的 canonical private typed funnel：入参类型化为 `rss_request_context::TenantId`
 /// （Hard：裸 `&str` 无法进入）。Hard 只证明 typed scope / private mint / exact lane
 /// （`POSTGRES-TX-TYPE-01` / sealed lane）；GUC literal 集中出现于此 helper 是实现事实，**不是**
 /// compile-time uniqueness enforcement，也**不**恢复已删除的 `setlocal-funnel` Medium 扫描。
@@ -1128,7 +1128,7 @@ pub(crate) async fn set_local_tenant(
     tenant: TenantId,
 ) -> Result<(), sqlx::Error> {
     // SET LOCAL 不接 bind ⇒ 用 set_config(is_local=true) 参数化绑定；canonical UUID 字符串。
-    let tenant_uuid = tenant.as_uuid().to_string();
+    let tenant_uuid = tenant.to_string();
     sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
         .bind(tenant_uuid)
         .execute(conn)
@@ -2150,8 +2150,8 @@ mod transaction_boundary_tests {
         ));
     }
 
-    fn tenant() -> Result<vocab::TenantId, String> {
-        vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")
+    fn tenant() -> Result<rss_request_context::TenantId, String> {
+        rss_request_context::TenantId::parse("11111111-1111-1111-1111-111111111111")
             .map_err(|error| format!("invalid tenant fixture: {error:?}"))
     }
 
@@ -2159,10 +2159,10 @@ mod transaction_boundary_tests {
     fn tenant_db_tx_safe_surface_is_available() {
         fn read_db(_: &TenantDb<ServingReadLane>) {}
         fn write_db(_: &TenantDb<ServingWriteLane>) {}
-        fn read_tx(tx: &TenantTx<'_, ServingReadLane>) -> vocab::TenantId {
+        fn read_tx(tx: &TenantTx<'_, ServingReadLane>) -> rss_request_context::TenantId {
             tx.tenant()
         }
-        fn write_tx(tx: &TenantTx<'_, ServingWriteLane>) -> vocab::TenantId {
+        fn write_tx(tx: &TenantTx<'_, ServingWriteLane>) -> rss_request_context::TenantId {
             tx.tenant()
         }
 
@@ -2704,7 +2704,7 @@ mod retry_settlement_tests {
         let records = Arc::clone(&capture.records);
         let dispatch = tracing::Dispatch::new(capture);
         let _dispatch_guard = tracing::dispatcher::set_default(&dispatch);
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?;
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")?;
 
         let _commit_unknown = super::finish_local_tx_commit_result(
             Err(sqlx::Error::PoolTimedOut),

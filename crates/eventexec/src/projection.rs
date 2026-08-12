@@ -108,13 +108,13 @@ impl ProjectionSystemIdentity {
 /// Tenant-bound execution authority. Source metadata cannot construct or replace this value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionExecutionContext {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     identity: ProjectionSystemIdentity,
     target_identity_fingerprint: Option<[u8; 32]>,
 }
 
 impl ProjectionExecutionContext {
-    pub(crate) const fn background_worker(tenant: vocab::TenantId) -> Self {
+    pub(crate) const fn background_worker(tenant: rss_request_context::TenantId) -> Self {
         Self {
             tenant,
             identity: ProjectionSystemIdentity::background_worker(),
@@ -122,7 +122,7 @@ impl ProjectionExecutionContext {
         }
     }
 
-    pub(crate) const fn operator_replay(tenant: vocab::TenantId) -> Self {
+    pub(crate) const fn operator_replay(tenant: rss_request_context::TenantId) -> Self {
         Self {
             tenant,
             identity: ProjectionSystemIdentity::operator_replay(),
@@ -132,7 +132,7 @@ impl ProjectionExecutionContext {
 
     #[cfg(feature = "test-support")]
     const fn conformance_operator_replay(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_identity_fingerprint: [u8; 32],
     ) -> Self {
         Self {
@@ -142,7 +142,7 @@ impl ProjectionExecutionContext {
         }
     }
 
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -339,14 +339,14 @@ impl<'de> serde::Deserialize<'de> for ProjectionVersion {
 /// Tenant + projection + version selector used by replay/status/swap commands.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionSelector {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     projection: ProjectionId,
     version: ProjectionVersion,
 }
 
 impl ProjectionSelector {
     pub fn new(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         projection: ProjectionId,
         version: ProjectionVersion,
     ) -> Self {
@@ -357,7 +357,7 @@ impl ProjectionSelector {
         }
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -490,7 +490,7 @@ impl ProjectionTargetStoreError {
 /// 原子 receipt 的稳定去重键。字段私有，只能由 conforming funnel 创建。
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ProjectionDedupeKey {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     projection: ProjectionId,
     generation: ProjectionVersion,
     event_id: String,
@@ -498,7 +498,7 @@ pub struct ProjectionDedupeKey {
 
 impl ProjectionDedupeKey {
     /// target tenant。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -1087,7 +1087,7 @@ impl ProjectionTargetRegistry {
     pub(crate) fn capture_source_scope_fixture(
         view: crate::ProjectionCaptureView<'_>,
         projection: &ProjectionId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Result<crate::ProjectionSourceScope, ProjectionRegistryError> {
         let generation =
             view.generation()
@@ -1203,7 +1203,7 @@ impl ProjectionTargetRegistry {
     pub fn source_scope(
         &self,
         projection: &ProjectionId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Result<crate::ProjectionSourceScope, ProjectionRegistryError> {
         let planned = self.planned.get(projection).ok_or_else(|| {
             ProjectionRegistryError::UnknownProjection {
@@ -1223,7 +1223,7 @@ impl ProjectionTargetRegistry {
     pub fn operator_execution_context(
         &self,
         projection: &ProjectionId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Result<ProjectionExecutionContext, ProjectionRegistryError> {
         let planned = self.planned.get(projection).ok_or_else(|| {
             ProjectionRegistryError::UnknownProjection {
@@ -2256,7 +2256,7 @@ mod tests {
     // reason: test fixture literals are canonical; panic indicates fixture drift.
     fn projection_metadata() -> ProjectionEventMetadata {
         ProjectionEventMetadata::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                 .expect("canonical test tenant"),
             "projection-test-event",
             "test",
@@ -2278,7 +2278,7 @@ mod tests {
         schema_hash: &str,
     ) -> ProjectionEventMetadata {
         ProjectionEventMetadata::new(
-            vocab::TenantId::parse(tenant).expect("canonical test tenant"),
+            rss_request_context::TenantId::parse(tenant).expect("canonical test tenant"),
             format!("projection-test-event-{contract_id}"),
             domain,
             contract_id,
@@ -2552,7 +2552,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn projection_selector(version: &str) -> ProjectionSelector {
         ProjectionSelector::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                 .expect("canonical test tenant"),
             ProjectionId::parse("audit.session-projection").expect("valid projection"),
             ProjectionVersion::parse(version).expect("valid version"),
@@ -2635,7 +2635,7 @@ mod tests {
         let target = conforming_target(Arc::clone(&store));
         let metadata = |tier: &str, partition: &str, cause: &str| {
             ProjectionEventMetadata::new(
-                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                     .expect("canonical tenant"),
                 "same-event",
                 "identity",
@@ -2681,7 +2681,7 @@ mod tests {
             EventTopic::parse("identity.session.created").expect("canonical topic"),
             b"same-payload".to_vec(),
             ProjectionEventMetadata::new(
-                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                     .expect("canonical tenant"),
                 "same-event",
                 "identity",
@@ -4429,7 +4429,7 @@ mod tests {
             EventTopic::parse("inventory.projected").expect("valid topic"),
             b"payload".to_vec(),
             ProjectionEventMetadata::new(
-                vocab::TenantId::parse(tenant_id).expect("canonical tenant"),
+                rss_request_context::TenantId::parse(tenant_id).expect("canonical tenant"),
                 "event-reserved",
                 "inventory",
                 "contract-projection",

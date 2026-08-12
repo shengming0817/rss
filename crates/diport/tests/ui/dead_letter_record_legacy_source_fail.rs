@@ -2,7 +2,7 @@ use diport::{DeadLetterRecord, DeadLetterSource, DeadLetterSummary, EnvelopeMeta
 
 fn main() {
     let tenant =
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
     let _ = DeadLetterRecord::new(
         tenant,
         "message-1",

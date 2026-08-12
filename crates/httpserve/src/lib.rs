@@ -28,7 +28,7 @@ pub use auth::{
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use auth::{NonRssTestScheme, RssAccessRejectMatrixKind};
-pub use budget::ServerRequestBudget;
+pub use budget::{RequestControl, ServerRequestBudget};
 pub use middleware::VerifiedRequestId;
 pub use middleware::{rate_limit, with_client_rate_limit};
 pub use protect::{BodyLimit, EdgeHardening, SecurityHeaders};

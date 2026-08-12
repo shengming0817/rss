@@ -400,6 +400,7 @@ dependencies = [
  "observ",
  "primitives",
  "rss-diag-context",
+ "rss-request-context",
  "rstest",
  "runctx",
  "secure",
@@ -440,6 +441,7 @@ dependencies = [
  "diport",
  "ids",
  "primitives",
+ "rss-request-context",
  "rstest",
  "runctx",
  "secure",
@@ -1435,6 +1437,7 @@ name = "consistency"
 version = "0.0.0"
 dependencies = [
  "ids",
+ "rss-request-context",
  "runctx",
  "secure",
  "serde",
@@ -1476,6 +1479,7 @@ dependencies = [
  "ids",
  "observ",
  "primitives",
+ "rss-contract",
  "runctx",
  "secure",
  "support",
@@ -1855,6 +1859,7 @@ dependencies = [
  "diport",
  "ids",
  "primitives",
+ "rss-request-context",
  "runctx",
  "secure",
  "support",
@@ -1905,6 +1910,7 @@ dependencies = [
  "ids",
  "mockall",
  "primitives",
+ "rss-request-context",
  "sagaauthmint",
  "secure",
  "sha2 0.10.9",
@@ -1940,6 +1946,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "primitives",
+ "rss-request-context",
  "runctx",
  "secure",
  "serde",
@@ -2120,6 +2127,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "primitives",
+ "rss-request-context",
  "rss-trace-context",
  "secure",
  "serde",
@@ -2155,6 +2163,7 @@ dependencies = [
  "metrics",
  "postgres",
  "primitives",
+ "rss-request-context",
  "settings",
  "testkit",
  "thiserror",
@@ -2449,6 +2458,8 @@ dependencies = [
  "jsonschema",
  "regress",
  "requestidmint",
+ "rss-contract",
+ "rss-request-context",
  "secure",
  "serde",
  "serde_json",
@@ -2954,11 +2965,13 @@ dependencies = [
  "primitives",
  "requestidmint",
  "rss-diag-context",
+ "rss-request-context",
  "runctx",
  "serde",
  "serde_json",
  "thiserror",
  "tokio",
+ "tokio-util",
  "tower",
  "tower-http",
  "tracing",
@@ -3238,6 +3251,7 @@ dependencies = [
  "observ",
  "primitives",
  "regex",
+ "rss-request-context",
  "rstest",
  "runctx",
  "secure",
@@ -3274,6 +3288,7 @@ dependencies = [
  "mqtt",
  "postgres",
  "primitives",
+ "rss-request-context",
  "secure",
  "sha2 0.10.9",
  "static_assertions",
@@ -3319,6 +3334,7 @@ dependencies = [
  "ratelimit",
  "redis-adapter",
  "reqwest",
+ "rss-request-context",
  "runctx",
  "runtimeexec",
  "schemars 0.8.22",
@@ -3589,6 +3605,7 @@ dependencies = [
  "generated",
  "postgres",
  "redis-adapter",
+ "rss-request-context",
  "secure",
  "serde_json",
  "testkit",
@@ -3817,6 +3834,7 @@ dependencies = [
  "generated",
  "identity",
  "primitives",
+ "rss-request-context",
  "secure",
  "tokio",
  "tokio-util",
@@ -3947,6 +3965,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "rcgen",
  "ring",
+ "rss-request-context",
  "rumqttc",
  "rustls",
  "rustls-pki-types",
@@ -4164,7 +4183,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "p256",
  "primitives",
- "rss-platform",
+ "rss-request-context",
  "rstest",
  "serde",
  "serde_json",
@@ -4571,6 +4590,7 @@ dependencies = [
  "postgres-migration-inventory",
  "primitives",
  "rss-diag-context",
+ "rss-request-context",
  "rss-trace-context",
  "runctx",
  "secure",
@@ -5052,6 +5072,7 @@ dependencies = [
  "consistency",
  "deadpool-redis",
  "diport",
+ "rss-request-context",
  "rstest",
  "secure",
  "sha2 0.10.9",
@@ -5155,6 +5176,9 @@ checksum = "ba39f3699c378cd8970968dcbff9c43159ea4cfbd88d43c00b22f2ef10a435d2"
 [[package]]
 name = "requestidmint"
 version = "0.0.0"
+dependencies = [
+ "rss-request-context",
+]
 
 [[package]]
 name = "reqwest"
@@ -5266,6 +5290,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "rss-contract"
+version = "0.1.0"
+
+[[package]]
 name = "rss-diag-context"
 version = "0.1.0"
 dependencies = [
@@ -5275,13 +5303,18 @@ dependencies = [
 
 [[package]]
 name = "rss-platform"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
- "base64",
- "p256",
- "serde",
- "serde_json",
- "trybuild",
+ "rss-contract",
+ "rss-request-context",
+ "tokio",
+]
+
+[[package]]
+name = "rss-request-context"
+version = "0.1.0"
+dependencies = [
+ "uuid",
 ]
 
 [[package]]
@@ -5351,6 +5384,7 @@ dependencies = [
 name = "runctx"
 version = "0.0.0"
 dependencies = [
+ "rss-request-context",
  "secure",
  "thiserror",
  "tokio",
@@ -5407,6 +5441,9 @@ dependencies = [
  "rcgen",
  "redis-adapter",
  "reqwest",
+ "rss-contract",
+ "rss-platform",
+ "rss-request-context",
  "runctx",
  "runtimeexec",
  "runtimeinventorymint",
@@ -5450,6 +5487,7 @@ dependencies = [
  "diport",
  "eventexec",
  "primitives",
+ "rss-platform",
  "runtimeinventorymint",
  "secure",
  "serde",
@@ -5629,6 +5667,7 @@ dependencies = [
  "diport",
  "eventexec",
  "futures",
+ "rss-request-context",
  "secure",
  "testkit",
  "thiserror",
@@ -5770,6 +5809,7 @@ dependencies = [
  "argon2",
  "base64",
  "hmac 0.12.1",
+ "rss-request-context",
  "rstest",
  "secrecy",
  "securederive",
@@ -6036,6 +6076,7 @@ dependencies = [
  "mockall",
  "observ",
  "primitives",
+ "rss-request-context",
  "rstest",
  "secure",
  "serde_json",
@@ -6059,6 +6100,7 @@ dependencies = [
  "postgres",
  "primitives",
  "reqwest",
+ "rss-request-context",
  "secure",
  "settings",
  "tokio",
@@ -6100,6 +6142,7 @@ dependencies = [
  "rcgen",
  "redis-adapter",
  "reqwest",
+ "rss-request-context",
  "runctx",
  "runtimeexec",
  "rustls",
@@ -6273,6 +6316,7 @@ dependencies = [
  "diport",
  "ids",
  "ring",
+ "rss-request-context",
  "testkit",
  "thiserror",
  "tokio",
@@ -6820,6 +6864,7 @@ dependencies = [
  "axum",
  "futures",
  "rcgen",
+ "rss-request-context",
  "serde",
  "serde_json",
  "sqlx",
@@ -7510,6 +7555,7 @@ dependencies = [
  "base64",
  "diport",
  "reqwest",
+ "rss-request-context",
  "secure",
  "serde",
  "serde_json",
@@ -7539,11 +7585,12 @@ name = "vocab"
 version = "0.0.0"
 dependencies = [
  "base64",
+ "rss-contract",
+ "rss-request-context",
  "serde",
  "serde_json",
  "thiserror",
  "trybuild",
- "uuid",
 ]
 
 [[package]]
@@ -8085,6 +8132,8 @@ dependencies = [
  "proc-macro2",
  "public-api",
  "quote",
+ "rss-contract",
+ "rss-request-context",
  "rstest",
  "rustdoc-types",
  "rustix",

@@ -21,7 +21,7 @@ struct NoopStore;
 impl ReconcileScheduleStore for NoopStore {
     async fn claim_due_targets(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         _holder_id: &str,
         _limit: ReconcileMaxInFlight,
@@ -43,7 +43,7 @@ impl ReconcileScheduleStore for NoopStore {
 
     async fn claim_targeted(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         _holder_id: &str,
         wake: &ReconcileWake,
@@ -115,7 +115,7 @@ impl ReconcileScheduleStore for NoopStore {
 
     async fn pause_target(
         &self,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         _target_id: &str,
     ) -> Result<(), ReconcileScheduleError> {
         Ok(())
@@ -123,7 +123,7 @@ impl ReconcileScheduleStore for NoopStore {
 
     async fn resume_target(
         &self,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         _target_id: &str,
     ) -> Result<(), ReconcileScheduleError> {
         Ok(())
@@ -165,7 +165,7 @@ impl DurableReconciler<NoopStore> for NoopDurableReconciler {
 }
 
 fn main() {
-    let tenant = vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant");
+    let tenant = rss_request_context::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant");
     let trigger = Trigger::interval(Duration::from_secs(30)).expect("non-zero trigger");
     let worker = ReconcileSchedulerBuilder::new(
         NoopStore,

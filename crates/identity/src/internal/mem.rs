@@ -15,7 +15,7 @@ use crate::domain::{
 use crate::ports::{AccountSecurityReadRepo, CredentialRepo, TenantRepoScope};
 #[cfg(test)]
 use authn::{AuthGrant, AuthGrantId, AuthGrantStatus, GrantSecurityEventKind};
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 // 认证授权根 in-mem 替身在 test / seed-login 构建启用；单一 Mutex 是原子 login/refresh-security 的事务边界。
 #[cfg(test)]
@@ -1525,7 +1525,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tenant,
                 ids::UserId::parse(USER_ALICE).expect("canonical user"),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("user-backed actor")
         };
@@ -1724,7 +1724,7 @@ mod tests {
                 occurred_at: 1,
                 session_id: uuid::Uuid::from_u128(1),
                 subject: USER_ALICE.parse().expect("subject uuid"),
-                tenant_id: tenant.as_uuid(),
+                tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
             };
         generated::event::identity_v1::session_created::emit(
             &eventexec::event::GeneratedEventEncoder,
@@ -1732,10 +1732,10 @@ mod tests {
             tenant,
             EnvelopeSubjectId::from_opaque("subject-1").expect("subject"),
             OutboxActor::scoped(
-                vocab::PrincipalKind::User,
+                rss_request_context::PrincipalKind::User,
                 OpaqueActorId::from_opaque("actor-1").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::SelfOnly,
+                rss_request_context::RowScope::SelfOnly,
             ),
             IdemKey::parse(event_id).expect("idem key parses"),
         )
@@ -1763,10 +1763,10 @@ mod tests {
             tenant,
             EnvelopeSubjectId::from_opaque("subject-1").expect("subject"),
             OutboxActor::scoped(
-                vocab::PrincipalKind::User,
+                rss_request_context::PrincipalKind::User,
                 OpaqueActorId::from_opaque("actor-1").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::SelfOnly,
+                rss_request_context::RowScope::SelfOnly,
             ),
             IdemKey::parse("evt-wrong-fact").expect("idem key parses"),
         )
@@ -1794,10 +1794,10 @@ mod tests {
             tenant,
             EnvelopeSubjectId::from_opaque("policy-tombstone").expect("subject"),
             OutboxActor::scoped(
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 OpaqueActorId::from_opaque("actor-1").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::Tenant,
+                rss_request_context::RowScope::Tenant,
             ),
             IdemKey::parse("evt-policy").expect("idem key parses"),
         )
@@ -1820,10 +1820,10 @@ mod tests {
             tenant,
             EnvelopeSubjectId::from_opaque("actor-1").expect("subject"),
             OutboxActor::scoped(
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 OpaqueActorId::from_opaque("actor-1").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::Tenant,
+                rss_request_context::RowScope::Tenant,
             ),
             IdemKey::parse("evt-role-assigned").expect("idem key"),
         )
@@ -1846,10 +1846,10 @@ mod tests {
             tenant,
             EnvelopeSubjectId::from_opaque("actor-1").expect("subject"),
             OutboxActor::scoped(
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 OpaqueActorId::from_opaque("actor-1").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::Tenant,
+                rss_request_context::RowScope::Tenant,
             ),
             IdemKey::parse("evt-role-revoked").expect("idem key"),
         )

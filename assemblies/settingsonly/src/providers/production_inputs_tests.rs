@@ -499,7 +499,7 @@ async fn settingsonly_vault_production_inputs_close_readiness_and_aad_contract()
         StatusCode::FORBIDDEN,
         "workload token must not read outside its configured prefix"
     );
-    let expected_tenant = vocab::TenantId::parse(binding.tenant_id)?;
+    let expected_tenant = rss_request_context::TenantId::parse(binding.tenant_id)?;
     let expected_store = binding.store_id.to_owned();
     let expected_key = view.settings_key_name.to_owned();
     let expected_readiness = view.readiness_interval;

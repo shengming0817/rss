@@ -390,7 +390,7 @@ mod listener_plan_tests {
                     .contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: None,
-                principal_kind: vocab::PrincipalKind::Service,
+                principal_kind: rss_request_context::PrincipalKind::Service,
                 principal_id: "remote-identity-security-root-test".to_owned(),
                 federated_permissions: None,
                 resource: None,

@@ -6,7 +6,7 @@ fn main() {
         dlqauthmint::DlqOperatorMint::capability(),
         vocab::ServiceCallerDomain::MaintenanceOperator,
         "operator".to_owned(),
-        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
+        rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap(),
         diport::DlqOperatorStartAuditId::parse("ui-audit").unwrap(),
     );
     let _reconcile = eventexec::OperatorReconcileCapability::issue_for_authorized_operator();

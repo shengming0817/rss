@@ -3,7 +3,7 @@ use diport::ServiceTokenProfile;
 
 fn arbitrary_service_subject_cannot_be_minted<S>(
     issuer: &JwtIssuer<ServiceTokenProfile, S>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) where
     S: diport::Signer + Send + Sync + 'static,
 {

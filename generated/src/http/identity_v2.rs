@@ -798,12 +798,15 @@ pub mod device_certificate_policy_put {
     pub const CONTRACT_ID: &str = "identity.device-certificate-policy-put";
 
     /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.device-certificate-policy-put",
-        "v2",
-        "sha256:7c298c8b77aae9704e743ea393cb63543f7063b75bd16ef0eaaf3384e52c266f",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.device-certificate-policy-put",
+            "v2",
+            "sha256:7c298c8b77aae9704e743ea393cb63543f7063b75bd16ef0eaaf3384e52c266f",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v2");
 
     impl super::super::HttpResponseBinding for IdentityDeviceCertificatePolicyPutResponse {
         const CONTRACT: ::vocab::ContractBinding = CONTRACT;
@@ -1675,10 +1678,13 @@ pub mod device_certificate_status_get {
     pub const CONTRACT_ID: &str = "identity.device-certificate-status-get";
 
     /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.device-certificate-status-get",
-        "v2",
-        "sha256:e554542947aecbdc688c8969e32933bf4026fe6194b48d98a3fd83e5450d5ef8",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.device-certificate-status-get",
+            "v2",
+            "sha256:e554542947aecbdc688c8969e32933bf4026fe6194b48d98a3fd83e5450d5ef8",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v2");
 }

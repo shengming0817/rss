@@ -164,8 +164,9 @@ mod tests {
     fn domain_outcome() -> identity::ports::device_certificate::DeviceIngressDomainOutcome {
         struct Delivery;
         impl identity::ports::device_certificate::DeviceIngressDelivery for Delivery {
-            fn tenant(&self) -> vocab::TenantId {
-                vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant")
+            fn tenant(&self) -> rss_request_context::TenantId {
+                rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
+                    .expect("tenant")
             }
             fn device(&self) -> ids::DeviceId {
                 ids::DeviceId::parse("00000000-0000-4000-8000-000000000002").expect("device")

@@ -13,6 +13,7 @@ default = []
 test-support = ["tokio/sync"]
 
 [dependencies]
+rss-platform.workspace = true
 anyhow = { workspace = true }
 assembly-schema = { path = "../assembly-schema" }
 authn = { path = "../authn" }

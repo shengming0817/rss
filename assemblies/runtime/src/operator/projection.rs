@@ -45,7 +45,7 @@ pub(super) struct ProjectionCliArgs {
     pub(super) selector: ProjectionSelector,
     pub(super) command: ProjectionCliCommand,
     pub(super) operator_service_token: OperatorServiceToken,
-    pub(super) operator_tenant: vocab::TenantId,
+    pub(super) operator_tenant: rss_request_context::TenantId,
 }
 
 /// Operator-owned audit correlation for one projection maintenance command.
@@ -430,7 +430,7 @@ pub(super) fn projection_command_resource_id(parsed: &ProjectionCliArgs) -> Stri
 
 pub(super) async fn verified_service_maintenance_operator(
     service_token: &str,
-    operator_tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
     pdp: &diport::DynPdp<'_>,
     maintenance_context: &str,
 ) -> anyhow::Result<authn::VerifiedMaintenanceServiceOperator> {
@@ -459,7 +459,7 @@ pub(super) fn service_maintenance_operator_audit_subject(
 
 pub(super) async fn verified_projection_maintenance_operator_subject(
     service_token: &str,
-    operator_tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
     pdp: &diport::DynPdp<'_>,
 ) -> anyhow::Result<authn::Principal> {
     let (token, principal) = authn::verify_projection_operator_token(service_token, pdp)
@@ -470,7 +470,7 @@ pub(super) async fn verified_projection_maintenance_operator_subject(
         "projection maintenance operator token tenant does not match --operator-tenant"
     );
     anyhow::ensure!(
-        principal.kind() == vocab::PrincipalKind::Service,
+        principal.kind() == rss_request_context::PrincipalKind::Service,
         "projection maintenance operator must be a service principal"
     );
     anyhow::ensure!(
@@ -525,7 +525,7 @@ pub(super) fn parse_projection_maintenance_grants(
             unreachable!("len checked");
         };
         let action = ProjectionMaintenanceAction::parse(action)?.authorized_action();
-        let tenant = vocab::TenantId::parse(tenant).with_context(|| {
+        let tenant = rss_request_context::TenantId::parse(tenant).with_context(|| {
             format!("{PROJECTION_MAINTENANCE_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
         })?;
         let projection = ProjectionId::parse(projection).with_context(|| {

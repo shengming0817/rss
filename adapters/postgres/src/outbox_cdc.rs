@@ -89,7 +89,7 @@ impl ReviewedEventWriter for PgOutboxCdcEmitter {
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct OutboxLogRecord {
     pub(crate) event_id: String,
-    pub(crate) tenant_id: vocab::TenantId,
+    pub(crate) tenant_id: rss_request_context::TenantId,
     pub(crate) aggregate_type: String,
     pub(crate) aggregate_id: String,
     pub(crate) topic: String,
@@ -174,8 +174,8 @@ mod tests {
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[allow(clippy::unwrap_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).unwrap()
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).unwrap()
     }
 
     fn contract() -> vocab::ContractBinding {

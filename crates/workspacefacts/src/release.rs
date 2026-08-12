@@ -11,6 +11,7 @@ const RELEASE_SELECTION_SUBJECT: &str = "workspace.metadata.release-surface";
 #[serde(rename_all = "kebab-case")]
 pub enum PublicApiOwner {
     StandaloneComponent,
+    FoundationPublic,
     PlatformPublic,
 }
 

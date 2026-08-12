@@ -65,7 +65,7 @@ impl<'a> ConfigProducerRequest<'a> {
 #[cfg(feature = "domain-settings")]
 pub(crate) struct ConfigReadTx<'tx> {
     conn: &'tx mut PgConnection,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 #[cfg(feature = "domain-settings")]
@@ -134,7 +134,7 @@ pub(crate) struct ConfigWriteTx<'tx> {
     #[allow(dead_code)]
     conn: &'tx mut PgConnection,
     #[allow(dead_code)]
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 #[cfg(not(feature = "domain-settings"))]
@@ -201,7 +201,7 @@ impl ConfigWriteTx<'_> {
 #[cfg(feature = "domain-settings")]
 async fn insert_tombstone(
     conn: &mut PgConnection,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     tombstone: &ConfigTombstone,
     encoded: &EncodedConfigValue,
 ) -> Result<sqlx::postgres::PgQueryResult, sqlx::Error> {
@@ -236,8 +236,8 @@ async fn insert_tombstone(
 }
 
 #[cfg(feature = "domain-settings")]
-fn tenant_param(tenant: vocab::TenantId) -> String {
-    tenant.as_uuid().to_string()
+fn tenant_param(tenant: rss_request_context::TenantId) -> String {
+    tenant.to_string()
 }
 
 #[cfg(feature = "domain-settings")]
@@ -336,7 +336,7 @@ const AUDIT_TABLE: &str = "audit_entries";
 #[cfg(feature = "domain-audit")]
 pub(crate) struct AuditWriteTx<'tx> {
     conn: &'tx mut PgConnection,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 #[cfg(feature = "domain-audit")]
@@ -443,7 +443,7 @@ impl AuditWriteTx<'_> {
 #[cfg(feature = "domain-audit")]
 pub(crate) struct AuditReadTx<'tx> {
     conn: &'tx mut PgConnection,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 #[cfg(feature = "domain-audit")]
@@ -651,13 +651,13 @@ audit_read_runner!(ServingReadLane, audit_read);
 audit_read_runner!(AuditAdminReadLane, audit_admin_read);
 
 #[cfg(feature = "domain-audit")]
-fn audit_tenant_param(tenant: vocab::TenantId) -> String {
-    tenant.as_uuid().to_string()
+fn audit_tenant_param(tenant: rss_request_context::TenantId) -> String {
+    tenant.to_string()
 }
 
 #[cfg(feature = "domain-audit")]
-pub(crate) fn advisory_lock_key(tenant: vocab::TenantId) -> i64 {
-    let bytes = *tenant.as_uuid().as_bytes();
+pub(crate) fn advisory_lock_key(tenant: rss_request_context::TenantId) -> i64 {
+    let bytes = *&tenant.octets();
     let high = i64::from_be_bytes([
         bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
     ]);
@@ -683,12 +683,14 @@ fn invalid_audit_data(message: &'static str) -> AuditError {
 #[cfg(feature = "domain-audit")]
 fn hydrate_audit_row(
     row: &sqlx::postgres::PgRow,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Result<AuditEntry, AuditError> {
     let row_tenant = row
         .try_get::<String, _>("tenant_id")
         .map_err(audit_storage)
-        .and_then(|value| vocab::TenantId::parse(&value).map_err(AuditError::storage))?;
+        .and_then(|value| {
+            rss_request_context::TenantId::parse(&value).map_err(AuditError::storage)
+        })?;
     if row_tenant != tenant {
         return Err(AuditError::ChainBroken);
     }
@@ -786,7 +788,7 @@ pub(crate) struct EncodedAuditEvent {
 #[cfg(feature = "domain-audit")]
 pub(crate) struct AuthAuditWriteTx<'tx> {
     conn: &'tx mut PgConnection,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 #[cfg(feature = "domain-audit")]
@@ -795,7 +797,7 @@ impl AuthAuditWriteTx<'_> {
         &mut self,
         event: EncodedAuditEvent,
     ) -> Result<(), sqlx::Error> {
-        let tenant = self.tenant.as_uuid().to_string();
+        let tenant = self.tenant.to_string();
         if event.tenant_context.as_deref() != Some(tenant.as_str()) {
             return Err(sqlx::Error::Protocol(
                 "auth audit event tenant does not match transaction tenant".to_string(),

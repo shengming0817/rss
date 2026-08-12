@@ -48,7 +48,7 @@ enum DeviceLatentInspectionOutput {
 #[derive(Debug)]
 pub(super) struct DeviceLatentInspectionCommand {
     operator_service_token: OperatorServiceToken,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device_id: ids::DeviceId,
     output: DeviceLatentInspectionOutput,
 }
@@ -115,7 +115,7 @@ The operator service token is read from stdin after argv validation \
 
         /// Tenant that minted the operator service token and scopes the inspection (UUID).
         #[arg(long, value_parser = parse_tenant_cli)]
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
 
         /// Target device id (lowercase hyphenated non-nil UUID).
         #[arg(long, value_parser = parse_device_id_cli)]
@@ -183,7 +183,7 @@ pub fn prepare_device_latent_command(
 }
 
 struct ExactDeviceCertificateStatusAuthorizer {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device_id: String,
 }
 
@@ -196,7 +196,7 @@ impl httpserve::RouteAuthorizer for ExactDeviceCertificateStatusAuthorizer {
             let exact = request.contract_id == STATUS_CONTRACT_ID
                 && request.permission == STATUS_PERMISSION
                 && request.tenant_id == Some(self.tenant)
-                && request.principal_kind == vocab::PrincipalKind::Service
+                && request.principal_kind == rss_request_context::PrincipalKind::Service
                 && request.principal_id == vocab::ServiceCallerDomain::MaintenanceOperator.as_str()
                 && request.federated_permissions.is_none()
                 && request
@@ -217,7 +217,7 @@ pub(super) async fn authorize_device_certificate_status_read(
     operator: &authn::VerifiedMaintenanceServiceOperator,
 ) -> anyhow::Result<AuthorizedDeviceCertificateStatusRead> {
     anyhow::ensure!(
-        operator.principal().kind() == vocab::PrincipalKind::Service
+        operator.principal().kind() == rss_request_context::PrincipalKind::Service
             && operator.principal().service_caller_domain()
                 == Some(vocab::ServiceCallerDomain::MaintenanceOperator),
         "device-latent inspection requires a verified maintenance service operator"

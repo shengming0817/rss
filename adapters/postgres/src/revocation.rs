@@ -216,7 +216,7 @@ impl VerifiedPgWriteStore {
     pub(crate) async fn verify_revocation_capability(
         &self,
     ) -> Result<RevocationCapabilityReceipt, PgError> {
-        let tenant = vocab::TenantId::parse(REVOCATION_CAPABILITY_PROBE_TENANT)
+        let tenant = rss_request_context::TenantId::parse(REVOCATION_CAPABILITY_PROBE_TENANT)
             .map_err(|_| PgError::RevocationSchema)?;
         TenantDb::<ServingWriteLane>::new(self)
             .revocation_write(

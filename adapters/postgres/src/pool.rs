@@ -6,8 +6,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rss_request_context::TenantId;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode};
-use vocab::TenantId;
 
 use crate::PgStore;
 use crate::cotx::set_local_tenant;

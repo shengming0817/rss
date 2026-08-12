@@ -5,11 +5,11 @@
 fn main() {
     let _ = authn::VerifiedJwt::seal(
         "h.e.s".to_string(),
-        diport::VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator, vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap()),
+        diport::VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator, rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap()),
     ); // E0624: associated function `seal` is private
 
     let _ = authn::VerifiedServiceToken::seal(
         authn::AccessToken::new("svc"),
-        diport::VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator, vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap()),
+        diport::VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator, rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap()),
     ); // E0624: associated function `seal` is private
 }

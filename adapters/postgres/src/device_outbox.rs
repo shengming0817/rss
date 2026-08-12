@@ -47,13 +47,13 @@ struct ClaimedDeviceOutboxRow {
 /// accepts a caller-provided topic or credential scope while classifying an outbox row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PgDeviceOutboxScope {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: DeviceId,
 }
 
 impl PgDeviceOutboxScope {
     #[must_use]
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -413,7 +413,7 @@ fn hydrate_claim(
     row: ClaimedDeviceOutboxRow,
     monotonic_deadline: tokio::time::Instant,
 ) -> Result<PgClaimedDeviceOutbox, EngineError> {
-    let tenant = vocab::TenantId::parse(&row.tenant_id)
+    let tenant = rss_request_context::TenantId::parse(&row.tenant_id)
         .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
     let device = DeviceId::parse(&row.device_id)
         .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
@@ -685,7 +685,10 @@ mod tests {
         let stable_message_id = command.message_id().to_owned();
         let stable_scope = command.scope();
         let stable_payload = command.payload().to_vec();
-        assert_eq!(stable_scope.tenant(), vocab::TenantId::parse(TENANT)?);
+        assert_eq!(
+            stable_scope.tenant(),
+            rss_request_context::TenantId::parse(TENANT)?
+        );
         assert_eq!(stable_scope.device(), DeviceId::parse(DEVICE)?);
 
         let receipt_status: String =

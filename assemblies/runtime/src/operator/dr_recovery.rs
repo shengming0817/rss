@@ -42,7 +42,7 @@ pub fn is_l2_dr_recovery_command(args: &[String]) -> bool {
 #[derive(Debug)]
 pub(super) struct L2DrRecoveryCliArgs {
     operator_service_token: OperatorServiceToken,
-    operator_tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
     plan: eventexec::L2DrRecoveryPlan,
     admission_epoch: primitives::AdmissionEpochId,
 }
@@ -50,8 +50,8 @@ pub(super) struct L2DrRecoveryCliArgs {
 #[derive(Debug)]
 struct L2DrAdmissionCliArgs {
     operator_service_token: OperatorServiceToken,
-    operator_tenant: vocab::TenantId,
-    tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
+    tenant: rss_request_context::TenantId,
     admission_epoch: primitives::AdmissionEpochId,
     action: L2DrAdmissionAction,
 }
@@ -441,7 +441,7 @@ pub fn prepare_l2_dr_recovery_command(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct L2DrRecoveryOperatorGrant {
     action: String,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 fn parse_l2_dr_recovery_operator_grants(
@@ -464,7 +464,7 @@ fn parse_l2_dr_recovery_operator_grants(
                     "{L2_DR_RECOVERY_OPERATOR_GRANTS_ENV} entries must be exact action|tenant"
                 ),
             };
-            let tenant = vocab::TenantId::parse(parts[1])
+            let tenant = rss_request_context::TenantId::parse(parts[1])
                 .context("L2 DR recovery grant tenant must be a UUID")?;
             Ok(L2DrRecoveryOperatorGrant {
                 action: action.to_owned(),

@@ -18,8 +18,8 @@ workspace = true
 # graviola=未审计〕，故 in-app HTTPS 留后续）。OidcProvider 构造器签名为此留稳。ADR-006 §5：本 PR 仅 crate 交付、
 # 不接入任何生产可达 httpserve 认证路径（验签空窗保护；组合根接线 + readiness probe = #1109/T004 安全同批门）。
 [dependencies]
+rss-request-context.workspace = true
 diport = { path = "../../crates/diport" }
-rss-platform = { path = "../../crates/platform", optional = true }
 # ES256（P-256 ECDSA）JWS 验签（仅 backend）：VerifyingKey::from_sec1_bytes + Verifier::verify（内部 SHA-256）。
 p256 = { workspace = true, optional = true }
 # HS256（HMAC-SHA256）service-token 验签（仅 backend）：Hmac<Sha256> 计算 tag。
@@ -53,7 +53,7 @@ metrics = { workspace = true, optional = true }
 
 [features]
 default = []
-backend = ["dep:rss-platform", "dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:vocab", "dep:ids", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util", "dep:metrics"]
+backend = ["dep:p256", "dep:hmac", "dep:sha2", "dep:primitives", "dep:vocab", "dep:ids", "dep:base64", "dep:serde", "dep:serde_json", "dep:tracing", "dep:thiserror", "dep:tokio", "dep:tokio-util", "dep:metrics"]
 
 [dev-dependencies]
 # 验签器 async path + dyn 注入冒烟（multi_thread 真验 Send future 可跨 worker 调度）；

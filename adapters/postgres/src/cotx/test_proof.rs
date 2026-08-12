@@ -24,7 +24,7 @@ pub(crate) struct TestTx<'borrow, 'tx, L: TenantLane> {
 }
 
 impl<L: TenantLane> TestTx<'_, '_, L> {
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub(crate) fn tenant(&self) -> rss_request_context::TenantId {
         self.tx.tenant()
     }
 }
@@ -253,7 +253,7 @@ impl TenantDb<ServingWriteLane> {
                          SET expires_at = acquired_at + interval '1 microsecond' \
                          WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
                     )
-                    .bind(tx.tenant.as_uuid().to_string())
+                    .bind(tx.tenant.to_string())
                     .bind(target_id)
                     .execute(&mut *tx.conn)
                     .await?;
@@ -373,7 +373,7 @@ impl TestTx<'_, '_, ServingReadLane> {
         )
         .bind(name)
         .bind(role_id)
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .execute(&mut *self.tx.conn)
         .await
     }
@@ -387,7 +387,7 @@ impl TestTx<'_, '_, ServingReadLane> {
             "SELECT epoch FROM reconcile_leases \
              WHERE tenant_id = $1::uuid AND target_id = $2::uuid",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(target_id)
         .fetch_one(&mut *self.tx.conn)
         .await
@@ -435,7 +435,7 @@ impl TestTx<'_, '_, ServingReadLane> {
                 WHERE attempt.tenant_id = $1::uuid AND attempt.target_id = $5::uuid \
                   AND attempt.epoch = $4)",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(device_id)
         .bind(generation)
         .bind(epoch)
@@ -466,7 +466,7 @@ impl TestTx<'_, '_, ServingReadLane> {
              WHERE tenant_id = $1::uuid AND device_id = $2::uuid \
                AND generation = $3 AND fence_epoch = $4",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(device_id)
         .bind(generation)
         .bind(epoch)
@@ -486,7 +486,7 @@ impl TestTx<'_, '_, ServingReadLane> {
              WHERE tenant_id = $1::uuid AND target_id = $2::uuid \
                AND trigger_kind = $3 AND epoch = $4",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(target_id)
         .bind(trigger_kind)
         .bind(epoch)
@@ -529,7 +529,7 @@ impl OutboxTx<'_> {
              (tenant_id, config_key, version, value, protection_scheme) \
              VALUES ($1::uuid, $2, 1, $3, 0)",
         )
-        .bind(self.tenant.as_uuid().to_string())
+        .bind(self.tenant.to_string())
         .bind(key)
         .bind(value)
         .execute(&mut *self.conn)

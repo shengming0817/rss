@@ -656,7 +656,7 @@ mod tests {
 
     use super::*;
     use ids::DeviceId;
-    use vocab::TenantId;
+    use rss_request_context::TenantId;
 
     fn digest(byte: char) -> String {
         format!("sha256:{}", byte.to_string().repeat(64))

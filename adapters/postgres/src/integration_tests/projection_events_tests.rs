@@ -1433,8 +1433,8 @@ async fn projection_scoped_high_water_reduces_all_bindings_to_max_lsn() -> TestR
         )),
     )
     .await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let first_event_id = unique_event_id("projection-high-water-multi-a");
     let second_event_id = unique_event_id("projection-high-water-multi-b");
     let noise_event_id = unique_event_id("projection-high-water-multi-noise");
@@ -1970,8 +1970,8 @@ async fn projection_real_postgres_replay_checkpoints_and_restarts_without_cross_
     setup_outbox(&owner).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let fixture = ProjectionConformanceFixture::primary();
     let bindings = projection_conformance_inputs(fixture);
     let binding = bindings

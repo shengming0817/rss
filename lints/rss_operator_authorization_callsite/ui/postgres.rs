@@ -3,7 +3,7 @@
 
 fn mint(
     subject: eventexec::L2DrRecoveryOperatorSubject,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     epoch: eventexec::RecoveryEpochId,
     digest: eventexec::L2DrRecoveryPlanDigest,
     start: uuid::Uuid,
@@ -20,7 +20,7 @@ fn mint(
 
 fn mint_function_item(
     subject: eventexec::L2DrRecoveryOperatorSubject,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     epoch: eventexec::RecoveryEpochId,
     digest: eventexec::L2DrRecoveryPlanDigest,
     start: uuid::Uuid,
@@ -43,7 +43,7 @@ mod bundle {
         pub fn record_l2_dr_recovery_start_audit_subject(
             &self,
             subject: eventexec::L2DrRecoveryOperatorSubject,
-            tenant: vocab::TenantId,
+            tenant: rss_request_context::TenantId,
             epoch: eventexec::RecoveryEpochId,
             digest: eventexec::L2DrRecoveryPlanDigest,
             start: uuid::Uuid,
@@ -66,7 +66,7 @@ mod bundle {
         pub fn record_l2_dr_recovery_start_audit_subject(
             &self,
             subject: eventexec::L2DrRecoveryOperatorSubject,
-            tenant: vocab::TenantId,
+            tenant: rss_request_context::TenantId,
             epoch: eventexec::RecoveryEpochId,
             digest: eventexec::L2DrRecoveryPlanDigest,
             start: uuid::Uuid,

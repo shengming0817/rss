@@ -16,8 +16,9 @@ struct Delivery {
 }
 
 impl DeviceIngressDelivery for Delivery {
-    fn tenant(&self) -> vocab::TenantId {
-        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant")
+    fn tenant(&self) -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("tenant")
     }
 
     fn device(&self) -> ids::DeviceId {
@@ -112,8 +113,9 @@ fn mismatched_or_missing_durable_identity_is_rejected() {
 fn malformed_payload_with_stable_envelope_becomes_durable_protocol_violation() {
     struct MalformedDelivery;
     impl DeviceIngressDelivery for MalformedDelivery {
-        fn tenant(&self) -> vocab::TenantId {
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant")
+        fn tenant(&self) -> rss_request_context::TenantId {
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
+                .expect("tenant")
         }
         fn device(&self) -> ids::DeviceId {
             ids::DeviceId::parse("00000000-0000-4000-8000-000000000002").expect("device")

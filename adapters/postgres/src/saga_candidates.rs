@@ -74,7 +74,7 @@ impl PgSagaCandidateSource {
         let mut tenants = rows
             .into_iter()
             .map(|(tenant,)| {
-                vocab::TenantId::parse(&tenant).map_err(|error| {
+                rss_request_context::TenantId::parse(&tenant).map_err(|error| {
                     SagaDurableStoreError::new(SagaDurableStoreErrorKind::Integrity, error)
                 })
             })

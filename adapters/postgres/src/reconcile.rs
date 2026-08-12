@@ -37,23 +37,23 @@ use eventexec::reconcile::{
 /// infrastructure scope from becoming an ambient escape hatch for repository code.
 #[derive(Clone, Copy)]
 struct ReconcileTenantScope {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     _seal: (),
 }
 
 impl ReconcileTenantScope {
-    fn new(tenant: vocab::TenantId) -> Self {
+    fn new(tenant: rss_request_context::TenantId) -> Self {
         Self { tenant, _seal: () }
     }
 }
 
 impl TenantScopeHandle for ReconcileTenantScope {
-    fn tenant(self) -> vocab::TenantId {
+    fn tenant(self) -> rss_request_context::TenantId {
         self.tenant
     }
 }
 
-fn reconcile_tenant_scope(tenant: vocab::TenantId) -> ReconcileTenantScope {
+fn reconcile_tenant_scope(tenant: rss_request_context::TenantId) -> ReconcileTenantScope {
     ReconcileTenantScope::new(tenant)
 }
 
@@ -343,7 +343,7 @@ impl PgReconcileStore {
     #[cfg(feature = "fault-matrix-test-support")]
     pub(crate) async fn seed_device_desired_for_fault_matrix(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         device_id: &str,
     ) -> Result<(), ReconcileScheduleError> {
         let device_id = device_id.to_owned();
@@ -393,7 +393,7 @@ impl PgMaintenanceReconcileStore {
     /// target links to agree. Missing, cross-tenant or spoofed evidence fails closed as absence.
     pub async fn read_device_command_audit_proof(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         command_id: &str,
     ) -> Result<Option<eventexec::reconcile::DeviceCommandAuditProof>, ReconcileScheduleError> {
         let command_id = command_id.to_owned();
@@ -434,7 +434,7 @@ impl PgReconcileStore {
     ))]
     pub(crate) async fn upsert_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         key: &ReconcileTargetKey,
     ) -> Result<ReconcileTarget, ReconcileStoreError> {
         let fields = TargetFields::from_key(key);
@@ -463,7 +463,7 @@ impl PgReconcileStore {
     ))]
     pub(crate) async fn acquire_lease(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
         holder_id: &str,
         ttl: Duration,
@@ -498,7 +498,7 @@ impl PgReconcileStore {
     /// Extend a held lease by token and epoch CAS.
     pub(crate) async fn extend_lease(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
         lease_token: &str,
         epoch: u64,
@@ -521,7 +521,7 @@ impl PgReconcileStore {
     /// Release a held lease by token and epoch CAS.
     pub(crate) async fn release_lease(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
         lease_token: &str,
         epoch: u64,
@@ -542,7 +542,7 @@ impl PgReconcileStore {
     /// Append one immutable attempt row.
     pub(crate) async fn append_attempt(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         attempt: ReconcileAttemptInsert<'_>,
     ) -> Result<Option<ReconcileLedgerId>, ReconcileStoreError> {
         validate_runtime_component("target_id", attempt.target_id, UUID_TEXT_MAX_BYTES)?;
@@ -583,7 +583,7 @@ impl PgReconcileStore {
     /// Append one immutable attempt result row and schedule the next target run under lease CAS.
     pub(crate) async fn append_attempt_result(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         lease_token: &str,
         epoch: u64,
         result: ReconcileAttemptResultInsert<'_>,
@@ -636,7 +636,7 @@ impl PgReconcileStore {
 
     async fn cas_lease(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         request: LeaseCasRequest<'_>,
     ) -> Result<ReconcileLeaseOutcome, ReconcileStoreError> {
         validate_runtime_component("target_id", request.target_id, UUID_TEXT_MAX_BYTES)?;
@@ -681,7 +681,7 @@ impl PgReconcileStore {
     /// Pause a target: future due scans skip disabled rows.
     pub(crate) async fn pause_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileStoreError> {
         serving_update_target_status(
@@ -696,7 +696,7 @@ impl PgReconcileStore {
     /// Resume a target and make it immediately due.
     pub(crate) async fn resume_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileStoreError> {
         serving_update_target_status(
@@ -712,7 +712,7 @@ impl PgReconcileStore {
 impl ReconcileOperatorStore for PgMaintenanceReconcileStore {
     async fn inspect_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
         _capability: OperatorReconcileCapability,
     ) -> Result<ReconcileTargetSummary, ReconcileScheduleError> {
@@ -723,7 +723,7 @@ impl ReconcileOperatorStore for PgMaintenanceReconcileStore {
 
     async fn resume_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
         _capability: OperatorReconcileCapability,
     ) -> Result<ReconcileTargetSummary, ReconcileScheduleError> {
@@ -744,7 +744,7 @@ impl ReconcileOperatorStore for PgMaintenanceReconcileStore {
 impl ReconcileScheduleStore for PgReconcileStore {
     async fn claim_due_targets(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         holder_id: &str,
         limit: ReconcileMaxInFlight,
@@ -784,7 +784,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
 
     async fn claim_targeted(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         holder_id: &str,
         wake: &ReconcileWake,
@@ -1031,7 +1031,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
 
     async fn pause_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileScheduleError> {
         PgReconcileStore::pause_target(self, tenant, target_id)
@@ -1041,7 +1041,7 @@ impl ReconcileScheduleStore for PgReconcileStore {
 
     async fn resume_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileScheduleError> {
         PgReconcileStore::resume_target(self, tenant, target_id)
@@ -1175,7 +1175,7 @@ fn wake_version_to_db(wake_version: WakeVersion) -> Result<i64, ReconcileStoreEr
 }
 
 fn claimed_target_from_row(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     row: ReconcileClaimedRow,
 ) -> Result<ClaimedTarget, ReconcileScheduleError> {
     let failure_streak = u32::try_from(row.failure_streak)
@@ -1226,7 +1226,7 @@ fn lease_from_row(row: (String, String, i64)) -> Result<ReconcileLease, Reconcil
 
 async fn serving_update_target_status(
     pool: &TenantDb<ServingWriteLane>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: &str,
     kind: ReconcileTargetTransitionKind,
 ) -> Result<(), ReconcileStoreError> {
@@ -1257,7 +1257,7 @@ async fn serving_update_target_status(
 
 async fn maintenance_update_target_status(
     pool: &TenantDb<MaintenanceWriteLane>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: &str,
     kind: ReconcileTargetTransitionKind,
 ) -> Result<(), ReconcileStoreError> {
@@ -1288,7 +1288,7 @@ async fn maintenance_update_target_status(
 
 async fn maintenance_inspect_target(
     pool: &TenantDb<MaintenanceReadLane>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: &str,
 ) -> Result<ReconcileTargetSummary, ReconcileStoreError> {
     validate_runtime_component("target_id", target_id, UUID_TEXT_MAX_BYTES)?;

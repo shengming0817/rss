@@ -10,6 +10,8 @@ default = []
 test-support = []
 
 [dependencies]
+rss-contract.workspace = true
+rss-request-context.workspace = true
 # typify 派生码用全限定 ::serde::{Serialize,Deserialize}（derive feature）。所有 codegen 机器
 # （typify/schemars/syn）留在 xtask，见 docs/rules/architecture.md §83/§126。
 serde = { workspace = true }

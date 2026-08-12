@@ -13,6 +13,7 @@ workspace = true
 # 仍保 freeze smoke 类型断言），与 vault/redis/s3/amqp 同范式（仅声明真正用到的 dep，cargo-udeps 守——
 # 故不预连未用的基础/引擎 crate）。
 [dependencies]
+rss-request-context.workspace = true
 # 实现 diport 已冻 DI port trait（Signer + ManagedResource，native AFIT）。
 diport = { path = "../../crates/diport" }
 # 软件 CA 签名后端（仅 backend）：ECDSA P-256 sign-bytes（generate_pkcs8/from_pkcs8/sign）。ring 已在树、

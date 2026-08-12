@@ -12,13 +12,13 @@ use postgres::{PgBrokerAcceptedDeviceOutbox, PgClaimedDeviceOutbox};
 /// derives it from PostgreSQL's SQL-classified, move-only claim.
 enum DeviceMqttPublishRequest {
     ApplyDeviceCertificate {
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         device: ids::DeviceId,
         message_id: MessageId,
         payload: Vec<u8>,
     },
     ApplicationReceipt {
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         device: ids::DeviceId,
         message_id: MessageId,
         payload: Vec<u8>,

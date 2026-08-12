@@ -13,6 +13,7 @@ name = "settings_composition"
 path = "src/lib.rs"
 
 [dependencies]
+rss-request-context.workspace = true
 anyhow = { workspace = true }
 bootstrap = { path = "../../crates/bootstrap" }
 diport = { path = "../../crates/diport" }

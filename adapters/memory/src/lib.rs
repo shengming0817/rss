@@ -252,7 +252,7 @@ impl Error for TenantMetadataSignFailure {
 /// Tenant authority binding passed to [`TenantMetadataSigner`].
 #[derive(Debug, Clone, Copy)]
 pub struct TenantMetadataBinding<'a> {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     domain: &'a str,
     contract_id: &'a str,
     topic: &'a str,
@@ -262,7 +262,7 @@ pub struct TenantMetadataBinding<'a> {
 impl<'a> TenantMetadataBinding<'a> {
     /// Construct a transport tenant metadata binding.
     pub fn new(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         domain: &'a str,
         contract_id: &'a str,
         topic: &'a str,
@@ -277,7 +277,7 @@ impl<'a> TenantMetadataBinding<'a> {
         }
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -1328,7 +1328,7 @@ impl SagaDurableStore for MemSagaDurableStore {
     async fn list_runnable(
         &self,
         identity: &SagaWorkerIdentity,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         limit: NonZeroUsize,
     ) -> Result<Vec<SagaRunnableInstance>, SagaDurableStoreError> {
         let now = saga_now();
@@ -2426,10 +2426,10 @@ impl SagaTenantSource for MemSagaDurableStore {
             {
                 continue;
             }
-            tenants
-                .push(vocab::TenantId::parse(tenant).map_err(|error| {
-                    mem_saga_error(SagaDurableStoreErrorKind::Integrity, error)
-                })?);
+            tenants.push(
+                rss_request_context::TenantId::parse(tenant)
+                    .map_err(|error| mem_saga_error(SagaDurableStoreErrorKind::Integrity, error))?,
+            );
         }
         tenants.sort_by_key(|tenant| tenant.to_string());
         if let Some(cursor) = cursor {
@@ -2714,13 +2714,15 @@ impl MemSecretResolver {
     /// 向 store 注入一条 secret（覆盖写）。调用方持有字节，resolver 存 clone。
     ///
     /// `tenant`：租户隔离键（`store_id` + `key` 同 tenant 不同值互不干扰）。
-    pub fn insert(&self, tenant: vocab::TenantId, store_id: &str, key: &str, bytes: Vec<u8>) {
+    pub fn insert(
+        &self,
+        tenant: rss_request_context::TenantId,
+        store_id: &str,
+        key: &str,
+        bytes: Vec<u8>,
+    ) {
         self.store.lock().unwrap_or_else(|e| e.into_inner()).insert(
-            (
-                tenant.as_uuid().to_string(),
-                store_id.to_string(),
-                key.to_string(),
-            ),
+            (tenant.to_string(), store_id.to_string(), key.to_string()),
             bytes,
         );
     }
@@ -2741,7 +2743,7 @@ impl MemSecretResolver {
 impl SecretResolver for MemSecretResolver {
     async fn resolve(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         coord: &SecretCoordinate,
     ) -> Result<SecretMaterial, SecretResolverError> {
         // 旋钮检查（fail-closed 优先于命中查询）。
@@ -2755,7 +2757,7 @@ impl SecretResolver for MemSecretResolver {
         }
         let g = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let lookup_key = (
-            tenant.as_uuid().to_string(),
+            tenant.to_string(),
             coord.store_id().to_string(),
             coord.key().to_string(),
         );
@@ -2772,7 +2774,7 @@ mod tests {
     use authn::AuthnEpoch;
     use diport::{AuditOutcome, SagaStepCompletion};
     use identity::ports::RefreshTokenSnapshot;
-    use vocab::TenantId;
+    use rss_request_context::TenantId;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const OTHER_TENANT: &str = "00000000-0000-4000-8000-000000000abc";
@@ -2956,7 +2958,7 @@ mod tests {
         use consistency::{SagaDefinitionIdentity, SagaEffectPhase, SagaId, SagaIdempotencyKey};
 
         let store = MemSagaDurableStore::new();
-        let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).unwrap();
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(saga_id))).unwrap();
         let definition = SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
@@ -3112,7 +3114,7 @@ mod tests {
         AuditEvent {
             occurred_at: SystemTime::UNIX_EPOCH,
             principal_id: "alice".to_string(),
-            principal_kind: vocab::PrincipalKind::User,
+            principal_kind: rss_request_context::PrincipalKind::User,
             tenant_id: Some(TenantId::parse(CANON_TENANT).expect("canonical tenant")),
             resource_kind: "session",
             resource_id: "sess-1".to_string(),
@@ -3219,17 +3221,17 @@ mod tests {
             IdemKey::parse("evt-session-77").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
-        let tenant =
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("tenant");
         let env = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
             tenant,
             diport::EnvelopeSubjectId::from_opaque("subj-opaque").expect("subject"),
             diport::OutboxActor::scoped(
-                vocab::PrincipalKind::User,
+                rss_request_context::PrincipalKind::User,
                 diport::OpaqueActorId::from_opaque("actor-opaque").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::SelfOnly,
+                rss_request_context::RowScope::SelfOnly,
             ),
         );
         MemEmitter::new(bus.clone())
@@ -3245,7 +3247,10 @@ mod tests {
         assert_eq!(msg.payload().as_bytes(), b"payload");
         assert_eq!(
             msg.metadata().tenant_id(),
-            Some(vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")),
+            Some(
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                    .expect("tenant")
+            ),
             "MemEmitter 应透传 tenantId metadata"
         );
         assert_eq!(msg.metadata().get(diport::KEY_SCHEMA_VERSION), Some("v1"));
@@ -3278,16 +3283,16 @@ mod tests {
             IdemKey::parse("evt-signed-tenant").expect("idem"),
             consistency::OutboxPayload::from_reviewed_event_bytes(b"payload".to_vec()),
         );
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
         let env = OutboxEnvelopeParts::new(
             vocab::ContractBinding::from_static("identity", TOPIC, "v1", HASH),
             tenant,
             diport::EnvelopeSubjectId::from_opaque("subj-opaque").expect("subject"),
             diport::OutboxActor::scoped(
-                vocab::PrincipalKind::User,
+                rss_request_context::PrincipalKind::User,
                 diport::OpaqueActorId::from_opaque("actor-opaque").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::SelfOnly,
+                rss_request_context::RowScope::SelfOnly,
             ),
         );
 
@@ -3322,7 +3327,7 @@ mod tests {
             .subscribe(Topic::new(TOPIC), token.clone())
             .await
             .expect("subscribe");
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
         let grant = test_grant("7d65e5f2-e716-4c4e-8e4c-6f7ab1754ef8", tenant);
         let refresh = initial_refresh(&grant, "refresh-mem-tenant", [7; 32]);
         let refresh_hash = refresh.token_hash().clone();
@@ -3388,7 +3393,7 @@ mod tests {
             .subscribe(Topic::new(TOPIC), token.clone())
             .await
             .expect("subscribe");
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
         let scope = identity::ports::TenantRepoScope::for_test(tenant);
         let grant = test_grant("d8dbe849-1d7e-49aa-b68a-a7b41ed252df", tenant);
         let grant_id = grant.id().clone();
@@ -3441,8 +3446,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn mem_auth_grant_store_rejects_grant_tenant_mismatch_without_write_or_emit() {
-        let tenant_a = vocab::TenantId::parse(CANON_TENANT).expect("tenant a");
-        let tenant_b = vocab::TenantId::parse(OTHER_TENANT).expect("tenant b");
+        let tenant_a = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant a");
+        let tenant_b = rss_request_context::TenantId::parse(OTHER_TENANT).expect("tenant b");
         let grant = test_grant("6e3b6c98-2d14-4862-83d7-35f5333a76e3", tenant_b);
         let grant_id = grant.id().clone();
         let refresh = initial_refresh(&grant, "refresh-mem-mismatch", [8; 32]);
@@ -3481,8 +3486,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn mem_auth_grant_store_rejects_envelope_tenant_mismatch_without_write_or_emit() {
-        let tenant_a = vocab::TenantId::parse(CANON_TENANT).expect("tenant a");
-        let tenant_b = vocab::TenantId::parse(OTHER_TENANT).expect("tenant b");
+        let tenant_a = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant a");
+        let tenant_b = rss_request_context::TenantId::parse(OTHER_TENANT).expect("tenant b");
         let grant = test_grant("315ba1e6-5831-4683-b8ec-fdf535c90cd6", tenant_a);
         let grant_id = grant.id().clone();
         let refresh = initial_refresh(&grant, "refresh-mem-envelope-mismatch", [9; 32]);
@@ -4539,7 +4544,7 @@ mod tests {
         use consistency::SagaId;
 
         let store = MemSagaDurableStore::new();
-        let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).unwrap();
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(1925))).unwrap();
         let record = store
@@ -4600,7 +4605,7 @@ mod tests {
         use consistency::SagaId;
 
         let store = MemSagaDurableStore::new();
-        let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).unwrap();
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(19_250))).unwrap();
         let record = store
@@ -4654,7 +4659,8 @@ mod tests {
         let mut expected = Vec::new();
         for ordinal in 1_u128..=5 {
             let tenant =
-                vocab::TenantId::parse(&uuid::Uuid::from_u128(ordinal).to_string()).unwrap();
+                rss_request_context::TenantId::parse(&uuid::Uuid::from_u128(ordinal).to_string())
+                    .unwrap();
             let instance =
                 SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(20_000 + ordinal)))
                     .unwrap();
@@ -5273,7 +5279,7 @@ mod tests {
     #[allow(clippy::panic, clippy::unwrap_used)]
     async fn mem_saga_terminate_accepts_only_ready_instances_without_effect_intent() {
         let store = MemSagaDurableStore::new();
-        let tenant = vocab::TenantId::parse(CANON_TENANT).unwrap();
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).unwrap();
         let instance = SagaInstanceRef::new(
             tenant,
             consistency::SagaId::new(uuid::Uuid::from_u128(19_341)),
@@ -5473,7 +5479,8 @@ mod tests {
         assert!(store.is_empty());
 
         let record = DeadLetterRecord::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                .expect("tenant"),
             "msg-1",
             DeadLetterProvenance::consumer("identity", "audit"),
             "contract-session",

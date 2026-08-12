@@ -33,7 +33,7 @@ use crate::reconcile::TargetFields;
 #[doc(hidden)]
 pub struct ReconcileTx<'tx, L: TenantLane> {
     conn: &'tx mut PgConnection,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     _lane: std::marker::PhantomData<fn() -> L>,
 }
 

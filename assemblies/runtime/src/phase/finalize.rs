@@ -75,6 +75,12 @@ impl<'a> DomainsWired<'a> {
                 inventory_health_publisher,
                 inventory_placement_publisher,
             ) = runtimeexec::inventory::deferred_inventory_channel(seed);
+            let platform_host = runtimeexec::RuntimeHostView::starting(inventory_reader.clone());
+            let inventory_routes = crate::runtime_inventory::RuntimeInventoryRoutes::new(
+                inventory_reader,
+                platform_host.clone(),
+            )
+            .context("compose Platform runtime inventory dispatcher")?;
             inventory_placement_publisher
                 .publish(domain_transport.readiness_sampler())
                 .context("publish runtime inventory placement readiness sampler")?;
@@ -88,9 +94,7 @@ impl<'a> DomainsWired<'a> {
                 rate_limiter,
                 trusted_proxy_config,
                 metrics: metrics_exporter,
-                framework_routes: crate::runtime_inventory::RuntimeInventoryRoutes::new(
-                    inventory_reader,
-                ),
+                framework_routes: inventory_routes,
             })
             .context("finalize RuntimePlan listeners")?;
             let (listeners, probe_receipt, health_reporter) = finalized_listeners.into_parts();
@@ -98,10 +102,14 @@ impl<'a> DomainsWired<'a> {
                 .publish(health_reporter)
                 .context("publish runtime inventory health reporter")?;
 
-            Ok(((listeners, probe_receipt), inventory_publisher))
+            Ok((
+                (listeners, probe_receipt),
+                inventory_publisher,
+                platform_host,
+            ))
         })();
         let result = match result {
-            Ok(((listeners, probe_receipt), inventory_publisher)) => Ok(Finalized {
+            Ok(((listeners, probe_receipt), inventory_publisher, platform_host)) => Ok(Finalized {
                 context,
                 provider_build,
                 deps,
@@ -113,6 +121,7 @@ impl<'a> DomainsWired<'a> {
                 listeners,
                 probe_receipt,
                 inventory_publisher,
+                platform_host,
             }),
             Err(error) => Err(provider_build.abort(error).await),
         };

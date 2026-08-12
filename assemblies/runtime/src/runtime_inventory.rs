@@ -7,12 +7,26 @@ use runtimeexec::inventory as model;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeInventoryRoutes {
-    reader: runtimeexec::inventory::InventoryReader,
+    dispatcher: rss_platform::Dispatcher,
 }
 
 impl RuntimeInventoryRoutes {
-    pub(crate) fn new(reader: runtimeexec::inventory::InventoryReader) -> Self {
-        Self { reader }
+    pub(crate) fn new(
+        reader: runtimeexec::inventory::InventoryReader,
+        host: runtimeexec::RuntimeHostView,
+    ) -> anyhow::Result<Self> {
+        let dispatcher = rss_platform::ApplicationBuilder::new(
+            rss_platform::ApplicationName::parse("runtime")?,
+            std::sync::Arc::new(host),
+        )
+        .module(
+            rss_platform::ApplicationModule::new(rss_platform::ModuleName::parse("inventory")?)
+                .handler::<InventoryContract, _>(InventoryHandler {
+                reader: reader.clone(),
+            }),
+        )
+        .build()?;
+        Ok(Self { dispatcher })
     }
 
     #[cfg(test)]
@@ -60,7 +74,8 @@ impl RuntimeInventoryRoutes {
         )?);
         let (_publisher, reader, _health_publisher, _placement_publisher) =
             model::deferred_inventory_channel(seed);
-        Ok(Self::new(reader))
+        let host = runtimeexec::RuntimeHostView::ready_for_test(reader.clone());
+        Self::new(reader, host)
     }
 }
 
@@ -74,7 +89,7 @@ impl ::bootstrap::FrameworkRoutes for RuntimeInventoryRoutes {
         &self,
         registry: &mut ::bootstrap::Registry,
     ) -> Result<(), ::bootstrap::KernelError> {
-        let state = RuntimeInventoryRoutes::new(self.reader.clone());
+        let state = self.clone();
         registry.route_group::<::httpserve::Admin>("/api/v1/runtime", move |routes| {
             let endpoint = ::httpserve::GeneratedEndpoint::new_declared(
                 ::generated::http::runtime_v1::inventory::ROUTE,
@@ -90,8 +105,143 @@ async fn inventory_handler(
     _: ::httpserve::ContractMarker<::generated::http::runtime_v1::inventory::RouteMarker>,
     State(state): State<RuntimeInventoryRoutes>,
     Extension(request_id): Extension<httpserve::VerifiedRequestId>,
+    authorized: Option<Extension<httpserve::AuthorizedSubject>>,
+    control: Option<Extension<std::sync::Arc<httpserve::RequestControl>>>,
 ) -> wire::RuntimeInventoryHandlerResult {
-    inventory_response(&state.reader, request_id)
+    let (Some(Extension(authorized)), Some(Extension(control))) = (authorized, control) else {
+        return internal_response(request_id);
+    };
+    let Some(trusted) = TrustedRequestContext::mint(&authorized, &request_id, control) else {
+        return internal_response(request_id);
+    };
+    match state
+        .dispatcher
+        .dispatch::<InventoryContract>(
+            &<InventoryContract as rss_platform::Contract>::DESCRIPTOR,
+            request_id.clone(),
+            trusted.view(),
+        )
+        .await
+    {
+        Ok(rss_platform::DispatchOutcome::Completed(response)) => response,
+        Ok(
+            rss_platform::DispatchOutcome::HandlerFailed
+            | rss_platform::DispatchOutcome::Cancelled
+            | rss_platform::DispatchOutcome::DeadlineExceeded,
+        )
+        | Err(
+            rss_platform::DispatchError::UnknownContract
+            | rss_platform::DispatchError::DescriptorMismatch,
+        ) => internal_response(request_id),
+        Err(
+            rss_platform::DispatchError::HostNotReady
+            | rss_platform::DispatchError::HostDraining
+            | rss_platform::DispatchError::HostStopped,
+        ) => unavailable_response(request_id),
+    }
+}
+
+/// Assembly-private carrier minted only after the route gate produced an AuthorizedSubject.
+/// Foundation values remain authority-free; only this production bridge reaches the dispatcher.
+struct TrustedRequestContext {
+    tenant: rss_request_context::TenantId,
+    request_id: rss_request_context::RequestId,
+    principal: rss_request_context::PrincipalRef,
+    control: std::sync::Arc<httpserve::RequestControl>,
+    fields: Box<[&'static str]>,
+}
+
+impl TrustedRequestContext {
+    fn mint(
+        authorized: &httpserve::AuthorizedSubject,
+        request_id: &httpserve::VerifiedRequestId,
+        control: std::sync::Arc<httpserve::RequestControl>,
+    ) -> Option<Self> {
+        if authorized.contract_id() != wire::CONTRACT_ID
+            || authorized.permission() != vocab::RoutePermissionId::RuntimeInventoryRead
+        {
+            return None;
+        }
+        let projection = authorized.projection();
+        let fields = [
+            vocab::ProjectionField::AuditActor,
+            vocab::ProjectionField::AuditTenantId,
+            vocab::ProjectionField::AuditResourceId,
+            vocab::ProjectionField::IdentityProfileSubject,
+            vocab::ProjectionField::IdentityProfileTenantId,
+        ]
+        .into_iter()
+        .filter(|field| projection.allows(*field))
+        .map(vocab::ProjectionField::obligation_key)
+        .collect::<Vec<_>>()
+        .into_boxed_slice();
+        Some(Self {
+            tenant: authorized.tenant_id(),
+            request_id: rss_request_context::RequestId::parse(request_id.as_str()).ok()?,
+            principal: rss_request_context::PrincipalRef::new(
+                authorized.principal_kind(),
+                authorized.principal_id(),
+            )
+            .ok()?,
+            control,
+            fields,
+        })
+    }
+
+    fn view(&self) -> rss_request_context::RequestContextView<'_> {
+        rss_request_context::RequestContextView::new(
+            Some(&self.tenant),
+            &self.request_id,
+            &self.principal,
+            self.control.deadline(),
+            rss_request_context::Cancellation::observe(self.control.as_ref()),
+            rss_request_context::ObligationsView::new(
+                None,
+                rss_request_context::FieldMaskView::new(&self.fields),
+            ),
+        )
+    }
+}
+
+struct InventoryContract;
+impl rss_platform::Contract for InventoryContract {
+    type Request = httpserve::VerifiedRequestId;
+    type Response = wire::RuntimeInventoryHandlerResult;
+    const DESCRIPTOR: rss_contract::ContractDescriptor = *wire::CONTRACT.descriptor();
+}
+
+struct InventoryHandler {
+    reader: runtimeexec::inventory::InventoryReader,
+}
+impl rss_platform::Handler<InventoryContract> for InventoryHandler {
+    fn handle<'a>(
+        &'a self,
+        request_id: httpserve::VerifiedRequestId,
+        _context: rss_request_context::RequestContextView<'a>,
+    ) -> rss_platform::HandlerFuture<'a, wire::RuntimeInventoryHandlerResult> {
+        Box::pin(async move { Ok(inventory_response(&self.reader, request_id)) })
+    }
+}
+
+fn unavailable_response(
+    request_id: httpserve::VerifiedRequestId,
+) -> wire::RuntimeInventoryHandlerResult {
+    match wire::project_read_result(Err(
+        assembly_schema::runtime_inventory::RuntimeInventoryReadFailure::Unavailable,
+    )) {
+        Ok(response) => Ok(wire::RuntimeInventoryResponseEnvelope::Success(response)),
+        Err(failure) => Ok(wire::RuntimeInventoryResponseEnvelope::Error(
+            failure.into_response_error(request_id.into_wire()),
+        )),
+    }
+}
+
+fn internal_response(
+    request_id: httpserve::VerifiedRequestId,
+) -> wire::RuntimeInventoryHandlerResult {
+    Err(wire::RuntimeInventoryFrameworkFailure::internal(
+        request_id.into_wire(),
+    ))
 }
 
 fn inventory_response(
@@ -127,10 +277,20 @@ mod tests {
             ("RSS_INTERNAL_AUTH_SCHEME", "mtls"),
         ])?;
         let state = RuntimeInventoryRoutes::unpublished_fixture(snapshot.view())?;
+        let authorized = httpserve::AuthorizedSubject::for_test(
+            wire::CONTRACT_ID,
+            vocab::RoutePermissionId::RuntimeInventoryRead,
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000197")?,
+            rss_request_context::PrincipalKind::Admin,
+            "inventory-test-admin",
+            None,
+        );
         let response = inventory_handler(
             httpserve::ContractMarker::for_test(),
             State(state),
             Extension(httpserve::VerifiedRequestId::for_test("unavailable")),
+            Some(Extension(authorized)),
+            Some(Extension(httpserve::RequestControl::for_test())),
         )
         .await;
         let Ok(response) = response else {
@@ -181,8 +341,8 @@ pub mod test_support {
             &self,
             _: &diport::RawCredential,
         ) -> Result<diport::VerifiedClaims, diport::PdpError> {
-            let tenant =
-                vocab::TenantId::parse(TENANT).map_err(|_| diport::PdpError::InvalidSignature)?;
+            let tenant = rss_request_context::TenantId::parse(TENANT)
+                .map_err(|_| diport::PdpError::InvalidSignature)?;
             let subject = match self.0 {
                 JourneyCase::Deny => DENIED_SUBJECT,
                 JourneyCase::Allow
@@ -216,7 +376,7 @@ pub mod test_support {
             Box::pin(async move {
                 if request.contract_id == generated::http::runtime_v1::inventory::CONTRACT_ID
                     && request.permission == vocab::RoutePermissionId::RuntimeInventoryRead
-                    && request.principal_kind == vocab::PrincipalKind::User
+                    && request.principal_kind == rss_request_context::PrincipalKind::User
                     && request.principal_id == ALLOWED_SUBJECT
                     && request.tenant_id.is_some()
                 {
@@ -359,9 +519,10 @@ pub mod test_support {
             &format!("sha256:{}", "b".repeat(64)),
         )?);
         let (publisher, reader) = model::inventory_channel(seed, reporter);
+        let host = runtimeexec::RuntimeHostView::ready_for_test(reader.clone());
         let mut registry = bootstrap::Registry::new();
         crate::modules_gen::register_framework_routes(
-            &RuntimeInventoryRoutes::new(reader),
+            &RuntimeInventoryRoutes::new(reader, host)?,
             &mut registry,
         )?;
         let mounted = registry.finalize_routes()?;

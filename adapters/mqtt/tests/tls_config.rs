@@ -11,7 +11,7 @@ use mqtt::{
 use rcgen::{
     BasicConstraints, CertificateParams, CertifiedIssuer, ExtendedKeyUsagePurpose, IsCa, KeyPair,
 };
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 const CLIENT_ID: &str = "rss-control-plane-01";
 

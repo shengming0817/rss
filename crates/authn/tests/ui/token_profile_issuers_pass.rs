@@ -15,7 +15,7 @@ fn rss_can_only_sign_access<S>(
 fn service_can_only_sign_service<S>(
     issuer: &JwtIssuer<ServiceTokenProfile, S>,
     caller: vocab::ServiceCallerDomain,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) where
     S: diport::Signer + Send + Sync + 'static,
 {

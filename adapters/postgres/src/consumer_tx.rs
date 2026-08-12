@@ -365,7 +365,7 @@ fn reject_audit_payload(error: &AuditEventRecordError) -> PgConsumerTxOutcome {
 
 #[cfg(feature = "domain-audit")]
 fn reject_audit_tenant_mismatch(
-    payload_tenant: vocab::TenantId,
+    payload_tenant: rss_request_context::TenantId,
     ctx: &InboxReceiptContext,
 ) -> PgConsumerTxOutcome {
     tracing::warn!(
@@ -476,7 +476,7 @@ mod tests {
         let transport_message = diport::Message::new(OTHER_SESSION_BEARER, Vec::new());
         assert_eq!(transport_message.id().as_str(), OTHER_SESSION_BEARER);
         let ctx = InboxReceiptContext::new(
-            vocab::TenantId::parse(TENANT)?,
+            rss_request_context::TenantId::parse(TENANT)?,
             consistency::ConsumerGroup::parse("audit-log-redaction")?,
             "audit",
             "identity.session-created.v1",
@@ -492,7 +492,7 @@ mod tests {
         let _guard = tracing::dispatcher::set_default(&dispatch);
 
         let _ = reject_audit_tenant_mismatch(
-            vocab::TenantId::parse("550e8400-e29b-41d4-a716-446655440000")?,
+            rss_request_context::TenantId::parse("550e8400-e29b-41d4-a716-446655440000")?,
             &ctx,
         );
 
@@ -526,9 +526,9 @@ mod tests {
             &message(payload.into_bytes()),
         )?;
 
-        assert_eq!(record.tenant, vocab::TenantId::parse(TENANT)?);
+        assert_eq!(record.tenant, rss_request_context::TenantId::parse(TENANT)?);
         assert_eq!(record.actor, ids::UserId::parse(USER)?);
-        assert_eq!(record.actor_kind, vocab::PrincipalKind::User);
+        assert_eq!(record.actor_kind, rss_request_context::PrincipalKind::User);
         assert_eq!(record.action.as_str(), "identity:login");
         assert_eq!(record.resource.kind(), "session");
         assert_eq!(
@@ -558,9 +558,12 @@ mod tests {
             &message(payload.into_bytes()),
         )?;
 
-        assert_eq!(record.tenant, vocab::TenantId::parse(TENANT)?);
+        assert_eq!(record.tenant, rss_request_context::TenantId::parse(TENANT)?);
         assert_eq!(record.actor, ids::UserId::parse(ACTOR)?);
-        assert_eq!(record.actor_kind, vocab::PrincipalKind::Service);
+        assert_eq!(
+            record.actor_kind,
+            rss_request_context::PrincipalKind::Service
+        );
         assert_eq!(record.action.as_str(), "identity:role_assign");
         assert_eq!(record.resource.kind(), "role-binding");
         assert_eq!(
@@ -589,9 +592,9 @@ mod tests {
             &message(payload.into_bytes()),
         )?;
 
-        assert_eq!(record.tenant, vocab::TenantId::parse(TENANT)?);
+        assert_eq!(record.tenant, rss_request_context::TenantId::parse(TENANT)?);
         assert_eq!(record.actor, ids::UserId::parse(ACTOR)?);
-        assert_eq!(record.actor_kind, vocab::PrincipalKind::Admin);
+        assert_eq!(record.actor_kind, rss_request_context::PrincipalKind::Admin);
         assert_eq!(record.action.as_str(), "identity:role_revoke");
         assert_eq!(record.resource.kind(), "role-binding");
         assert_eq!(

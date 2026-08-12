@@ -166,7 +166,7 @@ pub struct RoleBinding {
     #[redact(sensitivity = public)]
     role_id: RoleId,
     #[redact(sensitivity = public)]
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 impl RoleBinding {
@@ -175,7 +175,7 @@ impl RoleBinding {
     pub(crate) fn new(
         subject: impl Into<String>,
         role_id: RoleId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Self {
         Self {
             subject: subject.into(),
@@ -193,7 +193,7 @@ impl RoleBinding {
     pub fn hydrate(
         subject: impl Into<String>,
         role_id: &str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Result<Self, IdentityError> {
         let subject = subject.into();
         if subject.is_empty() {
@@ -217,7 +217,7 @@ impl RoleBinding {
     }
 
     /// 取绑定租户。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 }
@@ -290,9 +290,10 @@ mod tests {
     use super::{Permission, Role, RoleBinding, authorize_rbac};
     use crate::domain::{PermissionId, ResourcePattern, RoleId};
     use authn::Principal;
+    use rss_request_context::PrincipalKind;
+    use rss_request_context::TenantId;
     use rstest::rstest;
-    use vocab::tenant::TenantId;
-    use vocab::{Decision, GrantPermission, PrincipalKind};
+    use vocab::{Decision, GrantPermission};
 
     // 两个 canonical UUID：tenant A（principal 所属）/ tenant B（跨租）。
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";

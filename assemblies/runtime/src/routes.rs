@@ -416,7 +416,7 @@ impl httpserve::RouteAuthorizer for MtlsRouteAuthorizer {
         request: httpserve::RouteAuthorizationRequest,
     ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>> {
         Box::pin(async move {
-            let allowed = request.principal_kind == vocab::PrincipalKind::Service
+            let allowed = request.principal_kind == rss_request_context::PrincipalKind::Service
                 && authn::SpiffeId::parse(&request.principal_id)
                     .map(|id| self.allow_set.allows(&id))
                     .unwrap_or(false);
@@ -1840,12 +1840,12 @@ mod tests {
                                             .contract_id(),
                                         permission: vocab::AUDIT_READ_PERMISSION,
                                         tenant_id: Some(
-                                            vocab::TenantId::parse(
+                                            rss_request_context::TenantId::parse(
                                                 "00000000-0000-4000-8000-000000000001",
                                             )
                                             .expect("tenant"),
                                         ),
-                                        principal_kind: vocab::PrincipalKind::Admin,
+                                        principal_kind: rss_request_context::PrincipalKind::Admin,
                                         principal_id: "admin-subject".to_string(),
                                         federated_permissions: None,
                                         resource: None,
@@ -1887,7 +1887,8 @@ mod tests {
             .extensions_mut()
             .insert(httpserve::Authenticated::new_rss_user_for_test(
                 "admin-subject",
-                vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant"),
+                rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
+                    .expect("tenant"),
             ));
 
         let response = routes

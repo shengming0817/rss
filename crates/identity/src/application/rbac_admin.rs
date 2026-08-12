@@ -21,8 +21,8 @@ use generated::event::identity_v1::role_assigned::{
 use generated::event::identity_v1::role_revoked::{
     IdentityRoleRevokedPayload, IdentityRoleRevokedPayloadActorKind,
 };
+use rss_request_context::TenantId;
 use uuid::Uuid;
-use vocab::TenantId;
 
 use super::{EventWireProjectionError, unix_secs};
 use crate::domain::{IdentityError, RoleBinding, RoleId};
@@ -101,7 +101,7 @@ impl RbacAdminService {
         receipt: RolesAssignProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
-        actor_kind: vocab::PrincipalKind,
+        actor_kind: rss_request_context::PrincipalKind,
         subject: String,
         role_id: RoleId,
     ) -> Result<(), RbacAdminError> {
@@ -166,7 +166,7 @@ impl RbacAdminService {
         receipt: RolesRevokeProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
-        actor_kind: vocab::PrincipalKind,
+        actor_kind: rss_request_context::PrincipalKind,
         role_id: RoleId,
         subject: String,
     ) -> Result<bool, RbacAdminError> {
@@ -200,34 +200,46 @@ impl RbacAdminService {
 }
 
 fn role_assigned_actor_kind_wire(
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
 ) -> Result<IdentityRoleAssignedPayloadActorKind, RbacAdminError> {
     match kind {
-        vocab::PrincipalKind::User => Ok(IdentityRoleAssignedPayloadActorKind::User),
-        vocab::PrincipalKind::Device => Ok(IdentityRoleAssignedPayloadActorKind::Device),
-        vocab::PrincipalKind::Admin => Ok(IdentityRoleAssignedPayloadActorKind::Admin),
-        vocab::PrincipalKind::SuperAdmin => Ok(IdentityRoleAssignedPayloadActorKind::SuperAdmin),
-        vocab::PrincipalKind::Service => Ok(IdentityRoleAssignedPayloadActorKind::Service),
-        vocab::PrincipalKind::Anonymous => Ok(IdentityRoleAssignedPayloadActorKind::Anonymous),
-        _ => Err(RbacAdminError::WireProjection(
-            EventWireProjectionError::PrincipalKind,
-        )),
+        rss_request_context::PrincipalKind::User => Ok(IdentityRoleAssignedPayloadActorKind::User),
+        rss_request_context::PrincipalKind::Device => {
+            Ok(IdentityRoleAssignedPayloadActorKind::Device)
+        }
+        rss_request_context::PrincipalKind::Admin => {
+            Ok(IdentityRoleAssignedPayloadActorKind::Admin)
+        }
+        rss_request_context::PrincipalKind::SuperAdmin => {
+            Ok(IdentityRoleAssignedPayloadActorKind::SuperAdmin)
+        }
+        rss_request_context::PrincipalKind::Service => {
+            Ok(IdentityRoleAssignedPayloadActorKind::Service)
+        }
+        rss_request_context::PrincipalKind::Anonymous => {
+            Ok(IdentityRoleAssignedPayloadActorKind::Anonymous)
+        }
     }
 }
 
 fn role_revoked_actor_kind_wire(
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
 ) -> Result<IdentityRoleRevokedPayloadActorKind, RbacAdminError> {
     match kind {
-        vocab::PrincipalKind::User => Ok(IdentityRoleRevokedPayloadActorKind::User),
-        vocab::PrincipalKind::Device => Ok(IdentityRoleRevokedPayloadActorKind::Device),
-        vocab::PrincipalKind::Admin => Ok(IdentityRoleRevokedPayloadActorKind::Admin),
-        vocab::PrincipalKind::SuperAdmin => Ok(IdentityRoleRevokedPayloadActorKind::SuperAdmin),
-        vocab::PrincipalKind::Service => Ok(IdentityRoleRevokedPayloadActorKind::Service),
-        vocab::PrincipalKind::Anonymous => Ok(IdentityRoleRevokedPayloadActorKind::Anonymous),
-        _ => Err(RbacAdminError::WireProjection(
-            EventWireProjectionError::PrincipalKind,
-        )),
+        rss_request_context::PrincipalKind::User => Ok(IdentityRoleRevokedPayloadActorKind::User),
+        rss_request_context::PrincipalKind::Device => {
+            Ok(IdentityRoleRevokedPayloadActorKind::Device)
+        }
+        rss_request_context::PrincipalKind::Admin => Ok(IdentityRoleRevokedPayloadActorKind::Admin),
+        rss_request_context::PrincipalKind::SuperAdmin => {
+            Ok(IdentityRoleRevokedPayloadActorKind::SuperAdmin)
+        }
+        rss_request_context::PrincipalKind::Service => {
+            Ok(IdentityRoleRevokedPayloadActorKind::Service)
+        }
+        rss_request_context::PrincipalKind::Anonymous => {
+            Ok(IdentityRoleRevokedPayloadActorKind::Anonymous)
+        }
     }
 }
 
@@ -316,7 +328,7 @@ mod tests {
             assign_receipt(),
             t,
             actor(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             "alice".to_string(),
             r.clone(),
         )
@@ -368,7 +380,7 @@ mod tests {
                 assign_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "alice".to_string(),
                 role("ghost"),
             )
@@ -400,7 +412,7 @@ mod tests {
                 assign_receipt(),
                 t_b,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "alice".to_string(),
                 r.clone(),
             )
@@ -426,7 +438,7 @@ mod tests {
                 assign_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "alice".to_string(),
                 r.clone(),
             )
@@ -455,7 +467,7 @@ mod tests {
                 revoke_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 r.clone(),
                 "alice".to_string(),
             )
@@ -506,7 +518,7 @@ mod tests {
                 revoke_receipt(),
                 t_b,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 r.clone(),
                 "alice".to_string(),
             )
@@ -538,7 +550,7 @@ mod tests {
                 revoke_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 r.clone(),
                 "alice".to_string(),
             )
@@ -569,7 +581,7 @@ mod tests {
             assign_receipt(),
             t,
             actor(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             "alice".to_string(),
             r.clone(),
         )
@@ -579,7 +591,7 @@ mod tests {
             assign_receipt(),
             t,
             actor(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             "alice".to_string(),
             r.clone(),
         )

@@ -10,7 +10,7 @@ use super::{ProjectionWorkerTarget, VerifiedPgProjectionWorkerStore};
 pub(crate) struct PgProjectionWorkerCheckpointStore {
     store: VerifiedPgProjectionWorkerStore,
     target: ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     owner: CheckpointOwner,
     id: CheckpointId,
 }
@@ -19,7 +19,7 @@ impl PgProjectionWorkerCheckpointStore {
     pub(super) fn new(
         store: &VerifiedPgProjectionWorkerStore,
         target: &ProjectionWorkerTarget,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Self {
         let selector = target.selector(tenant);
         Self {

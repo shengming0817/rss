@@ -6,10 +6,10 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+rss-contract.workspace = true
+rss-request-context.workspace = true
 thiserror = { workspace = true }
 serde = { workspace = true }
-# TenantId 内部表示为 canonical UUID（tenancy.md fail-closed）。仅需持有/解析，默认 std feature 即可；不引 v4/serde。
-uuid = { workspace = true }
 # Cursor 不透明 token = base64url（URL_SAFE_NO_PAD）；parse 仅做可解码校验，拒畸形游标。
 base64 = { workspace = true }
 

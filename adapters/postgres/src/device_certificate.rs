@@ -494,7 +494,7 @@ fn status_from_reconcile(error: CertificateReconcileRepositoryError) -> StatusEr
 }
 
 fn tenant_param(scope: DeviceCertificateScope) -> String {
-    scope.tenant().as_uuid().to_string()
+    scope.tenant().to_string()
 }
 
 fn device_param(scope: DeviceCertificateScope) -> String {
@@ -1430,7 +1430,7 @@ fn restore_artifact_receipt<E: ArtifactEligibility>(
 }
 
 fn restore_current_command_evidence(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     row: CurrentCommandEvidenceRow,
 ) -> Result<DeviceCertificateCommandEvidence, CertificateReconcileRepositoryError> {
     let corrupt_evidence = || {
@@ -2300,7 +2300,7 @@ mod integration_tests {
 
     fn scope() -> DeviceCertificateScope {
         DeviceCertificateScope::for_test(
-            vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
             ids::DeviceId::new(uuid::Uuid::new_v4()),
         )
     }
@@ -2310,7 +2310,7 @@ mod integration_tests {
             generated::http::identity_v2::device_certificate_status_get::CONTRACT_ID,
             vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead,
             scope.tenant(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             "status-test-operator",
             httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string()),
         );
@@ -2398,7 +2398,7 @@ mod integration_tests {
              JOIN public.reconcile_leases AS lease USING (tenant_id,target_id) \
              WHERE target.tenant_id=$1::uuid AND target.resource_id=$2::uuid::text",
         )
-        .bind(enrolled_scope.tenant().as_uuid().to_string())
+        .bind(enrolled_scope.tenant().to_string())
         .bind(enrolled_scope.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2468,7 +2468,7 @@ mod integration_tests {
                             "SELECT public.rss_enroll_device_certificate_reconcile_target( \
                              $1::uuid,$2::uuid,$3)",
                         )
-                        .bind(enrolled_scope.tenant().as_uuid().to_string())
+                        .bind(enrolled_scope.tenant().to_string())
                         .bind(enrolled_scope.device().as_uuid().to_string())
                         .bind(initial_due_micros)
                         .fetch_one(&mut *certificates.conn)
@@ -2599,8 +2599,8 @@ mod integration_tests {
         let status = super::PgDeviceCertificateStatusStore::<ProductionEligibility>::
             from_unverified_for_test(&reader);
         let device = ids::DeviceId::new(uuid::Uuid::new_v4());
-        let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-        let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let scope_a = DeviceCertificateScope::for_test(tenant_a, device);
         let scope_b = DeviceCertificateScope::for_test(tenant_b, device);
         precreate_reconcile_target(&owner, scope_a).await?;
@@ -2661,7 +2661,8 @@ mod integration_tests {
         assert!(!debug.contains(&tenant_a.to_string()));
         assert!(!debug.contains(&device.as_uuid().hyphenated().to_string()));
 
-        let hidden_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let hidden_tenant =
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let foreign_scope = DeviceCertificateScope::for_test(hidden_tenant, device);
         let missing_scope = DeviceCertificateScope::for_test(
             hidden_tenant,
@@ -2734,7 +2735,7 @@ mod integration_tests {
               AND target.resource_kind = 'device-certificate' \
              WHERE desired.tenant_id = $1::uuid AND desired.device_id = $2::uuid",
         )
-        .bind(target.tenant().as_uuid().to_string())
+        .bind(target.tenant().to_string())
         .bind(target.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2777,7 +2778,7 @@ mod integration_tests {
               AND target.resource_kind = 'device-certificate' \
              WHERE desired.tenant_id = $1::uuid AND desired.device_id = $2::uuid",
         )
-        .bind(target.tenant().as_uuid().to_string())
+        .bind(target.tenant().to_string())
         .bind(target.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2821,7 +2822,7 @@ mod integration_tests {
                 (SELECT count(*) FROM reconcile_targets \
                  WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text)",
         )
-        .bind(absent.tenant().as_uuid().to_string())
+        .bind(absent.tenant().to_string())
         .bind(absent.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2842,7 +2843,7 @@ mod integration_tests {
                 (SELECT count(*) FROM reconcile_targets \
                  WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text)",
         )
-        .bind(missing_target.tenant().as_uuid().to_string())
+        .bind(missing_target.tenant().to_string())
         .bind(missing_target.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2859,7 +2860,7 @@ mod integration_tests {
                      $2::uuid::text) \
              RETURNING to_jsonb(reconcile_targets)::text, xmin::text",
         )
-        .bind(incomplete.tenant().as_uuid().to_string())
+        .bind(incomplete.tenant().to_string())
         .bind(incomplete.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2882,7 +2883,7 @@ mod integration_tests {
              FROM reconcile_targets target \
              WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text",
         )
-        .bind(incomplete.tenant().as_uuid().to_string())
+        .bind(incomplete.tenant().to_string())
         .bind(incomplete.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2913,7 +2914,7 @@ mod integration_tests {
                 (SELECT count(*) FROM reconcile_targets \
                  WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text)",
         )
-        .bind(fault_scope.tenant().as_uuid().to_string())
+        .bind(fault_scope.tenant().to_string())
         .bind(fault_scope.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2930,7 +2931,7 @@ mod integration_tests {
              WHERE tenant_id = $1::uuid AND target_id = $2::uuid \
              RETURNING to_jsonb(reconcile_targets)::text, xmin::text",
         )
-        .bind(quarantined.tenant().as_uuid().to_string())
+        .bind(quarantined.tenant().to_string())
         .bind(&quarantined_target_id)
         .fetch_one(&owner.pool)
         .await?;
@@ -2947,7 +2948,7 @@ mod integration_tests {
              FROM reconcile_targets target \
              WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text",
         )
-        .bind(quarantined.tenant().as_uuid().to_string())
+        .bind(quarantined.tenant().to_string())
         .bind(quarantined.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -2976,7 +2977,7 @@ mod integration_tests {
              FROM reconcile_targets \
              WHERE tenant_id = $1::uuid AND resource_id = $2::uuid::text",
         )
-        .bind(paused.tenant().as_uuid().to_string())
+        .bind(paused.tenant().to_string())
         .bind(paused.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;

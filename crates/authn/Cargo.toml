@@ -15,6 +15,7 @@ workspace = true
 test-support = []
 
 [dependencies]
+rss-request-context.workspace = true
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
 secure = { path = "../secure" }

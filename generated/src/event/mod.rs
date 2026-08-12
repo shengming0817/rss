@@ -38,7 +38,7 @@ pub trait EventEmit {
     fn emit<C>(
         &self,
         payload: &C::Payload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: Self::IdempotencyKey,

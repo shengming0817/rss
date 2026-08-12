@@ -22,6 +22,7 @@ settings-consumers = [
 test-support = []
 
 [dependencies]
+rss-request-context.workspace = true
 anyhow = { workspace = true }
 audit = { path = "../../crates/audit", optional = true }
 bootstrap = { path = "../../crates/bootstrap" }

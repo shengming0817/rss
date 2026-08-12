@@ -784,8 +784,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).expect("canonical tenant")
     }
 
     #[allow(clippy::expect_used)]
@@ -811,7 +811,7 @@ mod tests {
     // reason: 测试 tenant literal 合法，失败即测试数据写错。
     fn sample_dead_letter_record(message_id: &str) -> DeadLetterRecord {
         DeadLetterRecord::new(
-            vocab::TenantId::parse("00000000-0000-0000-0000-000000000001")
+            rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000000001")
                 .expect("valid tenant id"),
             message_id,
             DeadLetterProvenance::consumer("identity", "audit"),

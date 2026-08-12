@@ -555,7 +555,7 @@ fn contains_bare_tenant_type(ty: &syn::Type) -> bool {
 fn contains_bare_row_scope_type(ty: &syn::Type) -> bool {
     type_contains_path(ty, |path| {
         path_last_matches(path, |name| {
-            matches!(name, "RowVisibility" | "RowScope" | "ScopedTenant")
+            matches!(name, "RowVisibility" | "VisibilityScope" | "RowScope")
         })
     })
 }
@@ -768,7 +768,7 @@ mod tests {
                 async fn find(
                     &self,
                     scope: TenantRepoScope,
-                    fallback: Option<vocab::TenantId>,
+                    fallback: Option<rss_request_context::TenantId>,
                 ) -> Result<(), Error>;
             }
             "#,

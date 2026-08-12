@@ -2811,12 +2811,15 @@ pub mod inventory {
     pub const CONTRACT_ID: &str = "runtime.inventory";
 
     /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "runtime",
-        "runtime.inventory",
-        "v1",
-        "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "runtime.inventory",
+            "v1",
+            "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("runtime", DESCRIPTOR, "v1");
 
     impl super::super::HttpResponseBinding for RuntimeInventoryResponse {
         const CONTRACT: ::vocab::ContractBinding = CONTRACT;

@@ -8,7 +8,7 @@
 use std::time::SystemTime;
 
 use ids::DeviceId;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 use crate::generation::{CurrentFence, FenceCoordinate, MatchingReportedState, SupersedingFence};
 

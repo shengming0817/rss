@@ -9,7 +9,7 @@
 use std::time::SystemTime;
 
 use ids::UserId;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 use authn::{AuthGrant, AuthGrantId, AuthGrantStatus, AuthnEpoch};
 

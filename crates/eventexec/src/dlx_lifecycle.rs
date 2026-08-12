@@ -136,7 +136,7 @@ impl DlxArchiveObjectKey {
 #[derive(Debug)]
 pub struct VerifiedArchiveReceipt {
     id: DeadLetterId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     object_key: DlxArchiveObjectKey,
     checksum: ArchiveChecksum,
     archive_version_id: ArchiveVersionId,
@@ -150,7 +150,7 @@ impl VerifiedArchiveReceipt {
         &self.id
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -187,7 +187,7 @@ impl VerifiedArchiveReceipt {
 #[derive(Debug, Clone)]
 pub struct ExpiredArchiveReceipt {
     id: DeadLetterId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     object_key: DlxArchiveObjectKey,
     checksum: ArchiveChecksum,
     archive_version_id: ArchiveVersionId,
@@ -196,7 +196,7 @@ pub struct ExpiredArchiveReceipt {
 impl ExpiredArchiveReceipt {
     pub fn from_persisted(
         id: DeadLetterId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         object_key: &str,
         checksum: ArchiveChecksum,
         archive_version_id: ArchiveVersionId,
@@ -221,7 +221,7 @@ impl ExpiredArchiveReceipt {
         &self.id
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -249,7 +249,7 @@ impl MissingArchiveProof {
         self.receipt.dead_letter_id()
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.receipt.tenant()
     }
 

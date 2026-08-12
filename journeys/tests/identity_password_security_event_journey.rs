@@ -425,7 +425,7 @@ async fn seed_role_revision(
     pool: &PgPool,
     tenant: TenantId,
     actor: &str,
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
     role: &Role,
 ) -> TestResult {
     let mut tx = pool.begin().await?;
@@ -457,7 +457,14 @@ async fn seed_rbac(pg: &postgres::PgRuntimeHandle, owner: &PgPool, tenant: Tenan
         ],
     )?;
     let role_id = role.id().clone();
-    seed_role_revision(owner, tenant, USER, vocab::PrincipalKind::Admin, &role).await?;
+    seed_role_revision(
+        owner,
+        tenant,
+        USER,
+        rss_request_context::PrincipalKind::Admin,
+        &role,
+    )
+    .await?;
     let service = identity::RbacAdminService::new(
         Arc::from(DynRoleReadRepo::new_box(identity.role_repo())),
         Arc::from(DynRoleBindingLifecycle::new_box(
@@ -470,7 +477,7 @@ async fn seed_rbac(pg: &postgres::PgRuntimeHandle, owner: &PgPool, tenant: Tenan
             ProducerMarker::for_test(ROLES_ASSIGN_PRODUCER).into_receipt(),
             tenant,
             ids::UserId::parse(USER)?,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             USER.to_owned(),
             role_id,
         )

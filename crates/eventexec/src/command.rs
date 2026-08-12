@@ -110,7 +110,7 @@ impl CommandIdempotencyKeyring {
 
     fn probes(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         topic: &str,
         raw: &CommandIdempotencyKey,
     ) -> Result<CommandAliasProbeSet, ()> {
@@ -422,7 +422,7 @@ pub struct ReviewedCommandDispatch {
 impl ReviewedCommandDispatch {
     fn new(
         spec: generated::command::CommandSpec,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         payload: Vec<u8>,
         subject_id: EnvelopeSubjectId,
         actor: OutboxActor,
@@ -458,7 +458,7 @@ pub struct ReviewedCommandJournal {
 impl ReviewedCommandJournal {
     fn new(
         spec: generated::command::CommandSpec,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         payload: Vec<u8>,
         subject_id: EnvelopeSubjectId,
         actor: OutboxActor,
@@ -512,7 +512,7 @@ impl From<ReviewedIntentError> for CommandJournalError {
 
 fn reviewed_intent(
     spec: generated::command::CommandSpec,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     payload: Vec<u8>,
     subject_id: EnvelopeSubjectId,
     actor: OutboxActor,
@@ -543,7 +543,7 @@ fn reviewed_intent(
 pub(crate) fn reviewed_keyed_intent(
     keyring: &CommandIdempotencyKeyring,
     spec: generated::command::CommandSpec,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     payload: Vec<u8>,
     subject_id: EnvelopeSubjectId,
     actor: OutboxActor,
@@ -559,7 +559,7 @@ pub(crate) fn reviewed_keyed_intent(
 }
 
 fn command_request_fingerprint(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     topic: &str,
     contract: vocab::ContractBinding,
     payload: &[u8],
@@ -588,7 +588,7 @@ fn command_request_fingerprint(
 }
 
 pub(crate) fn validate_actor_tenant(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     actor: &OutboxActor,
 ) -> Result<(), ()> {
     match actor.tenant() {
@@ -646,7 +646,7 @@ impl<S: CommandDispatchStore> DirectCommandDispatcher<S> {
     async fn dispatch_reviewed<C>(
         &self,
         request: &C::Request,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         subject_id: EnvelopeSubjectId,
         actor: OutboxActor,
         idempotency_key: Option<&str>,
@@ -683,7 +683,7 @@ impl<S: CommandDispatchStore> generated::command::CommandEmit for DirectCommandD
     async fn emit<C>(
         &self,
         request: &C::Request,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: Option<&str>,
@@ -719,7 +719,7 @@ impl<S: CommandJournalStore> generated::command::CommandJournal for JournaledCom
     async fn journal<C>(
         &self,
         request: &C::Request,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: &str,
@@ -922,8 +922,9 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("tenant")
     }
 
     fn command_contract() -> vocab::ContractBinding {
@@ -942,13 +943,13 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn other_tenant_actor() -> OutboxActor {
-        let other = vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")
+        let other = rss_request_context::TenantId::parse("11111111-1111-1111-1111-111111111111")
             .expect("canonical tenant");
         OutboxActor::scoped(
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             OpaqueActorId::from_opaque("other-tenant-actor").expect("actor"),
             other,
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         )
     }
 
@@ -997,7 +998,8 @@ mod tests {
             .expect("aliases");
         let other = keys
             .probes(
-                vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant"),
+                rss_request_context::TenantId::parse("11111111-1111-1111-1111-111111111111")
+                    .expect("tenant"),
                 "seed.commands.do-thing",
                 &raw,
             )

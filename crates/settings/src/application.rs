@@ -70,7 +70,8 @@ use generated::event::{SubscriptionEffect, SubscriptionExecution};
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
-use vocab::{CoreError, CoreErrorKind, TenantId};
+use rss_request_context::TenantId;
+use vocab::{CoreError, CoreErrorKind};
 
 use crate::secret_application::{
     SecretPublishState, SecretResolveState, secret_publish_handler, secret_resolve_handler,
@@ -346,7 +347,7 @@ pub enum ConfigVersionChangedEventError {
     #[error("config-version-changed payload decode failed")]
     Decode(#[source] serde_json::Error),
     #[error("config-version-changed tenant parse failed")]
-    Tenant(#[source] vocab::TenantIdError),
+    Tenant(#[source] rss_request_context::TenantIdError),
     #[error("config-version-changed key parse failed")]
     Key(#[source] SettingsError),
     #[error("config-version-changed version is negative")]
@@ -775,7 +776,7 @@ fn authenticated_actor(
             auth.principal_kind(),
             actor_id,
             tenant,
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         ),
     ))
 }
@@ -1304,10 +1305,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn actor() -> OutboxActor {
         OutboxActor::scoped(
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             OpaqueActorId::from_opaque("settings-test-actor").expect("opaque actor"),
             tenant(),
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         )
     }
 
@@ -1590,8 +1591,8 @@ mod tests {
 
     // ── #1430 settings durable module：HTTP handler / route 装配测试 ──────────────────
     use crate::internal::mem::{InMemSecretRepo, new_secret_store};
+    use rss_request_context::PrincipalKind;
     use testkit::ContractRequest;
-    use vocab::PrincipalKind;
 
     /// 共享同一 in-mem store 的 secret read repo + mutation UoW。
     fn secret_ports_arc() -> (

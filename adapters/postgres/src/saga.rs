@@ -193,7 +193,7 @@ impl SagaStorageErrorClass {
 
 #[derive(Debug, Clone)]
 struct SagaDiagnosticContext {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     owner: Option<String>,
     contract: Option<String>,
 }
@@ -708,7 +708,7 @@ impl SagaDurableStore for PgSagaDurableStore {
     async fn list_runnable(
         &self,
         identity: &SagaWorkerIdentity,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         limit: NonZeroUsize,
     ) -> Result<Vec<SagaRunnableInstance>, SagaDurableStoreError> {
         let owner = identity.owner().to_string();
@@ -2908,7 +2908,7 @@ where
 }
 
 fn runnable_from_row(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     row: SagaRunnableRow,
 ) -> Result<SagaRunnableInstance, SagaDurableStoreError> {
     let saga_id = uuid::Uuid::parse_str(&row.saga_id)
@@ -3271,7 +3271,7 @@ mod tests {
         let dispatch = tracing::Dispatch::new(capture);
         let _guard = tracing::dispatcher::set_default(&dispatch);
 
-        let tenant = vocab::TenantId::parse("00000000-0000-0000-0000-000000000123")
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000000123")
             .expect("tenant fixture is valid");
         let instance = consistency::SagaInstanceRef::new(
             tenant,

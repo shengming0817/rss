@@ -59,9 +59,8 @@ workspace 结构与分层仍以 [`architecture.md`](architecture.md) 为准，�
 本节细化上表的稳定语义，不建立第二套能力 taxonomy、package plane 或支持矩阵。具体 crate、provider、contract、
 profile 与公开符号仍从 Cargo metadata、manifest、schema、codegen 和 release surface 派生。
 
-以下 Platform vNext 条款是已接纳、待 #2107 原子激活的目标边界，不描述当前 v0.2 Cargo 图。#2107 必须在同一
-cutover 中同步替换 `architecture.md` 的当前 PlatformPublic 分层/公开命名、Cargo 依赖、Release API 与实现；在此之前
-current-head enforcement 仍以现有机器载体为准，不能把 planned carrier 当成 active。
+以下 Platform vNext 条款已由 #2107 原子 cutover 激活。当前 Cargo graph、Release API、codegen、RuntimeExec
+bridge 与 production composition 是现行边界；v0.2 仅为历史，不提供 compatibility authority。
 
 ### Domain Governance
 

@@ -35,10 +35,10 @@ impl CanonicalDeviceIngressFact {
         let expected_device = scope.device().as_uuid().to_string();
         let envelope_valid = envelope.tenant() == scope.tenant()
             && envelope.subject_id().as_str() == expected_device
-            && envelope.actor().kind() == vocab::PrincipalKind::Device
+            && envelope.actor().kind() == rss_request_context::PrincipalKind::Device
             && envelope.actor().actor_id().as_str() == expected_device
             && envelope.actor().tenant() == Some(scope.tenant())
-            && envelope.actor().scope() == vocab::RowScope::Tenant
+            && envelope.actor().scope() == vocab::VisibilityScope::Tenant
             && envelope.causation_id().is_none();
         if fact != ::identity::ports::device_certificate::device_ingress_receipt_fact()
             || !envelope_valid
@@ -70,7 +70,7 @@ impl CanonicalDeviceIngressFact {
         Ok(Self { entry, envelope })
     }
 
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub(crate) fn tenant(&self) -> rss_request_context::TenantId {
         self.envelope.tenant()
     }
 
@@ -107,7 +107,7 @@ pub struct IdentityTx<'borrow, 'tx, L: super::TenantLane> {
 }
 
 impl<L: super::TenantLane> IdentityTx<'_, '_, L> {
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub(crate) fn tenant(&self) -> rss_request_context::TenantId {
         self.tx.tenant()
     }
 }
@@ -491,7 +491,7 @@ impl RevocationWrite<'_, '_> {
                 crate::revocation::RevocationOperationError::EvidenceMissing,
             ));
         }
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         let device = scope.device().as_uuid().to_string();
         let serial = serial.as_bytes().to_vec();
         let not_after = not_after.unix_seconds();
@@ -563,7 +563,7 @@ impl RevocationWrite<'_, '_> {
               AND not_after > pg_catalog.clock_timestamp()
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(scope.device().as_uuid().to_string())
         .bind(serial.as_bytes() as &[u8])
         .fetch_optional(&mut *self.tx.conn)
@@ -601,7 +601,7 @@ impl SecretRead<'_, '_> {
             ORDER BY version DESC LIMIT 1
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(key.as_str())
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -619,7 +619,7 @@ impl SecretRead<'_, '_> {
             WHERE tenant_id = $1::uuid AND secret_key = $2 AND version = $3
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(key.as_str())
         .bind(i64::try_from(version).unwrap_or(i64::MAX))
         .fetch_optional(&mut *self.tx.conn)
@@ -634,7 +634,7 @@ impl SecretRead<'_, '_> {
             "SELECT max(version) FROM secret_refs \
              WHERE tenant_id = $1::uuid AND secret_key = $2",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(key.as_str())
         .fetch_one(&mut *self.tx.conn)
         .await
@@ -650,7 +650,7 @@ impl<'borrow, 'tx> SecretWrite<'borrow, 'tx> {
         #[cfg(all(test, feature = "integration"))]
         crate::secret_repo::wait_at_secret_key_lock_rendezvous(key.as_str()).await;
         sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
-            .bind(self.tx.tenant.as_uuid().to_string())
+            .bind(self.tx.tenant.to_string())
             .bind(key.as_str())
             .execute(&mut *self.tx.conn)
             .await
@@ -683,7 +683,7 @@ impl LockedSecretKey<'_, '_> {
                  WHERE tenant_id = $1::uuid AND secret_key = $2), 0)
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(self.key.as_str())
         .bind(i64::try_from(entry.version()).unwrap_or(i64::MAX))
         .bind(entry.secret_ref().store_id().as_str())
@@ -719,7 +719,7 @@ impl LockedSecretKey<'_, '_> {
                  ORDER BY version DESC LIMIT 1), true)
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(self.key.as_str())
         .execute(&mut *self.tx.conn)
         .await
@@ -765,7 +765,7 @@ impl IdentityRead<'_, '_> {
             WHERE tenant_id = $1::uuid AND user_id = $2::uuid
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(user_id.as_uuid().to_string())
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -794,7 +794,7 @@ impl IdentityRead<'_, '_> {
               AND g.grant_id = $2
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(grant_id.to_wire())
         .bind(user_id.as_uuid().to_string())
         .fetch_optional(&mut *self.tx.conn)
@@ -823,7 +823,7 @@ impl IdentityRead<'_, '_> {
               AND expires_at > to_timestamp($3)
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(grant_id.to_wire())
         .bind(crate::outbox::unix_secs(observed_at))
         .fetch_optional(&mut *self.tx.conn)
@@ -844,7 +844,7 @@ impl IdentityRead<'_, '_> {
             WHERE tenant_id = $1::uuid AND token_hash = $2
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(hash.as_bytes() as &[u8])
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -860,7 +860,7 @@ impl IdentityRead<'_, '_> {
             "SELECT login, password_hash, version FROM credentials \
              WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(user_id.as_uuid().to_string())
         .fetch_optional(&mut *self.tx.conn)
         .await?;
@@ -888,7 +888,7 @@ impl IdentityRead<'_, '_> {
                            ORDER BY version DESC LIMIT 1) AS revision ON true \
              WHERE role.tenant_id = $1::uuid AND role.id = $2",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(id.as_str())
         .fetch_optional(&mut *self.tx.conn)
         .await?;
@@ -920,7 +920,7 @@ impl IdentityRead<'_, '_> {
             LIMIT $3
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(after.map(|id| id.as_str()))
         .bind(limit)
         .fetch_all(&mut *self.tx.conn)
@@ -944,7 +944,7 @@ impl IdentityRead<'_, '_> {
             "SELECT role_id, subject FROM role_bindings \
              WHERE tenant_id = $1::uuid AND subject = $2 ORDER BY role_id ASC",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(subject)
         .fetch_all(&mut *self.tx.conn)
         .await
@@ -964,7 +964,7 @@ impl IdentityRead<'_, '_> {
             WHERE tenant_id = $1::uuid AND id = $2 AND deleted_at IS NULL
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(id.as_str())
         .fetch_optional(&mut *self.tx.conn)
         .await?;
@@ -990,7 +990,7 @@ impl IdentityRead<'_, '_> {
             LIMIT $3
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(after.map(|id| id.as_str()))
         .bind(fetch_limit)
         .fetch_all(&mut *self.tx.conn)
@@ -1021,7 +1021,7 @@ impl IdentityRead<'_, '_> {
             ORDER BY id ASC
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(scope.contract_id())
         .bind(scope.permission().as_str())
         .bind(crate::outbox::unix_secs(at))
@@ -1054,7 +1054,7 @@ impl IdentityRead<'_, '_> {
               AND deleted_at IS NULL
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(scope.contract_id())
         .bind(scope.permission().as_str())
         .bind(resource_id.as_str())
@@ -1111,7 +1111,7 @@ impl IdentityWrite<'_, '_> {
             "SELECT status, authn_epoch FROM account_security_states \
              WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(user_id.as_uuid().to_string())
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -1133,7 +1133,7 @@ impl IdentityWrite<'_, '_> {
              FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2 \
              ORDER BY id FOR UPDATE",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(grant_id.to_wire())
         .fetch_all(&mut *self.tx.conn)
         .await
@@ -1157,7 +1157,7 @@ impl IdentityWrite<'_, '_> {
                     (extract(epoch from expires_at) * 1000000)::bigint AS expires_at_micros \
              FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2 FOR UPDATE",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(grant_id.to_wire())
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -1198,7 +1198,7 @@ impl IdentityWrite<'_, '_> {
             "UPDATE refresh_tokens SET status = 'consumed' \
              WHERE tenant_id = $1::uuid AND id = $2::uuid AND status = 'active'",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(id.as_str())
         .execute(&mut *self.tx.conn)
         .await
@@ -1214,7 +1214,7 @@ impl IdentityWrite<'_, '_> {
             "UPDATE refresh_tokens SET status = 'revoked' \
              WHERE tenant_id = $1::uuid AND auth_grant_id = $2 AND status <> 'revoked'",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(grant_id.to_wire())
         .execute(&mut *self.tx.conn)
         .await
@@ -1234,7 +1234,7 @@ impl IdentityWrite<'_, '_> {
              WHERE tenant_id = $1::uuid AND grant_id = $2 \
                AND status IN ('active', 'revoked')",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(grant_id.to_wire())
         .bind(database_now_micros)
         .execute(&mut *self.tx.conn)
@@ -1265,7 +1265,7 @@ impl IdentityWrite<'_, '_> {
                      to_timestamp($11), to_timestamp($12))",
         )
         .bind(record.id().as_str())
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(record.auth_grant_id().to_wire())
         .bind(record.user_id().as_uuid().to_string())
         .bind(epoch)
@@ -1298,7 +1298,7 @@ impl IdentityWrite<'_, '_> {
               AND password_hash = $4 AND version = $7
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(&row.user)
         .bind(&row.login)
         .bind(&row.expected_hash)
@@ -1332,7 +1332,7 @@ impl IdentityWrite<'_, '_> {
               AND updated_at = TIMESTAMPTZ 'epoch' + $12 * INTERVAL '1 microsecond'
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(&row.user)
         .bind(row.next_status)
         .bind(row.next_epoch)
@@ -1359,7 +1359,7 @@ impl IdentityWrite<'_, '_> {
                 std::io::Error::other("refresh revocation tenant does not match transaction"),
             )));
         }
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         sqlx::query(
             "SELECT refresh.id FROM refresh_tokens AS refresh \
              WHERE refresh.tenant_id = $1::uuid AND refresh.user_id = $2::uuid \
@@ -1398,7 +1398,7 @@ impl IdentityWrite<'_, '_> {
                 std::io::Error::other("grant revocation tenant does not match transaction"),
             )));
         }
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         sqlx::query(
             "SELECT grant_id FROM auth_grants \
              WHERE tenant_id = $1::uuid AND user_id = $2::uuid AND status = 'active' \
@@ -1438,7 +1438,7 @@ impl IdentityWrite<'_, '_> {
         let version = |value: ::identity::ports::ResourceAttributeVersion| {
             i32::try_from(value.get()).map_err(|_| ::identity::ports::IdentityError::InvalidPolicy)
         };
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         let row = match expected {
             None => {
                 let first = ::identity::ports::ResourceAttributeVersion::first();
@@ -1521,7 +1521,7 @@ impl IdentityWrite<'_, '_> {
     {
         let expected = i32::try_from(expected.get())
             .map_err(|_| ::identity::ports::IdentityError::InvalidPolicy)?;
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         let updated = sqlx::query(
             r#"
             UPDATE resource_attributes
@@ -1587,7 +1587,7 @@ impl IdentityWrite<'_, '_> {
             ON CONFLICT (tenant_id, id) DO NOTHING
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(policy.id().as_str())
         .bind(version)
         .bind(policy.route_scope().contract_id())
@@ -1613,7 +1613,7 @@ impl IdentityWrite<'_, '_> {
         }
         let expected = i32::try_from(expected.get())
             .map_err(|error| ::identity::ports::IdentityError::Storage(Box::new(error)))?;
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         let row = sqlx::query(
             r#"
             UPDATE abac_policies
@@ -1665,7 +1665,7 @@ impl IdentityWrite<'_, '_> {
     ) -> Result<(u64, bool), ::identity::ports::IdentityError> {
         let expected = i32::try_from(expected.get())
             .map_err(|error| ::identity::ports::IdentityError::Storage(Box::new(error)))?;
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         let rows = sqlx::query(
             r#"
             UPDATE abac_policies
@@ -1704,7 +1704,7 @@ impl IdentityWrite<'_, '_> {
             "UPDATE credentials SET failure_count = 0, lockout_window_start = NULL, \
              locked_until = NULL WHERE tenant_id = $1::uuid AND login = $2",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(login)
         .execute(&mut *self.tx.conn)
         .await
@@ -1721,7 +1721,7 @@ impl IdentityWrite<'_, '_> {
              lockout_window_start = to_timestamp($4), locked_until = to_timestamp($5) \
              WHERE tenant_id = $1::uuid AND login = $2",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(login)
         .bind(i64::from(lockout.failure_count()))
         .bind(crate::outbox::unix_secs(lockout.window_start()))
@@ -1740,7 +1740,7 @@ impl IdentityWrite<'_, '_> {
             "UPDATE credentials SET password_hash = $3 \
              WHERE tenant_id = $1::uuid AND login = $2",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(login)
         .bind(replacement.as_str())
         .execute(&mut *self.tx.conn)
@@ -1764,7 +1764,7 @@ impl IdentityWrite<'_, '_> {
             FOR UPDATE
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(login)
         .fetch_optional(&mut *self.tx.conn)
         .await?;
@@ -1795,7 +1795,7 @@ impl IdentityWrite<'_, '_> {
             FOR UPDATE
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(user_id)
         .fetch_optional(&mut *self.tx.conn)
         .await
@@ -1810,7 +1810,7 @@ impl IdentityWrite<'_, '_> {
                 "credential tenant does not match transaction".to_owned(),
             ));
         }
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         sqlx::query(
             r#"
             INSERT INTO credentials (tenant_id, user_id, login, password_hash, version)
@@ -1858,7 +1858,7 @@ impl IdentityWrite<'_, '_> {
             FOR UPDATE
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(grant.user_id().as_uuid().to_string())
         .fetch_optional(&mut *self.tx.conn)
         .await?;
@@ -1887,7 +1887,7 @@ impl IdentityWrite<'_, '_> {
             )
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(grant.id().to_wire())
         .bind(grant.user_id().as_uuid().to_string())
         .bind(crate::outbox::unix_secs(grant.auth_time()))
@@ -1923,7 +1923,7 @@ impl IdentityWrite<'_, '_> {
             "#,
         )
         .bind(record.id().as_str())
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(record.auth_grant_id().to_wire())
         .bind(record.user_id().as_uuid().to_string())
         .bind(epoch)
@@ -1947,7 +1947,7 @@ impl IdentityWrite<'_, '_> {
                 "auth grant close tenant does not match transaction".to_owned(),
             ));
         }
-        let tenant = self.tx.tenant.as_uuid().to_string();
+        let tenant = self.tx.tenant.to_string();
         let account_locked: Option<i32> = sqlx::query_scalar(
             r#"
             SELECT 1 FROM account_security_states
@@ -2049,7 +2049,7 @@ impl IdentityWrite<'_, '_> {
             SET assigned_at = now()
             "#,
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(binding.role_id().as_str())
         .bind(binding.subject())
         .execute(&mut *self.tx.conn)
@@ -2066,7 +2066,7 @@ impl IdentityWrite<'_, '_> {
             "DELETE FROM role_bindings \
              WHERE tenant_id = $1::uuid AND role_id = $2 AND subject = $3",
         )
-        .bind(self.tx.tenant.as_uuid().to_string())
+        .bind(self.tx.tenant.to_string())
         .bind(role_id.as_str())
         .bind(subject)
         .execute(&mut *self.tx.conn)

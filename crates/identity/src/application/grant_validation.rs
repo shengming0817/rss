@@ -11,7 +11,7 @@ use crate::ports::{AuthGrantValidator, DynAuthGrantValidator, IdentityError};
 pub struct CurrentAuthGrant {
     grant_id: ids::CanonicalUuidV4,
     user_id: ids::UserId,
-    tenant_id: vocab::TenantId,
+    tenant_id: rss_request_context::TenantId,
     authn_epoch: u64,
 }
 
@@ -28,7 +28,7 @@ impl CurrentAuthGrant {
     pub(crate) fn user_id(&self) -> ids::UserId {
         self.user_id
     }
-    pub(crate) fn tenant_id(&self) -> vocab::TenantId {
+    pub(crate) fn tenant_id(&self) -> rss_request_context::TenantId {
         self.tenant_id
     }
     pub(crate) fn authn_epoch(&self) -> u64 {
@@ -36,7 +36,7 @@ impl CurrentAuthGrant {
     }
 
     /// Compare against the verified HTTP principal without exposing correlation fields.
-    pub fn binds_principal(&self, tenant: vocab::TenantId, subject: &str) -> bool {
+    pub fn binds_principal(&self, tenant: rss_request_context::TenantId, subject: &str) -> bool {
         self.tenant_id == tenant && self.user_id.as_uuid().hyphenated().to_string() == subject
     }
 
@@ -44,7 +44,7 @@ impl CurrentAuthGrant {
     pub fn for_test(
         grant_id: ids::CanonicalUuidV4,
         user_id: ids::UserId,
-        tenant_id: vocab::TenantId,
+        tenant_id: rss_request_context::TenantId,
         authn_epoch: u64,
     ) -> Self {
         Self {

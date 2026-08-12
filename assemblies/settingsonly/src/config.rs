@@ -1376,7 +1376,7 @@ fn vault_path_schema(allow_empty: bool) -> schemars::schema::Schema {
 
 impl VaultStoreBindingConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        vocab::TenantId::parse(&self.tenant_id)
+        rss_request_context::TenantId::parse(&self.tenant_id)
             .map_err(|_| ConfigError::InvalidValue("vault.tenantStoreAllowlist.tenantId"))?;
         non_blank(&self.store_id, "vault.tenantStoreAllowlist.storeId")?;
         validate_vault_path(&self.mount, false, "vault.tenantStoreAllowlist.mount")?;

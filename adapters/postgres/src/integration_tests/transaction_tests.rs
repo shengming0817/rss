@@ -221,7 +221,7 @@ async fn localtx_deadline_real_postgres_fault_matrix() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(7)).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let scoped = crate::cotx::TenantDb::<ServingWriteLane>::from_unverified_for_test(&app);
     let budget =
         LocalTxExecutionBudget::new(Duration::from_millis(300), Duration::from_millis(100))?;
@@ -573,7 +573,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(7)).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let scoped = crate::cotx::TenantDb::<ServingWriteLane>::from_unverified_for_test(&app);
 
     let committed = scoped
@@ -594,7 +594,7 @@ async fn localtx_settlement_connection_policy() -> TestResult {
     let committed_pid = committed.into_result()?;
     localtx_assert_backend_reused(&app.pool, committed_pid, "commit ack").await?;
 
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let isolation_key = format!("localtx-cross-tenant-{}", uuid::Uuid::new_v4());
     let tenant_a_id = tenant.to_string();
     let tenant_b_id = tenant_b.to_string();

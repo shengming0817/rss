@@ -270,7 +270,7 @@ pub mod test_support {
     pub fn dlq_operator_authorization<A: DlqOperatorAction>(
         caller: vocab::ServiceCallerDomain,
         operator_subject: impl Into<String>,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         start_audit_id: DlqOperatorStartAuditId,
     ) -> DlqOperatorAuthorization<A> {
         DlqOperatorAuthorization::issue(

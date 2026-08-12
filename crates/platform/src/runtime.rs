@@ -2,105 +2,112 @@ use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
+use std::future::Future;
 use std::marker::PhantomData;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::Poll;
+use std::time::Instant;
 
-use crate::auth::{AccessToken, PrincipalKind, TrustedIssuer, VerifiedAccess};
-use crate::diagnostics::{
-    BuildError, Condition, ConditionCode, ConditionStatus, ConditionsSnapshot, Diagnostic,
-    DiagnosticCode, DiagnosticsSnapshot, DispatchError, ShutdownError, VerifyError,
-};
-use crate::identity::{
-    ApplicationName, ContractId, ContractVersion, ModuleName, RequestId, SchemaDigest, TenantId,
-};
+use rss_contract::{ContractDescriptor, ContractId};
+use rss_request_context::RequestContextView;
 
-pub(crate) mod private {
-    pub trait Sealed {}
-}
+use crate::{ApplicationName, ModuleName};
 
-pub trait Contract: private::Sealed + Send + Sync + 'static {
+pub type HandlerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HandlerError>> + Send + 'a>>;
+
+pub trait Contract: Send + Sync + 'static {
     type Request: Send + 'static;
     type Response: Send + 'static;
-    const ID: ContractId;
-    const VERSION: ContractVersion;
-    const SCHEMA_DIGEST: SchemaDigest;
-    const PERMISSION: &'static str;
+    const DESCRIPTOR: ContractDescriptor;
 }
 
 pub trait Handler<C: Contract>: Send + Sync + 'static {
-    fn handle(
-        &self,
+    fn handle<'a>(
+        &'a self,
         request: C::Request,
-        context: RequestContext<'_>,
-    ) -> Result<C::Response, HandlerError>;
+        context: RequestContextView<'a>,
+    ) -> HandlerFuture<'a, C::Response>;
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct HandlerError;
-impl HandlerError {
-    pub const fn new() -> Self {
-        Self
-    }
-}
-impl Default for HandlerError {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl fmt::Debug for HandlerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("platform handler failed")
-    }
-}
 impl fmt::Display for HandlerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("platform handler failed")
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("platform handler failed")
     }
 }
 impl Error for HandlerError {}
 
-pub struct RequestContext<'a> {
-    access: &'a VerifiedAccess,
-    request_id: &'a RequestId,
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum AdmissionState {
+    Starting,
+    Ready,
+    Draining,
+    Stopped,
 }
 
-impl RequestContext<'_> {
-    pub fn principal(&self) -> VerifiedPrincipal<'_> {
-        VerifiedPrincipal {
-            access: self.access,
-        }
-    }
-    pub fn tenant(&self) -> Option<VerifiedTenant<'_>> {
-        self.access.tenant.as_ref().map(|id| VerifiedTenant { id })
-    }
-    pub fn request_id(&self) -> &RequestId {
-        self.request_id
-    }
-    pub fn allows_permission(&self, permission: &str) -> bool {
-        self.access.allows_permission(permission)
-    }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConditionStatus {
+    True,
+    False,
+    Unknown,
 }
 
-pub struct VerifiedPrincipal<'a> {
-    access: &'a VerifiedAccess,
-}
-impl VerifiedPrincipal<'_> {
-    pub fn kind(&self) -> PrincipalKind {
-        self.access.kind
-    }
-    pub fn matches_subject(&self, candidate: &str) -> bool {
-        self.access.matches_subject(candidate)
-    }
+/// Read-only projection of process truth. It contains no lifecycle authority.
+pub trait HostView: Send + Sync + 'static {
+    fn admission_state(&self) -> AdmissionState;
+    fn try_admit(&self) -> Result<Box<dyn AdmissionPermit>, AdmissionState>;
+    fn inventory_revision(&self) -> Option<String>;
+    fn condition(&self, name: &str) -> Option<ConditionStatus>;
 }
 
-pub struct VerifiedTenant<'a> {
-    id: &'a TenantId,
+/// Move-only lease issued by the RuntimeExec-owned admission gate.
+pub trait AdmissionPermit: Send {}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DispatchError {
+    UnknownContract,
+    DescriptorMismatch,
+    HostNotReady,
+    HostDraining,
+    HostStopped,
 }
-impl VerifiedTenant<'_> {
-    pub fn id(&self) -> &TenantId {
-        self.id
+impl fmt::Display for DispatchError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::UnknownContract => "unknown platform contract",
+            Self::DescriptorMismatch => "platform contract descriptor mismatch",
+            Self::HostNotReady => "platform host is not ready",
+            Self::HostDraining => "platform host is draining",
+            Self::HostStopped => "platform host is stopped",
+        })
     }
 }
+impl Error for DispatchError {}
+
+#[derive(Debug, Eq, PartialEq)]
+pub enum DispatchOutcome<T> {
+    Completed(T),
+    HandlerFailed,
+    Cancelled,
+    DeadlineExceeded,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BuildError {
+    DuplicateModule,
+    DuplicateContract,
+}
+impl fmt::Display for BuildError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::DuplicateModule => "duplicate platform module",
+            Self::DuplicateContract => "duplicate platform contract",
+        })
+    }
+}
+impl Error for BuildError {}
 
 pub struct ApplicationModule {
     name: ModuleName,
@@ -108,15 +115,18 @@ pub struct ApplicationModule {
 }
 
 impl ApplicationModule {
+    #[must_use]
     pub fn new(name: ModuleName) -> Self {
         Self {
             name,
             registrations: Vec::new(),
         }
     }
+    #[must_use]
     pub fn name(&self) -> &ModuleName {
         &self.name
     }
+    #[must_use]
     pub fn handler<C, H>(mut self, handler: H) -> Self
     where
         C: Contract,
@@ -129,318 +139,133 @@ impl ApplicationModule {
 
 pub struct ApplicationBuilder {
     name: ApplicationName,
-    issuer: Option<TrustedIssuer>,
+    host: Arc<dyn HostView>,
     modules: Vec<ApplicationModule>,
 }
 
 impl ApplicationBuilder {
-    pub fn new(name: ApplicationName) -> Self {
+    #[must_use]
+    pub fn new(name: ApplicationName, host: Arc<dyn HostView>) -> Self {
         Self {
             name,
-            issuer: None,
+            host,
             modules: Vec::new(),
         }
     }
-    pub fn trusted_issuer(mut self, issuer: TrustedIssuer) -> Self {
-        self.issuer = Some(issuer);
-        self
-    }
+    #[must_use]
     pub fn module(mut self, module: ApplicationModule) -> Self {
         self.modules.push(module);
         self
     }
-
-    pub fn build(self) -> Result<Application, BuildError> {
-        let issuer = self.issuer.ok_or_else(|| {
-            BuildError::new(DiagnosticsSnapshot::one(Diagnostic::new(
-                DiagnosticCode::MissingTrustedIssuer,
-            )))
-        })?;
+    pub fn build(self) -> Result<Dispatcher, BuildError> {
         let mut module_names = HashSet::new();
         let mut handlers = HashMap::new();
-        let mut duplicate_modules = 0;
-        let mut duplicate_handlers = 0;
         for module in self.modules {
-            if !module_names.insert(module.name.as_str().to_owned()) {
-                duplicate_modules += 1;
+            if !module_names.insert(module.name) {
+                return Err(BuildError::DuplicateModule);
             }
             for registration in module.registrations {
                 if handlers
-                    .insert(registration.id, registration.handler)
+                    .insert(
+                        rss_contract::ContractId::from_static(registration.descriptor.id()),
+                        registration,
+                    )
                     .is_some()
                 {
-                    duplicate_handlers += 1;
+                    return Err(BuildError::DuplicateContract);
                 }
             }
         }
-        if duplicate_modules != 0 || duplicate_handlers != 0 {
-            let mut diagnostics = Vec::new();
-            if duplicate_modules != 0 {
-                diagnostics.push(Diagnostic::count(
-                    DiagnosticCode::DuplicateModule,
-                    duplicate_modules,
-                ));
-            }
-            if duplicate_handlers != 0 {
-                diagnostics.push(Diagnostic::count(
-                    DiagnosticCode::DuplicateHandler,
-                    duplicate_handlers,
-                ));
-            }
-            return Err(BuildError::new(DiagnosticsSnapshot::new(diagnostics)));
-        }
-        Ok(Application {
-            _name: self.name,
-            issuer,
-            handlers,
-        })
-    }
-}
-
-pub struct Application {
-    _name: ApplicationName,
-    issuer: TrustedIssuer,
-    handlers: HashMap<ContractId, Arc<dyn ErasedHandler>>,
-}
-
-impl Application {
-    pub fn start(self) -> RuntimeHandle {
-        let core = Arc::new(RuntimeCore {
-            issuer: self.issuer,
-            handlers: self.handlers,
-            state: Mutex::new(RuntimeState {
-                phase: Phase::Accepting,
-                inflight: 0,
-            }),
-            diagnostics: Mutex::new(Vec::new()),
-            idle: Condvar::new(),
-        });
-        RuntimeHandle { core }
-    }
-}
-
-pub struct RuntimeHandle {
-    core: Arc<RuntimeCore>,
-}
-
-impl RuntimeHandle {
-    pub fn dispatcher(&self) -> Dispatcher {
-        Dispatcher {
-            core: Arc::clone(&self.core),
-        }
-    }
-    pub fn conditions(&self) -> ConditionsSnapshot {
-        self.core.conditions()
-    }
-    pub fn diagnostics(&self) -> DiagnosticsSnapshot {
-        self.core.diagnostics()
-    }
-
-    pub fn shutdown(self, timeout: Duration) -> Result<ShutdownReport, ShutdownError> {
-        let mut state = lock_state(&self.core.state);
-        state.phase = Phase::Draining;
-        let (next, timed_out) = wait_until_idle(&self.core.idle, state, timeout);
-        state = next;
-        if timed_out && state.inflight != 0 {
-            self.core.record(DiagnosticCode::ShutdownTimedOut);
-            return Err(shutdown_timeout(timeout));
-        }
-        state.phase = Phase::Stopped;
-        drop(state);
-        Ok(ShutdownReport {
-            conditions: self.core.conditions(),
-            diagnostics: DiagnosticsSnapshot::one(Diagnostic::new(
-                DiagnosticCode::ShutdownComplete,
-            )),
+        Ok(Dispatcher {
+            application: self.name,
+            host: self.host,
+            handlers: Arc::new(handlers),
         })
     }
 }
 
 #[derive(Clone)]
 pub struct Dispatcher {
-    core: Arc<RuntimeCore>,
+    application: ApplicationName,
+    host: Arc<dyn HostView>,
+    handlers: Arc<HashMap<ContractId, Registration>>,
 }
 
 impl Dispatcher {
-    pub fn verify(
-        &self,
-        token: &AccessToken,
-        now: SystemTime,
-    ) -> Result<VerifiedAccess, VerifyError> {
-        if lock_state(&self.core.state).phase == Phase::Stopped {
-            self.core.record(DiagnosticCode::RuntimeStopped);
-            return Err(VerifyError::new(DiagnosticsSnapshot::one(Diagnostic::new(
-                DiagnosticCode::RuntimeStopped,
-            ))));
-        }
-        self.core.issuer.verify(token, now).inspect_err(|_| {
-            self.core.record(DiagnosticCode::InvalidCredential);
-        })
+    #[must_use]
+    pub fn application_name(&self) -> &ApplicationName {
+        &self.application
+    }
+    #[must_use]
+    pub fn host(&self) -> &dyn HostView {
+        self.host.as_ref()
     }
 
-    pub fn dispatch<C: Contract>(
+    pub async fn dispatch<C: Contract>(
         &self,
-        access: &VerifiedAccess,
-        request_id: RequestId,
+        descriptor: &ContractDescriptor,
         request: C::Request,
-    ) -> Result<C::Response, DispatchError> {
-        if !self.core.issuer.accepts(access)
-            || !access.is_fresh_at(trusted_now())
-            || !access.allows_permission(C::PERMISSION)
+        context: RequestContextView<'_>,
+    ) -> Result<DispatchOutcome<C::Response>, DispatchError> {
+        let _admission = self.host.try_admit().map_err(dispatch_state_error)?;
+        let contract_id = rss_contract::ContractId::from_static(descriptor.id());
+        let Some(registration) = self.handlers.get(&contract_id) else {
+            return Err(DispatchError::UnknownContract);
+        };
+        if descriptor != &C::DESCRIPTOR || descriptor != &registration.descriptor {
+            return Err(DispatchError::DescriptorMismatch);
+        }
+        if registration.request_type != std::any::TypeId::of::<C::Request>()
+            || registration.response_type != std::any::TypeId::of::<C::Response>()
         {
-            self.core.record(DiagnosticCode::PermissionDenied);
-            return Err(dispatch_error(DiagnosticCode::PermissionDenied));
+            return Err(DispatchError::DescriptorMismatch);
         }
-        let guard = self.core.begin_dispatch().map_err(|code| {
-            self.core.record(code);
-            dispatch_error(code)
-        })?;
-        let handler = self.core.handlers.get(&C::ID).ok_or_else(|| {
-            self.core.record(DiagnosticCode::MissingHandler);
-            dispatch_error(DiagnosticCode::MissingHandler)
-        })?;
-        let response = handler
-            .handle(access, &request_id, Box::new(request))
-            .inspect_err(|_| self.core.record(DiagnosticCode::HandlerFailed))?;
-        drop(guard);
-        response
-            .downcast::<C::Response>()
-            .map(|value| *value)
-            .map_err(|_| {
-                self.core.record(DiagnosticCode::HandlerFailed);
-                dispatch_error(DiagnosticCode::HandlerFailed)
-            })
-    }
-
-    pub fn conditions(&self) -> ConditionsSnapshot {
-        self.core.conditions()
-    }
-}
-
-#[allow(
-    clippy::disallowed_methods,
-    reason = "Platform Public owns this private concrete wall-clock boundary; no caller-supplied clock can extend authority freshness"
-)]
-fn trusted_now() -> SystemTime {
-    SystemTime::now()
-}
-
-pub struct ShutdownReport {
-    conditions: ConditionsSnapshot,
-    diagnostics: DiagnosticsSnapshot,
-}
-impl ShutdownReport {
-    pub fn conditions(&self) -> &ConditionsSnapshot {
-        &self.conditions
-    }
-    pub fn diagnostics(&self) -> &DiagnosticsSnapshot {
-        &self.diagnostics
-    }
-}
-
-struct RuntimeCore {
-    issuer: TrustedIssuer,
-    handlers: HashMap<ContractId, Arc<dyn ErasedHandler>>,
-    state: Mutex<RuntimeState>,
-    diagnostics: Mutex<Vec<DiagnosticCode>>,
-    idle: Condvar,
-}
-
-impl RuntimeCore {
-    fn begin_dispatch(self: &Arc<Self>) -> Result<InflightGuard, DiagnosticCode> {
-        let mut state = lock_state(&self.state);
-        match state.phase {
-            Phase::Accepting => {
-                state.inflight += 1;
-                Ok(InflightGuard {
-                    core: Arc::clone(self),
-                })
+        if context.cancellation().is_cancelled() {
+            return Ok(DispatchOutcome::Cancelled);
+        }
+        if context.deadline().is_expired(Instant::now()) {
+            return Ok(DispatchOutcome::DeadlineExceeded);
+        }
+        let mut operation = registration.handler.handle(Box::new(request), context);
+        let mut termination = context.cancellation().cancelled(context.deadline());
+        let output = std::future::poll_fn(move |cx| {
+            if let Poll::Ready(reason) = termination.as_mut().poll(cx) {
+                return Poll::Ready(Err(reason));
             }
-            Phase::Draining => Err(DiagnosticCode::RuntimeDraining),
-            Phase::Stopped => Err(DiagnosticCode::RuntimeStopped),
-        }
-    }
-
-    fn conditions(&self) -> ConditionsSnapshot {
-        let state = lock_state(&self.state);
-        let truth = |value| {
-            if value {
-                ConditionStatus::True
-            } else {
-                ConditionStatus::False
+            operation.as_mut().poll(cx).map(Ok)
+        })
+        .await;
+        let output = match output {
+            Ok(output) => output,
+            Err(rss_request_context::CancellationReason::Cancelled) => {
+                return Ok(DispatchOutcome::Cancelled);
+            }
+            Err(rss_request_context::CancellationReason::DeadlineExceeded) => {
+                return Ok(DispatchOutcome::DeadlineExceeded);
             }
         };
-        ConditionsSnapshot::new(vec![
-            Condition::new(
-                ConditionCode::HandlersAdmitted,
-                truth(!self.handlers.is_empty()),
-            ),
-            Condition::new(
-                ConditionCode::AcceptingDispatch,
-                truth(state.phase == Phase::Accepting),
-            ),
-            Condition::new(
-                ConditionCode::Draining,
-                truth(state.phase == Phase::Draining),
-            ),
-            Condition::new(ConditionCode::Stopped, truth(state.phase == Phase::Stopped)),
-        ])
-    }
-
-    fn record(&self, code: DiagnosticCode) {
-        const MAX_DIAGNOSTICS: usize = 64;
-        let mut diagnostics = lock_diagnostics(&self.diagnostics);
-        if diagnostics.len() == MAX_DIAGNOSTICS {
-            diagnostics.remove(0);
-        }
-        diagnostics.push(code);
-    }
-
-    fn diagnostics(&self) -> DiagnosticsSnapshot {
-        let diagnostics = lock_diagnostics(&self.diagnostics)
-            .iter()
-            .copied()
-            .map(Diagnostic::new)
-            .collect();
-        DiagnosticsSnapshot::new(diagnostics)
-    }
-}
-
-struct InflightGuard {
-    core: Arc<RuntimeCore>,
-}
-impl Drop for InflightGuard {
-    fn drop(&mut self) {
-        let mut state = lock_state(&self.core.state);
-        state.inflight = state.inflight.saturating_sub(1);
-        if state.inflight == 0 {
-            if state.phase == Phase::Draining {
-                state.phase = Phase::Stopped;
-            }
-            self.core.idle.notify_all();
+        match output {
+            Ok(value) => value
+                .downcast::<C::Response>()
+                .map(|value| DispatchOutcome::Completed(*value))
+                .map_err(|_| DispatchError::DescriptorMismatch),
+            Err(()) => Ok(DispatchOutcome::HandlerFailed),
         }
     }
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Phase {
-    Accepting,
-    Draining,
-    Stopped,
-}
-struct RuntimeState {
-    phase: Phase,
-    inflight: usize,
-}
-
-pub(crate) struct Registration {
-    id: ContractId,
+struct Registration {
+    descriptor: ContractDescriptor,
+    request_type: std::any::TypeId,
+    response_type: std::any::TypeId,
     handler: Arc<dyn ErasedHandler>,
 }
 impl Registration {
     fn new<C: Contract, H: Handler<C>>(handler: H) -> Self {
         Self {
-            id: C::ID,
+            descriptor: C::DESCRIPTOR.clone(),
+            request_type: std::any::TypeId::of::<C::Request>(),
+            response_type: std::any::TypeId::of::<C::Response>(),
             handler: Arc::new(TypedHandler::<C, H> {
                 handler,
                 marker: PhantomData,
@@ -449,68 +274,39 @@ impl Registration {
     }
 }
 
-trait ErasedHandler: Send + Sync {
-    fn handle(
-        &self,
-        access: &VerifiedAccess,
-        request_id: &RequestId,
-        request: Box<dyn Any + Send>,
-    ) -> Result<Box<dyn Any + Send>, DispatchError>;
+fn dispatch_state_error(state: AdmissionState) -> DispatchError {
+    match state {
+        AdmissionState::Starting => DispatchError::HostNotReady,
+        AdmissionState::Ready => DispatchError::HostNotReady,
+        AdmissionState::Draining => DispatchError::HostDraining,
+        AdmissionState::Stopped => DispatchError::HostStopped,
+    }
 }
 
+trait ErasedHandler: Send + Sync {
+    fn handle<'a>(
+        &'a self,
+        request: Box<dyn Any + Send>,
+        context: RequestContextView<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, ()>> + Send + 'a>>;
+}
 struct TypedHandler<C, H> {
     handler: H,
     marker: PhantomData<C>,
 }
 impl<C: Contract, H: Handler<C>> ErasedHandler for TypedHandler<C, H> {
-    fn handle(
-        &self,
-        access: &VerifiedAccess,
-        request_id: &RequestId,
+    fn handle<'a>(
+        &'a self,
         request: Box<dyn Any + Send>,
-    ) -> Result<Box<dyn Any + Send>, DispatchError> {
-        let request = request
-            .downcast::<C::Request>()
-            .map_err(|_| dispatch_error(DiagnosticCode::HandlerFailed))?;
-        let context = RequestContext { access, request_id };
-        self.handler
-            .handle(*request, context)
-            .map(|response| Box::new(response) as Box<dyn Any + Send>)
-            .map_err(|_| dispatch_error(DiagnosticCode::HandlerFailed))
-    }
-}
-
-fn dispatch_error(code: DiagnosticCode) -> DispatchError {
-    DispatchError::new(DiagnosticsSnapshot::one(Diagnostic::new(code)))
-}
-fn shutdown_timeout(timeout: Duration) -> ShutdownError {
-    ShutdownError::new(DiagnosticsSnapshot::one(Diagnostic::duration(
-        DiagnosticCode::ShutdownTimedOut,
-        timeout,
-    )))
-}
-fn lock_state(mutex: &Mutex<RuntimeState>) -> MutexGuard<'_, RuntimeState> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-fn lock_diagnostics(mutex: &Mutex<Vec<DiagnosticCode>>) -> MutexGuard<'_, Vec<DiagnosticCode>> {
-    match mutex.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
-fn wait_until_idle<'a>(
-    condvar: &Condvar,
-    state: MutexGuard<'a, RuntimeState>,
-    timeout: Duration,
-) -> (MutexGuard<'a, RuntimeState>, bool) {
-    match condvar.wait_timeout_while(state, timeout, |state| state.inflight != 0) {
-        Ok((guard, result)) => (guard, result.timed_out()),
-        Err(poisoned) => {
-            let (guard, result) = poisoned.into_inner();
-            (guard, result.timed_out())
-        }
+        context: RequestContextView<'a>,
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, ()>> + Send + 'a>> {
+        Box::pin(async move {
+            let request = request.downcast::<C::Request>().map_err(|_| ())?;
+            self.handler
+                .handle(*request, context)
+                .await
+                .map(|value| Box::new(value) as Box<dyn Any + Send>)
+                .map_err(|_| ())
+        })
     }
 }

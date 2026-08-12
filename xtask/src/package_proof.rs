@@ -57,16 +57,22 @@ pub(crate) fn run(
             bail!("cargo package did not produce {}", archive.display());
         }
         let crate_root = extract_archive(&archive, &unpacked)?;
-        validate_archive(plan, &crate_root, &head)
-            .with_context(|| format!("archive validation failed for `{}`", plan.package))?;
-        run_archive_matrix(plan, &crate_root, &temp.root)
-            .with_context(|| format!("archive matrix failed for `{}`", plan.package))?;
         let checksum = format!("{:x}", Sha256::digest(fs::read(&archive)?));
         artifacts.push(PackageArtifact {
             plan,
             archive,
+            crate_root,
             checksum,
         });
+    }
+
+    for artifact in &artifacts {
+        validate_archive(artifact.plan, &artifact.crate_root, &head).with_context(|| {
+            format!("archive validation failed for `{}`", artifact.plan.package)
+        })?;
+        write_archive_patch_config(artifact, &artifacts)?;
+        run_archive_matrix(artifact.plan, &artifact.crate_root, &temp.root)
+            .with_context(|| format!("archive matrix failed for `{}`", artifact.plan.package))?;
     }
 
     let registry = temp.root.join("registry");
@@ -175,11 +181,38 @@ fn validate_execution_coverage(
 struct PackageArtifact<'a> {
     plan: &'a PackageProofPlan,
     archive: PathBuf,
+    crate_root: PathBuf,
     checksum: String,
+}
+
+fn write_archive_patch_config(
+    artifact: &PackageArtifact<'_>,
+    artifacts: &[PackageArtifact<'_>],
+) -> Result<()> {
+    if artifact.plan.workspace_dependencies.is_empty() {
+        return Ok(());
+    }
+    let cargo = artifact.crate_root.join(".cargo");
+    fs::create_dir_all(&cargo)?;
+    let mut config = String::from("[patch.crates-io]\n");
+    for (dependency, _) in &artifact.plan.workspace_dependencies {
+        let source = artifacts
+            .iter()
+            .find(|candidate| candidate.plan.package == *dependency)
+            .context("selected archive dependency was not packaged")?;
+        config.push_str(&format!(
+            "{dependency} = {{ path = {:?} }}\n",
+            source.crate_root.to_string_lossy()
+        ));
+    }
+    fs::write(cargo.join("config.toml"), config)?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProofBehavior {
+    Contract,
+    RequestContext,
     Platform,
     DiagContext,
     TraceContext,
@@ -188,6 +221,8 @@ enum ProofBehavior {
 impl ProofBehavior {
     fn for_package(package: &str) -> Result<Self> {
         match package {
+            "rss-contract" => Ok(Self::Contract),
+            "rss-request-context" => Ok(Self::RequestContext),
             "rss-platform" => Ok(Self::Platform),
             "rss-diag-context" => Ok(Self::DiagContext),
             "rss-trace-context" => Ok(Self::TraceContext),
@@ -197,6 +232,8 @@ impl ProofBehavior {
 
     const fn fixture(self) -> &'static str {
         match self {
+            Self::Contract => "contract",
+            Self::RequestContext => "request-context",
             Self::Platform => "platform",
             Self::DiagContext => "diag-context",
             Self::TraceContext => "trace-context",
@@ -205,6 +242,8 @@ impl ProofBehavior {
 
     fn validate_receipt(self, receipt: &serde_json::Value) -> Result<()> {
         let expected = match self {
+            Self::Contract => contract_receipt(),
+            Self::RequestContext => request_context_receipt(),
             Self::Platform => platform_receipt(),
             Self::DiagContext => diag_context_receipt(),
             Self::TraceContext => trace_context_receipt(),
@@ -221,6 +260,7 @@ struct PackageProofPlan {
     version: String,
     minimum_rust_version: String,
     dependencies: Vec<serde_json::Value>,
+    workspace_dependencies: Vec<(String, PathBuf)>,
     features: BTreeMap<String, BTreeSet<String>>,
     behavior: ProofBehavior,
 }
@@ -230,16 +270,22 @@ impl PackageProofPlan {
         facts: &WorkspaceFacts,
         surface: &crate::release_surface::ReleaseSurface,
     ) -> Result<Vec<Self>> {
+        let selected = surface
+            .packages()
+            .iter()
+            .map(|package| package.package().to_owned())
+            .collect::<BTreeSet<_>>();
         surface
             .packages()
             .iter()
-            .map(|release| Self::derive(facts, release))
+            .map(|release| Self::derive(facts, release, &selected))
             .collect()
     }
 
     fn derive(
         facts: &WorkspaceFacts,
         release: &crate::release_surface::ReleasePackage,
+        selected: &BTreeSet<String>,
     ) -> Result<Self> {
         let package = facts
             .workspace_packages()
@@ -251,6 +297,7 @@ impl PackageProofPlan {
         }
         let key = facts.package_key(release.package())?;
         let mut dependencies = Vec::new();
+        let mut workspace_dependencies = Vec::new();
         for dependency in facts.direct_dependencies_for(&key)? {
             if dependency.kind() == DependencyKind::Dev {
                 continue;
@@ -258,15 +305,25 @@ impl PackageProofPlan {
             if !dependency.unconditional() {
                 bail!("package proof requires an owned target expression projection");
             }
-            let registry = match dependency.source() {
-                DependencySource::Registry { url } | DependencySource::Sparse { url } => url,
-                _ => bail!("release package proof forbids non-registry production dependencies"),
-            };
             let resolved = match dependency.resolution() {
                 DependencyResolution::Resolved(package) => package.as_str(),
                 DependencyResolution::Unresolved => {
                     bail!("release dependency identity is unresolved")
                 }
+            };
+            let registry = match dependency.source() {
+                DependencySource::Registry { url } | DependencySource::Sparse { url } => Some(url),
+                DependencySource::Workspace { repo_relative_root }
+                | DependencySource::Path { repo_relative_root }
+                    if selected.contains(resolved) =>
+                {
+                    workspace_dependencies
+                        .push((resolved.to_owned(), repo_relative_root.to_path_buf()));
+                    None
+                }
+                _ => bail!(
+                    "release package proof forbids production dependencies outside the validated Release Surface closure"
+                ),
             };
             let package_rename = (resolved != dependency.name()).then_some(resolved);
             let kind = match dependency.kind() {
@@ -295,6 +352,7 @@ impl PackageProofPlan {
             version: release.version().to_string(),
             minimum_rust_version: release.minimum_rust_version().to_string(),
             dependencies,
+            workspace_dependencies,
             features: package.publish_metadata().features().clone(),
             behavior,
         })
@@ -350,15 +408,23 @@ fn validate_trace_context_default_closure(
 fn platform_receipt() -> serde_json::Value {
     json!({
         "contract": "runtime.inventory",
-        "subjectMatched": true,
-        "tenantMatched": true,
-        "permissionMatched": true,
-        "requestIdMatched": true,
-        "dispatch": true,
-        "conditionsRead": true,
-        "diagnosticsRead": true,
-        "shutdown": true,
-        "stoppedFailClosed": true
+        "asyncHandlerImplemented": true,
+        "trustedContextReadOnly": true
+    })
+}
+
+fn contract_receipt() -> serde_json::Value {
+    json!({
+        "package": "rss-contract", "dottedId": true, "version": "v12",
+        "digest": true, "descriptor": true, "invalidRejected": true
+    })
+}
+
+fn request_context_receipt() -> serde_json::Value {
+    json!({
+        "package": "rss-request-context", "tenantCanonical": true, "requestId": true,
+        "principalRedacted": true, "deadlineShortened": true, "cancelObserved": true,
+        "obligationsRead": true
     })
 }
 
@@ -395,9 +461,25 @@ fn package(root: &Path, target: &Path, plan: &PackageProofPlan) -> Result<()> {
     let target = target
         .to_str()
         .context("package proof target path is not UTF-8")?;
+    let mut args = vec![
+        "-p".to_owned(),
+        plan.package.clone(),
+        "--locked".to_owned(),
+        "--no-verify".to_owned(),
+        "--target-dir".to_owned(),
+        target.to_owned(),
+    ];
+    for (package, path) in &plan.workspace_dependencies {
+        args.push("--config".to_owned());
+        args.push(format!(
+            "patch.crates-io.{package}.path={:?}",
+            root.join(path).to_string_lossy()
+        ));
+    }
+    let args = args.iter().map(String::as_str).collect::<Vec<_>>();
     run_cargo(
         crate::cmd::CargoSubcommand::Package,
-        &["-p", &plan.package, "--locked", "--target-dir", target],
+        &args,
         root,
         "build real crate archive",
     )
@@ -1271,15 +1353,8 @@ mod tests {
         assert!(ProofBehavior::Platform.validate_receipt(&green).is_ok());
         for field in [
             "contract",
-            "subjectMatched",
-            "tenantMatched",
-            "permissionMatched",
-            "requestIdMatched",
-            "dispatch",
-            "conditionsRead",
-            "diagnosticsRead",
-            "shutdown",
-            "stoppedFailClosed",
+            "asyncHandlerImplemented",
+            "trustedContextReadOnly",
         ] {
             let mut red = green.clone();
             red.as_object_mut().expect("receipt object").remove(field);
@@ -1287,6 +1362,48 @@ mod tests {
                 ProofBehavior::Platform.validate_receipt(&red).is_err(),
                 "missing {field} must fail"
             );
+        }
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn foundation_receipts_require_every_behavior_axis() {
+        for (behavior, green, fields) in [
+            (
+                ProofBehavior::Contract,
+                contract_receipt(),
+                &[
+                    "package",
+                    "dottedId",
+                    "version",
+                    "digest",
+                    "descriptor",
+                    "invalidRejected",
+                ][..],
+            ),
+            (
+                ProofBehavior::RequestContext,
+                request_context_receipt(),
+                &[
+                    "package",
+                    "tenantCanonical",
+                    "requestId",
+                    "principalRedacted",
+                    "deadlineShortened",
+                    "cancelObserved",
+                    "obligationsRead",
+                ][..],
+            ),
+        ] {
+            assert!(behavior.validate_receipt(&green).is_ok());
+            for field in fields {
+                let mut red = green.clone();
+                red.as_object_mut().expect("receipt object").remove(*field);
+                assert!(
+                    behavior.validate_receipt(&red).is_err(),
+                    "missing {field} must fail"
+                );
+            }
         }
     }
 
@@ -1388,19 +1505,40 @@ mod tests {
         assert_eq!(
             projected,
             BTreeMap::from([
+                ("rss-contract", ProofBehavior::Contract),
                 ("rss-diag-context", ProofBehavior::DiagContext),
                 ("rss-platform", ProofBehavior::Platform),
+                ("rss-request-context", ProofBehavior::RequestContext),
                 ("rss-trace-context", ProofBehavior::TraceContext),
             ])
         );
         for plan in &plans {
             assert_eq!(plan.minimum_rust_version, "1.96.0");
             assert!(plan.dependencies.iter().all(|dependency| {
-                dependency["registry"].as_str().is_some()
+                (dependency["registry"].as_str().is_some()
+                    || (plan.package == "rss-platform"
+                        && matches!(
+                            dependency["name"].as_str(),
+                            Some("rss-contract" | "rss-request-context")
+                        )))
                     && dependency["target"].is_null()
                     && dependency["kind"] != "dev"
             }));
         }
+        let platform = plans
+            .iter()
+            .find(|plan| plan.package == "rss-platform")
+            .expect("platform plan");
+        let projected_surface_dependencies = platform
+            .dependencies
+            .iter()
+            .filter(|dependency| dependency["registry"].is_null())
+            .map(|dependency| dependency["name"].as_str().expect("dependency name"))
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            projected_surface_dependencies,
+            BTreeSet::from(["rss-contract", "rss-request-context"])
+        );
     }
 
     #[test]

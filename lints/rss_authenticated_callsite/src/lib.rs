@@ -130,7 +130,7 @@ dylint_linting::declare_late_lint! {
     /// // 域 crate（非组合根）：
     /// let ev = httpserve::Authenticated::new_federated(
     ///     authmint::AuthenticatedMint::capability(),
-    ///     vocab::PrincipalKind::User,
+    ///     rss_request_context::PrincipalKind::User,
     ///     "subject-1",
     ///     None,
     ///     permissions,

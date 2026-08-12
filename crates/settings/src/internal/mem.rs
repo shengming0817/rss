@@ -19,7 +19,7 @@ use diport::OutboxEmitter;
 #[cfg(test)]
 use diport::OutboxEnvelopeParts;
 use eventexec::event::ReviewedEvent;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 use crate::domain::{ConfigEntry, ConfigHead, ConfigMutation, ConfigRepoError, SettingKey};
 #[cfg(any(test, feature = "seed-data"))]
@@ -651,10 +651,10 @@ mod tests {
             tenant,
             EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
             OutboxActor::scoped(
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 OpaqueActorId::from_opaque("actor").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::Tenant,
+                rss_request_context::RowScope::Tenant,
             ),
             consistency::IdemKey::parse(event_id).expect("event id"),
         )
@@ -674,7 +674,7 @@ mod tests {
                 subject: "11111111-2222-4333-8444-555555555555"
                     .parse()
                     .expect("uuid"),
-                tenant_id: tenant.as_uuid(),
+                tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
             };
         generated::event::identity_v1::session_created::emit(
             &eventexec::event::GeneratedEventEncoder,
@@ -682,10 +682,10 @@ mod tests {
             tenant,
             EnvelopeSubjectId::from_opaque("app.scope").expect("subject"),
             OutboxActor::scoped(
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 OpaqueActorId::from_opaque("actor").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::Tenant,
+                rss_request_context::RowScope::Tenant,
             ),
             consistency::IdemKey::parse(event_id).expect("event id"),
         )

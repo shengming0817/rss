@@ -459,11 +459,15 @@ fn forbidden_type_root<'a>(
     });
     if let Some(candidate) = workspace_package {
         return match owner {
-            PublicApiOwner::PlatformPublic => Some(root),
+            PublicApiOwner::FoundationPublic => Some(root),
+            PublicApiOwner::PlatformPublic => {
+                (!matches!(candidate, "rss-contract" | "rss-request-context")).then_some(root)
+            }
             PublicApiOwner::StandaloneComponent => (!selected.contains(candidate)).then_some(root),
         };
     }
     match owner {
+        PublicApiOwner::FoundationPublic => Some(root),
         PublicApiOwner::PlatformPublic => Some(root),
         PublicApiOwner::StandaloneComponent if path == "tracing::Span" => None,
         PublicApiOwner::StandaloneComponent => Some(root),

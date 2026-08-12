@@ -522,7 +522,7 @@ async fn auth_grant_sweeper_deletes_only_expired_roots_and_cascades_refresh() ->
                 now() - interval '2 hours', NULL, NULL \
          FROM generate_series(1, 1001) AS series",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&expired_prefix)
     .bind(expired_user.as_uuid().to_string())
     .execute(&owner.pool)
@@ -534,7 +534,7 @@ async fn auth_grant_sweeper_deletes_only_expired_roots_and_cascades_refresh() ->
          VALUES ($1::uuid, $2, $3::uuid, now() - interval '2 hours', 0, 'active', \
                  now() + interval '1 hour', now() - interval '2 hours', NULL, NULL)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&future_grant)
     .bind(future_user.as_uuid().to_string())
     .execute(&owner.pool)
@@ -550,7 +550,7 @@ async fn auth_grant_sweeper_deletes_only_expired_roots_and_cascades_refresh() ->
          FROM auth_grants \
          WHERE tenant_id = $1::uuid AND grant_id LIKE $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(format!("{expired_prefix}-%"))
     .execute(&owner.pool)
     .await?;
@@ -642,7 +642,7 @@ async fn auth_grant_sweeper_server_timeout_bounds_child_cascade_lock() -> TestRe
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&owner, tenant, user).await?;
     let grant_id = uuid::Uuid::new_v4().to_string();
@@ -654,7 +654,7 @@ async fn auth_grant_sweeper_server_timeout_bounds_child_cascade_lock() -> TestRe
          VALUES ($1::uuid, $2, $3::uuid, now() - interval '2 hours', 0, 'active', \
                  now() - interval '1 hour', now() - interval '2 hours', NULL, NULL)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&grant_id)
     .bind(user.as_uuid().to_string())
     .execute(&owner.pool)
@@ -667,7 +667,7 @@ async fn auth_grant_sweeper_server_timeout_bounds_child_cascade_lock() -> TestRe
                  'active', now() - interval '2 hours', now() + interval '1 hour')",
     )
     .bind(&refresh_id)
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&grant_id)
     .bind(user.as_uuid().to_string())
     .bind([0xA7_u8; 32].as_slice())
@@ -706,7 +706,7 @@ async fn auth_grant_sweeper_server_timeout_bounds_child_cascade_lock() -> TestRe
          (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
          (SELECT count(*) FROM refresh_tokens WHERE id = $3::uuid)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&grant_id)
     .bind(&refresh_id)
     .fetch_one(&owner.pool)
@@ -734,14 +734,14 @@ async fn auth_grant_sweeper_and_refresh_family_use_one_lock_order() -> TestResul
         connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(8)).await?;
     let sweeper_app =
         connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(8)).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let case = RefreshProducerCase::new(tenant);
     case.seed(&refresh_app, &owner).await?;
     sqlx::query(
         "UPDATE auth_grants SET expires_at = clock_timestamp() - interval '1 second' \
          WHERE tenant_id = $1::uuid AND grant_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .execute(&owner.pool)
     .await?;
@@ -754,7 +754,7 @@ async fn auth_grant_sweeper_and_refresh_family_use_one_lock_order() -> TestResul
         "SELECT grant_id FROM auth_grants \
          WHERE tenant_id = $1::uuid AND grant_id = $2 FOR UPDATE",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .fetch_one(&mut *root_blocker)
     .await?;
@@ -832,7 +832,7 @@ async fn auth_grant_sweeper_and_refresh_family_use_one_lock_order() -> TestResul
          (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
          (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .fetch_one(&owner.pool)
     .await?;
@@ -840,7 +840,7 @@ async fn auth_grant_sweeper_and_refresh_family_use_one_lock_order() -> TestResul
     let facts: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&owner.pool)
     .await?;
@@ -998,8 +998,8 @@ async fn dead_letter_tenant_conformance() -> TestResult {
     let dl = store.dead_letter(test_dlx_payload_protector());
     let domain = unique_domain("dead-letter-conf");
     let message_id = unique_event_id("dead-letter-conf-msg");
-    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
-    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
+    let tenant_a = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = rss_request_context::TenantId::parse(COTX_TENANT_B).unwrap();
 
     testkit::tenant_conformance::assert_tenant_isolation(
         tenant_a,
@@ -1089,7 +1089,7 @@ async fn refresh_producer_normal_rotation_commits_child_without_security_fact() 
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let case = RefreshProducerCase::new(tenant);
     case.seed(&app, &owner).await?;
 
@@ -1120,7 +1120,7 @@ async fn refresh_rotation_commit_unknown_never_returns_a_persisted_receipt() -> 
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let case = RefreshProducerCase::new(tenant);
     case.seed(&app, &owner).await?;
 
@@ -1153,7 +1153,7 @@ async fn refresh_replay_containment_is_atomic_with_the_winning_rotation() -> Tes
     owner.run_migrations().await?;
     let app_a = connect_pg_rss_app_role(&pg, &owner).await?;
     let app_b = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let case = RefreshProducerCase::new(tenant);
     case.seed(&app_a, &owner).await?;
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
@@ -1235,7 +1235,7 @@ async fn refresh_replay_containment_is_atomic_with_the_winning_rotation() -> Tes
         "UPDATE refresh_tokens SET status = 'active' \
          WHERE tenant_id = $1::uuid AND id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.rotation.new_record().id().as_str())
     .execute(&owner.pool)
     .await?;
@@ -1270,7 +1270,7 @@ async fn refresh_reuse_faults_roll_back_family_grant_and_outbox_together() -> Te
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let case = RefreshProducerCase::new(tenant);
     case.seed(&app, &owner).await?;
     crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
@@ -1332,7 +1332,7 @@ async fn refresh_rotation_after_family_fault_rolls_back_and_can_retry_cleanly() 
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let case = RefreshProducerCase::new(tenant);
     case.seed(&app, &owner).await?;
 
@@ -1358,7 +1358,7 @@ async fn refresh_rotation_after_family_fault_rolls_back_and_can_retry_cleanly() 
          (SELECT count(*) FROM projection_events \
           WHERE metadata ->> 'tenantId' = $1 AND contract_id = $5)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .bind(case.old.id().as_str())
     .bind(case.rotation.new_record().id().as_str())
@@ -1391,7 +1391,7 @@ async fn refresh_rotation_after_family_fault_rolls_back_and_can_retry_cleanly() 
          (SELECT count(*) FROM projection_events \
           WHERE metadata ->> 'tenantId' = $1 AND contract_id = $5)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .bind(case.old.id().as_str())
     .bind(case.rotation.new_record().id().as_str())
@@ -1424,7 +1424,7 @@ async fn refresh_reuse_fault_matrix_is_all_or_none_and_commit_unknown_has_no_par
         IdentitySecurityFault::OutboxAppend,
         IdentitySecurityFault::AfterOutboxBeforeCommit,
     ] {
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let case = RefreshProducerCase::new(tenant);
         case.seed(&app, &owner).await?;
         crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
@@ -1459,7 +1459,7 @@ async fn refresh_reuse_fault_matrix_is_all_or_none_and_commit_unknown_has_no_par
             "SELECT count(*) FROM projection_events \
              WHERE metadata ->> 'tenantId' = $1 AND contract_id = $2",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
         .fetch_one(&owner.pool)
         .await?;
@@ -1469,7 +1469,7 @@ async fn refresh_reuse_fault_matrix_is_all_or_none_and_commit_unknown_has_no_par
         );
     }
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let case = RefreshProducerCase::new(tenant);
     case.seed(&app, &owner).await?;
     crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
@@ -1515,7 +1515,7 @@ async fn refresh_producer_enforces_lineage_root_lifetime_and_family_binding() ->
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let root_expired = RefreshProducerCase::new(tenant);
     root_expired.seed(&app, &owner).await?;
     crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&app)
@@ -1552,7 +1552,7 @@ async fn refresh_producer_enforces_lineage_root_lifetime_and_family_binding() ->
         "UPDATE refresh_tokens SET expires_at = clock_timestamp() - interval '1 second' \
          WHERE tenant_id = $1::uuid AND id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(root_expired.old.id().as_str())
     .execute(&owner.pool)
     .await?;
@@ -1570,7 +1570,7 @@ async fn refresh_producer_enforces_lineage_root_lifetime_and_family_binding() ->
     let inserted: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(second_rotation.new_record().id().as_str())
     .fetch_one(&owner.pool)
     .await?;
@@ -1611,7 +1611,7 @@ async fn refresh_producer_enforces_lineage_root_lifetime_and_family_binding() ->
         "UPDATE refresh_tokens SET lineage_id = $3::uuid \
          WHERE tenant_id = $1::uuid AND id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(corrupt_family.old.id().as_str())
     .bind(uuid::Uuid::new_v4().to_string())
     .execute(&owner.pool)
@@ -1637,8 +1637,8 @@ async fn auth_grant_validator_fences_every_durable_binding_in_one_port_call() ->
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     let other_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&owner, tenant, user_id).await?;
@@ -1784,7 +1784,7 @@ async fn auth_grant_validator_fences_every_durable_binding_in_one_port_call() ->
         "UPDATE account_security_states SET authn_epoch = 1, version = version + 1, \
          updated_at = now() WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user_id.as_uuid().to_string())
     .execute(&owner.pool)
     .await?;
@@ -1797,7 +1797,7 @@ async fn auth_grant_validator_fences_every_durable_binding_in_one_port_call() ->
         "UPDATE account_security_states SET authn_epoch = 0, version = version + 1, \
          updated_at = now() WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user_id.as_uuid().to_string())
     .execute(&owner.pool)
     .await?;
@@ -1807,7 +1807,7 @@ async fn auth_grant_validator_fences_every_durable_binding_in_one_port_call() ->
          status_changed_at = now(), updated_at = now() \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user_id.as_uuid().to_string())
     .execute(&owner.pool)
     .await?;
@@ -1821,7 +1821,7 @@ async fn auth_grant_validator_fences_every_durable_binding_in_one_port_call() ->
          status_changed_at = now(), updated_at = now() \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user_id.as_uuid().to_string())
     .execute(&owner.pool)
     .await?;
@@ -1983,7 +1983,7 @@ async fn auth_grant_login_plain_producer_lock_wait_is_bounded_and_rolls_back() -
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(8)).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&owner, tenant, user_id).await?;
 
@@ -1995,7 +1995,7 @@ async fn auth_grant_login_plain_producer_lock_wait_is_bounded_and_rolls_back() -
         "SELECT user_id FROM account_security_states \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid FOR UPDATE",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user_id.as_uuid().to_string())
     .fetch_one(&mut *lock_holder)
     .await?;
@@ -2048,7 +2048,7 @@ async fn auth_grant_login_plain_producer_lock_wait_is_bounded_and_rolls_back() -
 async fn auth_grant_login_rejects_stale_epoch_after_security_event_commits() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant, user).await?;
 
@@ -2109,7 +2109,7 @@ async fn auth_grant_login_account_lock_serializes_security_event_without_deadloc
         connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(5)).await?;
     let security_store =
         connect_pg_rss_app_role_with_limits(&pg, &owner, 1, Duration::from_secs(5)).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&owner, tenant, user).await?;
 
@@ -2198,7 +2198,7 @@ async fn auth_grant_login_account_lock_serializes_security_event_without_deadloc
          JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
          WHERE s.tenant_id = $1::uuid AND s.user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user.as_uuid().to_string())
     .bind(identity::ports::SESSION_CREATED_CONTRACT.contract_id())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
@@ -2218,7 +2218,7 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&owner, tenant, user_id).await?;
     let grant_id = uuid::Uuid::new_v4().to_string();
@@ -2306,11 +2306,11 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
     ] {
         let mut tx = app.pool.begin().await?;
         sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(tenant.as_uuid().to_string())
+            .bind(tenant.to_string())
             .execute(&mut *tx)
             .await?;
         let error = sqlx::query(statement)
-            .bind(tenant.as_uuid().to_string())
+            .bind(tenant.to_string())
             .bind(&refresh_id)
             .execute(&mut *tx)
             .await
@@ -2340,11 +2340,11 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
     ] {
         let mut tx = app.pool.begin().await?;
         sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-            .bind(tenant.as_uuid().to_string())
+            .bind(tenant.to_string())
             .execute(&mut *tx)
             .await?;
         let error = sqlx::query(statement)
-            .bind(tenant.as_uuid().to_string())
+            .bind(tenant.to_string())
             .bind(&grant_id)
             .execute(&mut *tx)
             .await
@@ -2377,7 +2377,7 @@ async fn auth_grant_serving_role_has_exact_mutation_acl() -> TestResult {
            ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
          WHERE g.tenant_id = $1::uuid AND g.grant_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&grant_id)
     .fetch_one(&owner.pool)
     .await?;
@@ -2401,7 +2401,7 @@ async fn password_change_security_event_updates_credential_revokes_sessions_and_
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     let credentials = crate::PgCredentialRepo::from_unverified_for_test(&store);
     credentials
@@ -2488,7 +2488,7 @@ async fn password_change_security_event_updates_credential_revokes_sessions_and_
     let roots: Vec<(String,)> = sqlx::query_as(
         "SELECT status FROM auth_grants WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user.as_uuid().to_string())
     .fetch_all(&store.pool)
     .await?;
@@ -2498,7 +2498,7 @@ async fn password_change_security_event_updates_credential_revokes_sessions_and_
         "SELECT status, auth_grant_status FROM refresh_tokens \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user.as_uuid().to_string())
     .fetch_all(&store.pool)
     .await?;
@@ -2511,7 +2511,7 @@ async fn password_change_security_event_updates_credential_revokes_sessions_and_
     let facts: Vec<Vec<u8>> = sqlx::query_scalar(
         "SELECT payload FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_all(&store.pool)
     .await?;
@@ -2535,7 +2535,7 @@ async fn password_change_security_event_updates_credential_revokes_sessions_and_
 async fn password_change_concurrent_full_lifecycle_cas_has_exactly_one_winner() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     let credentials = crate::PgCredentialRepo::from_unverified_for_test(&store);
     credentials
@@ -2663,7 +2663,7 @@ async fn password_change_concurrent_full_lifecycle_cas_has_exactly_one_winner() 
                  WHERE tenant_id = $1::uuid AND contract_id = $3) \
          FROM auth_grants WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user.as_uuid().to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&store.pool)
@@ -2682,7 +2682,7 @@ async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() 
     let accounts = crate::PgAccountSecurityRepo::from_unverified_for_test(&store);
     let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
 
-    let password_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let password_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let password_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     credentials
         .insert(
@@ -2728,7 +2728,7 @@ async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() 
         "UPDATE account_security_states SET updated_at = updated_at + INTERVAL '1 microsecond' \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(password_tenant.as_uuid().to_string())
+    .bind(password_tenant.to_string())
     .bind(password_user.as_uuid().to_string())
     .execute(&store.pool)
     .await?;
@@ -2759,14 +2759,14 @@ async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() 
          JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
          WHERE c.tenant_id = $1::uuid AND c.user_id = $2::uuid",
     )
-    .bind(password_tenant.as_uuid().to_string())
+    .bind(password_tenant.to_string())
     .bind(password_user.as_uuid().to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&store.pool)
     .await?;
     assert_eq!(password_rows, (1, 1, "active".into(), "active".into(), 0));
 
-    let state_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let state_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let state_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     credentials
         .insert(
@@ -2789,7 +2789,7 @@ async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() 
          SET status_changed_at = status_changed_at - INTERVAL '1 microsecond' \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(state_tenant.as_uuid().to_string())
+    .bind(state_tenant.to_string())
     .bind(state_user.as_uuid().to_string())
     .execute(&store.pool)
     .await?;
@@ -2835,7 +2835,7 @@ async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() 
         "UPDATE account_security_states SET updated_at = updated_at + INTERVAL '1 microsecond' \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(state_tenant.as_uuid().to_string())
+    .bind(state_tenant.to_string())
     .bind(state_user.as_uuid().to_string())
     .execute(&store.pool)
     .await?;
@@ -2859,7 +2859,7 @@ async fn identity_security_full_snapshot_cas_rejects_timestamp_only_staleness() 
     let security_facts: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
     )
-    .bind(state_tenant.as_uuid().to_string())
+    .bind(state_tenant.to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&store.pool)
     .await?;
@@ -2902,7 +2902,7 @@ async fn password_change_security_event_fault_matrix_rolls_back_every_stage() ->
             crate::identity_security_lifecycle::IdentitySecurityFault::AfterOutboxBeforeCommit,
         ),
     ] {
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
         let credentials = crate::PgCredentialRepo::from_unverified_for_test(&store);
         credentials
@@ -2976,7 +2976,7 @@ async fn password_change_security_event_fault_matrix_rolls_back_every_stage() ->
              JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
              WHERE c.tenant_id = $1::uuid AND c.user_id = $2::uuid",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(user.as_uuid().to_string())
         .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
         .fetch_one(&store.pool)
@@ -3004,7 +3004,7 @@ async fn account_restriction_and_reactivation_preserve_revocation_epoch_without_
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     crate::PgCredentialRepo::from_unverified_for_test(&store)
         .insert(
@@ -3062,7 +3062,7 @@ async fn account_restriction_and_reactivation_preserve_revocation_epoch_without_
     let fact_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&store.pool)
     .await?;
@@ -3079,7 +3079,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
     store.run_migrations().await?;
     let lifecycle = crate::PgIdentitySecurityLifecycle::from_unverified_for_test(&store);
 
-    let account_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let account_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let account_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, account_tenant, account_user).await?;
     let account_grant_a_id = uuid::Uuid::new_v4().to_string();
@@ -3128,7 +3128,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
                 .await?;
     }
     let same_tenant_decoy_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let other_tenant_decoy_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, account_tenant, same_tenant_decoy_user).await?;
     seed_auth_grant_account(&store, other_tenant, other_tenant_decoy_user).await?;
@@ -3180,7 +3180,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         "UPDATE refresh_tokens SET status = 'consumed' \
          WHERE tenant_id = $1::uuid AND id = $2::uuid",
     )
-    .bind(account_tenant.as_uuid().to_string())
+    .bind(account_tenant.to_string())
     .bind(&account_refresh_b_id)
     .execute(&store.pool)
     .await?;
@@ -3212,7 +3212,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         "SELECT status, authn_epoch, version FROM account_security_states \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid",
     )
-    .bind(account_tenant.as_uuid().to_string())
+    .bind(account_tenant.to_string())
     .bind(account_user.as_uuid().to_string())
     .fetch_one(&store.pool)
     .await?;
@@ -3221,7 +3221,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         "SELECT grant_id, status, close_reason FROM auth_grants \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid ORDER BY grant_id",
     )
-    .bind(account_tenant.as_uuid().to_string())
+    .bind(account_tenant.to_string())
     .bind(account_user.as_uuid().to_string())
     .fetch_all(&store.pool)
     .await?;
@@ -3233,7 +3233,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         "SELECT status, auth_grant_status FROM refresh_tokens \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid ORDER BY id",
     )
-    .bind(account_tenant.as_uuid().to_string())
+    .bind(account_tenant.to_string())
     .bind(account_user.as_uuid().to_string())
     .fetch_all(&store.pool)
     .await?;
@@ -3247,7 +3247,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
     let account_security_facts: Vec<Vec<u8>> = sqlx::query_scalar(
         "SELECT payload FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
     )
-    .bind(account_tenant.as_uuid().to_string())
+    .bind(account_tenant.to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_all(&store.pool)
     .await?;
@@ -3277,7 +3277,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
              JOIN refresh_tokens refresh ON refresh.tenant_id = root.tenant_id AND refresh.auth_grant_id = root.grant_id \
              WHERE account.tenant_id = $1::uuid AND account.user_id = $2::uuid AND root.grant_id = $3",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(user.as_uuid().to_string())
         .bind(grant_id)
         .fetch_one(&store.pool)
@@ -3295,7 +3295,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         );
     }
 
-    let grant_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let grant_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let grant_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, grant_tenant, grant_user).await?;
     let root_id = uuid::Uuid::new_v4().to_string();
@@ -3364,7 +3364,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         "SELECT grant_id, status, close_reason FROM auth_grants \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid ORDER BY grant_id",
     )
-    .bind(grant_tenant.as_uuid().to_string())
+    .bind(grant_tenant.to_string())
     .bind(grant_user.as_uuid().to_string())
     .fetch_all(&store.pool)
     .await?;
@@ -3390,7 +3390,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
         "SELECT auth_grant_id, status, auth_grant_status FROM refresh_tokens \
          WHERE tenant_id = $1::uuid AND user_id = $2::uuid ORDER BY auth_grant_id",
     )
-    .bind(grant_tenant.as_uuid().to_string())
+    .bind(grant_tenant.to_string())
     .bind(grant_user.as_uuid().to_string())
     .fetch_all(&store.pool)
     .await?;
@@ -3403,7 +3403,7 @@ async fn credential_security_lifecycle_applies_account_cas_and_grant_promotion_a
     let grant_security_fact_count: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
     )
-    .bind(grant_tenant.as_uuid().to_string())
+    .bind(grant_tenant.to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&store.pool)
     .await?;
@@ -3423,7 +3423,7 @@ async fn credential_security_route_transactions_linearize_duplicate_validated_co
     store.run_migrations().await?;
     let grant_lifecycle = crate::PgAuthGrantLifecycle::new(&store, fixed_clock());
 
-    let all_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let all_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let all_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, all_tenant, all_user).await?;
     let (all_grant, all_refresh) = auth_grant_fixture(
@@ -3490,7 +3490,7 @@ async fn credential_security_route_transactions_linearize_duplicate_validated_co
         1
     );
 
-    let current_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let current_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let current_user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, current_tenant, current_user).await?;
     let (current_grant, current_refresh) = auth_grant_fixture(
@@ -3556,7 +3556,7 @@ async fn credential_security_route_transactions_linearize_duplicate_validated_co
         let fact_count: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
         .fetch_one(&store.pool)
         .await?;
@@ -3572,8 +3572,8 @@ async fn credential_security_lifecycle_rolls_back_before_outbox_and_never_receip
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let other_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant, user).await?;
     let grant_id = uuid::Uuid::new_v4().to_string();
@@ -3619,7 +3619,7 @@ async fn credential_security_lifecycle_rolls_back_before_outbox_and_never_receip
          JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
          WHERE s.tenant_id = $1::uuid AND s.user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user.as_uuid().to_string())
     .fetch_one(&store.pool)
     .await?;
@@ -3630,7 +3630,7 @@ async fn credential_security_lifecycle_rolls_back_before_outbox_and_never_receip
     let after_rollback_facts: i64 = sqlx::query_scalar(
         "SELECT count(*) FROM outbox WHERE tenant_id = $1::uuid AND contract_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&store.pool)
     .await?;
@@ -3639,7 +3639,7 @@ async fn credential_security_lifecycle_rolls_back_before_outbox_and_never_receip
         "SELECT count(*) FROM projection_events \
          WHERE metadata ->> 'tenantId' = $1 AND contract_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&store.pool)
     .await?;
@@ -3682,7 +3682,7 @@ async fn credential_security_lifecycle_rolls_back_before_outbox_and_never_receip
          JOIN refresh_tokens r ON r.tenant_id = g.tenant_id AND r.auth_grant_id = g.grant_id \
          WHERE s.tenant_id = $1::uuid AND s.user_id = $2::uuid",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(user.as_uuid().to_string())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&store.pool)
@@ -3713,7 +3713,7 @@ async fn credential_security_lifecycle_real_append_and_precommit_failures_roll_b
             crate::identity_security_lifecycle::IdentitySecurityFault::AfterOutboxBeforeCommit,
         ),
     ] {
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let user = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
         seed_auth_grant_account(&store, tenant, user).await?;
         let grant_id = uuid::Uuid::new_v4().to_string();
@@ -3772,7 +3772,7 @@ async fn credential_security_lifecycle_real_append_and_precommit_failures_roll_b
                  AND r.auth_grant_id = g.grant_id \
              WHERE s.tenant_id = $1::uuid AND s.user_id = $2::uuid",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(user.as_uuid().to_string())
         .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
         .fetch_one(&store.pool)
@@ -3792,8 +3792,8 @@ async fn credential_security_lifecycle_real_append_and_precommit_failures_roll_b
 async fn auth_grant_composite_fk_rejects_every_mismatched_refresh_binding() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user_a = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user_b = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant_a, user_a).await?;
@@ -3888,7 +3888,7 @@ async fn auth_grant_composite_fk_rejects_every_mismatched_refresh_binding() -> T
     );
 
     sqlx::query("DELETE FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2")
-        .bind(tenant_a.as_uuid().to_string())
+        .bind(tenant_a.to_string())
         .bind(&grant_id)
         .execute(&store.pool)
         .await?;
@@ -4475,7 +4475,7 @@ fn durable_operator_cases()
 
 fn durable_operator_policy(
     id: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     version: u32,
     operator: Operator,
     effect: PolicyEffect,
@@ -5436,7 +5436,7 @@ async fn policy_repo_obligation_round_trip_conformance() -> TestResult {
     let lifecycle = PgPolicyLifecycle::new(&store, fixed_clock());
     let tenant = role_tenant(ROLE_TENANT_A)?;
     let obligations = PolicyObligations::new(
-        Some(vocab::ScopedTenant::Tenant),
+        Some(rss_request_context::RowScope::Tenant),
         vec![AttributeKey::parse("email").map_err(|_| IdentityError::InvalidPolicy)?],
     );
     let policy = policy_fixture(
@@ -5481,7 +5481,7 @@ async fn policy_repo_obligation_round_trip_conformance() -> TestResult {
 async fn policy_route_gate_conformance_denies_nonempty_obligations() -> TestResult {
     testkit::policy_conformance::assert_route_gate_denies_nonempty_obligations(
         PolicyObligations::empty(),
-        PolicyObligations::new(Some(vocab::ScopedTenant::Tenant), Vec::new()),
+        PolicyObligations::new(Some(rss_request_context::RowScope::Tenant), Vec::new()),
         |obligations| async move { Ok::<bool, IdentityError>(obligations.is_empty()) },
     )
     .await?;
@@ -5714,7 +5714,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
         roles_assign_producer_receipt(),
         tenant,
         actor,
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         "target-user".to_string(),
         role_id.clone(),
     )
@@ -5757,7 +5757,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
             roles_revoke_producer_receipt(),
             tenant_b,
             actor,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             role_id.clone(),
             "target-user".to_string(),
         )
@@ -5793,7 +5793,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
             roles_revoke_producer_receipt(),
             tenant,
             actor,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             role_id.clone(),
             "target-user".to_string(),
         )
@@ -5814,7 +5814,7 @@ async fn role_binding_lifecycle_assign_revoke_writes_binding_and_outbox() -> Tes
             roles_revoke_producer_receipt(),
             tenant,
             actor,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             role_id,
             "target-user".to_string(),
         )
@@ -6477,7 +6477,7 @@ async fn credential_repo_rehash_commit_failure_rolls_back_hash_and_lockout_clear
          lockout_window_start = to_timestamp($3), locked_until = NULL \
          WHERE tenant_id = $1::uuid AND login = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind("alice")
     .bind(i64::try_from(CRED_BASE_SECS - 60)?)
     .execute(&store.pool)

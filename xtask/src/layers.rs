@@ -119,6 +119,8 @@ pub(crate) fn is_test_support(name: &str) -> bool {
 /// workspace 成员所属分层。
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(crate) enum Layer {
+    /// Lowest public value layer; no workspace production dependencies.
+    FoundationPublic,
     /// 最低位公开应用内核；自身禁止任何 workspace 生产依赖，所有内部层可反向消费其稳定值面。
     PlatformPublic,
     Basis,
@@ -143,6 +145,12 @@ pub(crate) enum Layer {
 /// `bins/server` / `xtask` / `generated`）判定分层。`crates/*` 经 const 表查五层；其余按路径前缀。
 /// 未识别（含 `crates/` 下未登记）→ `None`。
 pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
+    if matches!(
+        (crate_name, member_path),
+        ("rss-contract", "crates/contract") | ("rss-request-context", "crates/request-context")
+    ) {
+        return Some(Layer::FoundationPublic);
+    }
     if member_path == "crates/platform" {
         return (crate_name == "rss-platform").then_some(Layer::PlatformPublic);
     }
@@ -200,43 +208,53 @@ pub(crate) fn classify(crate_name: &str, member_path: &str) -> Option<Layer> {
 /// 显式授予的下行边。generated 仅需基础；root 依赖一切。
 pub(crate) fn allows(from: Layer, to: Layer) -> bool {
     use Layer::{
-        Adapter, Basis, DiPort, Domain, Engine, Example, Generated, PlatformPublic, Root,
-        RuntimeExec, Service, Tooling,
+        Adapter, Basis, DiPort, Domain, Engine, Example, FoundationPublic, Generated,
+        PlatformPublic, Root, RuntimeExec, Service, Tooling,
     };
     match from {
         // 分层矩阵允许组合根消费所有库 crate；RuntimeExec 再由 deny.toml 精确 target wrapper 收窄。
         Root => true,
-        PlatformPublic => false,
+        FoundationPublic => false,
+        PlatformPublic => to == FoundationPublic,
         // workspace facts 只消费外部 guppy/thiserror；任何内部出边均属越界。
         Tooling => false,
         // 示例包可演示 provider-agnostic 服务模型；禁止直接装配域/adapters/generated。
-        Example => matches!(to, PlatformPublic | Basis | Engine | DiPort | Service),
+        Example => matches!(
+            to,
+            FoundationPublic | PlatformPublic | Basis | Engine | DiPort | Service
+        ),
         // contract 派生 wire 类型只需基础（serde derive 在外部 crate）。
-        Generated => matches!(to, PlatformPublic | Basis),
+        Generated => matches!(to, FoundationPublic | PlatformPublic | Basis),
         // provider-independent runtime 启动内核：只消费基础/引擎/DI-infra/服务；禁具体域、adapter、
         // generated、组合根及兄弟 RuntimeExec。入边由其它各行保持关闭，仅 Root 行放行。
-        RuntimeExec => matches!(to, PlatformPublic | Basis | Engine | DiPort | Service),
+        RuntimeExec => matches!(
+            to,
+            FoundationPublic | PlatformPublic | Basis | Engine | DiPort | Service
+        ),
         // adapter：基础 + 引擎 + DI-infra（impl 其 port trait）+ 服务 + 域（impl 域 repo/service port，
         // DIP 内向边，Option 2/ADR-005）；禁兄弟 adapter / generated（反向 域→adapter 由下方 Domain 行禁）。
         Adapter => matches!(
             to,
-            PlatformPublic | Basis | Engine | DiPort | Service | Domain
+            FoundationPublic | PlatformPublic | Basis | Engine | DiPort | Service | Domain
         ),
         // 域：基础 + 引擎 + DI-infra + 服务 + generated；禁兄弟域（跨域只经 contract）/ adapter
         //（域不依赖 adapter——依赖反转方向：adapter→域 单向，见上方 Adapter 行）。
         Domain => matches!(
             to,
-            PlatformPublic | Basis | Engine | DiPort | Service | Generated
+            FoundationPublic | PlatformPublic | Basis | Engine | DiPort | Service | Generated
         ),
         // 服务：基础 + 引擎 + DI-infra（消费 DI port）；禁兄弟服务（§分层 未授予）/ 域 / adapter / generated。
-        Service => matches!(to, PlatformPublic | Basis | Engine | DiPort),
+        Service => matches!(
+            to,
+            FoundationPublic | PlatformPublic | Basis | Engine | DiPort
+        ),
         // DI-infra：基础 + 引擎（port 签名引用其类型）；禁服务及以上（无 back-path）/ 兄弟 DI-infra。
-        DiPort => matches!(to, PlatformPublic | Basis | Engine),
+        DiPort => matches!(to, FoundationPublic | PlatformPublic | Basis | Engine),
         // 引擎：仅基础；禁兄弟引擎（§分层 未授予）/ DI-infra 及以上。
-        Engine => matches!(to, PlatformPublic | Basis),
+        Engine => matches!(to, FoundationPublic | PlatformPublic | Basis),
         // 基础：不依赖上层 / 跨界；同层（兄弟基础）默认禁——唯一例外是 intra-base DAG 前向边，
         // 由 [`basis_intra_dag_allows`] 单独放行（layerdeps 在 Basis→Basis 时叠加判定）。
-        Basis => to == PlatformPublic,
+        Basis => matches!(to, FoundationPublic | PlatformPublic),
     }
 }
 
@@ -318,6 +336,12 @@ mod tests {
     #[case("rss-diag-context", "crates/diagctx", Some(Layer::Basis))]
     #[case("authmint", "crates/authmint", Some(Layer::Basis))]
     #[case("requestidmint", "crates/requestidmint", Some(Layer::Basis))]
+    #[case("rss-contract", "crates/contract", Some(Layer::FoundationPublic))]
+    #[case(
+        "rss-request-context",
+        "crates/request-context",
+        Some(Layer::FoundationPublic)
+    )]
     #[case("consistency", "crates/consistency", Some(Layer::Engine))]
     #[case("diport", "crates/diport", Some(Layer::DiPort))]
     #[case("httpserve", "crates/httpserve", Some(Layer::Service))]
@@ -355,6 +379,12 @@ mod tests {
     fn classify_runtimeexec_requires_exact_name_and_path() {
         assert_eq!(classify("runtimeexec", "crates/runtimeexec2"), None);
         assert_eq!(classify("runtimeexec2", "crates/runtimeexec"), None);
+    }
+
+    #[test]
+    fn classify_foundation_rejects_swapped_package_identity() {
+        assert_eq!(classify("rss-contract", "crates/request-context"), None);
+        assert_eq!(classify("rss-request-context", "crates/contract"), None);
     }
 
     #[test]

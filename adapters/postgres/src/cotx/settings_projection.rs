@@ -168,7 +168,7 @@ impl SettingsProjectionTxError {
 
 struct SettingsProjectionReadTx<'tx> {
     conn: &'tx mut PgConnection,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 impl SettingsProjectionReadTx<'_> {
@@ -186,7 +186,7 @@ impl SettingsProjectionReadTx<'_> {
              WHERE tenant_id = $1::uuid AND projection_id = $2 \
                AND generation = $3 AND config_key = $4",
         )
-        .bind(self.tenant.as_uuid().to_string())
+        .bind(self.tenant.to_string())
         .bind(SETTINGS_CONFIG_PROJECTION_ID)
         .bind(scope.generation().as_str())
         .bind(key.as_str())
@@ -216,7 +216,7 @@ impl SettingsProjectionReadTx<'_> {
 
 struct SettingsProjectionWriteTx<'tx> {
     conn: &'tx mut PgConnection,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 impl SettingsProjectionWriteTx<'_> {
@@ -242,7 +242,7 @@ impl SettingsProjectionWriteTx<'_> {
             SettingsProjectionTxError::NumericOutOfRange(SettingsProjectionNumericField::OccurredAt)
         })?;
         let outcome = sqlx::query_scalar::<_, String>(apply_sql)
-            .bind(self.tenant.as_uuid().to_string())
+            .bind(self.tenant.to_string())
             .bind(scope.projection().as_str())
             .bind(scope.target_generation().as_str())
             .bind(scope.definition_version())

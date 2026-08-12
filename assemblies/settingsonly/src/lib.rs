@@ -251,7 +251,7 @@ mod tests {
     fn unused_tenant_store_allowlist() -> anyhow::Result<TenantStoreAllowlist> {
         Ok(TenantStoreAllowlist::new([(
             (
-                vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+                rss_request_context::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
                 "vault".to_owned(),
             ),
             StoreBinding {
@@ -283,7 +283,8 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn readiness_context_b64(tenant: &str) -> String {
-        let tenant = vocab::TenantId::parse(tenant).expect("canonical readiness tenant");
+        let tenant =
+            rss_request_context::TenantId::parse(tenant).expect("canonical readiness tenant");
         let aad = secure::ProtectionContext::authenticated_request(
             tenant,
             "readiness.probe",

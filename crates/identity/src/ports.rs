@@ -120,7 +120,7 @@ pub use crate::domain::{
     ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleId,
     ScalarOperandInput, ScalarOperandRef, StringPredicate, TypedPolicyValueInput,
 };
-pub use vocab::TenantId;
+use rss_request_context::TenantId;
 
 /// Closed generated fact and envelope pair for one credential-security command.
 ///
@@ -328,19 +328,14 @@ pub async fn credential_security_fact(
         CredentialSecurityTargetKind::Grant => WireTargetKind::Grant,
     };
     let actor_kind = match event.initiator().kind() {
-        vocab::PrincipalKind::User => WireActorKind::User,
-        vocab::PrincipalKind::Device => WireActorKind::Device,
-        vocab::PrincipalKind::Admin => WireActorKind::Admin,
-        vocab::PrincipalKind::SuperAdmin => WireActorKind::SuperAdmin,
-        vocab::PrincipalKind::Service => WireActorKind::Service,
-        vocab::PrincipalKind::Anonymous => {
+        rss_request_context::PrincipalKind::User => WireActorKind::User,
+        rss_request_context::PrincipalKind::Device => WireActorKind::Device,
+        rss_request_context::PrincipalKind::Admin => WireActorKind::Admin,
+        rss_request_context::PrincipalKind::SuperAdmin => WireActorKind::SuperAdmin,
+        rss_request_context::PrincipalKind::Service => WireActorKind::Service,
+        rss_request_context::PrincipalKind::Anonymous => {
             return Err(security_fact_build(std::io::Error::other(
                 "anonymous credential-security initiator",
-            )));
-        }
-        _ => {
-            return Err(security_fact_build(std::io::Error::other(
-                "unsupported credential-security initiator",
             )));
         }
     };
@@ -493,7 +488,7 @@ mod credential_security_fact_tests {
                     kind,
                     CredentialSecurityInitiator::authenticated(
                         tenant,
-                        vocab::PrincipalKind::User,
+                        rss_request_context::PrincipalKind::User,
                         user.as_uuid().hyphenated().to_string(),
                     ),
                     occurred_at,
@@ -518,7 +513,7 @@ mod credential_security_fact_tests {
                 kind,
                 CredentialSecurityInitiator::authenticated(
                     tenant,
-                    vocab::PrincipalKind::User,
+                    rss_request_context::PrincipalKind::User,
                     user.as_uuid().hyphenated().to_string(),
                 ),
                 occurred_at,
@@ -599,7 +594,10 @@ mod credential_security_fact_tests {
             assert_eq!(envelope.contract(), &SECURITY_EVENT_CONTRACT);
             assert_eq!(envelope.tenant(), tenant);
             assert_eq!(envelope.subject_id().as_str(), target_ref);
-            assert_eq!(envelope.actor().kind(), vocab::PrincipalKind::User);
+            assert_eq!(
+                envelope.actor().kind(),
+                rss_request_context::PrincipalKind::User
+            );
             assert_eq!(envelope.actor().actor_id().as_str(), actor_ref);
             assert_eq!(envelope.actor().tenant(), Some(tenant));
         }
@@ -609,14 +607,14 @@ mod credential_security_fact_tests {
         let subject = user.as_uuid().hyphenated().to_string();
         let actor_ref = CredentialSecurityInitiator::authenticated(
             tenant,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             subject.clone(),
         )
         .privacy_ref(&pseudonym_keys)
         .expect("actor ref");
         let other_actor_ref = CredentialSecurityInitiator::authenticated(
             other_tenant,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             subject.clone(),
         )
         .privacy_ref(&pseudonym_keys)
@@ -624,7 +622,7 @@ mod credential_security_fact_tests {
         assert_ne!(actor_ref, other_actor_ref);
 
         let publicly_recomputable_actor = uuid::Uuid::new_v5(
-            &tenant.as_uuid(),
+            &uuid::Uuid::from_bytes(tenant.octets()),
             format!("actor:user:{subject}").as_bytes(),
         );
         assert_ne!(
@@ -640,9 +638,21 @@ mod credential_security_fact_tests {
         let user = ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("user");
         let pseudonym_keys = pseudonym_keys();
         for (kind, subject, wire_kind) in [
-            (vocab::PrincipalKind::User, "opaque-user", "user"),
-            (vocab::PrincipalKind::Admin, "opaque-admin", "admin"),
-            (vocab::PrincipalKind::Service, "system-worker", "service"),
+            (
+                rss_request_context::PrincipalKind::User,
+                "opaque-user",
+                "user",
+            ),
+            (
+                rss_request_context::PrincipalKind::Admin,
+                "opaque-admin",
+                "admin",
+            ),
+            (
+                rss_request_context::PrincipalKind::Service,
+                "system-worker",
+                "service",
+            ),
         ] {
             let command = CredentialSecurityCommand::account(
                 AccountSecurityState::initial(tenant, user, SystemTime::UNIX_EPOCH),
@@ -691,7 +701,7 @@ mod credential_security_fact_tests {
             AccountSecurityEventKind::LogoutAll,
             CredentialSecurityInitiator::authenticated(
                 tenant,
-                vocab::PrincipalKind::User,
+                rss_request_context::PrincipalKind::User,
                 user.as_uuid().hyphenated().to_string(),
             ),
             before_epoch,
@@ -943,7 +953,7 @@ impl TenantRepoScope {
 
 /// Non-cross-tenant row-scoped repo capability for identity rows.
 ///
-/// It only accepts [`vocab::ScopedTenant`]-derived visibility, which keeps `RowScope::All` out of
+/// It only accepts [`rss_request_context::RowScope`]-derived visibility, which keeps `RowScope::All` out of
 /// ordinary row-scoped repositories at the type boundary.
 pub struct RowRepoScope {
     visibility: vocab::RowVisibility,
@@ -953,7 +963,7 @@ pub struct RowRepoScope {
 impl RowRepoScope {
     #[allow(dead_code)]
     pub(crate) fn from_scoped_visibility(
-        scope: vocab::ScopedTenant,
+        scope: rss_request_context::RowScope,
         tenant: TenantRepoScope,
     ) -> Self {
         Self {
@@ -967,7 +977,7 @@ impl RowRepoScope {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(scope: vocab::ScopedTenant, tenant: TenantRepoScope) -> Self {
+    pub fn for_test(scope: rss_request_context::RowScope, tenant: TenantRepoScope) -> Self {
         Self::from_scoped_visibility(scope, tenant)
     }
 }
@@ -1155,7 +1165,7 @@ impl RoleRevision {
 pub struct RoleMutationActor {
     tenant: TenantId,
     id: diport::OpaqueActorId,
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
 }
 
 impl RoleMutationActor {
@@ -1166,13 +1176,13 @@ impl RoleMutationActor {
     pub(crate) fn for_test_user(
         tenant: TenantId,
         user_id: ids::UserId,
-        kind: vocab::PrincipalKind,
+        kind: rss_request_context::PrincipalKind,
     ) -> Result<Self, IdentityError> {
         if !matches!(
             kind,
-            vocab::PrincipalKind::User
-                | vocab::PrincipalKind::Admin
-                | vocab::PrincipalKind::SuperAdmin
+            rss_request_context::PrincipalKind::User
+                | rss_request_context::PrincipalKind::Admin
+                | rss_request_context::PrincipalKind::SuperAdmin
         ) {
             return Err(IdentityError::PermissionDenied);
         }
@@ -1192,7 +1202,7 @@ impl RoleMutationActor {
         self.tenant
     }
 
-    pub fn kind(&self) -> vocab::PrincipalKind {
+    pub fn kind(&self) -> rss_request_context::PrincipalKind {
         self.kind
     }
 }
@@ -1218,9 +1228,9 @@ mod role_mutation_actor_tests {
         let user =
             ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("canonical user");
         for kind in [
-            vocab::PrincipalKind::Anonymous,
-            vocab::PrincipalKind::Device,
-            vocab::PrincipalKind::Service,
+            rss_request_context::PrincipalKind::Anonymous,
+            rss_request_context::PrincipalKind::Device,
+            rss_request_context::PrincipalKind::Service,
         ] {
             assert!(matches!(
                 RoleMutationActor::for_test_user(tenant, user, kind),

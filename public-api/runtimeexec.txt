@@ -507,6 +507,7 @@ impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::LaunchLifecycleBatch
 pub struct runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
 impl<Adapter, ProbeReceipt, ReadyHook> runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
 pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::new(Adapter, ProbeReceipt, ReadyHook, core::option::Option<alloc::boxed::Box<diport::managed_resource::__dynosaur_macro_dynmanagedresource::DynManagedResource<'static>>>, runtimeexec::LaunchLifecycleBatches, runtimeexec::TotalDrainBudget) -> Self
+pub fn runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>::with_platform_host(self, runtimeexec::RuntimeHostView) -> Self
 impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Freeze for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Freeze, ProbeReceipt: core::marker::Freeze, ReadyHook: core::marker::Freeze
 impl<Adapter, ProbeReceipt, ReadyHook> core::marker::Send for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook> where Adapter: core::marker::Send, ProbeReceipt: core::marker::Send, ReadyHook: core::marker::Send
 impl<Adapter, ProbeReceipt, ReadyHook> !core::marker::Sync for runtimeexec::LaunchPlan<Adapter, ProbeReceipt, ReadyHook>
@@ -555,6 +556,23 @@ impl core::marker::Unpin for runtimeexec::ProviderLifecycleBatch
 impl core::marker::UnsafeUnpin for runtimeexec::ProviderLifecycleBatch
 impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::ProviderLifecycleBatch
 impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::ProviderLifecycleBatch
+pub struct runtimeexec::RuntimeHostView
+impl runtimeexec::RuntimeHostView
+pub fn runtimeexec::RuntimeHostView::starting(runtimeexec::inventory::InventoryReader) -> Self
+impl core::clone::Clone for runtimeexec::RuntimeHostView
+pub fn runtimeexec::RuntimeHostView::clone(&self) -> runtimeexec::RuntimeHostView
+impl rss_platform::runtime::HostView for runtimeexec::RuntimeHostView
+pub fn runtimeexec::RuntimeHostView::admission_state(&self) -> rss_platform::runtime::AdmissionState
+pub fn runtimeexec::RuntimeHostView::condition(&self, &str) -> core::option::Option<rss_platform::runtime::ConditionStatus>
+pub fn runtimeexec::RuntimeHostView::inventory_revision(&self) -> core::option::Option<alloc::string::String>
+pub fn runtimeexec::RuntimeHostView::try_admit(&self) -> core::result::Result<alloc::boxed::Box<dyn rss_platform::runtime::AdmissionPermit>, rss_platform::runtime::AdmissionState>
+impl core::marker::Freeze for runtimeexec::RuntimeHostView
+impl core::marker::Send for runtimeexec::RuntimeHostView
+impl core::marker::Sync for runtimeexec::RuntimeHostView
+impl core::marker::Unpin for runtimeexec::RuntimeHostView
+impl core::marker::UnsafeUnpin for runtimeexec::RuntimeHostView
+impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::RuntimeHostView
+impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::RuntimeHostView
 pub struct runtimeexec::RuntimeOutputs
 impl core::marker::Freeze for runtimeexec::RuntimeOutputs
 impl core::marker::Send for runtimeexec::RuntimeOutputs

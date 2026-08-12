@@ -1035,7 +1035,7 @@ async fn migration_0084_live_guard_freezes_target_identity_and_wake_regression()
         .execute(&store.pool)
         .await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let key = ReconcileTargetKey::parse(
         "guard-reconciler",
         "device",
@@ -1465,7 +1465,7 @@ async fn migration_0045_backfills_legacy_reconcile_action_results() -> TestResul
     .execute(&store.pool)
     .await?;
 
-    let tenant = vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")?;
+    let tenant = rss_request_context::TenantId::parse("11111111-1111-1111-1111-111111111111")?;
     let target_id: (String,) = sqlx::query_as(
         "INSERT INTO reconcile_targets (tenant_id, reconciler_id, resource_kind, resource_id) \
          VALUES ($1::uuid, 'migration-reconciler', 'device', 'migration-device') \
@@ -1592,14 +1592,14 @@ async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() ->
     let (pg, owner) = connect_pg().await?;
     migrations_through(78).run(&owner.pool).await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let case = RefreshProducerCase::new(tenant);
     case.seed(&app, &owner).await?;
     sqlx::query(
         "UPDATE auth_grants SET expires_at = clock_timestamp() - interval '1 second' \
          WHERE tenant_id = $1::uuid AND grant_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .execute(&owner.pool)
     .await?;
@@ -1611,7 +1611,7 @@ async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() ->
          (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
          (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .fetch_one(&owner.pool)
     .await?;
@@ -1709,7 +1709,7 @@ async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() ->
          (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
          (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .fetch_one(&owner.pool)
     .await?;
@@ -1723,7 +1723,7 @@ async fn migration_0079_upgrades_live_sweeper_and_sweeps_preexisting_family() ->
          (SELECT count(*) FROM auth_grants WHERE tenant_id = $1::uuid AND grant_id = $2), \
          (SELECT count(*) FROM refresh_tokens WHERE tenant_id = $1::uuid AND auth_grant_id = $2)",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(case.grant.id().to_wire())
     .fetch_one(&owner.pool)
     .await?;
@@ -2921,7 +2921,7 @@ async fn migration_0031_accepts_canonical_uuid_v7_tenant_metadata() -> TestResul
 
     let tenant_v7 = "01890f9d-7bb3-7cc0-98c4-dc0c0c07398f";
     assert!(
-        vocab::TenantId::parse(tenant_v7).is_ok(),
+        rss_request_context::TenantId::parse(tenant_v7).is_ok(),
         "anti-vacuity: fixture must be a valid typed TenantId"
     );
     sqlx::query(

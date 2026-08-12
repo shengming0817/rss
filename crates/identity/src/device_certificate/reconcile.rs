@@ -1107,7 +1107,7 @@ mod tests {
     use diport::{CertNotAfter, CertScope, CertSerial};
     use eventexec::reconcile::{DeviceCertificateCommandEvidence, DeviceCommandAuditProof};
     use ids::DeviceId;
-    use vocab::TenantId;
+    use rss_request_context::TenantId;
 
     use crate::cert_artifact::{CertificateArtifactId, CertificatePublicKeyDigest};
     use crate::device_certificate::{DesiredStateRestore, PolicyHash};
@@ -1960,7 +1960,7 @@ mod tests {
         impl ReconcileScheduleStore for FakeSchedule {
             async fn claim_due_targets(
                 &self,
-                _tenant: vocab::TenantId,
+                _tenant: rss_request_context::TenantId,
                 _reconciler_id: &str,
                 _holder_id: &str,
                 _limit: ReconcileMaxInFlight,
@@ -1970,7 +1970,7 @@ mod tests {
             }
             async fn claim_targeted(
                 &self,
-                _tenant: vocab::TenantId,
+                _tenant: rss_request_context::TenantId,
                 _reconciler_id: &str,
                 _holder_id: &str,
                 _wake: &ReconcileWake,
@@ -2028,14 +2028,14 @@ mod tests {
             }
             async fn pause_target(
                 &self,
-                _tenant: vocab::TenantId,
+                _tenant: rss_request_context::TenantId,
                 _target_id: &str,
             ) -> Result<(), ReconcileScheduleError> {
                 Ok(())
             }
             async fn resume_target(
                 &self,
-                _tenant: vocab::TenantId,
+                _tenant: rss_request_context::TenantId,
                 _target_id: &str,
             ) -> Result<(), ReconcileScheduleError> {
                 Ok(())

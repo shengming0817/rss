@@ -6,6 +6,21 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 
 ## Unreleased
 
+### rss-contract 0.1.0
+
+- Establish the sole public owner for canonical contract IDs, versions, SHA-256 schema digests and descriptors.
+- Keep registries, generated catalogs, runtime bindings and admission authority outside the package.
+
+### rss-request-context 0.1.0
+
+- Establish authority-free tenant/request values, redacted principals, deadlines, cancellation observation and closed obligation views.
+- Keep trusted mint, cancellation trigger, deadline extension and cross-tenant authority internal.
+
+### rss-platform 0.3.0
+
+- Replace the v0.2 crypto/lifecycle/synchronous surface with a typed asynchronous application waist and read-only host projection.
+- This is an intentional breaking cutover with no alias, shim, conversion, feature-gated fallback or dual baseline.
+
 ### rss-diag-context 0.1.0
 
 - Establish the initial root-only diagnostic-context API: validated `CorrelationId`, owned

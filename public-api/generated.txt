@@ -53,9 +53,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::command::_seed_v1::S
 impl core::panic::unwind_safe::UnwindSafe for generated::command::_seed_v1::SeedDoThingRequest
 pub const generated::command::_seed_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::command::_seed_v1::CONTRACT_ID: &str
+pub const generated::command::_seed_v1::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::command::_seed_v1::SPEC: generated::command::CommandSpec
 pub const generated::command::_seed_v1::TOPIC: &str
-pub async fn generated::command::_seed_v1::journal_async<J: generated::command::CommandJournal>(&J, generated::command::_seed_v1::SeedDoThingRequest, vocab::tenant::TenantId, <J as generated::command::CommandJournal>::SubjectId, <J as generated::command::CommandJournal>::Actor, alloc::string::String) -> core::result::Result<<J as generated::command::CommandJournal>::Outcome, <J as generated::command::CommandJournal>::Error>
+pub async fn generated::command::_seed_v1::journal_async<J: generated::command::CommandJournal>(&J, generated::command::_seed_v1::SeedDoThingRequest, rss_request_context::TenantId, <J as generated::command::CommandJournal>::SubjectId, <J as generated::command::CommandJournal>::Actor, alloc::string::String) -> core::result::Result<<J as generated::command::CommandJournal>::Outcome, <J as generated::command::CommandJournal>::Error>
 pub fn generated::command::_seed_v1::register_handler<Reg, H, Fut>(&mut Reg, H) -> <Reg as generated::command::CommandRegister>::Output where Reg: generated::command::CommandRegister, H: core::ops::function::Fn(generated::command::_seed_v1::SeedDoThingRequest) -> Fut + core::marker::Send + core::marker::Sync + 'static, Fut: core::future::future::Future<Output = <Reg as generated::command::CommandRegister>::Outcome> + core::marker::Send + 'static
 pub mod generated::command::identity_v1
 pub mod generated::command::identity_v1::error
@@ -313,6 +314,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::command::identity_v1
 impl core::panic::unwind_safe::UnwindSafe for generated::command::identity_v1::IdentityApplyDeviceCertificateRequestPolicyHash
 pub const generated::command::identity_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::command::identity_v1::CONTRACT_ID: &str
+pub const generated::command::identity_v1::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::command::identity_v1::SPEC: generated::command::CommandSpec
 pub const generated::command::identity_v1::TOPIC: &str
 pub fn generated::command::identity_v1::fenced_reconcile_command(generated::command::identity_v1::IdentityApplyDeviceCertificateRequest) -> generated::command::identity_v1::FencedReconcileCommand
@@ -370,13 +372,13 @@ pub trait generated::command::CommandEmit
 pub type generated::command::CommandEmit::Actor: core::marker::Send
 pub type generated::command::CommandEmit::Error
 pub type generated::command::CommandEmit::SubjectId: core::marker::Send
-pub fn generated::command::CommandEmit::emit<C>(&self, &<C as generated::command::CommandContract>::Request, vocab::tenant::TenantId, Self::SubjectId, Self::Actor, core::option::Option<&str>) -> impl core::future::future::Future<Output = core::result::Result<(), Self::Error>> + core::marker::Send where C: generated::command::DirectCommandContract, <C as generated::command::CommandContract>::Request: core::marker::Send + core::marker::Sync
+pub fn generated::command::CommandEmit::emit<C>(&self, &<C as generated::command::CommandContract>::Request, rss_request_context::TenantId, Self::SubjectId, Self::Actor, core::option::Option<&str>) -> impl core::future::future::Future<Output = core::result::Result<(), Self::Error>> + core::marker::Send where C: generated::command::DirectCommandContract, <C as generated::command::CommandContract>::Request: core::marker::Send + core::marker::Sync
 pub trait generated::command::CommandJournal
 pub type generated::command::CommandJournal::Actor: core::marker::Send
 pub type generated::command::CommandJournal::Error
 pub type generated::command::CommandJournal::Outcome
 pub type generated::command::CommandJournal::SubjectId: core::marker::Send
-pub fn generated::command::CommandJournal::journal<C>(&self, &<C as generated::command::CommandContract>::Request, vocab::tenant::TenantId, Self::SubjectId, Self::Actor, &str) -> impl core::future::future::Future<Output = core::result::Result<Self::Outcome, Self::Error>> + core::marker::Send where C: generated::command::JournaledCommandContract, <C as generated::command::CommandContract>::Request: core::marker::Send + core::marker::Sync
+pub fn generated::command::CommandJournal::journal<C>(&self, &<C as generated::command::CommandContract>::Request, rss_request_context::TenantId, Self::SubjectId, Self::Actor, &str) -> impl core::future::future::Future<Output = core::result::Result<Self::Outcome, Self::Error>> + core::marker::Send where C: generated::command::JournaledCommandContract, <C as generated::command::CommandContract>::Request: core::marker::Send + core::marker::Sync
 pub trait generated::command::CommandRegister
 pub type generated::command::CommandRegister::Outcome
 pub type generated::command::CommandRegister::Output
@@ -478,10 +480,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::_seed_v1::See
 impl core::panic::unwind_safe::UnwindSafe for generated::event::_seed_v1::SeedThingHappenedPayload
 pub const generated::event::_seed_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::_seed_v1::CONTRACT_ID: &str
+pub const generated::event::_seed_v1::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::_seed_v1::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::_seed_v1::SPEC: generated::event::EventSpec
 pub const generated::event::_seed_v1::TOPIC: &str
-pub async fn generated::event::_seed_v1::emit<E: generated::event::EventEmit>(&E, generated::event::_seed_v1::SeedThingHappenedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::_seed_v1::emit<E: generated::event::EventEmit>(&E, generated::event::_seed_v1::SeedThingHappenedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub mod generated::event::identity_v1
 pub mod generated::event::identity_v1::device_certificate_reported
 pub mod generated::event::identity_v1::device_certificate_reported::error
@@ -632,10 +635,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::device_certificate_reported::IdentityDeviceCertificateReportedPayloadStateHash
 pub const generated::event::identity_v1::device_certificate_reported::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::device_certificate_reported::CONTRACT_ID: &str
+pub const generated::event::identity_v1::device_certificate_reported::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::identity_v1::device_certificate_reported::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::device_certificate_reported::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::device_certificate_reported::TOPIC: &str
-pub async fn generated::event::identity_v1::device_certificate_reported::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_certificate_reported::IdentityDeviceCertificateReportedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::device_certificate_reported::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_certificate_reported::IdentityDeviceCertificateReportedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub mod generated::event::identity_v1::device_command_acked
 pub mod generated::event::identity_v1::device_command_acked::error
 pub struct generated::event::identity_v1::device_command_acked::error::ConversionError(_)
@@ -1011,10 +1015,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::device_command_acked::IdentityDeviceCommandAckedRejectedPayloadCommandId
 pub const generated::event::identity_v1::device_command_acked::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::device_command_acked::CONTRACT_ID: &str
+pub const generated::event::identity_v1::device_command_acked::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::identity_v1::device_command_acked::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::device_command_acked::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::device_command_acked::TOPIC: &str
-pub async fn generated::event::identity_v1::device_command_acked::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_command_acked::IdentityDeviceCommandAckedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::device_command_acked::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_command_acked::IdentityDeviceCommandAckedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub mod generated::event::identity_v1::device_ingress_receipted
 pub mod generated::event::identity_v1::device_ingress_receipted::error
 pub struct generated::event::identity_v1::device_ingress_receipted::error::ConversionError(_)
@@ -1696,10 +1701,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::identity_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressStalePayloadIngressEnvelopeId
 pub const generated::event::identity_v1::device_ingress_receipted::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::device_ingress_receipted::CONTRACT_ID: &str
+pub const generated::event::identity_v1::device_ingress_receipted::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::identity_v1::device_ingress_receipted::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::device_ingress_receipted::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::device_ingress_receipted::TOPIC: &str
-pub async fn generated::event::identity_v1::device_ingress_receipted::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressReceiptedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::device_ingress_receipted::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::device_ingress_receipted::IdentityDeviceIngressReceiptedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub mod generated::event::identity_v1::policy_updated
 pub mod generated::event::identity_v1::policy_updated::error
 pub struct generated::event::identity_v1::policy_updated::error::ConversionError(_)
@@ -1863,10 +1869,11 @@ impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::pol
 pub const generated::event::identity_v1::policy_updated::AUDIT_SUBSCRIPTION: generated::event::SubscriptionSpec
 pub const generated::event::identity_v1::policy_updated::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::policy_updated::CONTRACT_ID: &str
+pub const generated::event::identity_v1::policy_updated::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::identity_v1::policy_updated::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::policy_updated::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::policy_updated::TOPIC: &str
-pub async fn generated::event::identity_v1::policy_updated::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::policy_updated::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::policy_updated::IdentityPolicyUpdatedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::policy_updated::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::identity_v1::role_assigned
 pub mod generated::event::identity_v1::role_assigned::error
@@ -1984,10 +1991,11 @@ impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::rol
 pub const generated::event::identity_v1::role_assigned::AUDIT_SUBSCRIPTION: generated::event::SubscriptionSpec
 pub const generated::event::identity_v1::role_assigned::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::role_assigned::CONTRACT_ID: &str
+pub const generated::event::identity_v1::role_assigned::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::identity_v1::role_assigned::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::role_assigned::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::role_assigned::TOPIC: &str
-pub async fn generated::event::identity_v1::role_assigned::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::role_assigned::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::role_assigned::IdentityRoleAssignedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::role_assigned::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::identity_v1::role_revoked
 pub mod generated::event::identity_v1::role_revoked::error
@@ -2105,10 +2113,11 @@ impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::rol
 pub const generated::event::identity_v1::role_revoked::AUDIT_SUBSCRIPTION: generated::event::SubscriptionSpec
 pub const generated::event::identity_v1::role_revoked::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::role_revoked::CONTRACT_ID: &str
+pub const generated::event::identity_v1::role_revoked::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::identity_v1::role_revoked::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::role_revoked::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::role_revoked::TOPIC: &str
-pub async fn generated::event::identity_v1::role_revoked::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::role_revoked::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::role_revoked::IdentityRoleRevokedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::role_revoked::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::identity_v1::security_event
 pub mod generated::event::identity_v1::security_event::error
@@ -2360,10 +2369,11 @@ impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::sec
 pub const generated::event::identity_v1::security_event::AUDIT_SUBSCRIPTION: generated::event::SubscriptionSpec
 pub const generated::event::identity_v1::security_event::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::security_event::CONTRACT_ID: &str
+pub const generated::event::identity_v1::security_event::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::identity_v1::security_event::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::security_event::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::security_event::TOPIC: &str
-pub async fn generated::event::identity_v1::security_event::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::security_event::IdentitySecurityEventPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::security_event::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::security_event::IdentitySecurityEventPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::security_event::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::identity_v1::session_created
 pub mod generated::event::identity_v1::session_created::error
@@ -2432,10 +2442,11 @@ impl core::panic::unwind_safe::UnwindSafe for generated::event::identity_v1::ses
 pub const generated::event::identity_v1::session_created::AUDIT_SUBSCRIPTION: generated::event::SubscriptionSpec
 pub const generated::event::identity_v1::session_created::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::identity_v1::session_created::CONTRACT_ID: &str
+pub const generated::event::identity_v1::session_created::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::identity_v1::session_created::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::identity_v1::session_created::SPEC: generated::event::EventSpec
 pub const generated::event::identity_v1::session_created::TOPIC: &str
-pub async fn generated::event::identity_v1::session_created::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::session_created::IdentitySessionCreatedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::identity_v1::session_created::emit<E: generated::event::EventEmit>(&E, generated::event::identity_v1::session_created::IdentitySessionCreatedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::identity_v1::session_created::subscribe_audit<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub mod generated::event::settings_v1
 pub mod generated::event::settings_v1::error
@@ -2549,11 +2560,12 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::event::settings_v1::
 impl core::panic::unwind_safe::UnwindSafe for generated::event::settings_v1::SettingsSubscription
 pub const generated::event::settings_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::event::settings_v1::CONTRACT_ID: &str
+pub const generated::event::settings_v1::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::event::settings_v1::FACT: vocab::contract::binding::EventFactBinding
 pub const generated::event::settings_v1::SETTINGS_SUBSCRIPTION: generated::event::SubscriptionSpec
 pub const generated::event::settings_v1::SPEC: generated::event::EventSpec
 pub const generated::event::settings_v1::TOPIC: &str
-pub async fn generated::event::settings_v1::emit<E: generated::event::EventEmit>(&E, generated::event::settings_v1::SettingsConfigVersionChangedPayload, vocab::tenant::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
+pub async fn generated::event::settings_v1::emit<E: generated::event::EventEmit>(&E, generated::event::settings_v1::SettingsConfigVersionChangedPayload, rss_request_context::TenantId, <E as generated::event::EventEmit>::SubjectId, <E as generated::event::EventEmit>::Actor, <E as generated::event::EventEmit>::IdempotencyKey) -> core::result::Result<<E as generated::event::EventEmit>::Output, <E as generated::event::EventEmit>::Error>
 pub fn generated::event::settings_v1::subscribe_settings<Reg: generated::event::EventSubscribe>(&mut Reg, <Reg as generated::event::EventSubscribe>::Capability) -> <Reg as generated::event::EventSubscribe>::Output
 pub enum generated::event::PartitionKeyStrategy
 pub generated::event::PartitionKeyStrategy::Aggregate
@@ -2780,7 +2792,7 @@ pub type generated::event::EventEmit::Error
 pub type generated::event::EventEmit::IdempotencyKey: core::marker::Send
 pub type generated::event::EventEmit::Output
 pub type generated::event::EventEmit::SubjectId: core::marker::Send
-pub fn generated::event::EventEmit::emit<C>(&self, &<C as generated::event::EventContract>::Payload, vocab::tenant::TenantId, Self::SubjectId, Self::Actor, Self::IdempotencyKey) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, Self::Error>> + core::marker::Send where C: generated::event::EventContract, <C as generated::event::EventContract>::Payload: core::marker::Send + core::marker::Sync
+pub fn generated::event::EventEmit::emit<C>(&self, &<C as generated::event::EventContract>::Payload, rss_request_context::TenantId, Self::SubjectId, Self::Actor, Self::IdempotencyKey) -> impl core::future::future::Future<Output = core::result::Result<Self::Output, Self::Error>> + core::marker::Send where C: generated::event::EventContract, <C as generated::event::EventContract>::Payload: core::marker::Send + core::marker::Sync
 pub trait generated::event::EventSubscribe
 pub type generated::event::EventSubscribe::Capability
 pub type generated::event::EventSubscribe::Output
@@ -2886,6 +2898,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::_seed_v1::Seed
 impl core::panic::unwind_safe::UnwindSafe for generated::http::_seed_v1::SeedEchoResponse
 pub const generated::http::_seed_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::_seed_v1::CONTRACT_ID: &str
+pub const generated::http::_seed_v1::DESCRIPTOR: rss_contract::ContractDescriptor
 pub mod generated::http::audit_v1
 pub mod generated::http::audit_v1::list_entries
 pub mod generated::http::audit_v1::list_entries::defaults
@@ -3305,6 +3318,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_entries::AuditListEntriesResponseError
 pub const generated::http::audit_v1::list_entries::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::audit_v1::list_entries::CONTRACT_ID: &str
+pub const generated::http::audit_v1::list_entries::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::audit_v1::list_entries::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::audit_v1::list_entries::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::audit_v1::list_entries::PATH: &str
@@ -3416,6 +3430,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::audit_v1::list
 impl core::panic::unwind_safe::UnwindSafe for generated::http::audit_v1::list_tenant_entries::AuditTenantEntryView
 pub const generated::http::audit_v1::list_tenant_entries::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::audit_v1::list_tenant_entries::CONTRACT_ID: &str
+pub const generated::http::audit_v1::list_tenant_entries::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::audit_v1::list_tenant_entries::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::audit_v1::list_tenant_entries::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::audit_v1::list_tenant_entries::LOCAL_TX: generated::http::LocalTxSpec
@@ -3566,6 +3581,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::a
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_get::IdentityAccountStatusGetResponse
 pub const generated::http::identity_v1::account_status_get::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::account_status_get::CONTRACT_ID: &str
+pub const generated::http::identity_v1::account_status_get::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::account_status_get::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::account_status_get::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::account_status_get::PATH: &str
@@ -3751,6 +3767,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::a
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::account_status_set::IdentityAccountStatusSetResponse
 pub const generated::http::identity_v1::account_status_set::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::account_status_set::CONTRACT_ID: &str
+pub const generated::http::identity_v1::account_status_set::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::account_status_set::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::account_status_set::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::account_status_set::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -3852,6 +3869,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::l
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::login::IdentityLoginResponse
 pub const generated::http::identity_v1::login::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::login::CONTRACT_ID: &str
+pub const generated::http::identity_v1::login::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::login::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::login::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::login::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -3949,6 +3967,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::l
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout::IdentityLogoutResponse
 pub const generated::http::identity_v1::logout::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::logout::CONTRACT_ID: &str
+pub const generated::http::identity_v1::logout::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::logout::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::logout::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::logout::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -4046,6 +4065,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::l
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::logout_all::IdentityLogoutAllResponse
 pub const generated::http::identity_v1::logout_all::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::logout_all::CONTRACT_ID: &str
+pub const generated::http::identity_v1::logout_all::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::logout_all::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::logout_all::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::logout_all::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -4188,6 +4208,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::password_change::IdentityPasswordChangeResponse
 pub const generated::http::identity_v1::password_change::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::password_change::CONTRACT_ID: &str
+pub const generated::http::identity_v1::password_change::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::password_change::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::password_change::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::password_change::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -5683,6 +5704,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_create::IdentityPolicyView
 pub const generated::http::identity_v1::policies_create::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_create::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_create::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::policies_create::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::policies_create::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_create::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -5780,6 +5802,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_deactivate::IdentityPoliciesDeactivateResponse
 pub const generated::http::identity_v1::policies_deactivate::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_deactivate::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_deactivate::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::policies_deactivate::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::policies_deactivate::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_deactivate::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -7129,6 +7152,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_get::IdentityPolicyView
 pub const generated::http::identity_v1::policies_get::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_get::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_get::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::policies_get::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::policies_get::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_get::PATH: &str
@@ -8481,6 +8505,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_list::IdentityPolicyView
 pub const generated::http::identity_v1::policies_list::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_list::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_list::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::policies_list::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::policies_list::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_list::PATH: &str
@@ -9974,6 +9999,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::policies_update::IdentityPolicyView
 pub const generated::http::identity_v1::policies_update::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::policies_update::CONTRACT_ID: &str
+pub const generated::http::identity_v1::policies_update::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::policies_update::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::policies_update::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::policies_update::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -10128,6 +10154,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::p
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::profile::IdentityProfileResponse
 pub const generated::http::identity_v1::profile::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::profile::CONTRACT_ID: &str
+pub const generated::http::identity_v1::profile::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::profile::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::profile::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::profile::PATH: &str
@@ -10224,6 +10251,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::r
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::refresh::IdentityRefreshResponse
 pub const generated::http::identity_v1::refresh::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::refresh::CONTRACT_ID: &str
+pub const generated::http::identity_v1::refresh::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::refresh::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::refresh::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::refresh::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -10320,6 +10348,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::r
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_assign::IdentityRolesAssignResponse
 pub const generated::http::identity_v1::roles_assign::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_assign::CONTRACT_ID: &str
+pub const generated::http::identity_v1::roles_assign::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::roles_assign::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::roles_assign::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_assign::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -10432,6 +10461,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::r
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_list::IdentityRolesListResponse
 pub const generated::http::identity_v1::roles_list::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_list::CONTRACT_ID: &str
+pub const generated::http::identity_v1::roles_list::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::roles_list::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::roles_list::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_list::PATH: &str
@@ -10527,6 +10557,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v1::r
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v1::roles_revoke::IdentityRolesRevokeResponse
 pub const generated::http::identity_v1::roles_revoke::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v1::roles_revoke::CONTRACT_ID: &str
+pub const generated::http::identity_v1::roles_revoke::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v1::roles_revoke::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::identity_v1::roles_revoke::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::identity_v1::roles_revoke::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -10987,6 +11018,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::d
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseError
 pub const generated::http::identity_v2::device_certificate_policy_put::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID: &str
+pub const generated::http::identity_v2::device_certificate_policy_put::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::identity_v2::device_certificate_policy_put::RESPONSES: &[generated::http::HttpResponseSpec]
 pub type generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutHandlerResult = core::result::Result<generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutResponseEnvelope, generated::http::identity_v2::device_certificate_policy_put::IdentityDeviceCertificatePolicyPutFrameworkFailure>
 pub mod generated::http::identity_v2::device_certificate_status_get
@@ -11305,6 +11337,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::identity_v2::d
 impl core::panic::unwind_safe::UnwindSafe for generated::http::identity_v2::device_certificate_status_get::IdentityDeviceCertificateStatusGetResponse
 pub const generated::http::identity_v2::device_certificate_status_get::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::identity_v2::device_certificate_status_get::CONTRACT_ID: &str
+pub const generated::http::identity_v2::device_certificate_status_get::DESCRIPTOR: rss_contract::ContractDescriptor
 pub mod generated::http::runtime_v1
 pub mod generated::http::runtime_v1::inventory
 pub mod generated::http::runtime_v1::inventory::error
@@ -12966,6 +12999,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::runtime_v1::in
 impl core::panic::unwind_safe::UnwindSafe for generated::http::runtime_v1::inventory::Sha256Fingerprint
 pub const generated::http::runtime_v1::inventory::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::runtime_v1::inventory::CONTRACT_ID: &str
+pub const generated::http::runtime_v1::inventory::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::runtime_v1::inventory::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::runtime_v1::inventory::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::runtime_v1::inventory::PATH: &str
@@ -13067,6 +13101,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v1::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v1::SettingsConfigPublishResponse
 pub const generated::http::settings_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v1::CONTRACT_ID: &str
+pub const generated::http::settings_v1::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::settings_v1::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v1::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v1::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -13167,6 +13202,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v2::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v2::SettingsSecretPublishResponse
 pub const generated::http::settings_v2::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v2::CONTRACT_ID: &str
+pub const generated::http::settings_v2::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::settings_v2::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v2::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v2::LOCAL_TX: generated::http::LocalTxSpec
@@ -13273,6 +13309,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v4::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v4::SettingsConfigGetResponse
 pub const generated::http::settings_v4::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v4::CONTRACT_ID: &str
+pub const generated::http::settings_v4::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::settings_v4::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v4::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v4::PATH: &str
@@ -13350,6 +13387,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v5::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v5::SettingsConfigDeleteResponse
 pub const generated::http::settings_v5::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v5::CONTRACT_ID: &str
+pub const generated::http::settings_v5::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::settings_v5::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v5::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v5::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -13448,6 +13486,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v6::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v6::SettingsConfigRollbackResponse
 pub const generated::http::settings_v6::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v6::CONTRACT_ID: &str
+pub const generated::http::settings_v6::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::settings_v6::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v6::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v6::EMITTED_FACTS: &[vocab::contract::binding::ContractBinding]
@@ -13553,6 +13592,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for generated::http::settings_v7::S
 impl core::panic::unwind_safe::UnwindSafe for generated::http::settings_v7::SettingsSecretResolveResponse
 pub const generated::http::settings_v7::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::http::settings_v7::CONTRACT_ID: &str
+pub const generated::http::settings_v7::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::http::settings_v7::EFFECTS: &[vocab::http::HttpEffectKind]
 pub const generated::http::settings_v7::EFFECT_PROFILE: vocab::http::HttpEffectProfile
 pub const generated::http::settings_v7::PATH: &str
@@ -13749,9 +13789,11 @@ pub mod generated::projection
 pub mod generated::projection::audit_v2
 pub const generated::projection::audit_v2::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::projection::audit_v2::CONTRACT_ID: &str
+pub const generated::projection::audit_v2::DESCRIPTOR: rss_contract::ContractDescriptor
 pub mod generated::projection::settings_v3
 pub const generated::projection::settings_v3::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::projection::settings_v3::CONTRACT_ID: &str
+pub const generated::projection::settings_v3::DESCRIPTOR: rss_contract::ContractDescriptor
 pub mod generated::saga
 pub mod generated::saga::billing_v1
 pub mod generated::saga::billing_v1::error
@@ -13909,6 +13951,7 @@ impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v1::Reser
 pub const generated::saga::billing_v1::ACTION_REGISTRY_GENERATION: &str
 pub const generated::saga::billing_v1::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::saga::billing_v1::CONTRACT_ID: &str
+pub const generated::saga::billing_v1::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::saga::billing_v1::POLICY: vocab::contract::binding::SagaRuntimePolicySpec
 pub const generated::saga::billing_v1::SPEC: generated::saga::SagaSpec
 pub const generated::saga::billing_v1::STEPS: &[vocab::contract::binding::SagaStepBinding]
@@ -14070,6 +14113,7 @@ impl core::panic::unwind_safe::UnwindSafe for generated::saga::billing_v2::Reser
 pub const generated::saga::billing_v2::ACTION_REGISTRY_GENERATION: &str
 pub const generated::saga::billing_v2::CONTRACT: vocab::contract::binding::ContractBinding
 pub const generated::saga::billing_v2::CONTRACT_ID: &str
+pub const generated::saga::billing_v2::DESCRIPTOR: rss_contract::ContractDescriptor
 pub const generated::saga::billing_v2::POLICY: vocab::contract::binding::SagaRuntimePolicySpec
 pub const generated::saga::billing_v2::SPEC: generated::saga::SagaSpec
 pub const generated::saga::billing_v2::STEPS: &[vocab::contract::binding::SagaStepBinding]

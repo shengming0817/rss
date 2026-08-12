@@ -187,7 +187,7 @@ async fn wait_for_session_created_hash_chain(pool: &PgPool, login: &LoginReceipt
         let actor_kind_raw = row.try_get::<String, _>("actor_kind")?;
         let actor_kind =
             actor_kind_from_db(&actor_kind_raw).context("persisted audit actor kind is invalid")?;
-        let tenant = vocab::TenantId::parse(&row.try_get::<String, _>("tenant_id")?)?;
+        let tenant = rss_request_context::TenantId::parse(&row.try_get::<String, _>("tenant_id")?)?;
         let action = vocab::Action::parse(&row.try_get::<String, _>("action")?)?;
         let resource_kind = row.try_get::<String, _>("resource_kind")?;
         let resource_id = row.try_get::<String, _>("resource_id")?;

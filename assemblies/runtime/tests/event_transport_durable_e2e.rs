@@ -196,7 +196,7 @@ struct UnusedSecretResolver;
 impl SecretResolver for UnusedSecretResolver {
     async fn resolve(
         &self,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         _coordinate: &SecretCoordinate,
     ) -> Result<SecretMaterial, SecretResolverError> {
         Err(SecretResolverError::NotFound)
@@ -738,10 +738,10 @@ async fn policy_updated_event(
         occurred_at: i64::try_from(NOW_SECS)?,
     };
     let actor = OutboxActor::scoped(
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         OpaqueActorId::from_opaque(CANON_USER)?,
         tenant,
-        vocab::ScopedTenant::Tenant,
+        rss_request_context::RowScope::Tenant,
     );
     Ok(policy_updated::emit(
         &eventexec::event::GeneratedEventEncoder,
@@ -923,10 +923,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let tenant = TenantId::parse(CANON_TENANT)?;
     let settings_key = "app.runtime-e2e";
     let settings_actor = OutboxActor::scoped(
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         OpaqueActorId::from_opaque("settings-event-transport-e2e")?,
         tenant,
-        vocab::ScopedTenant::Tenant,
+        rss_request_context::RowScope::Tenant,
     );
     publisher_settings_service
         .publish_config(
@@ -1375,7 +1375,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
                 contract_id: "identity.account-status-get",
                 permission: vocab::RoutePermissionId::IdentityAccountSecurityRead,
                 tenant_id: Some(tenant),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 resource: Some(RouteResource::new(CANON_USER).context("canonical resource")?),
                 federated_permissions: None,

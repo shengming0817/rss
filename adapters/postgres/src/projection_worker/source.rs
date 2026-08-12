@@ -13,14 +13,14 @@ use crate::projection_events::{
 pub(crate) struct PgProjectionWorkerSource {
     store: VerifiedPgProjectionWorkerStore,
     target: ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 impl PgProjectionWorkerSource {
     pub(super) fn new(
         store: &VerifiedPgProjectionWorkerStore,
         target: &ProjectionWorkerTarget,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Self {
         Self {
             store: store.clone(),

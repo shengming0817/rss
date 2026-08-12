@@ -303,8 +303,8 @@ fn production_access_jwt() -> String {
 }
 
 #[allow(clippy::expect_used)]
-fn production_tenant() -> vocab::TenantId {
-    vocab::TenantId::parse(TENANT).expect("canonical tenant")
+fn production_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse(TENANT).expect("canonical tenant")
 }
 
 #[allow(clippy::expect_used)]
@@ -515,7 +515,7 @@ async fn rss_verified_evidence_handler(
         || receipt.token_id().to_string().len() != 36
         || receipt.auth_time_unix_secs() != (NOW - 30) as u64
         || receipt.authn_epoch() != 7
-        || authenticated.principal_kind() != vocab::PrincipalKind::User
+        || authenticated.principal_kind() != rss_request_context::PrincipalKind::User
         || !current.binds_principal(production_tenant(), USER_ID)
     {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
@@ -582,7 +582,8 @@ fn federated_router_with_calls(handler_calls: Arc<AtomicUsize>) -> httpserve::Au
                     let handler_calls = Arc::clone(&handler_calls);
                     async move {
                         if !verified.allows_route(vocab::RoutePermissionId::IdentityPolicyRead)
-                            || verified.principal().kind() != vocab::PrincipalKind::SuperAdmin
+                            || verified.principal().kind()
+                                != rss_request_context::PrincipalKind::SuperAdmin
                         {
                             return Err(StatusCode::INTERNAL_SERVER_ERROR);
                         }

@@ -7,7 +7,7 @@
 #![allow(unused, unknown_lints)]
 
 use httpserve::Authenticated;
-use vocab::PrincipalKind;
+use rss_request_context::PrincipalKind;
 
 fn main() {
     // R1：非组合根 crate 调 profile-specific evidence constructor → 触发。
@@ -27,19 +27,19 @@ fn main() {
     let _rss = Authenticated::new_rss_user(
         authmint::AuthenticatedMint::capability(),
         "11111111-2222-4333-8444-555555555555",
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
     );
 
     // R2b：service-token typed mint 的直接引用、别名和 fn-pointer 同样触发。
     let _service = Authenticated::new_service(
         authmint::AuthenticatedMint::capability(),
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
         vocab::ServiceCallerDomain::MaintenanceOperator,
     );
     let service_mint = Authenticated::new_service;
     let _service_fn: fn(
         authmint::AuthenticatedMint,
-        vocab::TenantId,
+        rss_request_context::TenantId,
         vocab::ServiceCallerDomain,
     ) -> Authenticated = Authenticated::new_service;
     let _ = service_mint;

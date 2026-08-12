@@ -69,9 +69,9 @@ use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, InMemClaimer, MemAuthGrantStore, MemBus, MemDeadLetterStore, MemEmitter};
 use primitives::ListenerKind;
 use primitives::healthz::HealthStatus;
+use rss_request_context::TenantId;
 use testkit::{await_delay, await_map};
 use tokio_util::sync::CancellationToken;
-use vocab::TenantId;
 
 /// 手造 relay payload 的 session_id——它是 bearer，只用于证明审计链不会持久化该值。
 const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
@@ -389,10 +389,10 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     let emitter = MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer());
     let subject = EnvelopeSubjectId::from_opaque(CANON_USER)?;
     let actor = OutboxActor::scoped(
-        vocab::PrincipalKind::User,
+        rss_request_context::PrincipalKind::User,
         OpaqueActorId::from_opaque(CANON_USER)?,
         TenantId::parse(CANON_TENANT)?,
-        vocab::ScopedTenant::SelfOnly,
+        rss_request_context::RowScope::SelfOnly,
     );
     for _ in 0..2 {
         let entry = EventEntry::new(

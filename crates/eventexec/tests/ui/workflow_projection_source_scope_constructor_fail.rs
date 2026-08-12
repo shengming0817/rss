@@ -1,7 +1,7 @@
 use eventexec::{ProjectionId, ProjectionSourceScope};
 
 fn main() {
-    let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+    let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
     let projection = ProjectionId::parse("projection").unwrap();
     let digest = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     let _new = ProjectionSourceScope::new(tenant, projection.clone(), "v1", digest, digest);

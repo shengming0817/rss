@@ -494,6 +494,7 @@ const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "diport",
     "eventexec",
     "primitives",
+    "rss-platform",
     "runtimeinventorymint",
     "secure",
 ];
@@ -1344,7 +1345,10 @@ pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
 pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Finding> {
     edges
         .iter()
-        .filter(|edge| layers::is_test_support(&edge.from))
+        .filter(|edge| {
+            layers::is_test_support(&edge.from)
+                && !matches!(edge.to.as_str(), "rss-contract" | "rss-request-context")
+        })
         .map(|edge| {
             finding(
                 Rule::TestSupportInternalShipped,
@@ -2583,6 +2587,15 @@ mod tests {
         assert!(findings.is_empty(), "{findings:?}");
     }
 
+    #[test]
+    fn test_support_may_consume_public_foundation_only() {
+        let edges = [
+            e("testkit", "rss-contract"),
+            e("testkit", "rss-request-context"),
+        ];
+        assert!(check_test_support_internal_dependencies(&edges).is_empty());
+    }
+
     /// LAYER-DEPS-10 anti-vacuity：无 shipped 出边时不误报；dev-dep 本来就不进入 `edges`。
     #[test]
     fn test_support_internal_dependencies_green_no_shipped_edge() {
@@ -3654,6 +3667,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             e("runtimeexec", "diport"),
             e("runtimeexec", "eventexec"),
             e("runtimeexec", "primitives"),
+            e("runtimeexec", "rss-platform"),
             e("runtimeexec", "runtimeinventorymint"),
             e("runtimeexec", "secure"),
         ];

@@ -38,7 +38,7 @@ pub struct PgCheckpointStore {
 }
 
 struct ProjectionCheckpointScope {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     projection: Box<str>,
     version: Box<str>,
     owner: CheckpointOwner,

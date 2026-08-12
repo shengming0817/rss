@@ -20,6 +20,7 @@ dlq-test-support = []
 workspace = true
 
 [dependencies]
+rss-request-context.workspace = true
 authmint = { path = "../authmint" }
 sagaauthmint = { path = "../sagaauthmint" }
 dlqauthmint = { path = "../dlqauthmint" }

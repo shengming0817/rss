@@ -189,12 +189,15 @@ pub const TOPIC: &str = "settings.config-version-changed";
 /// domain / contract_id / topic。
 /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
 /// CONTRACT-BINDING-FUNNEL-01）。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "settings",
-    "settings.config-version-changed",
-    "v1",
-    "sha256:b74288de6fd13213cb6676431f4833a7c921ec9ffe2825ad244cad49c52d17e4",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "settings.config-version-changed",
+        "v1",
+        "sha256:b74288de6fd13213cb6676431f4833a7c921ec9ffe2825ad244cad49c52d17e4",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("settings", DESCRIPTOR, "v1");
 
 /// Generated contract + topic identity carried by this event payload.
 pub const FACT: ::vocab::EventFactBinding = ::vocab::EventFactBinding::from_static(CONTRACT, TOPIC);
@@ -214,7 +217,7 @@ impl super::EventContract for Contract {
 pub async fn emit<E: super::EventEmit>(
     emitter: &E,
     payload: SettingsConfigVersionChangedPayload,
-    tenant: ::vocab::TenantId,
+    tenant: ::rss_request_context::TenantId,
     subject_id: E::SubjectId,
     actor: E::Actor,
     idempotency_key: E::IdempotencyKey,

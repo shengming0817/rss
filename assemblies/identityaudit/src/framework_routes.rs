@@ -97,8 +97,8 @@ pub mod test_support {
             &self,
             _: &diport::RawCredential,
         ) -> Result<diport::VerifiedClaims, diport::PdpError> {
-            let tenant =
-                vocab::TenantId::parse(TENANT).map_err(|_| diport::PdpError::InvalidSignature)?;
+            let tenant = rss_request_context::TenantId::parse(TENANT)
+                .map_err(|_| diport::PdpError::InvalidSignature)?;
             let subject = match self.0 {
                 JourneyCase::Deny => DENIED_SUBJECT,
                 JourneyCase::Allow
@@ -144,7 +144,7 @@ pub mod test_support {
             Box::pin(async move {
                 if request.contract_id == generated::http::runtime_v1::inventory::CONTRACT_ID
                     && request.permission == vocab::RoutePermissionId::RuntimeInventoryRead
-                    && request.principal_kind == vocab::PrincipalKind::User
+                    && request.principal_kind == rss_request_context::PrincipalKind::User
                     && request.principal_id == ALLOWED_SUBJECT
                     && request.tenant_id.is_some()
                 {

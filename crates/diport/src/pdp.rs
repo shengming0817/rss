@@ -8,11 +8,12 @@
 
 use dynosaur::dynosaur;
 use ids::UserId;
+use rss_request_context::{PrincipalKind, TenantId};
 use sha2::{Digest as _, Sha256};
 use std::future::Future;
 use std::marker::PhantomData;
 use std::time::Duration;
-use vocab::{PrincipalKind, ServiceCallerDomain, tenant::TenantId};
+use vocab::ServiceCallerDomain;
 
 /// service-token exact-one challenger HTTP header 名（wire 原始大小写）。
 pub const SERVICE_TOKEN_TENANT_HEADER: &str = "X-Tenant-ID";
@@ -908,7 +909,6 @@ impl VerifiedClaims {
             PrincipalKind::User | PrincipalKind::Device | PrincipalKind::Admin => tenant.is_some(),
             PrincipalKind::SuperAdmin => tenant.is_none(),
             PrincipalKind::Service | PrincipalKind::Anonymous => false,
-            _ => false,
         };
         if subject.is_empty() || !tenant_shape_valid {
             return Err(VerifiedClaimShapeError::Invalid);
@@ -1009,7 +1009,7 @@ mod smoke {
         async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
             Ok(VerifiedClaims::service_token(
                 vocab::ServiceCallerDomain::MaintenanceOperator,
-                vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                     .expect("canonical tenant"),
             ))
         }
@@ -1115,7 +1115,7 @@ mod pii_debug {
         RawCredential, ServiceTokenTenantBinding, TokenProfile, VerifiedAccessGrantFacts,
         VerifiedClaims, VerifiedFederatedPermissions,
     };
-    use vocab::tenant::TenantId;
+    use rss_request_context::TenantId;
 
     fn _assert_redact<T: secure::Redact>() {}
 
@@ -1182,7 +1182,7 @@ mod pii_debug {
             Some(
                 TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant"),
             ),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
                 vocab::RoutePermissionId::SettingsConfigPublish,
             )])

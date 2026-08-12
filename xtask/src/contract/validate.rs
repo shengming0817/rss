@@ -2035,7 +2035,7 @@ fn rule_ident_syntax(m: &ContractManifest, label: &str) -> Vec<Finding> {
             ),
         ));
     }
-    if !is_dotted_id(&m.id) {
+    if !is_contract_id(&m.id) {
         out.push(finding(
             Rule::IdentSyntax,
             label,
@@ -3244,6 +3244,10 @@ fn is_safe_slug(s: &str) -> bool {
 /// authoring constructor，否则读取 manifest 会意外获得持久化写入 authority。
 fn is_dotted_id(s: &str) -> bool {
     consistency::is_canonical_topic_name(s)
+}
+
+fn is_contract_id(s: &str) -> bool {
+    rss_contract::ContractId::parse(s).is_ok()
 }
 
 /// 域名（owner 用）：`[a-z][a-z0-9_]*`，非空、首字符字母（拒 `_` 前缀保留段与空串）。

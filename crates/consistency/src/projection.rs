@@ -6,7 +6,7 @@
 
 use crate::error::EngineError;
 use crate::outbox::EventTopic;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 /// 日志序号 newtype（私有字段；单调递增，checkpoint 用于断点续投）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -708,7 +708,7 @@ mod tests {
     // reason: test fixture uses a compile-time known canonical tenant.
     fn projection_event_metadata_debug_redacts_partition_key_and_causation_id() {
         let metadata = ProjectionEventMetadata::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                 .expect("canonical test tenant"),
             "projection-test-event",
             "test",
