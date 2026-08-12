@@ -59,7 +59,7 @@ struct JourneyHarness {
     pg: PgFaultMatrixHarness,
     recovery: PgL2DrRecoveryDeps,
     rabbit_url: String,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     suffix: String,
 }
 
@@ -141,7 +141,7 @@ impl JourneyHarness {
             pg,
             recovery,
             rabbit_url,
-            tenant: vocab::TenantId::parse(&Uuid::new_v4().to_string())?,
+            tenant: rss_request_context::TenantId::parse(&Uuid::new_v4().to_string())?,
             suffix: Uuid::new_v4().simple().to_string(),
         })
     }
@@ -157,7 +157,7 @@ impl JourneyHarness {
 }
 
 fn session_created_payload(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     session_id: Uuid,
 ) -> generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
     generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
@@ -169,7 +169,7 @@ fn session_created_payload(
 }
 
 fn recovery_plan(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     epoch: RecoveryEpochId,
     direction: RecoveryDirection,
     event_ids: &[&str],

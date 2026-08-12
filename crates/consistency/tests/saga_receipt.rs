@@ -3,7 +3,8 @@ use consistency::{
     SagaIdempotencyKey, SagaInstanceRef, SagaInstanceStatus, SagaJournalStatus, SagaOperatorReason,
     SagaReceiptFormatVersion, SagaReceiptScope, SagaReceiptScopeError, SagaWorkerIdentity,
 };
-use vocab::{ContractBinding, SagaRetryClass, SagaStepBinding, TenantId};
+use rss_request_context::TenantId;
+use vocab::{ContractBinding, SagaRetryClass, SagaStepBinding};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

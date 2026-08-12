@@ -601,8 +601,8 @@ async fn command_journal_same_key_isolated_by_tenant() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let idempotency_key = unique_event_id("command-journal-cross-tenant-key");
 
     let first =
@@ -670,7 +670,7 @@ impl CommandJournalStore for CaptureReviewedCommand {
 }
 
 async fn command_journal_command(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     key: &str,
     payload: &[u8],
 ) -> Result<ReviewedCommandJournal, TestError> {
@@ -678,7 +678,7 @@ async fn command_journal_command(
 }
 
 async fn command_journal_command_with_keyring(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     key: &str,
     payload: &[u8],
     keyring: std::sync::Arc<CommandIdempotencyKeyring>,
@@ -711,7 +711,7 @@ fn reviewed_command_fingerprint(command: &ReviewedCommandJournal) -> String {
 
 async fn persisted_command_id(
     pool: &sqlx::PgPool,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     fingerprint: &str,
 ) -> Result<String, TestError> {
     let (command_id,): (String,) = sqlx::query_as(

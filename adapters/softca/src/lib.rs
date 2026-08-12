@@ -667,9 +667,9 @@ mod revocation_tests {
     use super::InMemRevocationLedger;
     use diport::{CertNotAfter, CertScope, CertSerial, Clock, RevocationStore};
     use ids::DeviceId;
+    use rss_request_context::TenantId;
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime};
-    use vocab::TenantId;
 
     // canonical lowercase-hyphenated（TenantId::parse fail-closed 只认 canonical）；DeviceId 同步用 canonical。
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";

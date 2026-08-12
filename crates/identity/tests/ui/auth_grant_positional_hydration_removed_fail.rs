@@ -8,7 +8,7 @@ use authn::{
 use identity::ports::{RefreshStatus, RefreshTokenRecord};
 
 fn positional_hydration_is_not_available(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     user_id: ids::UserId,
     epoch: AuthnEpoch,
 ) {

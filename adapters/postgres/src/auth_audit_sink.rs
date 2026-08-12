@@ -72,12 +72,12 @@ pub(crate) struct AuthAuditAppendAttemptProbe {
 
 #[cfg(all(test, feature = "integration"))]
 impl AuthAuditAppendAttemptProbe {
-    pub(crate) fn attempts(&self, tenant: vocab::TenantId) -> usize {
+    pub(crate) fn attempts(&self, tenant: rss_request_context::TenantId) -> usize {
         self.state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .attempts
-            .get(&tenant.as_uuid().to_string())
+            .get(&tenant.to_string())
             .copied()
             .unwrap_or_default()
     }
@@ -108,7 +108,7 @@ impl PgAuthAuditSink {
     #[cfg(all(test, feature = "integration"))]
     pub(crate) fn with_append_fault(
         self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         fault: AuthAuditAppendFault,
         remaining: usize,
     ) -> Self {
@@ -118,7 +118,7 @@ impl PgAuthAuditSink {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .plans
             .insert(
-                tenant.as_uuid().to_string(),
+                tenant.to_string(),
                 AuthAuditAppendFaultPlan { fault, remaining },
             );
         self
@@ -205,17 +205,16 @@ fn system_time_parts(at: std::time::SystemTime) -> Result<(i64, i32), AuditSinkE
 }
 
 fn tenant_context(event: &AuditEvent) -> Option<String> {
-    event.tenant_id.map(|tenant| tenant.as_uuid().to_string())
+    event.tenant_id.map(|tenant| tenant.to_string())
 }
-fn actor_kind_to_db(kind: vocab::PrincipalKind) -> &'static str {
+fn actor_kind_to_db(kind: rss_request_context::PrincipalKind) -> &'static str {
     match kind {
-        vocab::PrincipalKind::User => "user",
-        vocab::PrincipalKind::Device => "device",
-        vocab::PrincipalKind::Admin => "admin",
-        vocab::PrincipalKind::SuperAdmin => "super_admin",
-        vocab::PrincipalKind::Service => "service",
-        vocab::PrincipalKind::Anonymous => "anonymous",
-        _ => "unknown",
+        rss_request_context::PrincipalKind::User => "user",
+        rss_request_context::PrincipalKind::Device => "device",
+        rss_request_context::PrincipalKind::Admin => "admin",
+        rss_request_context::PrincipalKind::SuperAdmin => "super_admin",
+        rss_request_context::PrincipalKind::Service => "service",
+        rss_request_context::PrincipalKind::Anonymous => "anonymous",
     }
 }
 
@@ -287,7 +286,7 @@ impl AuditListTenantAppender for PgAuthAuditSink {
     async fn append(&self, command: AuditListTenantAppend) -> Result<(), AuditSinkError> {
         let (scope, event, observation) = command.into_parts();
         #[cfg(all(test, feature = "integration"))]
-        let tenant = scope.tenant().as_uuid().to_string();
+        let tenant = scope.tenant().to_string();
         let event = encode_event(event)?;
         #[cfg(all(test, feature = "integration"))]
         let append_faults = Arc::clone(&self.append_faults);

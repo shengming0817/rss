@@ -688,7 +688,8 @@ mod tests {
 
     fn scope() -> DeviceCommandScope {
         DeviceCommandScope::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                .expect("tenant"),
             ids::DeviceId::parse("550e8400-e29b-41d4-a716-446655440000").expect("device"),
         )
     }

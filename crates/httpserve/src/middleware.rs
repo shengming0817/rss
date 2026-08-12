@@ -20,7 +20,6 @@ use std::sync::Arc;
 const X_REQUEST_ID: &str = "x-request-id";
 
 /// 入站 `X-Request-Id` 长度上限：超出则丢弃并生成新 UUID（防超大值污染 span/日志）。
-const MAX_REQUEST_ID_LEN: usize = 128;
 
 /// 入站 `X-Correlation-ID` header 名（小写，axum HeaderName 约定）。
 const CORRELATION_HEADER: &str = "x-correlation-id";
@@ -99,14 +98,17 @@ pub(crate) async fn correlation(req: Request, next: Next) -> Response {
 /// plus the request correlation handle.
 pub(crate) async fn server_request_budget(
     State(budget): State<crate::ServerRequestBudget>,
-    req: Request,
+    mut req: Request,
     next: Next,
 ) -> Response {
     let request_id = req
         .extensions()
         .get::<VerifiedRequestId>()
         .map_or_else(String::new, |request_id| request_id.as_str().to_owned());
-    match tokio::time::timeout(budget.duration(), next.run(req)).await {
+    let control = crate::budget::RequestControl::start(budget);
+    req.extensions_mut().insert(control.clone());
+    let _cancel_on_drop = crate::budget::CancelRequestOnDrop(control.clone());
+    match tokio::time::timeout_at(control.deadline().instant().into(), next.run(req)).await {
         Ok(response) => response,
         Err(_elapsed) => {
             tracing::warn!(
@@ -130,7 +132,11 @@ pub struct VerifiedRequestId(requestidmint::WireRequestId);
 
 impl VerifiedRequestId {
     pub(crate) fn from_middleware(value: String) -> Self {
-        Self(requestidmint::WireRequestId::from_http_middleware(value))
+        let request_id = rss_request_context::RequestId::parse(&value)
+            .expect("HTTP middleware must validate request IDs before minting provenance");
+        Self(requestidmint::WireRequestId::from_http_middleware(
+            request_id,
+        ))
     }
 
     /// 借出请求 id 字符串（供 [`crate::request_id_str`] 给组合根外层中间件读 request 关联）。
@@ -159,7 +165,7 @@ pub(crate) async fn request_id(mut req: Request, next: Next) -> Response {
         .get(X_REQUEST_ID)
         .and_then(|v| v.to_str().ok())
         .map(str::to_owned)
-        .filter(|s| !s.is_empty() && s.len() <= MAX_REQUEST_ID_LEN)
+        .filter(|value| rss_request_context::RequestId::parse(value).is_ok())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     req.extensions_mut()

@@ -33,14 +33,26 @@ pub struct ContractBinding {
     /// 发布域（= `contract.toml` `domain` 字段，crate-name 形）。
     domain: &'static str,
     /// 契约 ID（= `contract.toml` `id` 字段，点分小写名，可含连字符）。
-    contract_id: &'static str,
-    /// 契约版本（= `contract.toml` `version` 字段，`v{N}`）。
-    version: &'static str,
-    /// 声明 schema bundle 的稳定摘要（`sha256:<64 lowercase hex>`）。
-    schema_hash: &'static str,
+    descriptor: rss_contract::ContractDescriptor,
+    version_label: &'static str,
 }
 
 impl ContractBinding {
+    /// Compose internal domain semantics around one canonical Foundation descriptor.
+    #[must_use]
+    pub const fn from_descriptor(
+        domain: &'static str,
+        descriptor: rss_contract::ContractDescriptor,
+        version_label: &'static str,
+    ) -> Self {
+        assert!(descriptor.version().major() == parse_static_version(version_label));
+        Self {
+            domain,
+            descriptor,
+            version_label,
+        }
+    }
+
     /// 由 `&'static str`（codegen 字面量）构造——const-evaluable，**不**运行期校验。
     ///
     /// 唯一生产 mint 面：`generated::{kind}::{domain}_v1::CONTRACT`（codegen 从 manifest + schema
@@ -53,12 +65,12 @@ impl ContractBinding {
         version: &'static str,
         schema_hash: &'static str,
     ) -> Self {
-        Self {
+        let version_major = parse_static_version(version);
+        Self::from_descriptor(
             domain,
-            contract_id,
+            rss_contract::ContractDescriptor::from_static(contract_id, version_major, schema_hash),
             version,
-            schema_hash,
-        }
+        )
     }
 
     /// 借出发布域（outbox 行 `domain` 路由列）。
@@ -70,20 +82,44 @@ impl ContractBinding {
     /// 借出契约 ID（outbox 行 `contract_id` 路由列）。
     #[must_use]
     pub const fn contract_id(&self) -> &'static str {
-        self.contract_id
+        self.descriptor.id()
     }
 
     /// 借出契约版本（`v{N}`）。
     #[must_use]
     pub const fn version(&self) -> &'static str {
-        self.version
+        self.version_label
     }
 
     /// 借出 schema bundle 摘要（`sha256:<64 lowercase hex>`）。
     #[must_use]
     pub const fn schema_hash(&self) -> &'static str {
-        self.schema_hash
+        self.descriptor.schema_digest()
     }
+
+    /// Canonical Foundation descriptor shared by code generation and runtime consumers.
+    #[must_use]
+    pub const fn descriptor(&self) -> &rss_contract::ContractDescriptor {
+        &self.descriptor
+    }
+}
+
+const fn parse_static_version(value: &str) -> u32 {
+    let bytes = value.as_bytes();
+    assert!(
+        bytes.len() >= 2 && bytes[0] == b'v',
+        "invalid contract version"
+    );
+    let mut index = 1;
+    let mut major = 0_u32;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        assert!(byte.is_ascii_digit(), "invalid contract version");
+        major = major * 10 + (byte - b'0') as u32;
+        index += 1;
+    }
+    assert!(major != 0, "invalid contract version");
+    major
 }
 
 /// Generated identity of one event fact, binding its contract columns and broker topic atomically.

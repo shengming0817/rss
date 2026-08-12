@@ -154,14 +154,14 @@ fn draft_digest(
     generation: u64,
     binding: &[u8],
 ) -> [u8; 32] {
-    let tenant = scope.tenant().as_uuid();
+    let tenant = scope.tenant().octets();
     let device = scope.device().as_uuid();
     let mut digest = Sha256::new();
     digest.update(b"rss.deviceidentity.draft-artifact.v1\0");
     digest.update((purpose.len() as u64).to_be_bytes());
     digest.update(purpose);
     digest.update(seed);
-    digest.update(tenant.as_bytes());
+    digest.update(tenant);
     digest.update(device.as_bytes());
     digest.update(generation.to_be_bytes());
     digest.update((binding.len() as u64).to_be_bytes());
@@ -332,7 +332,7 @@ pub struct DeviceIdentitySchedulerConfig {
     clock: Arc<dyn Clock>,
     keyring: Arc<CommandIdempotencyKeyring>,
     producer: DeviceCertificateSystemProducer,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     holder_id: String,
     tenancy: Tenancy,
     timing: DeviceIdentitySchedulerTiming,
@@ -369,7 +369,7 @@ impl DeviceIdentitySchedulerConfig {
         clock: Arc<dyn Clock>,
         keyring: Arc<CommandIdempotencyKeyring>,
         producer: DeviceCertificateSystemProducer,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         holder_id: impl Into<String>,
         tenancy: Tenancy,
         timing: DeviceIdentitySchedulerTiming,
@@ -1864,7 +1864,8 @@ mod tests {
 
     fn scope() -> DeviceCertificateScope {
         DeviceCertificateScope::for_test(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                .expect("tenant"),
             ids::DeviceId::parse("550e8400-e29b-41d4-a716-446655440000").expect("device"),
         )
     }

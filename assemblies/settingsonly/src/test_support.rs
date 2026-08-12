@@ -45,12 +45,12 @@ impl diport::Pdp for FixturePdp {
         &self,
         _raw: &diport::RawCredential,
     ) -> Result<diport::VerifiedClaims, diport::PdpError> {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000179")
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000179")
             .map_err(|_| diport::PdpError::InvalidSignature)?;
         diport::VerifiedClaims::federated_access(
             "settingsonly-fixture",
             Some(tenant),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             diport::VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
                 vocab::RoutePermissionId::SettingsConfigPublish,
             )])

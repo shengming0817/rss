@@ -10,7 +10,7 @@ use crate::outbox_routine::{
 const DLQ_TEST_OPERATOR: &str = "postgres-dlq-operator";
 
 fn dlq_authorization<A: diport::DlqOperatorAction>(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> diport::DlqOperatorAuthorization<A> {
     dlq_authorization_with_audit_id(
         tenant,
@@ -19,7 +19,7 @@ fn dlq_authorization<A: diport::DlqOperatorAction>(
 }
 
 fn dlq_authorization_with_audit_id<A: diport::DlqOperatorAction>(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     start_audit_id: diport::DlqOperatorStartAuditId,
 ) -> diport::DlqOperatorAuthorization<A> {
     diport::test_support::dlq_operator_authorization(
@@ -2245,7 +2245,7 @@ async fn t_outbox_published_sweep_deletes_1001_rows_in_two_stable_batches() -> T
 
 async fn seed_consumer_replay_dead_letter(
     store: &crate::PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     binding: vocab::ProjectionInputBinding,
     producer_domain: &str,
     suffix: &str,
@@ -2304,7 +2304,7 @@ async fn t_dead_letter_replay_wrong_domain_writes_outbox_without_projection_mirr
     let maintenance = crate::PgRuntimeDeps::connect_maintenance(&config).await?;
     let plan = eventexec::WorkflowRuntimePlan::generated_projection_capture_fixture();
     let binding = generated::event::PROJECTION_INPUTS[0];
-    let tenant = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_B).unwrap();
     let wrong_domain = unique_domain("dlq-replay-wrong-domain");
     let (dead_letter_id, _) = seed_consumer_replay_dead_letter(
         &store,
@@ -2366,7 +2366,7 @@ async fn t_dead_letter_replay_projection_catalog_drift_rolls_back_atomically() -
     let maintenance = crate::PgRuntimeDeps::connect_maintenance(&config).await?;
     let plan = eventexec::WorkflowRuntimePlan::generated_projection_capture_fixture();
     let binding = generated::event::PROJECTION_INPUTS[0];
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let (dead_letter_id, _) = seed_consumer_replay_dead_letter(
         &store,
         tenant,
@@ -2437,7 +2437,7 @@ async fn t_dead_letter_replay_aad_tamper_is_invalid_without_writes() -> TestResu
     let maintenance = crate::PgRuntimeDeps::connect_maintenance(&config).await?;
     let plan = eventexec::WorkflowRuntimePlan::generated_projection_capture_fixture();
     let binding = generated::event::PROJECTION_INPUTS[0];
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let (dead_letter_id, _) = seed_consumer_replay_dead_letter(
         &store,
         tenant,
@@ -2527,7 +2527,7 @@ async fn t_dead_letter_replay_inserts_new_outbox_id() -> TestResult {
     let dl = store.dead_letter(test_dlx_payload_protector());
     let dlq = maintenance.dlq_store(test_dlx_payload_protector(), plan.projection_capture());
     let domain = binding.domain().to_string();
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let message_id = unique_event_id("consumer-msg");
     let replay_contract_id = binding.contract_id();
     let mut metadata = EnvelopeMetadata::empty();
@@ -2910,8 +2910,8 @@ async fn t_outbox_dlx_registers_dead_letter_and_redrive_is_tenant_scoped() -> Te
     let config = runtime_pg_config(params, &params.username, &params.password);
     let maintenance = crate::PgRuntimeDeps::connect_maintenance(&config).await?;
     let plan = eventexec::WorkflowRuntimePlan::generated_projection_capture_fixture();
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
-    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = rss_request_context::TenantId::parse(COTX_TENANT_B).unwrap();
     let domain = unique_domain("dlq-outbox");
     let event_id = unique_event_id("outbox-dlx");
     let partition_key = PartitionKey::parse("outbox-dlx-partition").unwrap();
@@ -3353,7 +3353,7 @@ async fn dlq_maintenance_audit_binds_tenant_and_start_id() -> TestResult {
     .fetch_all(&store.pool)
     .await?;
     assert_eq!(rows.len(), 2);
-    let expected_tenant = tenant.as_uuid().to_string();
+    let expected_tenant = tenant.to_string();
     for (action, principal_id, tenant_context, request_id) in rows {
         assert!(matches!(
             action.as_str(),
@@ -3750,7 +3750,7 @@ async fn expired_outbox_accepted_gap_resolution_is_terminal_audited_and_unblocks
     setup_outbox(&store).await?;
     let maintenance = connect_pg_maintenance(&pg).await?;
     let tenant = test_tenant();
-    let other_tenant = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let other_tenant = rss_request_context::TenantId::parse(COTX_TENANT_B)?;
     let domain = unique_domain("expired-resolution-gap");
     let partition = PartitionKey::parse("expired-resolution-gap-partition").unwrap();
     let head_id = unique_event_id("expired-resolution-head");
@@ -5784,8 +5784,8 @@ async fn t27b_outbox_cross_tenant_partition_dlx_does_not_block() -> TestResult {
 
     let domain = unique_domain("t27b");
     let key = PartitionKey::parse("shared-business-key").unwrap();
-    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
-    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B).unwrap();
+    let tenant_a = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant_b = rss_request_context::TenantId::parse(COTX_TENANT_B).unwrap();
     let a_head = unique_event_id("t27b-a-head");
     let a_tail = unique_event_id("t27b-a-tail");
     let b_head = unique_event_id("t27b-b-head");

@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use vocab::PrincipalKind;
+use rss_request_context::PrincipalKind;
 
 fn federated_access(kind: PrincipalKind) -> bool {
     matches!(kind, PrincipalKind::User | PrincipalKind::Device)

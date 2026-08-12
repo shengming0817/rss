@@ -1,0 +1,18 @@
+[package]
+name = "rss-contract"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+license-file = "../../LICENSE"
+readme = "README.md"
+description = "Canonical contract identity values for the RSS public Foundation"
+categories = ["development-tools", "data-structures"]
+keywords = ["contract", "schema", "identity", "api"]
+publish = ["crates-io"]
+
+[features]
+default = []
+
+[lints]
+workspace = true

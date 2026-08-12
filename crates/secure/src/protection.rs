@@ -11,7 +11,7 @@
 //!   （那样攻击者复制 `(ciphertext, stored_aad)` 跨租即可自洽验签）。`open` 只接 `&DerivedAad`，
 //!   而 envelope 存的是 [`ProtectionAad`]（异类型），回灌即编译失败。
 
-use vocab::tenant::TenantId;
+use rss_request_context::TenantId;
 
 /// AAD 规范序列化的 domain-separation 标签 + 维度顺序的**格式单源**。
 ///
@@ -375,8 +375,8 @@ mod tests {
         ProtectionContext, SAGA_RECEIPT_AAD_DOMAIN_LABEL, SagaReceiptProtectionContext,
         SagaReceiptProtectionCoordinates,
     };
+    use rss_request_context::TenantId;
     use rstest::rstest;
-    use vocab::tenant::TenantId;
 
     const TENANT_A: &str = "11111111-2222-4333-8444-555555555555";
     const TENANT_B: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";

@@ -2,7 +2,7 @@ pub mod requestidmint
 pub struct requestidmint::WireRequestId(_)
 impl requestidmint::WireRequestId
 pub fn requestidmint::WireRequestId::as_str(&self) -> &str
-pub fn requestidmint::WireRequestId::from_http_middleware(alloc::string::String) -> Self
+pub fn requestidmint::WireRequestId::from_http_middleware(rss_request_context::RequestId) -> Self
 impl core::clone::Clone for requestidmint::WireRequestId
 pub fn requestidmint::WireRequestId::clone(&self) -> requestidmint::WireRequestId
 impl core::cmp::Eq for requestidmint::WireRequestId

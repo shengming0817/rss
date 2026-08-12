@@ -1,5 +1,6 @@
 //! `PgPolicyRepo` —— identity durable ABAC policy store（#1588）。
 
+use rss_request_context::TenantId;
 use std::time::SystemTime;
 
 use diport::{Clock, OutboxEnvelopeParts};
@@ -11,7 +12,7 @@ use identity::ports::{
     PolicyEffect, PolicyId, PolicyLifecycle, PolicyListResult, PolicyObligations, PolicyPage,
     PolicyRepo, PolicyRouteScope, PolicyRule, PolicyScalarInput, PolicyValue, PolicyValueRef,
     PolicyValueType, PolicyVersion, ScalarOperandInput, ScalarOperandRef, StringPredicate,
-    TenantId, TenantRepoScope, TypedPolicyValueInput,
+    TenantRepoScope, TypedPolicyValueInput,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
@@ -520,20 +521,19 @@ impl ObligationsDto {
 }
 
 impl RowScopeDto {
-    fn from_scoped(scope: vocab::ScopedTenant) -> Result<Self, IdentityError> {
+    fn from_scoped(scope: rss_request_context::RowScope) -> Result<Self, IdentityError> {
         match scope {
-            vocab::ScopedTenant::SelfOnly => Ok(Self::SelfOnly),
-            vocab::ScopedTenant::Device => Ok(Self::Device),
-            vocab::ScopedTenant::Tenant => Ok(Self::Tenant),
-            _ => Err(IdentityError::InvalidPolicy),
+            rss_request_context::RowScope::SelfOnly => Ok(Self::SelfOnly),
+            rss_request_context::RowScope::Device => Ok(Self::Device),
+            rss_request_context::RowScope::Tenant => Ok(Self::Tenant),
         }
     }
 
-    fn into_scoped(self) -> Result<vocab::ScopedTenant, IdentityError> {
+    fn into_scoped(self) -> Result<rss_request_context::RowScope, IdentityError> {
         Ok(match self {
-            Self::SelfOnly => vocab::ScopedTenant::SelfOnly,
-            Self::Device => vocab::ScopedTenant::Device,
-            Self::Tenant => vocab::ScopedTenant::Tenant,
+            Self::SelfOnly => rss_request_context::RowScope::SelfOnly,
+            Self::Device => rss_request_context::RowScope::Device,
+            Self::Tenant => rss_request_context::RowScope::Tenant,
         })
     }
 }

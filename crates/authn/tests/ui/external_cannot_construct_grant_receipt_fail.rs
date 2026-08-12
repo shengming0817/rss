@@ -1,6 +1,6 @@
 fn forge(
     user_id: ids::UserId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     facts: &diport::VerifiedAccessGrantFacts,
 ) {
     let _ = authn::VerifiedGrantReceipt {

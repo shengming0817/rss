@@ -356,7 +356,7 @@ const READY_CASE_RUNNERS: &[ReadyCaseRunner] = &[
 ];
 
 struct RunScope {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     suffix: String,
     event_ids: BTreeMap<&'static str, String>,
 }
@@ -364,7 +364,7 @@ struct RunScope {
 impl RunScope {
     fn new() -> Result<Self> {
         Ok(Self {
-            tenant: vocab::TenantId::parse(&Uuid::new_v4().to_string())?,
+            tenant: rss_request_context::TenantId::parse(&Uuid::new_v4().to_string())?,
             suffix: Uuid::new_v4().simple().to_string(),
             event_ids: READY_CASE_RUNNERS
                 .iter()
@@ -523,7 +523,7 @@ async fn shutdown_amqp(
 }
 
 fn session_created_payload(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     session_id: Uuid,
 ) -> generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
     generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
@@ -536,7 +536,7 @@ fn session_created_payload(
 
 async fn next_consumer_tx_delivery(
     pg: &PgHarness,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     ids: &EventingIds,
     deliveries: &mut diport::DeliveryStream,
     expected: FaultMatrixConsumerDelivery,
@@ -1202,7 +1202,7 @@ fn run_projection_stale_checkpoint_writer<'a>(
 
 async fn assert_outbox_count(
     pg: &PgHarness,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &str,
     status: FaultMatrixOutboxStatus,
     expected: i64,

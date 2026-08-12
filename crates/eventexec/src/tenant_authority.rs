@@ -143,7 +143,7 @@ impl TenantAuthority {
         &self,
         binding: TenantAuthorityBinding<'_>,
         metadata: &diport::EnvelopeMetadata,
-    ) -> Result<vocab::TenantId, TenantAuthorityError> {
+    ) -> Result<rss_request_context::TenantId, TenantAuthorityError> {
         let metadata_tenant = metadata
             .tenant_id()
             .ok_or(TenantAuthorityError::TenantMissing)?;
@@ -151,7 +151,7 @@ impl TenantAuthority {
             .get(diport::KEY_TENANT_AUTHORITY)
             .ok_or(TenantAuthorityError::Missing)?;
         let payload = self.verify_token(token)?;
-        let signed_tenant = vocab::TenantId::parse(&payload.tenant_id)
+        let signed_tenant = rss_request_context::TenantId::parse(&payload.tenant_id)
             .map_err(|_| TenantAuthorityError::Malformed)?;
         if signed_tenant != binding.tenant || metadata_tenant != binding.tenant {
             return Err(TenantAuthorityError::BindingMismatch);
@@ -219,7 +219,7 @@ impl TenantAuthority {
 
 #[derive(Debug, Clone, Copy)]
 pub struct TenantAuthorityBinding<'a> {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     domain: &'a str,
     contract_id: &'a str,
     topic: &'a str,
@@ -228,7 +228,7 @@ pub struct TenantAuthorityBinding<'a> {
 
 impl<'a> TenantAuthorityBinding<'a> {
     pub fn new(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         domain: &'a str,
         contract_id: &'a str,
         topic: &'a str,
@@ -339,8 +339,9 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant")
     }
 
     #[allow(clippy::expect_used)]

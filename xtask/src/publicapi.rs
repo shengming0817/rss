@@ -405,6 +405,14 @@ impl ReleaseSelectionDelta {
     }
 }
 
+fn changed_frozen_version_line<'a>(
+    base: Option<&'a str>,
+    current: &'a str,
+) -> Option<(&'a str, &'a str)> {
+    base.filter(|base| *base != current)
+        .map(|base| (base, current))
+}
+
 fn referenced_type_paths(tokens: &[public_api::tokens::Token]) -> BTreeSet<String> {
     use public_api::tokens::Token;
     let mut paths = BTreeSet::new();
@@ -459,11 +467,15 @@ fn forbidden_type_root<'a>(
     });
     if let Some(candidate) = workspace_package {
         return match owner {
-            PublicApiOwner::PlatformPublic => Some(root),
+            PublicApiOwner::FoundationPublic => Some(root),
+            PublicApiOwner::PlatformPublic => {
+                (!matches!(candidate, "rss-contract" | "rss-request-context")).then_some(root)
+            }
             PublicApiOwner::StandaloneComponent => (!selected.contains(candidate)).then_some(root),
         };
     }
     match owner {
+        PublicApiOwner::FoundationPublic => Some(root),
         PublicApiOwner::PlatformPublic => Some(root),
         PublicApiOwner::StandaloneComponent if path == "tracing::Span" => None,
         PublicApiOwner::StandaloneComponent => Some(root),
@@ -832,9 +844,26 @@ pub(crate) fn run_release_check(
         .iter()
         .map(|package| package.as_str().to_owned())
         .collect::<BTreeSet<_>>();
-    let delta = base_packages
-        .as_ref()
-        .map(|base| ReleaseSelectionDelta::derive(&current_packages, base));
+    let delta = base_packages.as_ref().map(|base| {
+        ReleaseSelectionDelta::derive(&current_packages, &base.keys().cloned().collect())
+    });
+    if let Some(base) = &base_packages {
+        for package in surface.packages() {
+            if let Some((base_line, current_line)) = changed_frozen_version_line(
+                base.get(package.package()).and_then(Option::as_deref),
+                package.version_line(),
+            ) {
+                failures.push(ReleaseProofFailure {
+                    stage: 2,
+                    subject: format!("package:{}", package.package()),
+                    detail: format!(
+                        "prepublication version-line changed from `{base_line}` to `{}`; major/minor is frozen against the merge base",
+                        current_line
+                    ),
+                });
+            }
+        }
+    }
 
     let captures = match execute(
         root,
@@ -1001,7 +1030,7 @@ fn merge_base(root: &Path, against: &str) -> Result<String> {
     Ok(revision)
 }
 
-fn release_packages_at(root: &Path, revision: &str) -> Result<BTreeSet<String>> {
+fn release_packages_at(root: &Path, revision: &str) -> Result<BTreeMap<String, Option<String>>> {
     let object = format!("{revision}:Cargo.toml");
     let output = crate::cmd::external_cmd(
         crate::cmd::ExternalProgram::SystemGit,
@@ -1029,9 +1058,15 @@ fn release_packages_at(root: &Path, revision: &str) -> Result<BTreeSet<String>> 
     let selection = workspacefacts::parse_release_selection(&metadata)
         .map_err(anyhow::Error::new)?
         .context("base Cargo.toml 缺 workspace.metadata.release-surface")?;
-    let mut packages = BTreeSet::new();
+    let mut packages = BTreeMap::new();
     for package in selection.packages() {
-        if !packages.insert(package.package().to_owned()) {
+        if packages
+            .insert(
+                package.package().to_owned(),
+                package.version_line().map(str::to_owned),
+            )
+            .is_some()
+        {
             bail!(
                 "base Cargo.toml Release Surface 重复选择 package `{}`",
                 package.package()
@@ -1998,6 +2033,7 @@ mod tests {
             "release-surface": {
                 "packages": [{
                     "package": "alpha-release",
+                    "version-line": "0.1",
                     "public-api-owner": "standalone-component",
                     "api-stability": "experimental",
                     "profiles": []
@@ -2066,8 +2102,8 @@ mod tests {
         metadata["metadata"] = json!({
             "release-surface": {
                 "packages": [
-                    {"package":"alpha-release","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]},
-                    {"package":"beta-release","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]}
+                    {"package":"alpha-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]},
+                    {"package":"beta-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]}
                 ],
                 "profile-artifacts": []
             }
@@ -2149,7 +2185,13 @@ mod tests {
                 .iter()
                 .map(PackageKey::as_str)
                 .collect::<Vec<_>>(),
-            vec!["rss-diag-context", "rss-platform", "rss-trace-context"]
+            vec![
+                "rss-contract",
+                "rss-diag-context",
+                "rss-platform",
+                "rss-request-context",
+                "rss-trace-context"
+            ]
         );
         let internal = catalog.internal.iter().collect::<BTreeSet<_>>();
         let release = catalog.release.iter().collect::<BTreeSet<_>>();
@@ -3205,6 +3247,16 @@ pub vocab::http::HttpRouteEvidence::effect_profile: vocab::http::HttpEffectProfi
         assert_eq!(delta.semver_packages, vec!["kept"]);
         assert_eq!(delta.first_release_packages, vec!["added"]);
         assert_eq!(delta.removed_packages, vec!["removed"]);
+    }
+
+    #[test]
+    fn prepublication_version_line_is_bound_to_the_merge_base() {
+        assert_eq!(
+            changed_frozen_version_line(Some("0.3"), "0.4"),
+            Some(("0.3", "0.4"))
+        );
+        assert_eq!(changed_frozen_version_line(Some("0.3"), "0.3"), None);
+        assert_eq!(changed_frozen_version_line(None, "0.3"), None);
     }
 
     #[test]

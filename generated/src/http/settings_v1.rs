@@ -168,12 +168,15 @@ impl crate::FieldProtectionMetadata for SettingsConfigPublishRequest {
 pub const CONTRACT_ID: &str = "settings.config-publish";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "settings",
-    "settings.config-publish",
-    "v1",
-    "sha256:242fdcfb290e0b22c83d0fc405d83c0fe428a98fbe45b4d5d2c511bd3f6b70ce",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "settings.config-publish",
+        "v1",
+        "sha256:242fdcfb290e0b22c83d0fc405d83c0fe428a98fbe45b4d5d2c511bd3f6b70ce",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("settings", DESCRIPTOR, "v1");
 
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/settings/configs";

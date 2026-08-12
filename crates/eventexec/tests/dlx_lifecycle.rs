@@ -41,7 +41,7 @@ fn hot_and_archive_keys_are_distinct_configuration_types() {
 
 #[test]
 fn canonical_archive_envelope_matches_committed_bytes() -> TestResult {
-    let tenant = vocab::TenantId::parse("11111111-2222-4333-8444-555555555555")?;
+    let tenant = rss_request_context::TenantId::parse("11111111-2222-4333-8444-555555555555")?;
     let metadata = DlxArchiveSafeMetadata::try_new(DlxArchiveSafeMetadataInput {
         message_id: "message-17".to_string(),
         producer_domain: "identity".to_string(),

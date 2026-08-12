@@ -78,6 +78,9 @@ path = "tests/wire_contract_e2e.rs"
 required-features = ["integration"]
 
 [dependencies]
+rss-request-context.workspace = true
+rss-platform.workspace = true
+rss-contract.workspace = true
 settingsonly = { path = "../settingsonly" }
 settings-composition = { path = "../../composition/settings" }
 identity-composition = { path = "../../composition/identity" }

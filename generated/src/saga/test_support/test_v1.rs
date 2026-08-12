@@ -87,12 +87,15 @@ pub mod foreign {
     pub const CONTRACT_ID: &str = "test.saga-conformance.foreign";
 
     /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "test",
-        "test.saga-conformance.foreign",
-        "v1",
-        "sha256:f8350750be70bd8e437f9b6bcb5334c9464b219606814d0766236f74e54493ce",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "test.saga-conformance.foreign",
+            "v1",
+            "sha256:f8350750be70bd8e437f9b6bcb5334c9464b219606814d0766236f74e54493ce",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("test", DESCRIPTOR, "v1");
 
     /// Ordered action semantics generation, domain-separated and length-prefixed before SHA-256.
     pub const ACTION_REGISTRY_GENERATION: &str =
@@ -274,12 +277,15 @@ pub mod primary {
     pub const CONTRACT_ID: &str = "test.saga-conformance.primary";
 
     /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "test",
-        "test.saga-conformance.primary",
-        "v1",
-        "sha256:a02896aae2de47ad119a259f492de77741f6d1050d8ccb706fad969b37fbd891",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "test.saga-conformance.primary",
+            "v1",
+            "sha256:a02896aae2de47ad119a259f492de77741f6d1050d8ccb706fad969b37fbd891",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("test", DESCRIPTOR, "v1");
 
     /// Ordered action semantics generation, domain-separated and length-prefixed before SHA-256.
     pub const ACTION_REGISTRY_GENERATION: &str =

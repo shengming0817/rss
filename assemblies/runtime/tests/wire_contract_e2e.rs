@@ -46,7 +46,7 @@ const KEYPROVIDER_CONFIG_SCHEME: u32 = 1;
 fn unused_tenant_store_allowlist() -> TestResult<TenantStoreAllowlist> {
     Ok(TenantStoreAllowlist::new([(
         (
-            vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
+            rss_request_context::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")?,
             "vault".to_owned(),
         ),
         StoreBinding {
@@ -134,7 +134,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
 
 #[allow(clippy::expect_used)]
 fn readiness_context_b64(tenant: &str) -> String {
-    let tenant = vocab::TenantId::parse(tenant).expect("canonical readiness tenant");
+    let tenant = rss_request_context::TenantId::parse(tenant).expect("canonical readiness tenant");
     let aad = secure::ProtectionContext::authenticated_request(
         tenant,
         "readiness.probe",

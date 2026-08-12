@@ -11,7 +11,7 @@
 use std::time::SystemTime;
 
 use ids::UserId;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 const MAX_PERSISTED_COUNTER: u64 = i64::MAX as u64;
 
@@ -501,8 +501,9 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("tenant")
     }
 
     #[allow(clippy::expect_used)]

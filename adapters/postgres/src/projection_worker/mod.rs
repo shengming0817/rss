@@ -30,7 +30,7 @@ pub(crate) use source::PgProjectionWorkerSource;
 pub(crate) fn checkpoint_for_integration(
     store: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> PgProjectionWorkerCheckpointStore {
     PgProjectionWorkerCheckpointStore::new(store, target, tenant)
 }
@@ -39,7 +39,7 @@ pub(crate) fn checkpoint_for_integration(
 pub(crate) fn dead_letter_for_integration(
     store: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     payload_protector: crate::dead_letter_payload::DlxPayloadProtector,
 ) -> PgProjectionWorkerDeadLetterStore {
     PgProjectionWorkerDeadLetterStore::new(store, target, tenant, payload_protector)
@@ -137,7 +137,10 @@ impl ProjectionWorkerTarget {
         &self.input_generation
     }
 
-    pub(crate) fn selector(&self, tenant: vocab::TenantId) -> eventexec::ProjectionSelector {
+    pub(crate) fn selector(
+        &self,
+        tenant: rss_request_context::TenantId,
+    ) -> eventexec::ProjectionSelector {
         eventexec::ProjectionSelector::new(
             tenant,
             self.projection.clone(),
@@ -153,7 +156,7 @@ impl ProjectionWorkerTarget {
 
     pub(crate) fn background_execution(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> eventexec::ProjectionExecutionContext {
         self.execution.issue(tenant)
     }

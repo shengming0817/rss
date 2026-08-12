@@ -1,7 +1,7 @@
 #![allow(unused)]
 
 use httpserve::Authenticated;
-use vocab::PrincipalKind;
+use rss_request_context::PrincipalKind;
 
 fn main() {
     let auth = Authenticated::new(

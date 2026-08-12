@@ -23,9 +23,9 @@ impl<T, P> core::marker::UnsafeUnpin for runctx::ctx::RequestCtx<T, P> where T: 
 impl<T, P> core::panic::unwind_safe::RefUnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::RefUnwindSafe, P: core::panic::unwind_safe::RefUnwindSafe
 impl<T, P> core::panic::unwind_safe::UnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::UnwindSafe, P: core::panic::unwind_safe::UnwindSafe
 pub trait runctx::ctx::PrincipalFacet: core::marker::Send + core::marker::Sync + 'static
-pub fn runctx::ctx::PrincipalFacet::kind(&self) -> vocab::principal::PrincipalKind
+pub fn runctx::ctx::PrincipalFacet::kind(&self) -> rss_request_context::PrincipalKind
 pub fn runctx::ctx::PrincipalFacet::matches_subject(&self, &str) -> bool
-pub type runctx::ctx::AppCtx = runctx::ctx::RequestCtx<vocab::tenant::TenantId, alloc::sync::Arc<dyn runctx::ctx::PrincipalFacet>>
+pub type runctx::ctx::AppCtx = runctx::ctx::RequestCtx<rss_request_context::TenantId, alloc::sync::Arc<dyn runctx::ctx::PrincipalFacet>>
 pub mod runctx::local
 pub struct runctx::local::MissingCtx
 impl core::clone::Clone for runctx::local::MissingCtx
@@ -91,9 +91,9 @@ impl<T, P> core::marker::UnsafeUnpin for runctx::ctx::RequestCtx<T, P> where T: 
 impl<T, P> core::panic::unwind_safe::RefUnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::RefUnwindSafe, P: core::panic::unwind_safe::RefUnwindSafe
 impl<T, P> core::panic::unwind_safe::UnwindSafe for runctx::ctx::RequestCtx<T, P> where T: core::panic::unwind_safe::UnwindSafe, P: core::panic::unwind_safe::UnwindSafe
 pub trait runctx::PrincipalFacet: core::marker::Send + core::marker::Sync + 'static
-pub fn runctx::PrincipalFacet::kind(&self) -> vocab::principal::PrincipalKind
+pub fn runctx::PrincipalFacet::kind(&self) -> rss_request_context::PrincipalKind
 pub fn runctx::PrincipalFacet::matches_subject(&self, &str) -> bool
 pub fn runctx::scope<F>(runctx::ctx::AppCtx, F) -> impl core::future::future::Future<Output = <F as core::future::future::Future>::Output> where F: core::future::future::Future
 pub fn runctx::try_current() -> core::result::Result<runctx::ctx::AppCtx, runctx::local::MissingCtx>
 pub fn runctx::try_with<R>(impl core::ops::function::FnOnce(&runctx::ctx::AppCtx) -> R) -> core::result::Result<R, runctx::local::MissingCtx>
-pub type runctx::AppCtx = runctx::ctx::RequestCtx<vocab::tenant::TenantId, alloc::sync::Arc<dyn runctx::ctx::PrincipalFacet>>
+pub type runctx::AppCtx = runctx::ctx::RequestCtx<rss_request_context::TenantId, alloc::sync::Arc<dyn runctx::ctx::PrincipalFacet>>

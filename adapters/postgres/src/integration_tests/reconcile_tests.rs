@@ -319,7 +319,7 @@ async fn reconcile_lease_cas_rejects_stale_token_and_epoch() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let resource = format!("lease-device-{}", uuid::Uuid::new_v4());
     let key = ReconcileTargetKey::parse("lease-reconciler", "device", &resource)?;
     let reconcile = store.reconcile();
@@ -552,7 +552,7 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let resource = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &resource).await?;
     let key = ReconcileTargetKey::parse(
@@ -911,7 +911,7 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
         "rss.reconcile.device-certificate.v1"
     );
     assert_eq!(durable.attempt_id(), attempt.attempt_id());
-    let wrong_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let wrong_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     assert!(
         maintenance
             .read_device_command_audit_proof(wrong_tenant, &command_id)
@@ -1126,7 +1126,7 @@ async fn reconcile_scheduler_store_claim_result_action_and_outbox_roundtrip() ->
 async fn reconcile_claim_returns_equal_due_targets_in_target_id_order() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let reconcile = store.reconcile();
     let mut expected = Vec::new();
     for suffix in ["c", "a", "b"] {
@@ -1175,7 +1175,7 @@ async fn reconcile_claim_returns_equal_due_targets_in_target_id_order() -> TestR
 async fn reconcile_claim_skips_locked_earliest_target_without_waiting() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let reconcile = store.reconcile();
     let first = reconcile
         .upsert_target(
@@ -1241,7 +1241,7 @@ async fn reconcile_claim_skips_locked_earliest_target_without_waiting() -> TestR
 async fn reconcile_two_holders_have_one_claim_winner_for_same_target() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let key = ReconcileTargetKey::parse(
         "single-winner-reconciler",
         "device",
@@ -1284,11 +1284,11 @@ async fn reconcile_scheduler_command_dispatch_key_is_tenant_scoped() -> TestResu
     let mut dispatched = Vec::new();
     for (tenant, resource) in [
         (
-            vocab::TenantId::parse("11111111-1111-1111-1111-111111111111")?,
+            rss_request_context::TenantId::parse("11111111-1111-1111-1111-111111111111")?,
             uuid::Uuid::new_v4().to_string(),
         ),
         (
-            vocab::TenantId::parse("22222222-2222-2222-2222-222222222222")?,
+            rss_request_context::TenantId::parse("22222222-2222-2222-2222-222222222222")?,
             uuid::Uuid::new_v4().to_string(),
         ),
     ] {
@@ -1363,7 +1363,7 @@ async fn reconcile_concurrent_takeover_commits_only_highest_authority_without_re
 {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let device = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &device).await?;
     let reconcile = store.reconcile();
@@ -1503,7 +1503,7 @@ async fn reconcile_scheduler_faults_roll_back_all_four_command_writes() -> TestR
         crate::reconcile::ReconcileCommandWriteFault::Action,
         crate::reconcile::ReconcileCommandWriteFault::Outbox,
     ] {
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let device = uuid::Uuid::new_v4().to_string();
         insert_device_desired(&store, tenant, &device).await?;
         let reconcile = store.reconcile().with_command_write_fault(fault);
@@ -1573,7 +1573,7 @@ async fn reconcile_scheduler_supersedes_each_nonterminal_state_and_keeps_termina
     store.run_migrations().await?;
 
     for old_state in ["queued", "published", "received", "cancelled"] {
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let device = uuid::Uuid::new_v4().to_string();
         insert_device_desired(&store, tenant, &device).await?;
         let reconcile = store.reconcile();
@@ -1750,7 +1750,7 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let resource = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &resource).await?;
     let key = ReconcileTargetKey::parse(
@@ -1931,7 +1931,7 @@ async fn reconcile_scheduler_rejects_same_scoped_key_with_different_payload() ->
         Some(ReconcileQuarantineReason::FactConflict)
     );
 
-    let wrong_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let wrong_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     for result in [
         ReconcileOperatorStore::inspect_target(
             &maintenance,
@@ -2016,7 +2016,7 @@ async fn reconcile_scheduler_rejects_stale_attempt_writes_after_lease_reclaim() 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let resource = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &resource).await?;
     let key = ReconcileTargetKey::parse(
@@ -2140,7 +2140,7 @@ async fn reconcile_result_uses_persisted_attempt_evidence_not_forged_claim_snaps
 {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let key = ReconcileTargetKey::parse(
         "attempt-evidence-reconciler",
         "device",
@@ -2208,7 +2208,7 @@ async fn reconcile_permanent_and_invariant_results_persist_quarantine_without_ho
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let reconcile = store.reconcile();
     for (suffix, label, error_kind, schedule, reason) in [
         (
@@ -2312,7 +2312,7 @@ async fn reconcile_scheduler_claims_requeue_after_attempt_as_requeue_trigger() -
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let resource = format!("requeue-device-{}", uuid::Uuid::new_v4());
     let key = ReconcileTargetKey::parse("requeue-reconciler", "device", &resource)?;
     let reconcile = store.reconcile();
@@ -2377,7 +2377,7 @@ async fn reconcile_scheduler_persists_retry_streak_across_store_restart_and_rese
 -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let resource = format!("retry-device-{}", uuid::Uuid::new_v4());
     let key = ReconcileTargetKey::parse("retry-reconciler", "device", &resource)?;
     let reconcile = store.reconcile();
@@ -2494,7 +2494,7 @@ async fn reconcile_wake_supersedes_inflight_result_and_exact_or_periodic_claims_
     let repository = crate::device_certificate::PgDeviceCertificateRepository::<
         ProductionEligibility,
     >::from_unverified_stores_for_test(&reader, &writer);
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let device = ids::DeviceId::new(uuid::Uuid::new_v4());
     let resource = device.as_uuid().to_string();
     let key = ReconcileTargetKey::parse(
@@ -2671,7 +2671,7 @@ async fn reconcile_scheduler_target_pause_resume_missing_target_fails_closed() -
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let missing_target = uuid::Uuid::new_v4().to_string();
     let reconcile = store.reconcile();
 

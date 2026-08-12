@@ -551,7 +551,7 @@ type BacklogScopeState = HashMap<String, HashSet<ObservedBacklogScope>>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ObservedBacklogScope {
-    tenant_id: vocab::TenantId,
+    tenant_id: rss_request_context::TenantId,
     contract_id: OutboxContractId,
 }
 
@@ -918,7 +918,7 @@ mod tests {
     // reason: 测试 happy-path 已知合法 tenant / contract。
     fn subject(contract_id: &str) -> OutboxMetricSubject {
         OutboxMetricSubject::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                 .expect("valid test tenant"),
             OutboxContractId::parse(contract_id).expect("valid test contract"),
         )

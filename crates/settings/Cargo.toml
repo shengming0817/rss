@@ -16,6 +16,7 @@ seed-data = []
 test-support = ["httpserve/test-util"]
 
 [dependencies]
+rss-request-context.workspace = true
 thiserror = { workspace = true }
 vocab = { path = "../vocab" }
 secure = { path = "../secure" }

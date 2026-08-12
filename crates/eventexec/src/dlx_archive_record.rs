@@ -212,7 +212,7 @@ impl DlxArchiveSafeMetadata {
 /// decrypted only into [`Plaintext`]. Tenant authority is absent from the capsule by construction.
 pub struct ArchiveCanonicalRecord {
     id: DeadLetterId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     safe: DlxArchiveSafeMetadata,
     capsule: Plaintext,
 }
@@ -220,7 +220,7 @@ pub struct ArchiveCanonicalRecord {
 impl ArchiveCanonicalRecord {
     pub fn new(
         id: DeadLetterId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         safe: DlxArchiveSafeMetadata,
         capsule: Plaintext,
     ) -> Self {
@@ -236,7 +236,7 @@ impl ArchiveCanonicalRecord {
         &self.id
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -330,7 +330,7 @@ pub struct DlxArchiveCandidate(ArchiveCanonicalRecord);
 impl DlxArchiveCandidate {
     pub fn try_new(
         id: DeadLetterId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         safe: DlxArchiveSafeMetadata,
         capsule: Plaintext,
     ) -> Result<Self, DlxLifecycleError> {
@@ -426,7 +426,7 @@ mod tests {
         })?;
         let record = ArchiveCanonicalRecord::new(
             DeadLetterId::parse("018f31a8-893d-7a52-8e17-3ca9df50120b")?,
-            vocab::TenantId::parse("11111111-2222-4333-8444-555555555555")?,
+            rss_request_context::TenantId::parse("11111111-2222-4333-8444-555555555555")?,
             safe,
             Plaintext::new(b"TOP_SECRET_CAPSULE".to_vec()),
         );
@@ -452,7 +452,7 @@ mod tests {
         );
 
         let id = DeadLetterId::parse("018f31a8-893d-7a52-8e17-3ca9df50120b")?;
-        let tenant = vocab::TenantId::parse("11111111-2222-4333-8444-555555555555")?;
+        let tenant = rss_request_context::TenantId::parse("11111111-2222-4333-8444-555555555555")?;
         let candidate = DlxArchiveCandidate::try_new(
             id.clone(),
             tenant,

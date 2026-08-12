@@ -93,8 +93,7 @@ mod smoke {
         let _validate: fn(&ContractRecord) -> Result<(), ContractRegError> = validate_metadata;
         let _ = _validate;
 
-        let _parse: fn(&str) -> Result<ContractId, ContractRegError> = ContractId::parse;
-        let _ = _parse;
+        assert!(ContractId::parse("runtime.inventory").is_ok());
 
         let _new: fn(
             ContractId,

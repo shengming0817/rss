@@ -124,7 +124,7 @@ async fn saga_unresolved_observation_adapter_preserves_oldest_across_claim_and_c
     )?;
     let definition =
         consistency::SagaDefinitionIdentity::from_binding(generated::saga::billing_v1::SPEC);
-    let operator_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let operator_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let operator_instance = consistency::SagaInstanceRef::new(
         operator_tenant,
         consistency::SagaId::new(uuid::Uuid::new_v4()),
@@ -140,14 +140,14 @@ async fn saga_unresolved_observation_adapter_preserves_oldest_across_claim_and_c
             None,
         ),
         (
-            vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
             consistency::SagaId::new(uuid::Uuid::new_v4()),
             "degraded",
             None,
             None,
         ),
         (
-            vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
             consistency::SagaId::new(uuid::Uuid::new_v4()),
             "compensation_failed",
             None,
@@ -254,7 +254,7 @@ async fn saga_retry_and_terminate_are_single_winner_across_independent_connectio
     let retry_saga = uuid::Uuid::new_v4();
     let terminate_saga = uuid::Uuid::new_v4();
     let effect_key = vec![0x2a_u8; 32];
-    let tenant_id = vocab::TenantId::parse(&tenant.to_string())?;
+    let tenant_id = rss_request_context::TenantId::parse(&tenant.to_string())?;
     let identity = diport::SagaWorkerIdentity::new(
         "orders",
         diport::SagaContractId::parse("orders.checkout.v1")?,
@@ -480,7 +480,7 @@ async fn saga_operator_transitions_rls_fences_serving_and_read_roles() -> TestRe
         .execute(&owner.pool)
         .await?;
         let instance = consistency::SagaInstanceRef::new(
-            vocab::TenantId::parse(&tenant.to_string())?,
+            rss_request_context::TenantId::parse(&tenant.to_string())?,
             consistency::SagaId::new(saga),
         )?;
         let authorization = diport::test_support::saga_operator_authorization(
@@ -645,7 +645,7 @@ async fn saga_durable_store_commits_and_recovers_one_atomic_view() -> TestResult
         .handle()
         .infra()
         .saga_durable_store(saga_receipt_test_protection()?);
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let instance =
         consistency::SagaInstanceRef::new(tenant, consistency::SagaId::new(uuid::Uuid::new_v4()))?;
     let definition =
@@ -926,7 +926,7 @@ async fn saga_operator_repair_matrix_is_fenced_and_audited() -> TestResult {
         .handle()
         .infra()
         .saga_durable_store(saga_receipt_test_protection()?);
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let instance =
         consistency::SagaInstanceRef::new(tenant, consistency::SagaId::new(uuid::Uuid::new_v4()))?;
     let definition =
@@ -2403,7 +2403,7 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
         .is_err(),
         "auditor must not execute recovery mutation",
     );
-    let wrong_tenant = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let wrong_tenant = rss_request_context::TenantId::parse(COTX_TENANT_B)?;
     let wrong_tenant_result = {
         let mut tx = executor.store_arc().pool.begin().await?;
         crate::cotx::set_local_tenant(&mut tx, wrong_tenant).await?;
@@ -2413,7 +2413,7 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
              'CHG-1837-PG', $3::text[], $4::bytea, $5, $6::uuid, $7::uuid)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(vec![unique_event_id("l2-dr-wrong-tenant")])
         .bind(vec![0_u8; 32])
         .bind(vocab::ServiceCallerDomain::MaintenanceOperator.as_str())
@@ -2440,7 +2440,7 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
              'database_ahead_broker_earlier', 2000, 1000, 'CHG-1837-PG', \
              $2::text[], $3::bytea, $4, $5::uuid, $6::uuid)",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(vec![unique_event_id("l2-dr-nil-epoch")])
         .bind(vec![0_u8; 32])
         .bind("service:l2-dr-test")
@@ -2973,7 +2973,11 @@ async fn l2_dr_recovery_epoch_is_idempotent_conflict_safe_and_receipt_immutable(
     assert_eq!(visible_to_tenant, 1);
     let hidden_from_other_tenant: i64 = {
         let mut tx = reader.store_arc().pool.begin().await?;
-        crate::cotx::set_local_tenant(&mut tx, vocab::TenantId::parse(COTX_TENANT_B)?).await?;
+        crate::cotx::set_local_tenant(
+            &mut tx,
+            rss_request_context::TenantId::parse(COTX_TENANT_B)?,
+        )
+        .await?;
         let count = sqlx::query_scalar(
             "SELECT count(*) FROM event_l2_dr_recovery_receipt WHERE epoch_id = $1::uuid",
         )
@@ -3051,7 +3055,7 @@ async fn l2_dr_admission_requires_bootstrap_witness_and_scopes_every_transition(
     let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
     let tenant = test_tenant();
-    let other_tenant = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let other_tenant = rss_request_context::TenantId::parse(COTX_TENANT_B)?;
     let event_id = unique_event_id("l2-dr-bootstrap-witness");
     let recovery_epoch = uuid::Uuid::new_v4();
     let plan = l2_dr_recovery_plan(
@@ -3356,7 +3360,7 @@ async fn l2_dr_recovery_rabbit_ahead_preserves_outbox_and_inbox_exactly() -> Tes
          VALUES ($1::uuid, $2, 'l2-dr-test', 'l2-dr-test', 'l2-dr.test', 'l2-dr.test', \
                  'v1', $3, 'done', gen_random_uuid(), clock_timestamp())",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&event_id)
     .bind(TEST_SCHEMA_HASH)
     .execute(&owner.pool)
@@ -3370,7 +3374,7 @@ async fn l2_dr_recovery_rabbit_ahead_preserves_outbox_and_inbox_exactly() -> Tes
         "SELECT to_jsonb(inbox_receipts)::text FROM inbox_receipts \
          WHERE tenant_id = $1::uuid AND event_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&event_id)
     .fetch_one(&owner.pool)
     .await?;
@@ -3401,7 +3405,7 @@ async fn l2_dr_recovery_rabbit_ahead_preserves_outbox_and_inbox_exactly() -> Tes
         "SELECT to_jsonb(inbox_receipts)::text FROM inbox_receipts \
          WHERE tenant_id = $1::uuid AND event_id = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(&event_id)
     .fetch_one(&owner.pool)
     .await?;
@@ -3659,7 +3663,7 @@ enum PgOperatorRepairCase {
 async fn exercise_pg_operator_repair_case(
     observer: &sqlx::PgPool,
     store: &crate::saga::PgSagaDurableStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     identity: &diport::SagaWorkerIdentity,
     definition: &consistency::SagaDefinitionIdentity,
     operator_identity: &diport::SagaWorkerIdentity,

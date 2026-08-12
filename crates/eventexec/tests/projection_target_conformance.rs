@@ -291,7 +291,7 @@ impl PartitionSerialDelivery for SerialSource {}
 
 fn selector() -> ProjectionSelector {
     ProjectionSelector::new(
-        vocab::TenantId::parse(TENANT).expect("canonical tenant"),
+        rss_request_context::TenantId::parse(TENANT).expect("canonical tenant"),
         ProjectionId::parse(fixture().projection_id()).expect("canonical projection"),
         ProjectionVersion::parse(fixture().target_generation()).expect("canonical generation"),
     )
@@ -303,7 +303,7 @@ fn record(lsn: u64, event_id: &str, payload: &[u8], schema: &str) -> ProjectionE
         consistency::EventTopic::parse(binding().topic()).expect("canonical topic"),
         payload.to_vec(),
         ProjectionEventMetadata::new(
-            vocab::TenantId::parse(TENANT).expect("canonical tenant"),
+            rss_request_context::TenantId::parse(TENANT).expect("canonical tenant"),
             event_id,
             binding().source_domain(),
             binding().contract_id(),

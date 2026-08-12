@@ -184,7 +184,7 @@ pub struct DeadLetterRecord {
     contract_id: String,
     topic: String,
     consumer_group: Option<String>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     message_id: String,
     original_payload: RedactedBytes,
     metadata: EnvelopeMetadata,
@@ -223,7 +223,7 @@ impl DeadLetterRecord {
     // reason: DLX 记录的 tenant/message/domain/contract/topic/payload/summary/attempts 均为必填审计字段；
     // 聚合 builder 会重新引入 tenantless 中间态，本构造器刻意保持一次性完整信封。
     pub fn new(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         message_id: impl Into<String>,
         provenance: DeadLetterProvenance,
         contract_id: impl Into<String>,
@@ -279,7 +279,7 @@ impl DeadLetterRecord {
     }
 
     /// 借出租户标识（DLX RLS scope）。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -421,8 +421,9 @@ mod smoke {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant")
     }
 
     // multi_thread + spawn：boxed future 须 Send（trait_variant Send 变体）才能跨 worker 调度——
@@ -464,8 +465,9 @@ mod pii_debug {
     use crate::EnvelopeMetadata;
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant")
     }
 
     #[test]
@@ -581,7 +583,7 @@ mod tenant_scope {
     #[test]
     #[allow(clippy::expect_used)]
     fn tenant_and_message_id_round_trip() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let record = DeadLetterRecord::new(
             tenant,

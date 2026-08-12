@@ -75,7 +75,7 @@ pub mod test_support {
     use std::sync::Arc;
     use std::time::SystemTime;
 
-    use vocab::TenantId;
+    use rss_request_context::TenantId;
 
     /// Evaluate policies loaded by a downstream adapter through the same PDP function used by the
     /// production contract authorizer. This seam is test-only so persistence providers can prove
@@ -109,10 +109,10 @@ pub mod test_support {
     pub fn role_mutation_actor(
         tenant: &str,
         raw: &str,
-        kind: vocab::PrincipalKind,
+        kind: rss_request_context::PrincipalKind,
     ) -> crate::ports::RoleMutationActor {
         crate::ports::RoleMutationActor::for_test_user(
-            vocab::TenantId::parse(tenant).expect("test tenant id must be canonical"),
+            rss_request_context::TenantId::parse(tenant).expect("test tenant id must be canonical"),
             user_id(raw),
             kind,
         )
@@ -196,7 +196,7 @@ pub mod test_support {
     ) -> CredentialSecurityCommand {
         let initiator = CredentialSecurityInitiator::authenticated(
             state.tenant(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             state.user_id().as_uuid().hyphenated().to_string(),
         );
         CredentialSecurityCommand::account(state, kind, initiator, occurred_at)
@@ -212,7 +212,7 @@ pub mod test_support {
     ) -> CredentialSecurityCommand {
         let initiator = CredentialSecurityInitiator::authenticated(
             grant.tenant(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             grant.user_id().as_uuid().hyphenated().to_string(),
         );
         CredentialSecurityCommand::grant(grant, kind, initiator, occurred_at)
@@ -228,7 +228,7 @@ pub mod test_support {
     ) -> LogoutAllCommand {
         let initiator = CredentialSecurityInitiator::authenticated(
             state.tenant(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             state.user_id().as_uuid().hyphenated().to_string(),
         );
         CredentialSecurityCommand::logout_all(state, initiator, occurred_at)
@@ -244,7 +244,7 @@ pub mod test_support {
     ) -> LogoutCurrentCommand {
         let initiator = CredentialSecurityInitiator::authenticated(
             grant.tenant(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             grant.user_id().as_uuid().hyphenated().to_string(),
         );
         CredentialSecurityCommand::logout_current(grant, initiator, occurred_at)
@@ -261,7 +261,7 @@ pub mod test_support {
     ) -> PasswordChangeCommand {
         let initiator = CredentialSecurityInitiator::authenticated(
             account.tenant(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             account.user_id().as_uuid().hyphenated().to_string(),
         );
         PasswordChangeCommand::new(credential, account, password, initiator, occurred_at)
@@ -277,7 +277,7 @@ pub mod test_support {
     ) -> AccountStatusSetCommand {
         let initiator = CredentialSecurityInitiator::authenticated(
             state.tenant(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             "test-admin",
         );
         AccountStatusSetCommand::new(state, target, initiator, occurred_at)
@@ -374,7 +374,7 @@ pub mod test_support {
             generated::event::identity_v1::session_created::IdentitySessionCreatedPayload {
                 session_id: grant.id().as_uuid(),
                 subject: grant.user_id().as_uuid(),
-                tenant_id: grant.tenant().as_uuid(),
+                tenant_id: uuid::Uuid::from_bytes(grant.tenant().octets()),
                 occurred_at: crate::application::unix_secs(grant.created_at()),
             };
         let subject = grant.user_id();

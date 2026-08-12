@@ -26,8 +26,8 @@ fn id(suffix: &str) -> TestResult<DeadLetterId> {
     Ok(DeadLetterId::parse(&raw)?)
 }
 
-fn tenant() -> TestResult<vocab::TenantId> {
-    Ok(vocab::TenantId::parse(
+fn tenant() -> TestResult<rss_request_context::TenantId> {
+    Ok(rss_request_context::TenantId::parse(
         "11111111-2222-4333-8444-555555555555",
     )?)
 }

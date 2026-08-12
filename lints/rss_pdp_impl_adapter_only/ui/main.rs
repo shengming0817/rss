@@ -19,7 +19,7 @@ impl Pdp for AllowAll {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
         Ok(VerifiedClaims::service_token(
             vocab::ServiceCallerDomain::MaintenanceOperator,
-            vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
         ))
     }
 }
@@ -45,7 +45,7 @@ impl Pdp for AllowedByAttr {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
         Ok(VerifiedClaims::service_token(
             vocab::ServiceCallerDomain::MaintenanceOperator,
-            vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
         ))
     }
 }

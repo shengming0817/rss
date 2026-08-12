@@ -385,7 +385,7 @@ async fn execute_retry(
 pub(super) async fn ordinary_dlx(
     tenant_pool: &TenantDb<ServingWriteLane>,
     payload_protector: &DlxPayloadProtector,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     claimed: &PgClaimedOutboxEntry,
     failure: &RelayPublishFailure,
     relay_budget: RelayBudget,
@@ -411,7 +411,7 @@ pub(super) async fn ordinary_dlx(
 pub(super) async fn same_id_expiry_dlx(
     tenant_pool: &TenantDb<ServingWriteLane>,
     payload_protector: &DlxPayloadProtector,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     claimed: &PgClaimedOutboxEntry,
     phase: SameIdDeliveryPhase,
     relay_budget: RelayBudget,
@@ -435,7 +435,7 @@ pub(super) async fn same_id_expiry_dlx(
 }
 
 struct DlxInput<'a> {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     claimed: &'a PgClaimedOutboxEntry,
     error_summary: &'static str,
     relay_failure_reason: Option<&'static str>,
@@ -502,7 +502,7 @@ async fn execute_dlx(
 struct DlxRowContext<'a> {
     payload_protector: &'a DlxPayloadProtector,
     phase: &'static str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &'a str,
     error_summary: &'static str,
     relay_failure_reason: Option<&'static str>,
@@ -521,7 +521,7 @@ struct SettledDlxRow {
 
 async fn protect_dlx_row(
     payload_protector: &DlxPayloadProtector,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &str,
     relay_failure_reason: Option<&'static str>,
     row: SettledDlxRow,
@@ -559,7 +559,7 @@ async fn protect_dlx_row(
 
 fn decode_dlx_row(
     row: MarkDlxRow,
-    expected_tenant: vocab::TenantId,
+    expected_tenant: rss_request_context::TenantId,
 ) -> Result<Settlement<SettledDlxRow>, SettlementAttemptError> {
     match parse_outcome(&row.settlement_outcome)? {
         Settlement::Expired(_) => ensure_empty_dlx_row(
@@ -766,8 +766,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).expect("valid tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).expect("valid tenant")
     }
 
     #[allow(clippy::expect_used)]
@@ -1258,7 +1258,7 @@ mod tests {
         MetricScope {
             domain: "identity".to_owned(),
             subject: consistency::OutboxMetricSubject::new(
-                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                     .expect("valid tenant"),
                 consistency::OutboxContractId::parse("identity.session-created")
                     .expect("valid contract"),

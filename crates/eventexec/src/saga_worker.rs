@@ -388,7 +388,7 @@ fn record_unresolved_metrics(
 
 async fn run_tenant_batch<S, E>(
     identity: &SagaWorkerIdentity,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     durable_store: &S,
     executor: &E,
     batch_size: NonZeroUsize,
@@ -538,12 +538,12 @@ mod tests {
     }
 
     struct FakeTenantSource {
-        tenants: Mutex<Result<Vec<vocab::TenantId>, SagaDurableStoreError>>,
+        tenants: Mutex<Result<Vec<rss_request_context::TenantId>, SagaDurableStoreError>>,
         unresolved: SagaUnresolvedObservation,
     }
 
     impl FakeTenantSource {
-        fn with_tenants(tenants: Vec<vocab::TenantId>) -> Self {
+        fn with_tenants(tenants: Vec<rss_request_context::TenantId>) -> Self {
             Self {
                 tenants: Mutex::new(Ok(tenants)),
                 unresolved: clear_unresolved(),
@@ -685,7 +685,7 @@ mod tests {
         async fn list_runnable(
             &self,
             _identity: &SagaWorkerIdentity,
-            tenant: vocab::TenantId,
+            tenant: rss_request_context::TenantId,
             _limit: NonZeroUsize,
         ) -> Result<Vec<SagaRunnableInstance>, SagaDurableStoreError> {
             self.rows
@@ -914,7 +914,10 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     async fn poison_first_page_does_not_starve_later_runnable_tenants() {
         let tenants = (1_u128..=3)
-            .map(|value| vocab::TenantId::parse(&uuid::Uuid::from_u128(value).to_string()).unwrap())
+            .map(|value| {
+                rss_request_context::TenantId::parse(&uuid::Uuid::from_u128(value).to_string())
+                    .unwrap()
+            })
             .collect::<Vec<_>>();
         let rows = tenants
             .iter()
@@ -1171,13 +1174,13 @@ mod tests {
     }
 
     #[allow(clippy::unwrap_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap()
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap()
     }
 
     #[allow(clippy::unwrap_used)]
     fn runnable(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         id: u128,
         status: SagaInstanceStatus,
     ) -> SagaRunnableInstance {
@@ -1191,7 +1194,7 @@ mod tests {
 
     #[allow(clippy::unwrap_used)]
     fn runnable_with_definition(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         id: u128,
         status: SagaInstanceStatus,
         definition: consistency::SagaDefinitionIdentity,

@@ -21,7 +21,7 @@ const PRINCIPAL_KEY: &str = "rss.authn.v1.principal";
 const SIGNATURE_KEY: &str = "rss.authn.v1.signature";
 
 fn policy() -> MqttTopicPolicy {
-    let tenant = vocab::TenantId::parse(TENANT).expect("canonical tenant");
+    let tenant = rss_request_context::TenantId::parse(TENANT).expect("canonical tenant");
     let device = ids::DeviceId::parse(DEVICE).expect("canonical device");
     let generation = CredentialGeneration::new(7).expect("positive generation");
     MqttTopicPolicy::new(vec![DeviceScope::new(tenant, device, generation)])
@@ -29,7 +29,7 @@ fn policy() -> MqttTopicPolicy {
 }
 
 fn command_acked_topic() -> String {
-    let tenant = vocab::TenantId::parse(TENANT).expect("canonical tenant");
+    let tenant = rss_request_context::TenantId::parse(TENANT).expect("canonical tenant");
     let device = ids::DeviceId::parse(DEVICE).expect("canonical device");
     let generation = CredentialGeneration::new(7).expect("positive generation");
     let scope = DeviceScope::new(tenant, device, generation);
@@ -41,7 +41,7 @@ fn command_acked_topic() -> String {
 }
 
 fn certificate_reported_topic() -> String {
-    let tenant = vocab::TenantId::parse(TENANT).expect("canonical tenant");
+    let tenant = rss_request_context::TenantId::parse(TENANT).expect("canonical tenant");
     let device = ids::DeviceId::parse(DEVICE).expect("canonical device");
     let generation = CredentialGeneration::new(7).expect("positive generation");
     let scope = DeviceScope::new(tenant, device, generation);

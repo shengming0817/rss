@@ -242,7 +242,7 @@ mod tests {
     // reason: fixed valid fixtures make setup failure a test-construction bug.
     fn receipt(tenant: &str, group: &str) -> InboxReceiptContext {
         InboxReceiptContext::new(
-            vocab::TenantId::parse(tenant).expect("tenant"),
+            rss_request_context::TenantId::parse(tenant).expect("tenant"),
             ConsumerGroup::parse(group).expect("group"),
             "identity",
             "identity.session-created",
@@ -433,7 +433,8 @@ mod tests {
         static CTX: OnceLock<InboxReceiptContext> = OnceLock::new();
         CTX.get_or_init(|| {
             InboxReceiptContext::new(
-                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                    .unwrap(),
                 ConsumerGroup::parse("test-consumer").unwrap(),
                 "identity",
                 "identity.session-created",

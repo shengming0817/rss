@@ -896,7 +896,7 @@ async fn apply_security_mutation(
 }
 
 pub(crate) struct CredentialCasRow {
-    pub(crate) tenant: vocab::TenantId,
+    pub(crate) tenant: rss_request_context::TenantId,
     pub(crate) user: String,
     pub(crate) login: String,
     pub(crate) expected_hash: String,
@@ -950,7 +950,7 @@ pub(crate) struct AccountSecurityRow {
 }
 
 pub(crate) struct AccountStateCasRow {
-    pub(crate) tenant: vocab::TenantId,
+    pub(crate) tenant: rss_request_context::TenantId,
     pub(crate) user: String,
     pub(crate) expected_status: &'static str,
     pub(crate) expected_epoch: i64,

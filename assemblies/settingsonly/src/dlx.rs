@@ -358,7 +358,7 @@ fn key_readiness_worker(
 }
 
 fn key_canary_aad(scope: &'static str) -> anyhow::Result<secure::DerivedAad> {
-    let tenant = vocab::TenantId::parse(DLX_ARCHIVE_KEY_CANARY_TENANT)
+    let tenant = rss_request_context::TenantId::parse(DLX_ARCHIVE_KEY_CANARY_TENANT)
         .context("parse settingsonly DLX archive key readiness tenant")?;
     Ok(
         secure::ProtectionContext::authorized_maintenance(tenant, scope, "readiness-canary", 1)

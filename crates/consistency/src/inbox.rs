@@ -25,7 +25,7 @@ pub const INBOX_RECEIPT_CORRELATION_MAX_LEN: usize = 256;
 /// empty constructor, so callers cannot express an unscoped receipt operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxReceiptContext {
-    tenant_id: vocab::TenantId,
+    tenant_id: rss_request_context::TenantId,
     consumer_group: ConsumerGroup,
     domain: String,
     topic: String,
@@ -42,7 +42,7 @@ impl InboxReceiptContext {
     // reason: the receipt row schema is intentionally explicit; bundling these fields before the
     // validation funnel would create a second unvalidated shape.
     pub fn new(
-        tenant_id: vocab::TenantId,
+        tenant_id: rss_request_context::TenantId,
         consumer_group: ConsumerGroup,
         domain: impl Into<String>,
         topic: impl Into<String>,
@@ -82,7 +82,7 @@ impl InboxReceiptContext {
     }
 
     /// Tenant scope for RLS and the receipt primary key.
-    pub fn tenant_id(&self) -> vocab::TenantId {
+    pub fn tenant_id(&self) -> rss_request_context::TenantId {
         self.tenant_id
     }
 
@@ -157,13 +157,13 @@ pub enum InboxReceiptContextError {
 /// Typed tenant/group scope for inbox backlog sampling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxBacklogScope {
-    tenant_id: vocab::TenantId,
+    tenant_id: rss_request_context::TenantId,
     consumer_group: ConsumerGroup,
 }
 
 impl InboxBacklogScope {
     /// Build a typed backlog sampling scope.
-    pub fn new(tenant_id: vocab::TenantId, consumer_group: ConsumerGroup) -> Self {
+    pub fn new(tenant_id: rss_request_context::TenantId, consumer_group: ConsumerGroup) -> Self {
         Self {
             tenant_id,
             consumer_group,
@@ -171,7 +171,7 @@ impl InboxBacklogScope {
     }
 
     /// Tenant scope for RLS and backlog filtering.
-    pub fn tenant_id(&self) -> vocab::TenantId {
+    pub fn tenant_id(&self) -> rss_request_context::TenantId {
         self.tenant_id
     }
 

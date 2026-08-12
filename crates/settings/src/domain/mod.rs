@@ -140,7 +140,7 @@ impl ConfigVersion {
 pub struct ConfigEntry {
     key: SettingKey,
     value: ConfigValue,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     version: ConfigVersion,
 }
 
@@ -166,12 +166,16 @@ impl ConfigHead {
 #[derive(Debug, Clone)]
 pub struct ConfigTombstone {
     key: SettingKey,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     version: ConfigVersion,
 }
 
 impl ConfigTombstone {
-    pub(crate) fn new(key: SettingKey, tenant: vocab::TenantId, version: ConfigVersion) -> Self {
+    pub(crate) fn new(
+        key: SettingKey,
+        tenant: rss_request_context::TenantId,
+        version: ConfigVersion,
+    ) -> Self {
         Self {
             key,
             tenant,
@@ -180,7 +184,7 @@ impl ConfigTombstone {
     }
 
     /// 供持久化 adapter / conformance fixture 重建 typed tombstone。
-    pub fn hydrate(key: SettingKey, tenant: vocab::TenantId, version: u64) -> Self {
+    pub fn hydrate(key: SettingKey, tenant: rss_request_context::TenantId, version: u64) -> Self {
         Self::new(key, tenant, ConfigVersion::new(version))
     }
 
@@ -190,7 +194,7 @@ impl ConfigTombstone {
     }
 
     /// 删除目标租户。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -211,7 +215,7 @@ pub enum ConfigMutation {
 
 impl ConfigMutation {
     /// mutation 所属租户。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         match self {
             Self::Put(entry) => entry.tenant(),
             Self::Delete(tombstone) => tombstone.tenant(),
@@ -240,7 +244,7 @@ impl ConfigEntry {
     pub(crate) fn new(
         key: SettingKey,
         value: ConfigValue,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         version: ConfigVersion,
     ) -> Self {
         Self {
@@ -259,7 +263,7 @@ impl ConfigEntry {
     pub fn hydrate(
         key: SettingKey,
         value: impl Into<String>,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         version: u64,
     ) -> Self {
         Self {
@@ -281,7 +285,7 @@ impl ConfigEntry {
     }
 
     /// 取租户 ID。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -480,7 +484,7 @@ impl SecretVersion {
 pub struct SecretEntry {
     key: SecretKey,
     secret_ref: SecretRef,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     version: SecretVersion,
 }
 
@@ -489,7 +493,7 @@ impl SecretEntry {
     pub(crate) fn new(
         key: SecretKey,
         secret_ref: SecretRef,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         version: SecretVersion,
     ) -> Self {
         Self {
@@ -507,7 +511,7 @@ impl SecretEntry {
     pub fn hydrate(
         key: SecretKey,
         secret_ref: SecretRef,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         version: u64,
     ) -> Self {
         Self {
@@ -529,7 +533,7 @@ impl SecretEntry {
     }
 
     /// 取租户 ID。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -634,8 +638,8 @@ mod tests {
 
     // 测试 helper：解析已知合法常量 —— expect item-level carve-out（error-handling.md §Carve-out）。
     #[allow(clippy::expect_used)]
-    fn tenant(raw: &str) -> vocab::TenantId {
-        vocab::TenantId::parse(raw).expect("canonical uuid")
+    fn tenant(raw: &str) -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(raw).expect("canonical uuid")
     }
 
     // --- SettingKey::parse -------------------------------------------------

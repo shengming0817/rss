@@ -47,8 +47,8 @@ use diport::{
     KeyProviderError, KeyRef, ManagedResource, RedactedBytes, SecretCoordinate, SecretMaterial,
     SecretResolver, SecretResolverError, ShutdownError,
 };
+use rss_request_context::TenantId;
 use secure::{DerivedAad, Plaintext};
-use vocab::TenantId;
 
 use crate::{SecretResolverReadinessTarget, VaultKeyProvider, VaultSecretResolver};
 

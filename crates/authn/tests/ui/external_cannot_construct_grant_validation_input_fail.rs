@@ -1,7 +1,7 @@
 fn forge(
     grant_id: authn::AuthGrantId,
     user_id: ids::UserId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     authn_epoch: authn::AuthnEpoch,
 ) {
     let _ = authn::AccessGrantValidationInput {

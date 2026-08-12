@@ -86,7 +86,7 @@ mod tests {
     use super::{Aead, AeadError, Plaintext};
     use crate::envelope::{CipherAlg, CiphertextEnvelope, EncryptionMode};
     use crate::protection::{DerivedAad, ProtectionContext};
-    use vocab::tenant::TenantId;
+    use rss_request_context::TenantId;
 
     const TENANT_A: &str = "11111111-2222-4333-8444-555555555555";
     const TENANT_B: &str = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee";

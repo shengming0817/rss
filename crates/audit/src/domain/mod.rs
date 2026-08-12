@@ -149,30 +149,29 @@ impl AuditOutcome {
     }
 }
 
-/// `vocab::PrincipalKind` → DB 持久化文本（snake_case；存储/rehydrate 单源 funnel）。
+/// `rss_request_context::PrincipalKind` → DB 持久化文本（snake_case；存储/rehydrate 单源 funnel）。
 /// 跨 crate `#[non_exhaustive]` 无法穷尽，未知变体 fail-closed 落 "unknown"——DB CHECK 约束不含 "unknown"
 /// ⇒ 未知 kind 的 append 被 DB 拒（fail-closed，不静默落库）。已知 6 变体的 round-trip 全集性由测试守。
-pub fn actor_kind_to_db(kind: vocab::PrincipalKind) -> &'static str {
+pub fn actor_kind_to_db(kind: rss_request_context::PrincipalKind) -> &'static str {
     match kind {
-        vocab::PrincipalKind::User => "user",
-        vocab::PrincipalKind::Device => "device",
-        vocab::PrincipalKind::Admin => "admin",
-        vocab::PrincipalKind::SuperAdmin => "super_admin",
-        vocab::PrincipalKind::Service => "service",
-        vocab::PrincipalKind::Anonymous => "anonymous",
-        _ => "unknown",
+        rss_request_context::PrincipalKind::User => "user",
+        rss_request_context::PrincipalKind::Device => "device",
+        rss_request_context::PrincipalKind::Admin => "admin",
+        rss_request_context::PrincipalKind::SuperAdmin => "super_admin",
+        rss_request_context::PrincipalKind::Service => "service",
+        rss_request_context::PrincipalKind::Anonymous => "anonymous",
     }
 }
 
-/// DB 文本 → `vocab::PrincipalKind`（rehydrate）；未知文本 fail-closed → `None`。
-pub fn actor_kind_from_db(raw: &str) -> Option<vocab::PrincipalKind> {
+/// DB 文本 → `rss_request_context::PrincipalKind`（rehydrate）；未知文本 fail-closed → `None`。
+pub fn actor_kind_from_db(raw: &str) -> Option<rss_request_context::PrincipalKind> {
     match raw {
-        "user" => Some(vocab::PrincipalKind::User),
-        "device" => Some(vocab::PrincipalKind::Device),
-        "admin" => Some(vocab::PrincipalKind::Admin),
-        "super_admin" => Some(vocab::PrincipalKind::SuperAdmin),
-        "service" => Some(vocab::PrincipalKind::Service),
-        "anonymous" => Some(vocab::PrincipalKind::Anonymous),
+        "user" => Some(rss_request_context::PrincipalKind::User),
+        "device" => Some(rss_request_context::PrincipalKind::Device),
+        "admin" => Some(rss_request_context::PrincipalKind::Admin),
+        "super_admin" => Some(rss_request_context::PrincipalKind::SuperAdmin),
+        "service" => Some(rss_request_context::PrincipalKind::Service),
+        "anonymous" => Some(rss_request_context::PrincipalKind::Anonymous),
         _ => None,
     }
 }
@@ -186,18 +185,16 @@ fn outcome_tag(outcome: AuditOutcome) -> u8 {
     }
 }
 
-/// `vocab::PrincipalKind` → 冻结 tag 字节。跨 crate `#[non_exhaustive]` 无法编译期穷尽，故补 `_ => 0`
+/// `rss_request_context::PrincipalKind` → 冻结 tag 字节。跨 crate `#[non_exhaustive]` 无法编译期穷尽，故补 `_ => 0`
 /// fail-closed；已知变体非零唯一由 `enum_tag_mapping_is_total_and_nonzero` 测试守。
-fn principal_kind_tag(kind: vocab::PrincipalKind) -> u8 {
+fn principal_kind_tag(kind: rss_request_context::PrincipalKind) -> u8 {
     match kind {
-        vocab::PrincipalKind::User => 1,
-        vocab::PrincipalKind::Device => 2,
-        vocab::PrincipalKind::Admin => 3,
-        vocab::PrincipalKind::SuperAdmin => 4,
-        vocab::PrincipalKind::Service => 5,
-        vocab::PrincipalKind::Anonymous => 6,
-        // reason: 跨 crate non_exhaustive，未知变体 fail-closed 落 0（与任何已知 tag 不撞 ⇒ 审计可发现）。
-        _ => 0,
+        rss_request_context::PrincipalKind::User => 1,
+        rss_request_context::PrincipalKind::Device => 2,
+        rss_request_context::PrincipalKind::Admin => 3,
+        rss_request_context::PrincipalKind::SuperAdmin => 4,
+        rss_request_context::PrincipalKind::Service => 5,
+        rss_request_context::PrincipalKind::Anonymous => 6,
     }
 }
 
@@ -221,9 +218,9 @@ pub struct AuditEntry {
     /// 操作者标识（用 `ids::UserId`；设备 / service 场景用 actor_kind 区分）。
     actor: ids::UserId,
     /// 操作者类别（驱动 audit 报告分层；与 authn principal 对齐）。
-    actor_kind: vocab::PrincipalKind,
+    actor_kind: rss_request_context::PrincipalKind,
     /// 租户标识（行级多租隔离；对标 settings::ConfigEntry.tenant）。
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     /// 授权动作。
     action: vocab::Action,
     /// 被操作资源引用。
@@ -243,8 +240,8 @@ impl AuditEntry {
         prev_hash: EntryHash,
         entry_hash: EntryHash,
         actor: ids::UserId,
-        actor_kind: vocab::PrincipalKind,
-        tenant: vocab::TenantId,
+        actor_kind: rss_request_context::PrincipalKind,
+        tenant: rss_request_context::TenantId,
         action: vocab::Action,
         resource: ResourceRef,
         outcome: AuditOutcome,
@@ -276,8 +273,8 @@ impl AuditEntry {
         prev_hash: EntryHash,
         entry_hash: EntryHash,
         actor: ids::UserId,
-        actor_kind: vocab::PrincipalKind,
-        tenant: vocab::TenantId,
+        actor_kind: rss_request_context::PrincipalKind,
+        tenant: rss_request_context::TenantId,
         action: vocab::Action,
         resource: ResourceRef,
         outcome: AuditOutcome,
@@ -318,7 +315,7 @@ impl AuditEntry {
     }
 
     /// 返回操作者类别。
-    pub fn actor_kind(&self) -> vocab::PrincipalKind {
+    pub fn actor_kind(&self) -> rss_request_context::PrincipalKind {
         self.actor_kind
     }
 
@@ -343,7 +340,7 @@ impl AuditEntry {
     }
 
     /// 返回租户标识（行级多租隔离）。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 }
@@ -384,7 +381,7 @@ fn canonical_message(prev: &EntryHash, entry: &AuditEntry) -> Vec<u8> {
     let mut msg = Vec::new();
     msg.extend_from_slice(prev.as_bytes());
     msg.extend_from_slice(DOMAIN_TAG);
-    msg.extend_from_slice(entry.tenant.as_uuid().as_bytes());
+    msg.extend_from_slice(&entry.tenant.octets());
     msg.extend_from_slice(&entry.seq.to_be_bytes());
     msg.extend_from_slice(entry.actor.as_uuid().as_bytes());
     msg.push(principal_kind_tag(entry.actor_kind));
@@ -623,8 +620,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant(raw: &str) -> vocab::TenantId {
-        vocab::TenantId::parse(raw).expect("canonical tenant")
+    fn tenant(raw: &str) -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(raw).expect("canonical tenant")
     }
 
     #[allow(clippy::expect_used)]
@@ -644,7 +641,7 @@ mod tests {
             prev,
             EntryHash::genesis(),
             actor(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             tenant(tenant_raw),
             action("audit:read"),
             ResourceRef::new("session", "sess-1"),
@@ -772,7 +769,7 @@ mod tests {
         let stale = *original.entry_hash();
         let prev = *original.prev_hash();
         let mut a = actor();
-        let mut kind = vocab::PrincipalKind::User;
+        let mut kind = rss_request_context::PrincipalKind::User;
         let mut ten = TENANT_A;
         let mut act = action("audit:read");
         let mut res = ResourceRef::new("session", "sess-1");
@@ -781,7 +778,7 @@ mod tests {
         match field {
             TamperField::Tenant => ten = TENANT_B,
             TamperField::Actor => a = other_actor(),
-            TamperField::ActorKind => kind = vocab::PrincipalKind::Admin,
+            TamperField::ActorKind => kind = rss_request_context::PrincipalKind::Admin,
             TamperField::Action => act = action("audit:write"),
             TamperField::ResourceKind => res = ResourceRef::new("device", "sess-1"),
             TamperField::ResourceId => res = ResourceRef::new("session", "sess-2"),
@@ -985,7 +982,10 @@ mod tests {
         assert_eq!(e.seq(), 0);
         assert_eq!(e.tenant().to_string(), TENANT_A);
         assert_eq!(e.actor().as_uuid(), actor().as_uuid());
-        assert!(matches!(e.actor_kind(), vocab::PrincipalKind::User));
+        assert!(matches!(
+            e.actor_kind(),
+            rss_request_context::PrincipalKind::User
+        ));
         assert_eq!(e.action().as_str(), "audit:read");
         assert_eq!(e.resource().kind(), "session");
         assert_eq!(e.resource().id(), "sess-1");
@@ -1002,12 +1002,12 @@ mod tests {
     #[test]
     fn enum_tag_mapping_is_total_and_nonzero() {
         let pk = [
-            principal_kind_tag(vocab::PrincipalKind::User),
-            principal_kind_tag(vocab::PrincipalKind::Device),
-            principal_kind_tag(vocab::PrincipalKind::Admin),
-            principal_kind_tag(vocab::PrincipalKind::SuperAdmin),
-            principal_kind_tag(vocab::PrincipalKind::Service),
-            principal_kind_tag(vocab::PrincipalKind::Anonymous),
+            principal_kind_tag(rss_request_context::PrincipalKind::User),
+            principal_kind_tag(rss_request_context::PrincipalKind::Device),
+            principal_kind_tag(rss_request_context::PrincipalKind::Admin),
+            principal_kind_tag(rss_request_context::PrincipalKind::SuperAdmin),
+            principal_kind_tag(rss_request_context::PrincipalKind::Service),
+            principal_kind_tag(rss_request_context::PrincipalKind::Anonymous),
         ];
         assert!(pk.iter().all(|&t| t != 0), "已知 PrincipalKind tag 须非零");
         let mut sorted = pk.to_vec();
@@ -1106,7 +1106,7 @@ mod tests {
             *c[2].prev_hash(),
             stale,
             c[2].actor(),
-            vocab::PrincipalKind::Admin, // 改 actor_kind
+            rss_request_context::PrincipalKind::Admin, // 改 actor_kind
             c[2].tenant(),
             c[2].action().clone(),
             ResourceRef::new(c[2].resource().kind(), c[2].resource().id()),
@@ -1172,12 +1172,12 @@ mod tests {
         }
         assert_eq!(AuditOutcome::from_db("bogus"), None);
         for kind in [
-            vocab::PrincipalKind::User,
-            vocab::PrincipalKind::Device,
-            vocab::PrincipalKind::Admin,
-            vocab::PrincipalKind::SuperAdmin,
-            vocab::PrincipalKind::Service,
-            vocab::PrincipalKind::Anonymous,
+            rss_request_context::PrincipalKind::User,
+            rss_request_context::PrincipalKind::Device,
+            rss_request_context::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::SuperAdmin,
+            rss_request_context::PrincipalKind::Service,
+            rss_request_context::PrincipalKind::Anonymous,
         ] {
             assert_eq!(actor_kind_from_db(actor_kind_to_db(kind)), Some(kind));
         }

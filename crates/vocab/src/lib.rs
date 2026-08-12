@@ -7,7 +7,6 @@ mod digest;
 pub mod epoch;
 pub mod error;
 pub mod http;
-pub mod principal;
 pub mod projection;
 pub mod query;
 pub mod service;
@@ -44,7 +43,6 @@ pub use http::{
     HttpRouteAuth, HttpRouteBinding, HttpRouteEvidence, HttpSuccessStatus, LocalTxBoundary,
     LocalTxCommitUnknown, LocalTxModel, LocalTxRetry,
 };
-pub use principal::PrincipalKind;
 pub use projection::{
     AUDIT_ACTOR_FIELD_OBLIGATION, AUDIT_FIELD_ACTOR_PERMISSION, AUDIT_FIELD_RESOURCE_ID_PERMISSION,
     AUDIT_FIELD_TENANT_ID_PERMISSION, AUDIT_READ_PERMISSION, AUDIT_RESOURCE_ID_FIELD_OBLIGATION,
@@ -54,9 +52,7 @@ pub use projection::{
 };
 pub use query::{Cursor, CursorError, Limit, LimitError};
 pub use service::ServiceCallerDomain;
-pub use tenant::{
-    CrossTenantVisibility, RowScope, RowVisibility, ScopedTenant, TenantId, TenantIdError,
-};
+pub use tenant::{CrossTenantVisibility, RowVisibility, VisibilityScope};
 pub use time::{UnixEpochSeconds, UnixEpochSecondsError};
 
 /// Closed policy for effects outside a durable ConsumerTx database transaction.

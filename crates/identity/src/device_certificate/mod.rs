@@ -68,7 +68,7 @@ mod tests {
 
     fn scope() -> DeviceCertificateScope {
         DeviceCertificateScope::for_test(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
             ids::DeviceId::parse("550e8400-e29b-41d4-a716-446655440000").unwrap(),
         )
     }
@@ -824,7 +824,7 @@ mod tests {
                 contract_id,
                 permission,
                 scope.tenant(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "status-test-operator",
                 resource,
             )

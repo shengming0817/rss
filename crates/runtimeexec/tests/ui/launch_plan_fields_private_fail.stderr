@@ -1,3 +1,32 @@
+error: cannot construct `LaunchPlan<_, _, _>` with struct literal syntax due to private fields
+  --> tests/ui/launch_plan_fields_private_fail.rs:7:9
+   |
+ 7 |         runtimeexec::LaunchPlan {
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+ 8 |             adapter: (),
+   |             ----------- private field
+ 9 |             probe_receipt: (),
+   |             ----------------- private field
+10 |             on_ready: ready,
+   |             --------------- private field
+11 |             trace_exporter: None,
+   |             -------------------- private field
+12 |             lifecycle_batches: todo!(),
+   |             -------------------------- private field
+   |
+   = note: ...and other private field `platform_host` that was not provided
+help: you might have meant to use the `new` associated function
+   |
+ 7 -         runtimeexec::LaunchPlan {
+ 8 -             adapter: (),
+ 9 -             probe_receipt: (),
+10 -             on_ready: ready,
+11 -             trace_exporter: None,
+12 -             lifecycle_batches: todo!(),
+13 -         };
+ 7 +         runtimeexec::LaunchPlan::new(_, _, _, _, _, _);
+   |
+
 warning: unreachable expression
   --> tests/ui/launch_plan_fields_private_fail.rs:7:9
    |
@@ -12,25 +41,3 @@ warning: unreachable expression
    | |_________^ unreachable expression
    |
    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
-
-error[E0451]: fields `adapter`, `probe_receipt`, `on_ready`, `trace_exporter` and `lifecycle_batches` of struct `LaunchPlan` are private
-  --> tests/ui/launch_plan_fields_private_fail.rs:8:13
-   |
- 7 |         runtimeexec::LaunchPlan {
-   |         ----------------------- in this type
- 8 |             adapter: (),
-   |             ^^^^^^^ private field
- 9 |             probe_receipt: (),
-   |             ^^^^^^^^^^^^^ private field
-10 |             on_ready: ready,
-   |             ^^^^^^^^ private field
-11 |             trace_exporter: None,
-   |             ^^^^^^^^^^^^^^ private field
-12 |             lifecycle_batches: todo!(),
-   |             ^^^^^^^^^^^^^^^^^ private field
-
-error: type `runtimeexec::LaunchLifecycle` is private
-  --> tests/ui/launch_plan_fields_private_fail.rs:12:32
-   |
-12 |             lifecycle_batches: todo!(),
-   |                                ^^^^^^^ private type

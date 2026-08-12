@@ -1334,8 +1334,8 @@ async fn tc5d_config_delete_cotx_is_both_or_neither() -> TestResult {
 async fn eventing_facade_rejects_embedded_tenant_mismatch_before_sql() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A)?;
-    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let tenant_a = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
+    let tenant_b = rss_request_context::TenantId::parse(COTX_TENANT_B)?;
     let event_id = unique_event_id("inbox-embedded-tenant-mismatch");
     let observed_event_id = event_id.clone();
     let saga_id = uuid::Uuid::new_v4();
@@ -2701,7 +2701,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
     let committed_rows: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
     )
-    .bind(tenant_a.as_uuid().to_string())
+    .bind(tenant_a.to_string())
     .bind(&commit_key_raw)
     .fetch_one(&owner.pool)
     .await?;
@@ -2731,7 +2731,7 @@ async fn ts9_secret_repo_real_rss_app_localtx_matrix() -> TestResult {
     let rolled_back_rows: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
     )
-    .bind(tenant_a.as_uuid().to_string())
+    .bind(tenant_a.to_string())
     .bind(&rollback_key_raw)
     .fetch_one(&owner.pool)
     .await?;
@@ -2825,7 +2825,7 @@ async fn ts9_secret_repo_real_rss_app_tenant_profile() -> TestResult {
     let hidden: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
     )
-    .bind(tenant_a.as_uuid().to_string())
+    .bind(tenant_a.to_string())
     .bind(&shared_key_raw)
     .fetch_one(&mut *missing_read)
     .await?;
@@ -2854,7 +2854,7 @@ async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
         "INSERT INTO secret_refs (tenant_id, secret_key, version, store_id, ref_key) \
          VALUES ($1::uuid, $2, 1, 'vault', 'secret/no-write-red')",
     )
-    .bind(tenant_b.as_uuid().to_string())
+    .bind(tenant_b.to_string())
     .bind(&no_write_red_key)
     .execute(&owner.pool)
     .await?;
@@ -2895,7 +2895,7 @@ async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
         )
     ));
     sqlx::query("DELETE FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2")
-        .bind(tenant_b.as_uuid().to_string())
+        .bind(tenant_b.to_string())
         .bind(&no_write_red_key)
         .execute(&owner.pool)
         .await?;
@@ -2905,7 +2905,7 @@ async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
     let cross_tenant_key_raw = format!("cross-rls.{}", uuid::Uuid::new_v4().simple());
     let mut cross_tenant_tx = app.pool.begin().await?;
     sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
-        .bind(tenant_a.as_uuid().to_string())
+        .bind(tenant_a.to_string())
         .execute(&mut *cross_tenant_tx)
         .await?;
     let cross_tenant_write = sqlx::query(
@@ -2913,7 +2913,7 @@ async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
              (tenant_id, secret_key, version, store_id, ref_key) \
          VALUES ($1::uuid, $2, 1, 'vault', 'secret/cross-tenant')",
     )
-    .bind(tenant_b.as_uuid().to_string())
+    .bind(tenant_b.to_string())
     .bind(&cross_tenant_key_raw)
     .execute(&mut *cross_tenant_tx)
     .await;
@@ -2925,7 +2925,7 @@ async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
     let cross_tenant_rows: (i64,) = sqlx::query_as(
         "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
     )
-    .bind(tenant_b.as_uuid().to_string())
+    .bind(tenant_b.to_string())
     .bind(&cross_tenant_key_raw)
     .fetch_one(&owner.pool)
     .await?;
@@ -3143,7 +3143,7 @@ async fn ts9_secret_repo_concurrency_and_lifecycle() -> TestResult {
         "SELECT count(*) FROM secret_refs \
          WHERE tenant_id = $1::uuid AND secret_key = $2 AND deleted",
     )
-    .bind(tenant_a.as_uuid().to_string())
+    .bind(tenant_a.to_string())
     .bind(&concurrent_key_raw)
     .fetch_one(&owner.pool)
     .await?;
@@ -3290,7 +3290,7 @@ async fn ts9_secret_repo_concurrency_and_lifecycle() -> TestResult {
         .await?;
     let mut lock_holder = owner.pool.begin().await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1 || chr(31) || $2, 0))")
-        .bind(tenant_a.as_uuid().to_string())
+        .bind(tenant_a.to_string())
         .bind(&bounded_key_raw)
         .execute(&mut *lock_holder)
         .await?;
@@ -3308,7 +3308,7 @@ async fn ts9_secret_repo_concurrency_and_lifecycle() -> TestResult {
         "SELECT count(*) FROM secret_refs \
          WHERE tenant_id = $1::uuid AND secret_key = $2 AND deleted",
     )
-    .bind(tenant_a.as_uuid().to_string())
+    .bind(tenant_a.to_string())
     .bind(&bounded_key_raw)
     .fetch_one(&owner.pool)
     .await?;

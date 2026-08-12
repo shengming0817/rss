@@ -10,9 +10,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use diport::{SecretCoordinate, SecretResolver, SecretResolverError};
+use rss_request_context::TenantId;
 use runtime::test_support::build_vault_runtime_from_values;
 use tokio::net::TcpListener;
-use vocab::TenantId;
 
 const TENANT_A: &str = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa";
 const TENANT_B: &str = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";

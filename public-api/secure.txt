@@ -138,7 +138,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::FilterBits
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::FilterBits
 pub struct secure::blind_index::IndexScope<'a>
 impl<'a> secure::blind_index::IndexScope<'a>
-pub fn secure::blind_index::IndexScope<'a>::new(vocab::tenant::TenantId, &'a str, &'a str, &'a str) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
+pub fn secure::blind_index::IndexScope<'a>::new(rss_request_context::TenantId, &'a str, &'a str, &'a str) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
 impl<'a> core::clone::Clone for secure::blind_index::IndexScope<'a>
 pub fn secure::blind_index::IndexScope<'a>::clone(&self) -> secure::blind_index::IndexScope<'a>
 impl<'a> core::cmp::Eq for secure::blind_index::IndexScope<'a>
@@ -463,7 +463,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::DerivedAad
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::DerivedAad
 pub struct secure::protection::ProtectionAad(_)
 impl secure::protection::ProtectionAad
-pub fn secure::protection::ProtectionAad::new(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionAad::new(rss_request_context::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
 impl core::clone::Clone for secure::protection::ProtectionAad
 pub fn secure::protection::ProtectionAad::clone(&self) -> secure::protection::ProtectionAad
 impl core::cmp::Eq for secure::protection::ProtectionAad
@@ -481,8 +481,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionA
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionAad
 pub struct secure::protection::ProtectionContext
 impl secure::protection::ProtectionContext
-pub fn secure::protection::ProtectionContext::authenticated_request(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
-pub fn secure::protection::ProtectionContext::authorized_maintenance(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionContext::authenticated_request(rss_request_context::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionContext::authorized_maintenance(rss_request_context::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
 pub fn secure::protection::ProtectionContext::derive(&self) -> secure::protection::DerivedAad
 impl core::clone::Clone for secure::protection::ProtectionContext
 pub fn secure::protection::ProtectionContext::clone(&self) -> secure::protection::ProtectionContext
@@ -529,7 +529,7 @@ pub secure::protection::SagaReceiptProtectionCoordinates::owner: &'a str
 pub secure::protection::SagaReceiptProtectionCoordinates::receipt_schema: &'a str
 pub secure::protection::SagaReceiptProtectionCoordinates::saga_id: &'a str
 pub secure::protection::SagaReceiptProtectionCoordinates::step_name: &'a str
-pub secure::protection::SagaReceiptProtectionCoordinates::tenant: vocab::tenant::TenantId
+pub secure::protection::SagaReceiptProtectionCoordinates::tenant: rss_request_context::TenantId
 impl<'a> core::marker::Freeze for secure::protection::SagaReceiptProtectionCoordinates<'a>
 impl<'a> core::marker::Send for secure::protection::SagaReceiptProtectionCoordinates<'a>
 impl<'a> core::marker::Sync for secure::protection::SagaReceiptProtectionCoordinates<'a>
@@ -584,8 +584,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymKey
 impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymKeyId
 pub struct secure::pseudonym::PseudonymKeyRing
 impl secure::pseudonym::PseudonymKeyRing
-pub fn secure::pseudonym::PseudonymKeyRing::current(&self, vocab::tenant::TenantId, &str, &[u8]) -> core::result::Result<secure::pseudonym::PseudonymRef, secure::pseudonym::PseudonymError>
-pub fn secure::pseudonym::PseudonymKeyRing::lookup_set(&self, vocab::tenant::TenantId, &str, &[u8]) -> core::result::Result<alloc::vec::Vec<secure::pseudonym::PseudonymRef>, secure::pseudonym::PseudonymError>
+pub fn secure::pseudonym::PseudonymKeyRing::current(&self, rss_request_context::TenantId, &str, &[u8]) -> core::result::Result<secure::pseudonym::PseudonymRef, secure::pseudonym::PseudonymError>
+pub fn secure::pseudonym::PseudonymKeyRing::lookup_set(&self, rss_request_context::TenantId, &str, &[u8]) -> core::result::Result<alloc::vec::Vec<secure::pseudonym::PseudonymRef>, secure::pseudonym::PseudonymError>
 pub fn secure::pseudonym::PseudonymKeyRing::new(secure::pseudonym::VersionedPseudonymKey, alloc::vec::Vec<secure::pseudonym::VersionedPseudonymKey>) -> core::result::Result<Self, secure::pseudonym::PseudonymError>
 impl core::fmt::Debug for secure::pseudonym::PseudonymKeyRing
 pub fn secure::pseudonym::PseudonymKeyRing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1799,7 +1799,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::blind_index::FilterBits
 impl core::panic::unwind_safe::UnwindSafe for secure::blind_index::FilterBits
 pub struct secure::IndexScope<'a>
 impl<'a> secure::blind_index::IndexScope<'a>
-pub fn secure::blind_index::IndexScope<'a>::new(vocab::tenant::TenantId, &'a str, &'a str, &'a str) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
+pub fn secure::blind_index::IndexScope<'a>::new(rss_request_context::TenantId, &'a str, &'a str, &'a str) -> core::result::Result<Self, secure::blind_index::BlindIndexError>
 impl<'a> core::clone::Clone for secure::blind_index::IndexScope<'a>
 pub fn secure::blind_index::IndexScope<'a>::clone(&self) -> secure::blind_index::IndexScope<'a>
 impl<'a> core::cmp::Eq for secure::blind_index::IndexScope<'a>
@@ -1901,7 +1901,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::aead::Plaintext
 impl core::panic::unwind_safe::UnwindSafe for secure::aead::Plaintext
 pub struct secure::ProtectionAad(_)
 impl secure::protection::ProtectionAad
-pub fn secure::protection::ProtectionAad::new(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionAad::new(rss_request_context::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
 impl core::clone::Clone for secure::protection::ProtectionAad
 pub fn secure::protection::ProtectionAad::clone(&self) -> secure::protection::ProtectionAad
 impl core::cmp::Eq for secure::protection::ProtectionAad
@@ -1919,8 +1919,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::protection::ProtectionA
 impl core::panic::unwind_safe::UnwindSafe for secure::protection::ProtectionAad
 pub struct secure::ProtectionContext
 impl secure::protection::ProtectionContext
-pub fn secure::protection::ProtectionContext::authenticated_request(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
-pub fn secure::protection::ProtectionContext::authorized_maintenance(vocab::tenant::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionContext::authenticated_request(rss_request_context::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
+pub fn secure::protection::ProtectionContext::authorized_maintenance(rss_request_context::TenantId, &str, &str, u32) -> core::result::Result<Self, secure::protection::AadError>
 pub fn secure::protection::ProtectionContext::derive(&self) -> secure::protection::DerivedAad
 impl core::clone::Clone for secure::protection::ProtectionContext
 pub fn secure::protection::ProtectionContext::clone(&self) -> secure::protection::ProtectionContext
@@ -1961,8 +1961,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for secure::pseudonym::PseudonymKey
 impl core::panic::unwind_safe::UnwindSafe for secure::pseudonym::PseudonymKeyId
 pub struct secure::PseudonymKeyRing
 impl secure::pseudonym::PseudonymKeyRing
-pub fn secure::pseudonym::PseudonymKeyRing::current(&self, vocab::tenant::TenantId, &str, &[u8]) -> core::result::Result<secure::pseudonym::PseudonymRef, secure::pseudonym::PseudonymError>
-pub fn secure::pseudonym::PseudonymKeyRing::lookup_set(&self, vocab::tenant::TenantId, &str, &[u8]) -> core::result::Result<alloc::vec::Vec<secure::pseudonym::PseudonymRef>, secure::pseudonym::PseudonymError>
+pub fn secure::pseudonym::PseudonymKeyRing::current(&self, rss_request_context::TenantId, &str, &[u8]) -> core::result::Result<secure::pseudonym::PseudonymRef, secure::pseudonym::PseudonymError>
+pub fn secure::pseudonym::PseudonymKeyRing::lookup_set(&self, rss_request_context::TenantId, &str, &[u8]) -> core::result::Result<alloc::vec::Vec<secure::pseudonym::PseudonymRef>, secure::pseudonym::PseudonymError>
 pub fn secure::pseudonym::PseudonymKeyRing::new(secure::pseudonym::VersionedPseudonymKey, alloc::vec::Vec<secure::pseudonym::VersionedPseudonymKey>) -> core::result::Result<Self, secure::pseudonym::PseudonymError>
 impl core::fmt::Debug for secure::pseudonym::PseudonymKeyRing
 pub fn secure::pseudonym::PseudonymKeyRing::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -2165,7 +2165,7 @@ pub secure::SagaReceiptProtectionCoordinates::owner: &'a str
 pub secure::SagaReceiptProtectionCoordinates::receipt_schema: &'a str
 pub secure::SagaReceiptProtectionCoordinates::saga_id: &'a str
 pub secure::SagaReceiptProtectionCoordinates::step_name: &'a str
-pub secure::SagaReceiptProtectionCoordinates::tenant: vocab::tenant::TenantId
+pub secure::SagaReceiptProtectionCoordinates::tenant: rss_request_context::TenantId
 impl<'a> core::marker::Freeze for secure::protection::SagaReceiptProtectionCoordinates<'a>
 impl<'a> core::marker::Send for secure::protection::SagaReceiptProtectionCoordinates<'a>
 impl<'a> core::marker::Sync for secure::protection::SagaReceiptProtectionCoordinates<'a>

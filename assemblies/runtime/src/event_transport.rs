@@ -1150,7 +1150,8 @@ pub(crate) async fn verify_dlx_vault_key_capability(
 ) -> anyhow::Result<()> {
     const CANARY_TENANT: &str = "00000000-0000-4000-8000-000000001168";
     const CANARY_PLAINTEXT: &[u8] = b"rss-dlx-vault-capability-v1";
-    let tenant = vocab::TenantId::parse(CANARY_TENANT).context("parse DLX canary tenant")?;
+    let tenant =
+        rss_request_context::TenantId::parse(CANARY_TENANT).context("parse DLX canary tenant")?;
     let aad = secure::ProtectionContext::authorized_maintenance(
         tenant,
         coordinate,

@@ -603,11 +603,11 @@ fn projection_args_parse_replay_with_typed_selector() -> anyhow::Result<()> {
     assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         parsed.operator_tenant,
-        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?
+        rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")?
     );
     assert_eq!(
         parsed.selector.tenant(),
-        vocab::TenantId::parse("00000000-0000-4000-8000-000000000002")?
+        rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000002")?
     );
     assert_eq!(
         parsed.selector.projection().as_str(),
@@ -1793,7 +1793,7 @@ struct FakeAuditLedgerVerifyAuditRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FakeAuditLedgerVerifyCommandRecord {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     batch: u16,
 }
 
@@ -2022,11 +2022,11 @@ fn audit_ledger_verify_args_parse_typed_and_fail_closed() -> anyhow::Result<()> 
     assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         parsed.operator_tenant,
-        vocab::TenantId::parse(AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT)?
+        rss_request_context::TenantId::parse(AUDIT_LEDGER_FIXTURE_OPERATOR_TENANT)?
     );
     assert_eq!(
         parsed.tenant,
-        vocab::TenantId::parse(AUDIT_LEDGER_FIXTURE_TENANT)?
+        rss_request_context::TenantId::parse(AUDIT_LEDGER_FIXTURE_TENANT)?
     );
     assert_eq!(parsed.batch.get(), 7);
     assert!(is_audit_ledger_command(&args(&["audit-ledger", "verify"])));
@@ -2177,7 +2177,7 @@ async fn audit_ledger_verify_lifecycle_records_success_audit() -> anyhow::Result
     assert_eq!(
         runtime.command_records(),
         vec![FakeAuditLedgerVerifyCommandRecord {
-            tenant: vocab::TenantId::parse(AUDIT_LEDGER_FIXTURE_TENANT)?,
+            tenant: rss_request_context::TenantId::parse(AUDIT_LEDGER_FIXTURE_TENANT)?,
             batch: 7,
         }]
     );
@@ -2271,7 +2271,7 @@ enum FakeDlqAuditOutcome {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FakeDlqAuditRecord {
     subject: String,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     start_audit_id: String,
     action: String,
     outcome: FakeDlqAuditOutcome,
@@ -2281,7 +2281,7 @@ struct FakeDlqAuditRecord {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum FakeDlqCommandRecord {
     List {
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         source: Option<diport::DeadLetterSource>,
         producer_domain: Option<String>,
         consumer_domain: Option<String>,
@@ -2290,20 +2290,20 @@ enum FakeDlqCommandRecord {
         cursor: Option<String>,
     },
     Inspect {
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target: DlqInspectTarget,
     },
     ReplayDeadLetter {
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         dead_letter_id: String,
         replay_id: String,
     },
     RedriveOutbox {
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: String,
     },
     ResolveExpiredOutbox {
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: String,
         resolution_kind: OutboxExpiredResolutionKind,
         evidence_event_id: Option<String>,
@@ -2645,7 +2645,7 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
         &self,
         _session: &Self::Session,
         operator_subject: &str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         start_audit_id: &diport::DlqOperatorStartAuditId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -2756,7 +2756,10 @@ impl DlqControlRuntime for FakeDlqControlRuntime {
     }
 }
 
-fn dlq_summary(tenant: vocab::TenantId, kind: eventexec::DlqEntryKind) -> DlqEntrySummary {
+fn dlq_summary(
+    tenant: rss_request_context::TenantId,
+    kind: eventexec::DlqEntryKind,
+) -> DlqEntrySummary {
     DlqEntrySummary::new(
         kind,
         "dlq-row-1",
@@ -2811,7 +2814,8 @@ fn assert_dlq_lifecycle_audit(
         audits[0],
         FakeDlqAuditRecord {
             subject: UNAUTHENTICATED_DLQ_ATTEMPT.to_owned(),
-            tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT).expect("fixture tenant"),
+            tenant: rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)
+                .expect("fixture tenant"),
             start_audit_id: audits[0].start_audit_id.clone(),
             action: format!("dlq.{}.start", action.as_str()),
             outcome: FakeDlqAuditOutcome::Success,
@@ -2822,7 +2826,8 @@ fn assert_dlq_lifecycle_audit(
         audits[1],
         FakeDlqAuditRecord {
             subject: DLQ_FIXTURE_OPERATOR.to_owned(),
-            tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT).expect("fixture tenant"),
+            tenant: rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)
+                .expect("fixture tenant"),
             start_audit_id: audits[0].start_audit_id.clone(),
             action: format!("dlq.{}.finish", action.as_str()),
             outcome: expected_finish,
@@ -2859,9 +2864,12 @@ fn dlq_args_parse_list_and_inspect() -> anyhow::Result<()> {
     assert_eq!(list.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         list.operator_tenant,
-        vocab::TenantId::parse(DLQ_FIXTURE_OPERATOR_TENANT)?
+        rss_request_context::TenantId::parse(DLQ_FIXTURE_OPERATOR_TENANT)?
     );
-    assert_eq!(list.tenant, vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?);
+    assert_eq!(
+        list.tenant,
+        rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?
+    );
     assert!(matches!(
         list.command,
         DlqCliCommand::List {
@@ -3409,7 +3417,7 @@ fn reconcile_operator_args_SECRET_BAIT_too_many_values_is_redacted() {
 
 #[test]
 fn reconcile_operator_summary_is_payload_free() -> anyhow::Result<()> {
-    let tenant = vocab::TenantId::parse("018f5d8a-7b6c-7d2e-8a1b-1234567890ab")?;
+    let tenant = rss_request_context::TenantId::parse("018f5d8a-7b6c-7d2e-8a1b-1234567890ab")?;
     let summary = eventexec::ReconcileTargetSummary::new(
         tenant,
         "018f5d8a-7b6c-7d2e-8a1b-1234567890ac".to_owned(),
@@ -3450,7 +3458,7 @@ async fn dlq_control_lifecycle_dispatches_commands_with_audit() -> anyhow::Resul
             ),
             "source=consumer producer_domain=identity consumer_domain=audit contract_id=identity.session-created",
             FakeDlqCommandRecord::List {
-                tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                tenant: rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?,
                 source: Some(diport::DeadLetterSource::Consumer),
                 producer_domain: Some("identity".to_owned()),
                 consumer_domain: Some("audit".to_owned()),
@@ -3467,7 +3475,7 @@ async fn dlq_control_lifecycle_dispatches_commands_with_audit() -> anyhow::Resul
             ),
             "kind=dead_letter dead_letter_id=11111111-1111-4111-8111-111111111111",
             FakeDlqCommandRecord::Inspect {
-                tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                tenant: rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?,
                 target: DlqInspectTarget::DeadLetter(DeadLetterId::parse(
                     DLQ_FIXTURE_DEAD_LETTER_ID,
                 )?),
@@ -3486,7 +3494,7 @@ async fn dlq_control_lifecycle_dispatches_commands_with_audit() -> anyhow::Resul
             ),
             "dead_letter_id=11111111-1111-4111-8111-111111111111 replay_id=evt-dlq-replay",
             FakeDlqCommandRecord::ReplayDeadLetter {
-                tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                tenant: rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?,
                 dead_letter_id: DLQ_FIXTURE_DEAD_LETTER_ID.to_owned(),
                 replay_id: DLQ_FIXTURE_REPLAY_ID.to_owned(),
             },
@@ -3496,7 +3504,7 @@ async fn dlq_control_lifecycle_dispatches_commands_with_audit() -> anyhow::Resul
             dlq_control_args("redrive-outbox", &["--event-id", DLQ_FIXTURE_EVENT_ID]),
             "event_id=evt-outbox-dlx",
             FakeDlqCommandRecord::RedriveOutbox {
-                tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                tenant: rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?,
                 event_id: DLQ_FIXTURE_EVENT_ID.to_owned(),
             },
         ),
@@ -3515,7 +3523,7 @@ async fn dlq_control_lifecycle_dispatches_commands_with_audit() -> anyhow::Resul
             ),
             "event_id=evt-outbox-dlx resolution_kind=accepted_gap",
             FakeDlqCommandRecord::ResolveExpiredOutbox {
-                tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                tenant: rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?,
                 event_id: DLQ_FIXTURE_EVENT_ID.to_owned(),
                 resolution_kind: OutboxExpiredResolutionKind::AcceptedGap,
                 evidence_event_id: None,
@@ -3571,7 +3579,7 @@ async fn dlq_control_lifecycle_audits_command_failure() -> anyhow::Result<()> {
 
 #[tokio::test]
 async fn dlq_control_lifecycle_audits_expired_redrive_and_returns_error() -> anyhow::Result<()> {
-    let tenant = vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?;
+    let tenant = rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?;
     let event_id = IdemKey::parse(DLQ_FIXTURE_EVENT_ID)?;
     let output = dlq_redrive_result_line(tenant, &event_id, DlqRedriveOutcome::Expired);
     assert_eq!(
@@ -3654,7 +3662,7 @@ async fn dlq_verified_subject_is_injected_and_resolution_rejections_are_safely_a
         assert_eq!(
             runtime.command_records(),
             vec![FakeDlqCommandRecord::ResolveExpiredOutbox {
-                tenant: vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?,
+                tenant: rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?,
                 event_id: DLQ_FIXTURE_EVENT_ID.to_owned(),
                 resolution_kind: OutboxExpiredResolutionKind::AcceptedGap,
                 evidence_event_id: None,
@@ -3823,7 +3831,7 @@ fn dlq_audit_correlation_line_is_operator_actionable() -> anyhow::Result<()> {
 
 #[test]
 fn dlq_summary_renders_json_line_without_space_delimited_free_text() -> anyhow::Result<()> {
-    let tenant = vocab::TenantId::parse(DLQ_FIXTURE_TENANT)?;
+    let tenant = rss_request_context::TenantId::parse(DLQ_FIXTURE_TENANT)?;
     let summary = DlqEntrySummary::new(
         eventexec::DlqEntryKind::DeadLetter,
         "dlq-row-1",
@@ -3865,7 +3873,7 @@ fn settings_config_value_maintenance_args_default_to_both() -> anyhow::Result<()
     assert_eq!(parsed.operator_service_token.as_str(), "opaque-token");
     assert_eq!(
         parsed.operator_tenant,
-        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?
+        rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")?
     );
     assert_eq!(
         parsed.options.operation(),
@@ -3905,7 +3913,7 @@ fn settings_config_value_maintenance_args_parse_flags() -> anyhow::Result<()> {
     assert_eq!(parsed.options.max_rows(), Some(9));
     assert_eq!(
         parsed.options.tenant_opt(),
-        Some(vocab::TenantId::parse(
+        Some(rss_request_context::TenantId::parse(
             "00000000-0000-4000-8000-000000000001"
         )?)
     );
@@ -4093,16 +4101,20 @@ async fn settings_config_value_maintenance_operator_comes_from_verified_service_
 -> anyhow::Result<()> {
     let pdp = stub_pdp(Ok(diport::VerifiedClaims::service_token(
         vocab::ServiceCallerDomain::MaintenanceOperator,
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("tenant"),
     )));
     let proof = verified_config_value_maintenance_operator(
         "opaque-token",
-        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
+        rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
         &pdp,
     )
     .await?;
 
-    assert_eq!(proof.principal().kind(), vocab::PrincipalKind::Service);
+    assert_eq!(
+        proof.principal().kind(),
+        rss_request_context::PrincipalKind::Service
+    );
     assert!(
         proof
             .principal()
@@ -4117,7 +4129,7 @@ async fn settings_config_value_maintenance_operator_token_failure_is_fail_closed
     let pdp = stub_pdp(Err(diport::PdpError::InvalidSignature));
     let result = verified_config_value_maintenance_operator(
         "opaque-token",
-        vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
+        rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
         &pdp,
     )
     .await;

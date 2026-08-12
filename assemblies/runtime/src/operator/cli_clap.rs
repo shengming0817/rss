@@ -9,7 +9,7 @@
 
 use clap::Args;
 use clap::error::ErrorKind;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 use crate::operator::service_token::OPERATOR_SERVICE_TOKEN_STDIN_FLAG;
 

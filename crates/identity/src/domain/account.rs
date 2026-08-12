@@ -108,7 +108,7 @@ pub enum AuthOutcome {
 pub struct Credential {
     login: LoginIdentifier,
     user_id: ids::UserId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     password_hash: secure::PasswordHash,
     version: u32,
 }
@@ -135,7 +135,7 @@ impl Credential {
     pub(crate) fn new(
         login: LoginIdentifier,
         user_id: ids::UserId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         password_hash: secure::PasswordHash,
         version: u32,
     ) -> Self {
@@ -154,7 +154,7 @@ impl Credential {
     pub fn hydrate(
         login: &str,
         user_id: ids::UserId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         password_hash: secure::PasswordHash,
         version: u32,
     ) -> Credential {
@@ -220,7 +220,7 @@ impl Credential {
     }
 
     /// 租户（RLS scope）。`pub`（#1316 adapter 绑 `credentials.tenant_id` 列）。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -391,13 +391,13 @@ mod tests {
     };
     use std::time::{Duration, SystemTime};
 
-    // canonical UUID 种子租户（vocab::TenantId::parse 接受形态）。
+    // canonical UUID 种子租户（rss_request_context::TenantId::parse 接受形态）。
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     // canonical UUID 种子 user id（audit actor 形态；与登录标识 "alice-login" 解耦，#1277 F1）。
     const CANON_USER: &str = "11111111-2222-4333-8444-555555555555";
 
-    fn tid(raw: &str) -> vocab::TenantId {
-        vocab::TenantId::parse(raw).expect("canonical tenant parses")
+    fn tid(raw: &str) -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(raw).expect("canonical tenant parses")
     }
 
     fn uid(raw: &str) -> ids::UserId {

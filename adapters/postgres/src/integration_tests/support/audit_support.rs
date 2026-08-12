@@ -29,14 +29,14 @@ pub(in super::super) fn make_audit_admin_repo(
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试 helper——固定格式 UUID / action parse 不失败；item-level carve-out。
 pub(in super::super) fn make_audit_record(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     nanos: u32,
 ) -> audit::ports::AuditRecord {
     use std::time::{Duration, UNIX_EPOCH};
     audit::ports::AuditRecord {
         tenant,
         actor: ids::UserId::parse("11111111-2222-4333-8444-555555555555").unwrap(),
-        actor_kind: vocab::PrincipalKind::User,
+        actor_kind: rss_request_context::PrincipalKind::User,
         action: vocab::Action::parse("audit:read").unwrap(),
         resource: audit::ports::ResourceRef::new("session", "sess-1"),
         outcome: audit::ports::AuditOutcome::Success,

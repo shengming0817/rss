@@ -35,7 +35,7 @@ mod provider {
 }
 
 fn main() {
-    let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+    let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
     let subject = consistency::OutboxMetricSubject::new(
         tenant,
         consistency::OutboxContractId::parse("identity.session-created").unwrap(),

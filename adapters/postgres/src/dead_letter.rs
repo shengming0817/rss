@@ -33,7 +33,7 @@ enum DeadLetterLane {
 }
 
 struct ProjectionDeadLetterScope {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     owner: Box<str>,
     checkpoint_id: Box<str>,
 }
@@ -207,7 +207,7 @@ mod tests {
     use super::{ProjectionDeadLetterScope, ensure_projection_dead_letter_target, metadata_json};
 
     fn projection_record(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         owner: &str,
         checkpoint_id: &str,
     ) -> DeadLetterRecord {
@@ -245,8 +245,9 @@ mod tests {
     #[test]
     fn projection_operator_dead_letter_rejects_cross_target_records()
     -> Result<(), Box<dyn std::error::Error>> {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000002")?;
-        let other_tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000003")?;
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000002")?;
+        let other_tenant =
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000003")?;
         let scope = ProjectionDeadLetterScope {
             tenant,
             owner: "projection:00000000-0000-4000-8000-000000000002".into(),

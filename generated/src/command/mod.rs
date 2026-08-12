@@ -113,7 +113,7 @@ pub trait CommandEmit {
     fn emit<C>(
         &self,
         request: &C::Request,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: ::core::option::Option<&str>,
@@ -139,7 +139,7 @@ pub trait CommandJournal {
     fn journal<C>(
         &self,
         request: &C::Request,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: &str,

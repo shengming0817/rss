@@ -10,7 +10,7 @@ use diport::{
     SignerError, SigningPurpose, VerifiedClaims,
 };
 use std::sync::Arc;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 fn assert_send_sync<T: Send + Sync>() {}
 
@@ -41,7 +41,7 @@ struct OkPdp;
 
 impl Pdp for OkPdp {
     async fn verify(&self, _raw: &RawCredential) -> Result<VerifiedClaims, PdpError> {
-        Ok(VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator, vocab::tenant::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")))
+        Ok(VerifiedClaims::service_token(vocab::ServiceCallerDomain::MaintenanceOperator, rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")))
     }
 }
 

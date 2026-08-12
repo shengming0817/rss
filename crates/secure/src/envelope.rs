@@ -167,8 +167,8 @@ impl CiphertextEnvelope {
 mod tests {
     use super::{CipherAlg, CiphertextEnvelope, ENVELOPE_VERSION, EncryptionMode, EnvelopeError};
     use crate::protection::ProtectionAad;
+    use rss_request_context::TenantId;
     use rstest::rstest;
-    use vocab::tenant::TenantId;
 
     const TENANT_A: &str = "11111111-2222-4333-8444-555555555555";
 

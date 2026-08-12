@@ -4,9 +4,12 @@
 pub const CONTRACT_ID: &str = "settings.config-projection";
 
 /// Projection definition 归属绑定。该后台 carrier 不生成 HTTP route、request/response DTO 或 serving spec。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "settings",
-    "settings.config-projection",
-    "v3",
-    "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "settings.config-projection",
+        "v3",
+        "sha256:ce6e2126b5d5831f67955d1db29fc7c0c1cc339cdf4cec1ad2486f5fb778b4d8",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("settings", DESCRIPTOR, "v3");

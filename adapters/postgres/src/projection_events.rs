@@ -603,7 +603,7 @@ impl PgProjectionSourceReader {
                         .and_then(serde_json::Value::as_str)
                         .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))
                         .and_then(|raw| {
-                            vocab::TenantId::parse(raw)
+                            rss_request_context::TenantId::parse(raw)
                                 .map_err(|_| EngineError::new(EngineErrorKind::Invariant))
                         })?;
                     let metadata = ProjectionEventMetadata::new(
@@ -704,7 +704,7 @@ pub(crate) fn decode_projection_rows(
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| EngineError::new(EngineErrorKind::Invariant))
                     .and_then(|raw| {
-                        vocab::TenantId::parse(raw)
+                        rss_request_context::TenantId::parse(raw)
                             .map_err(|_| EngineError::new(EngineErrorKind::Invariant))
                     })?;
                 let metadata = ProjectionEventMetadata::new(

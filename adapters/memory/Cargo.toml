@@ -12,6 +12,7 @@ workspace = true
 # 供 journeys 组合根注入验接缝。runtime-agnostic（futures channel，不绑 tokio runtime）。
 # adapter 只能被组合根依赖（deny.toml wrappers）。
 [dependencies]
+rss-request-context.workspace = true
 consistency = { path = "../../crates/consistency" }
 eventexec = { path = "../../crates/eventexec" }
 diport = { path = "../../crates/diport" }

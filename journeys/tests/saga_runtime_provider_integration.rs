@@ -53,7 +53,7 @@ fn pg_config(params: &testkit::PgConnParams) -> PgConfig {
 
 fn instance(value: u128) -> Result<SagaInstanceRef> {
     Ok(SagaInstanceRef::new(
-        vocab::TenantId::parse(common::CANON_TENANT)?,
+        rss_request_context::TenantId::parse(common::CANON_TENANT)?,
         consistency::SagaId::new(uuid::Uuid::from_u128(value)),
     )?)
 }

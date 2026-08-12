@@ -13,10 +13,10 @@ pub(in super::super) use identity::ports::{
 
 pub(in super::super) async fn seed_auth_grant_account(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     user_id: ids::UserId,
 ) -> Result<(), sqlx::Error> {
-    let tenant = tenant.as_uuid().to_string();
+    let tenant = tenant.to_string();
     let user = user_id.as_uuid().to_string();
     let mut tx = store.pool.begin().await?;
     sqlx::query(
@@ -43,7 +43,7 @@ pub(in super::super) async fn seed_auth_grant_account(
 }
 
 pub(in super::super) fn auth_grant_fixture(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     user_id: ids::UserId,
     grant_id: &str,
     refresh_id: &str,
@@ -71,7 +71,7 @@ pub(in super::super) fn auth_grant_fixture(
 
 #[derive(Clone)]
 pub(in super::super) struct RefreshProducerCase {
-    pub(in super::super) tenant: vocab::TenantId,
+    pub(in super::super) tenant: rss_request_context::TenantId,
     pub(in super::super) user_id: ids::UserId,
     pub(in super::super) grant: AuthGrant,
     pub(in super::super) old: identity::ports::RefreshTokenRecord,
@@ -80,7 +80,7 @@ pub(in super::super) struct RefreshProducerCase {
 
 impl RefreshProducerCase {
     #[allow(clippy::expect_used, reason = "generated UUID fixture is canonical")]
-    pub(in super::super) fn new(tenant: vocab::TenantId) -> Self {
+    pub(in super::super) fn new(tenant: rss_request_context::TenantId) -> Self {
         let issued = SystemTime::UNIX_EPOCH + Duration::from_secs(TEST_OCCURRED_SECS);
         let user_id = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())
             .expect("generated refresh user id must be valid");
@@ -171,7 +171,7 @@ pub(in super::super) async fn refresh_producer_snapshot(
          (SELECT count(*) FROM outbox \
           WHERE tenant_id = $1::uuid AND contract_id = $3)",
     )
-    .bind(case.tenant.as_uuid().to_string())
+    .bind(case.tenant.to_string())
     .bind(case.grant.id().to_wire())
     .bind(identity::ports::SECURITY_EVENT_CONTRACT.contract_id())
     .fetch_one(&owner.pool)
@@ -190,7 +190,7 @@ impl diport::Pdp for AuthGrantValidationPdp {
 }
 
 pub(in super::super) async fn auth_grant_validation_input(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     user_id: ids::UserId,
     grant_id: &str,
     auth_time: i64,
@@ -276,7 +276,7 @@ pub(in super::super) async fn auth_grant_login_counts(
 #[allow(clippy::too_many_arguments)]
 pub(in super::super) async fn raw_refresh_insert(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     refresh_id: &str,
     grant_id: &str,
     user_id: ids::UserId,
@@ -292,7 +292,7 @@ pub(in super::super) async fn raw_refresh_insert(
                  'active', now(), now() + interval '1 hour')",
     )
     .bind(refresh_id)
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(grant_id)
     .bind(user_id.as_uuid().to_string())
     .bind(epoch)
@@ -336,7 +336,7 @@ pub(in super::super) fn role_mutation_actor(
     identity::test_support::role_mutation_actor(
         &tenant.to_string(),
         "11111111-2222-4333-8444-555555555555",
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
     )
 }
 
@@ -530,11 +530,11 @@ pub(in super::super) fn policy_lifecycle_event_with_id(
         diport::EnvelopeSubjectId::from_opaque(actor_subject.clone())
             .map_err(|_| IdentityError::InvalidPolicy)?,
         diport::OutboxActor::scoped(
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             diport::OpaqueActorId::from_opaque(actor_subject)
                 .map_err(|_| IdentityError::InvalidPolicy)?,
             tenant,
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         ),
     );
     Ok((entry, envelope))
@@ -842,7 +842,7 @@ pub(in super::super) async fn owner_credential_snapshot(
         "SELECT version, password_hash FROM credentials \
          WHERE tenant_id = $1::uuid AND login = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(login)
     .fetch_optional(&owner.pool)
     .await
@@ -861,7 +861,7 @@ pub(in super::super) async fn owner_credential_auth_state(
          extract(epoch from locked_until)::bigint \
          FROM credentials WHERE tenant_id = $1::uuid AND login = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(login)
     .fetch_optional(&owner.pool)
     .await

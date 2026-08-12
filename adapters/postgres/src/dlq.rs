@@ -26,23 +26,23 @@ use eventexec::{
 /// to this concern instead of widening the generic infrastructure capability surface.
 #[derive(Clone, Copy)]
 struct DlqTenantScope {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     _seal: (),
 }
 
 impl DlqTenantScope {
-    fn new(tenant: vocab::TenantId) -> Self {
+    fn new(tenant: rss_request_context::TenantId) -> Self {
         Self { tenant, _seal: () }
     }
 }
 
 impl TenantScopeHandle for DlqTenantScope {
-    fn tenant(self) -> vocab::TenantId {
+    fn tenant(self) -> rss_request_context::TenantId {
         self.tenant
     }
 }
 
-fn dlq_tenant_scope(tenant: vocab::TenantId) -> DlqTenantScope {
+fn dlq_tenant_scope(tenant: rss_request_context::TenantId) -> DlqTenantScope {
     DlqTenantScope::new(tenant)
 }
 
@@ -437,7 +437,7 @@ impl DlqStore for PgDlqStore {
 impl PgDlqStore {
     async fn inspect_dead_letter(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         id: &str,
     ) -> Result<DlqEntrySummary, DlqError> {
         let id = id.to_string();
@@ -454,7 +454,7 @@ impl PgDlqStore {
 
     async fn inspect_outbox_dlx(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> Result<DlqEntrySummary, DlqError> {
         let event_id = event_id.to_string();
@@ -563,7 +563,7 @@ trait DeadLetterRowExt {
     fn into_summary(
         self,
         kind: DlqEntryKind,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Result<DlqEntrySummary, DlqError>;
 }
 
@@ -571,7 +571,7 @@ impl DeadLetterRowExt for DeadLetterRow {
     fn into_summary(
         self,
         kind: DlqEntryKind,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Result<DlqEntrySummary, DlqError> {
         Ok(DlqEntrySummary::new(
             kind,
@@ -593,11 +593,17 @@ impl DeadLetterRowExt for DeadLetterRow {
 }
 
 trait OutboxRowExt {
-    fn into_summary(self, tenant: vocab::TenantId) -> Result<DlqEntrySummary, DlqError>;
+    fn into_summary(
+        self,
+        tenant: rss_request_context::TenantId,
+    ) -> Result<DlqEntrySummary, DlqError>;
 }
 
 impl OutboxRowExt for OutboxDlxRow {
-    fn into_summary(self, tenant: vocab::TenantId) -> Result<DlqEntrySummary, DlqError> {
+    fn into_summary(
+        self,
+        tenant: rss_request_context::TenantId,
+    ) -> Result<DlqEntrySummary, DlqError> {
         Ok(DlqEntrySummary::new(
             DlqEntryKind::OutboxDlx,
             self.event_id.clone(),
@@ -619,7 +625,7 @@ impl OutboxRowExt for OutboxDlxRow {
 
 fn replay_metadata(
     metadata: serde_json::Value,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     dead_letter_id: &str,
     original_message_id: &str,
 ) -> serde_json::Value {
@@ -753,7 +759,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id.
     fn replay_metadata_overwrites_tenant_and_keeps_correlation() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let metadata = serde_json::json!({
             "tenantId": "11111111-1111-1111-1111-111111111111",
@@ -817,7 +823,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id and summary result.
     fn legacy_outbox_summary_has_no_payload() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let row = OutboxDlxRow {
             event_id: "event-1".to_string(),

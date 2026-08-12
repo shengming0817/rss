@@ -185,7 +185,7 @@ mod tests {
     // reason: 测试 happy-path 已知合法 subject。
     fn subject() -> OutboxMetricSubject {
         OutboxMetricSubject::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
                 .expect("valid test tenant"),
             OutboxContractId::parse("identity.session-created").expect("valid test contract"),
         )

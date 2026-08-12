@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use vocab::PrincipalKind;
+use rss_request_context::PrincipalKind;
 
 /// 请求级授权快照——**只**装控制流值（tenant / principal），不装可观测 ID（见 crate 级文档）。
 ///
@@ -13,7 +13,7 @@ use vocab::PrincipalKind;
 /// - `P` 必须 trait/泛型擦除——`Principal` 归 `authn`（service 层），而 `authn` 已依赖 runctx，
 ///   故 `runctx → authn` 是 cargo 拒绝的闭环，principal 永不可被 runctx 按具体类型持有（ADR-002 §D3）。
 ///   [`AppCtx`] 收敛为 `Arc<dyn PrincipalFacet>`：authn 的 `Principal` 经 trait 擦除注入。
-/// - `T` 在 [`AppCtx`] 收敛为具体 `vocab::tenant::TenantId`（ADR-002 §D3「intra-base sub-DAG」
+/// - `T` 在 [`AppCtx`] 收敛为具体 `rss_request_context::TenantId`（ADR-002 §D3「intra-base sub-DAG」
 ///   已落地：sanctioned `runctx → vocab` 边）；泛型 `T` 仍保留，切换 tenant 类型只改别名一处。
 ///
 /// 字段私有 = sealed 构造：唯一入口 [`RequestCtx::new`]。具体 [`AppCtx`] 的 principal payload
@@ -80,11 +80,11 @@ pub trait PrincipalFacet: Send + Sync + 'static {
 
 /// 进程级实例化别名：`task_local!` 不能泛型，须钉死一组具体 payload 类型。
 ///
-/// tenant 收敛为具体 [`vocab::tenant::TenantId`]（ADR-002 §D3 intra-base sub-DAG：sanctioned
+/// tenant 收敛为具体 [`rss_request_context::TenantId`]（ADR-002 §D3 intra-base sub-DAG：sanctioned
 /// `runctx → vocab` 边）。principal 收敛为 `Arc<dyn PrincipalFacet>`：authn 的 `Principal` 经
 /// [`PrincipalFacet`] 擦除注入（生产 impl 面 dylint 限 authn）。`Arc` 而非 `Box`——`AppCtx` 须 `Clone`
 /// （[`crate::local::try_current`] clone 出快照），trait object 经 `Arc` 廉价共享。
-pub type AppCtx = RequestCtx<vocab::tenant::TenantId, Arc<dyn PrincipalFacet>>;
+pub type AppCtx = RequestCtx<rss_request_context::TenantId, Arc<dyn PrincipalFacet>>;
 
 /// 测试 facet（仅 `test` / `test-support`）：runctx 自身的 [`PrincipalFacet`] impl，供 [`test_support`]
 /// 构造 [`AppCtx`]——audit 等域 crate 单测**不依赖 authn**，故测试 facet 必须在 runctx 提供。
@@ -127,9 +127,9 @@ impl PrincipalFacet for TestPrincipalFacet {
 #[cfg(feature = "test-support")]
 pub mod test_support {
     use super::{AppCtx, PrincipalFacet, RequestCtx, TestPrincipalFacet};
+    use rss_request_context::PrincipalKind;
+    use rss_request_context::TenantId;
     use std::sync::Arc;
-    use vocab::PrincipalKind;
-    use vocab::tenant::TenantId;
 
     /// 构造一个绑定 `tenant` 的 [`AppCtx`]，principal 槽填测试 facet（`subject` + 默认 `kind=User`）。
     ///

@@ -584,8 +584,8 @@ fn invalid_persisted(operation: DlxLifecycleOperation) -> DlxLifecycleError {
 fn parse_tenant(
     raw: &str,
     operation: DlxLifecycleOperation,
-) -> Result<vocab::TenantId, DlxLifecycleError> {
-    vocab::TenantId::parse(raw).map_err(|_| invalid_persisted(operation))
+) -> Result<rss_request_context::TenantId, DlxLifecycleError> {
+    rss_request_context::TenantId::parse(raw).map_err(|_| invalid_persisted(operation))
 }
 
 fn checksum_from_db(bytes: Vec<u8>) -> Result<ArchiveChecksum, DlxLifecycleError> {
@@ -815,8 +815,8 @@ mod tests {
     const NOW: i64 = 1_800_000_000;
 
     #[allow(clippy::expect_used)] // reason: compile-time fixed UUID fixture must remain readable.
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT_ID).expect("valid test tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT_ID).expect("valid test tenant")
     }
 
     #[allow(clippy::expect_used)] // reason: compile-time fixed UUID fixture must remain readable.

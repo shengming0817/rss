@@ -35,7 +35,7 @@ use diport::{
     ManagedResource, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
     ShutdownError,
 };
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 use crate::{VaultBaseUrlError, VaultToken, validate_vault_base_url};
 
@@ -723,7 +723,7 @@ mod backend_tests {
         VaultSecretResolverConfigError,
     };
     use diport::{ManagedResource, SecretCoordinate, SecretResolver, SecretResolverError};
-    use vocab::TenantId;
+    use rss_request_context::TenantId;
 
     // ── 常量 / helper ───────────────────────────────────────────────────────────────────
 

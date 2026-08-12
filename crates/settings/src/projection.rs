@@ -376,7 +376,7 @@ pub enum SettingsProjectionScopeError {
 
 /// One typed, metadata-only Settings projection mutation.
 pub struct SettingsProjectionMutation {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     key: SettingKey,
     config_version: u64,
     change_kind: SettingsConfigChangeKind,
@@ -448,7 +448,7 @@ impl SettingsProjectionMutation {
         Self::from_event(scope, event, source_event_id, source_lsn, fact_digest)
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -564,7 +564,7 @@ fn validate_source_binding(
 
 fn envelope_tenant(
     input: &ValidatedProjectionApply,
-) -> Result<vocab::TenantId, SettingsProjectionApplyError> {
+) -> Result<rss_request_context::TenantId, SettingsProjectionApplyError> {
     let raw = input
         .metadata()
         .metadata_json()
@@ -572,7 +572,8 @@ fn envelope_tenant(
         .and_then(|metadata| metadata.get(diport::KEY_TENANT_ID))
         .and_then(serde_json::Value::as_str)
         .ok_or(SettingsProjectionApplyError::EnvelopeTenantInvalid)?;
-    vocab::TenantId::parse(raw).map_err(|_| SettingsProjectionApplyError::EnvelopeTenantInvalid)
+    rss_request_context::TenantId::parse(raw)
+        .map_err(|_| SettingsProjectionApplyError::EnvelopeTenantInvalid)
 }
 
 /// Closed failure classification for the Settings conversion funnel.
@@ -675,7 +676,7 @@ fn ensure_pg_i64(value: u64, field: &'static str) -> Result<(), SettingsProjecti
 /// One restored current-state Settings projection row.
 #[derive(Clone)]
 pub struct SettingsConfigProjectionRow {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     generation: ProjectionVersion,
     key: SettingKey,
     config_version: u64,
@@ -708,7 +709,7 @@ impl SettingsConfigProjectionRow {
     /// Validated hydration funnel for provider adapters.
     #[allow(clippy::too_many_arguments)]
     pub fn restore(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         generation: ProjectionVersion,
         key: SettingKey,
         config_version: u64,
@@ -742,7 +743,7 @@ impl SettingsConfigProjectionRow {
         })
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -845,11 +846,11 @@ mod tests {
     const DIGEST: &str = "sha256:3504a1f33b4e2765fff012fd263ed9a317d24cbe200382c364e4220d7bf05baa";
     const INPUT: &str = "sha256:6ceef61bfb723713a3d27682fb2597b6ed830e4497d97b78c044d9d999130286";
 
-    fn tenant(raw: &str) -> vocab::TenantId {
-        vocab::TenantId::parse(raw).expect("fixed tenant")
+    fn tenant(raw: &str) -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(raw).expect("fixed tenant")
     }
 
-    fn scope(tenant: vocab::TenantId) -> SettingsProjectionApplyScope {
+    fn scope(tenant: rss_request_context::TenantId) -> SettingsProjectionApplyScope {
         SettingsProjectionApplyScope::for_test(
             TenantRepoScope::for_test(tenant),
             ProjectionId::parse(SETTINGS_CONFIG_PROJECTION_ID).expect("fixed projection"),
@@ -861,7 +862,11 @@ mod tests {
         .expect("fixed scope")
     }
 
-    fn event(tenant: vocab::TenantId, version: u64, occurred_at: u64) -> ConfigVersionChangedEvent {
+    fn event(
+        tenant: rss_request_context::TenantId,
+        version: u64,
+        occurred_at: u64,
+    ) -> ConfigVersionChangedEvent {
         ConfigVersionChangedEvent::for_test(
             tenant,
             SettingKey::parse("projection.boundary").expect("fixed key"),
@@ -871,7 +876,10 @@ mod tests {
         )
     }
 
-    fn active_snapshot(tenant: vocab::TenantId, generation: &str) -> ActiveProjectionSnapshot {
+    fn active_snapshot(
+        tenant: rss_request_context::TenantId,
+        generation: &str,
+    ) -> ActiveProjectionSnapshot {
         let definition = generated::projection::settings_v3::CONTRACT;
         ActiveProjectionSnapshot::validated(
             TenantRepoScope::for_test(tenant),
@@ -1103,7 +1111,7 @@ mod tests {
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct AppliedSnapshot {
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         generation: String,
         key: String,
         version: u64,
@@ -1159,8 +1167,8 @@ mod tests {
         definition: vocab::ContractBinding,
         input_generation: &'static str,
         binding: vocab::ProjectionInputBinding,
-        selector_tenant: vocab::TenantId,
-        metadata_tenant: vocab::TenantId,
+        selector_tenant: rss_request_context::TenantId,
+        metadata_tenant: rss_request_context::TenantId,
         envelope_tenant: serde_json::Value,
         topic: &'static str,
         payload: Vec<u8>,
@@ -1235,7 +1243,7 @@ mod tests {
     }
 
     fn payload(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         change_kind: &str,
         version: serde_json::Value,
         occurred_at: serde_json::Value,

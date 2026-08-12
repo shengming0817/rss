@@ -1003,7 +1003,7 @@ fn build_vault(
         .map(|binding| {
             let (tenant, store, mount, kv_path_prefix) = binding.into_store_binding();
             Ok((
-                (vocab::TenantId::parse(&tenant)?, store),
+                (rss_request_context::TenantId::parse(&tenant)?, store),
                 vault::StoreBinding {
                     mount,
                     kv_path_prefix,

@@ -58,10 +58,10 @@ use identity::{CredentialSecurityService, LoginService};
 use memory::{FixedClock, MemBus};
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
 use primitives::MacKey;
+use rss_request_context::TenantId;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use testkit::{await_delay, await_map};
 use tokio_util::sync::CancellationToken;
-use vocab::TenantId;
 
 const IDENTITY_DOMAIN: &str = "identity";
 const RSS_APP_ROLE: &str = "rss_app";

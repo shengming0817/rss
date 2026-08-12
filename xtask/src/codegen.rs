@@ -12,7 +12,6 @@
 //! INVARIANT: GENERATED-TUPLE-REDACTION-01 { level = "Hard", exec = "check", source = "codegen", facet = "constrained-scalar-redaction", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy", anti_vacuity = "codegen::tests::constrained_newtypes_inherit_exact_redaction_policy" }
 //! INVARIANT: DEFERRED-STRING-LENGTH-VALIDATION-01 { level = "Hard", exec = "check", source = "codegen", facet = "schema-marked-transport-policy-boundary", golden = "generated/src/http/identity_v1.rs", synthetic_red = "codegen::tests::deferred_string_length_marker_rejects_other_validation_keywords", anti_vacuity = "codegen::tests::schema_marker_defers_transport_length_checks" }
 //! INVARIANT: GENERATED-RUSTDOC-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "codegen::tests::owned_event_and_command_seam_templates_document_public_api", anti_vacuity = "codegen::tests::command_glue_with_wrappers_emitted" }—— owned event/command templates require rustdoc on every public item, variant, accessor and associated item.
-//! INVARIANT: PLATFORM-PUBLIC-CODEGEN-01 { level = "Hard", exec = "check", source = "codegen", golden = "crates/platform/src/contracts/generated.rs", synthetic_red = "codegen::tests::platform_public_contract_identity_is_fail_closed", anti_vacuity = "codegen::tests::platform_public_contract_identity_is_fail_closed" } —— the first public contract is an exact manifest/schema/permission projection, never a broad framework-contract selector.
 //! golden = committed 文件 diff（rust-analyzer `ensure_file_contents` 模式）；
 //! anti-vacuity：注入漂移 / 孤儿文件必失（见 `#[cfg(test)]`）。
 //!
@@ -243,10 +242,6 @@ fn plan_codegen_transaction(
         root.join("contracts/README.md"),
         Some(normalize(&render_projected_contract_rule_docs(root)?).into_bytes()),
     )?);
-    outputs.push(planned_output(
-        root.join("crates/platform/src/contracts/generated.rs"),
-        Some(render_platform_public_contracts(contracts)?.into_bytes()),
-    )?);
 
     let mut unique = BTreeSet::new();
     for output in &outputs {
@@ -268,172 +263,6 @@ fn plan_codegen_transaction(
 ///
 /// The experimental release accepts one reviewed schema shape. A canonical manifest/schema change
 /// fails closed until its deterministic façade projection is deliberately approved in the same PR.
-fn render_platform_public_contracts(contracts: &[GovernedContract]) -> Result<String> {
-    let selected = contracts
-        .iter()
-        .filter(|contract| {
-            contract.owner().is_framework_owned()
-                && contract.manifest().lifecycle == Lifecycle::Active
-                && contract.manifest().kind == ContractKind::Http
-        })
-        .collect::<Vec<_>>();
-    require_single_platform_contract(selected.len())?;
-    let contract = selected[0];
-    let manifest = contract.manifest();
-    let auth = manifest
-        .endpoints
-        .as_ref()
-        .and_then(|endpoints| endpoints.http.as_ref())
-        .and_then(|http| http.auth.as_ref())
-        .context("Platform Public runtime.inventory requires HTTP auth metadata")?;
-    let schema_hash = contract.schema_hash();
-    validate_platform_contract_identity(
-        &manifest.id,
-        &manifest.domain,
-        &manifest.version,
-        auth.mode,
-        auth.permission.as_deref(),
-        schema_hash,
-    )?;
-    let provider_state_variants = render_platform_provider_state_variants(contract)?;
-    render_platform_contract_template(
-        &manifest.id,
-        &manifest.domain,
-        &manifest.version,
-        auth.permission
-            .as_deref()
-            .context("Platform Public runtime.inventory permission is absent")?,
-        schema_hash,
-        &provider_state_variants,
-    )
-}
-
-fn render_platform_provider_state_variants(contract: &GovernedContract) -> Result<String> {
-    let response_schema = contract
-        .manifest()
-        .schemas
-        .response(200)
-        .context("Platform Public runtime.inventory must declare its 200 response schema")?;
-    let schema = contract
-        .schema(response_schema)
-        .with_context(|| format!("resolve Platform Public response schema {response_schema}"))?;
-    render_platform_provider_state_variants_from_schema(schema)
-}
-
-fn render_platform_provider_state_variants_from_schema(
-    schema: &serde_json::Value,
-) -> Result<String> {
-    let values = schema
-        .pointer("/definitions/RuntimeProviderPosture/properties/state/enum")
-        .and_then(serde_json::Value::as_array)
-        .context("Platform Public runtime.inventory provider state must be a closed enum")?;
-    anyhow::ensure!(
-        !values.is_empty(),
-        "Platform Public runtime.inventory provider state enum cannot be empty"
-    );
-    let mut tokens = BTreeSet::new();
-    let mut variants = BTreeSet::new();
-    let mut rendered = String::new();
-    for value in values {
-        let token = value.as_str().context(
-            "Platform Public runtime.inventory provider state enum values must be strings",
-        )?;
-        anyhow::ensure!(
-            tokens.insert(token),
-            "Platform Public runtime.inventory provider state enum contains duplicate token {token:?}"
-        );
-        let variant = rust_enum_variant(token, "Platform Public provider state token")?;
-        anyhow::ensure!(
-            variants.insert(variant.clone()),
-            "Platform Public provider state tokens collide on Rust variant {variant:?}"
-        );
-        rendered.push_str("    ");
-        rendered.push_str(&variant);
-        rendered.push_str(",\n");
-    }
-    Ok(rendered.trim_end().to_owned())
-}
-
-fn render_platform_contract_template(
-    id: &str,
-    domain: &str,
-    version: &str,
-    permission: &str,
-    schema_hash: &str,
-    provider_state_variants: &str,
-) -> Result<String> {
-    let major = version
-        .strip_prefix('v')
-        .context("Platform Public contract version must use v<major>")?
-        .parse::<u64>()
-        .context("Platform Public contract major version is invalid")?;
-    let rendered = include_str!("../templates/platform_contracts.rs")
-        .replace("__CONTRACT_ID__", &format!("{id:?}"))
-        .replace("__CONTRACT_DOMAIN__", domain)
-        .replace("__CONTRACT_VERSION__", version)
-        .replace("__CONTRACT_MAJOR__", &major.to_string())
-        .replace("__CONTRACT_PERMISSION__", &format!("{permission:?}"))
-        .replace("__CONTRACT_SCHEMA_DIGEST__", &format!("{schema_hash:?}"))
-        .replace(
-            "__RUNTIME_PROVIDER_STATE_VARIANTS__",
-            provider_state_variants,
-        );
-    if rendered.contains("__CONTRACT_") || rendered.contains("__RUNTIME_PROVIDER_") {
-        bail!("Platform Public contract template contains an unresolved placeholder");
-    }
-    Ok(normalize(&rendered))
-}
-
-fn require_single_platform_contract(count: usize) -> Result<()> {
-    if count != 1 {
-        bail!(
-            "Platform Public requires exactly one framework-owned active HTTP contract; found {count}"
-        );
-    }
-    Ok(())
-}
-
-struct ReviewedPlatformContractIdentity {
-    id: &'static str,
-    domain: &'static str,
-    version: &'static str,
-    auth_mode: HttpAuthMode,
-    permission: &'static str,
-    schema_hash: &'static str,
-}
-
-const REVIEWED_RUNTIME_INVENTORY: ReviewedPlatformContractIdentity =
-    ReviewedPlatformContractIdentity {
-        id: "runtime.inventory",
-        domain: "runtime",
-        version: "v1",
-        auth_mode: HttpAuthMode::Permission,
-        permission: "runtime:inventory:read",
-        schema_hash: "sha256:95cff700e1fca1f72a566f493ae738be1e5a4c52c8d5383825fb7d4c7f56998b",
-    };
-
-fn validate_platform_contract_identity(
-    id: &str,
-    domain: &str,
-    version: &str,
-    auth_mode: HttpAuthMode,
-    permission: Option<&str>,
-    schema_hash: &str,
-) -> Result<()> {
-    if id == REVIEWED_RUNTIME_INVENTORY.id
-        && domain == REVIEWED_RUNTIME_INVENTORY.domain
-        && version == REVIEWED_RUNTIME_INVENTORY.version
-        && auth_mode == REVIEWED_RUNTIME_INVENTORY.auth_mode
-        && permission == Some(REVIEWED_RUNTIME_INVENTORY.permission)
-        && schema_hash == REVIEWED_RUNTIME_INVENTORY.schema_hash
-    {
-        return Ok(());
-    }
-    bail!(
-        "Platform Public runtime.inventory identity/schema/permission changed; update the reviewed typed projection atomically"
-    )
-}
-
 fn planned_output(path: PathBuf, expected: Option<Vec<u8>>) -> Result<PlannedOutput> {
     let original = read_optional_bytes(&path)?;
     Ok(PlannedOutput {
@@ -1468,8 +1297,11 @@ fn render_projection_glue(c: &GovernedContract) -> Result<String> {
 pub const CONTRACT_ID: &str = "{contract_id}";
 
 /// Projection definition 归属绑定。该后台 carrier 不生成 HTTP route、request/response DTO 或 serving spec。
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version("{contract_id}", "{version}", "{schema_hash}");
+
 pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
+    ::vocab::ContractBinding::from_descriptor("{domain}", DESCRIPTOR, "{version}");
 "#
     ))
 }
@@ -1612,8 +1444,11 @@ impl {sup}Receipt<{cursor_ty}> for {receipt_ty} {{}}
 pub const CONTRACT_ID: &str = "{contract_id}";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version("{contract_id}", "{version}", "{schema_hash}");
+
 pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
+    ::vocab::ContractBinding::from_descriptor("{domain}", DESCRIPTOR, "{version}");
 
 /// Ordered action semantics generation, domain-separated and length-prefixed before SHA-256.
 pub const ACTION_REGISTRY_GENERATION: &str = "{action_registry_generation}";
@@ -1747,8 +1582,11 @@ fn render_http_glue(
 pub const CONTRACT_ID: &str = "{contract_id}";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version("{contract_id}", "{version}", "{schema_hash}");
+
 pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
+    ::vocab::ContractBinding::from_descriptor("{domain}", DESCRIPTOR, "{version}");
 "#
     );
     out.push_str(&render_http_response_bindings(c, sup)?);
@@ -2788,7 +2626,7 @@ fn render_command_glue(c: &GovernedContract, sup: &str) -> Result<String> {
 pub async fn journal_async<J: {sup}CommandJournal>(
     journal: &J,
     request: {request_ty},
-    tenant: ::vocab::TenantId,
+    tenant: ::rss_request_context::TenantId,
     subject_id: J::SubjectId,
     actor: J::Actor,
     idempotency_key: ::std::string::String,
@@ -2807,7 +2645,7 @@ pub async fn journal_async<J: {sup}CommandJournal>(
 pub async fn emit_async<E: {sup}CommandEmit>(
     emitter: &E,
     request: {request_ty},
-    tenant: ::vocab::TenantId,
+    tenant: ::rss_request_context::TenantId,
     subject_id: E::SubjectId,
     actor: E::Actor,
     idempotency_key: ::core::option::Option<::std::string::String>,
@@ -2873,8 +2711,11 @@ pub fn fenced_reconcile_command(request: {request_ty}) -> FencedReconcileCommand
 pub const CONTRACT_ID: &str = "{contract_id}";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version("{contract_id}", "{version}", "{schema_hash}");
+
 pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
+    ::vocab::ContractBinding::from_descriptor("{domain}", DESCRIPTOR, "{version}");
 
 /// 稳定命令 topic（broker routing key，`<domain>.commands.<name>`；active command 来自 `contract.toml`
 /// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -3215,8 +3056,11 @@ pub const TOPIC: &str = "{topic}";
 /// domain / contract_id / topic。
 /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
 /// CONTRACT-BINDING-FUNNEL-01）。
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version("{contract_id}", "{version}", "{schema_hash}");
+
 pub const CONTRACT: ::vocab::ContractBinding =
-    ::vocab::ContractBinding::from_static("{domain}", "{contract_id}", "{version}", "{schema_hash}");
+    ::vocab::ContractBinding::from_descriptor("{domain}", DESCRIPTOR, "{version}");
 
 /// Generated contract + topic identity carried by this event payload.
 pub const FACT: ::vocab::EventFactBinding =
@@ -3237,7 +3081,7 @@ impl {sup}EventContract for Contract {{
 pub async fn emit<E: {sup}EventEmit>(
     emitter: &E,
     payload: {payload_type},
-    tenant: ::vocab::TenantId,
+    tenant: ::rss_request_context::TenantId,
     subject_id: E::SubjectId,
     actor: E::Actor,
     idempotency_key: E::IdempotencyKey,
@@ -4146,7 +3990,7 @@ pub trait EventEmit {
     fn emit<C>(
         &self,
         payload: &C::Payload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: Self::IdempotencyKey,
@@ -4499,7 +4343,7 @@ pub trait CommandEmit {
     fn emit<C>(
         &self,
         request: &C::Request,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: ::core::option::Option<&str>,
@@ -4524,7 +4368,7 @@ pub trait CommandJournal {
     fn journal<C>(
         &self,
         request: &C::Request,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: &str,
@@ -5262,139 +5106,6 @@ mod tests {
         "[effectProfile]\n",
         "effects = [\"auth\", \"business-write\", \"business-transaction\"]\n",
     );
-
-    #[test]
-    fn platform_public_contract_identity_is_fail_closed() {
-        let hash = REVIEWED_RUNTIME_INVENTORY.schema_hash;
-        let validate = |id, domain, version, mode, permission, hash| {
-            validate_platform_contract_identity(id, domain, version, mode, permission, hash)
-        };
-        assert!(require_single_platform_contract(1).is_ok());
-        assert!(require_single_platform_contract(0).is_err());
-        assert!(require_single_platform_contract(2).is_err());
-        assert!(
-            validate(
-                "runtime.inventory",
-                "runtime",
-                "v1",
-                HttpAuthMode::Permission,
-                Some("runtime:inventory:read"),
-                hash,
-            )
-            .is_ok()
-        );
-        for result in [
-            validate(
-                "runtime.other",
-                "runtime",
-                "v1",
-                HttpAuthMode::Permission,
-                Some("runtime:inventory:read"),
-                hash,
-            ),
-            validate(
-                "runtime.inventory",
-                "other",
-                "v1",
-                HttpAuthMode::Permission,
-                Some("runtime:inventory:read"),
-                hash,
-            ),
-            validate(
-                "runtime.inventory",
-                "runtime",
-                "v2",
-                HttpAuthMode::Permission,
-                Some("runtime:inventory:read"),
-                hash,
-            ),
-            validate(
-                "runtime.inventory",
-                "runtime",
-                "v1",
-                HttpAuthMode::Permission,
-                Some("runtime:other"),
-                hash,
-            ),
-            validate(
-                "runtime.inventory",
-                "runtime",
-                "v1",
-                HttpAuthMode::Permission,
-                Some("runtime:inventory:read"),
-                "sha256:changed",
-            ),
-        ] {
-            assert!(result.is_err());
-        }
-    }
-
-    #[test]
-    fn platform_provider_states_are_schema_derived_and_fail_closed() {
-        let schema = serde_json::json!({
-            "definitions": {
-                "RuntimeProviderPosture": {
-                    "properties": {
-                        "state": {
-                            "enum": ["unobserved", "ready", "degraded", "unavailable"]
-                        }
-                    }
-                }
-            }
-        });
-        assert_eq!(
-            render_platform_provider_state_variants_from_schema(&schema)
-                .expect("render provider states"),
-            "    Unobserved,\n    Ready,\n    Degraded,\n    Unavailable,"
-        );
-        for invalid in [
-            serde_json::json!({}),
-            serde_json::json!({
-                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": []}}}}
-            }),
-            serde_json::json!({
-                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": ["ready", "ready"]}}}}
-            }),
-            serde_json::json!({
-                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": ["ready", "Ready"]}}}}
-            }),
-            serde_json::json!({
-                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": [1]}}}}
-            }),
-            serde_json::json!({
-                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": ["123-ready"]}}}}
-            }),
-            serde_json::json!({
-                "definitions": {"RuntimeProviderPosture": {"properties": {"state": {"enum": ["self"]}}}}
-            }),
-        ] {
-            assert!(render_platform_provider_state_variants_from_schema(&invalid).is_err());
-        }
-    }
-
-    #[test]
-    fn platform_public_contract_emitter_projects_validated_identity() {
-        let rendered = render_platform_contract_template(
-            "runtime.synthetic",
-            "synthetic",
-            "v7",
-            "synthetic:read",
-            "sha256:synthetic",
-            "    Synthetic,",
-        )
-        .expect("render contract identity");
-        for expected in [
-            "contracts/http/synthetic/v7/inventory",
-            "ContractId::from_static(\"runtime.synthetic\")",
-            "ContractVersion::new(7, 0)",
-            "\"sha256:synthetic\"",
-            "\"synthetic:read\"",
-            "pub enum RuntimeProviderState {\n    Synthetic,\n}",
-        ] {
-            assert!(rendered.contains(expected), "missing projected {expected}");
-        }
-        assert!(!rendered.contains("runtime.inventory"));
-    }
 
     fn assert_generated_contains(source: &str, needle: &str, message: &str) {
         assert!(source.contains(needle), "{message}:\n{source}");
@@ -7530,7 +7241,7 @@ mod tests {
         // CONTRACT binding（#1193/#1618）：domain + id + version + schema_hash 同源；domain "_seed" ≠ id 首段 "seed" ⇒ 证明 domain
         // 取自 manifest domain 字段而非从 id 派生（rustfmt 可能换行，断言 from_static 调用子串）。
         assert!(
-            rendered.contains("::vocab::ContractBinding::from_static(")
+            rendered.contains("::vocab::ContractBinding::from_descriptor(")
                 && rendered.contains(r#""_seed","#)
                 && rendered.contains(r#""seed.happened","#)
                 && rendered.contains(r#""v1","#)
@@ -7647,7 +7358,7 @@ mod tests {
             "缺 CONTRACT_ID:\n{rendered}"
         );
         assert!(
-            rendered.contains("::vocab::ContractBinding::from_static(")
+            rendered.contains("::vocab::ContractBinding::from_descriptor(")
                 && rendered.contains(r#""billing","#)
                 && rendered.contains(r#""billing.checkout","#)
                 && rendered.contains(r#""v1","#)
@@ -7818,7 +7529,7 @@ mod tests {
         );
         // CONTRACT binding 仍发射（draft 亦有；domain "_seed" 取自 manifest，#1193/#1618）
         assert!(
-            rendered.contains("::vocab::ContractBinding::from_static(")
+            rendered.contains("::vocab::ContractBinding::from_descriptor(")
                 && rendered.contains(r#""_seed","#)
                 && rendered.contains(r#""seed.happened","#)
                 && rendered.contains(r#""v1","#)
@@ -8383,14 +8094,14 @@ mod tests {
         );
         // required wrapper 把 tenant/identity 与非可选业务幂等键纳入类型面。
         assert!(
-            rendered.contains("tenant: ::vocab::TenantId")
+            rendered.contains("tenant: ::rss_request_context::TenantId")
                 && rendered.contains("subject_id: J::SubjectId")
                 && rendered.contains("actor: J::Actor")
                 && rendered.contains("idempotency_key: ::std::string::String"),
             "journal_async wrapper 须含必填 idempotency_key:\n{rendered}"
         );
         assert!(
-            mod_rs.contains("tenant: ::vocab::TenantId")
+            mod_rs.contains("tenant: ::rss_request_context::TenantId")
                 && mod_rs.contains("type SubjectId: ::core::marker::Send")
                 && mod_rs.contains("type Actor: ::core::marker::Send")
                 && mod_rs.contains("subject_id: Self::SubjectId")

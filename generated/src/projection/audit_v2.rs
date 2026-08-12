@@ -4,9 +4,12 @@
 pub const CONTRACT_ID: &str = "audit.session-projection";
 
 /// Projection definition 归属绑定。该后台 carrier 不生成 HTTP route、request/response DTO 或 serving spec。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "audit",
-    "audit.session-projection",
-    "v2",
-    "sha256:f741f3d37379a56dcafe564b4b7c79d495e8a683534abcc9216cb87a1ab1bf82",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "audit.session-projection",
+        "v2",
+        "sha256:f741f3d37379a56dcafe564b4b7c79d495e8a683534abcc9216cb87a1ab1bf82",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("audit", DESCRIPTOR, "v2");

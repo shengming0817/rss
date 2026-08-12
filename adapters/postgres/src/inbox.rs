@@ -169,7 +169,7 @@ impl RetentionSweeper for PgInboxSweeper {
 
 #[derive(Clone)]
 pub(crate) struct ReceiptFields {
-    pub(crate) tenant: vocab::TenantId,
+    pub(crate) tenant: rss_request_context::TenantId,
     pub(crate) consumer_group: String,
     pub(crate) domain: String,
     pub(crate) topic: String,
@@ -517,7 +517,8 @@ mod tests {
         // reason: 测试 fixture 使用固定合法 receipt metadata，构造失败即测试配置错误。
         fn ctx(group: &str) -> InboxReceiptContext {
             InboxReceiptContext::new(
-                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                    .unwrap(),
                 consistency::ConsumerGroup::parse(group).unwrap(),
                 "identity",
                 "identity.session-created",
@@ -534,7 +535,8 @@ mod tests {
         // reason: 测试 fixture 使用固定合法 receipt metadata，构造失败即测试配置错误。
         fn ctx_with_schema(group: &str, schema_hash: &str) -> InboxReceiptContext {
             InboxReceiptContext::new(
-                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                    .unwrap(),
                 consistency::ConsumerGroup::parse(group).unwrap(),
                 "identity",
                 "identity.session-created",

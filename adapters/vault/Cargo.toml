@@ -15,6 +15,7 @@ workspace = true
 # impl diport::Signer（HashiCorp Vault Transit `sign`）。后端 HTTP 客户端经 feature 门控（default build 轻量、
 # 仍保 freeze smoke 类型断言），与 redis/s3/amqp 同范式（仅声明真正用到的 dep，cargo-udeps 守）。
 [dependencies]
+rss-request-context.workspace = true
 # 实现 diport 已冻 DI port trait（Signer + KeyProvider + ManagedResource + SecretResolver，native AFIT）。
 diport = { path = "../../crates/diport" }
 # KeyProvider 明文/AAD 类型（Plaintext / DerivedAad）。Vault provider 只读受控出口，不把明文/AAD 写入日志。

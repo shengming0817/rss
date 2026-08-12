@@ -9,7 +9,7 @@ use deviceloop::{
     DeviceIngressFingerprint, DeviceSequence, FenceEpoch, GenerationTracker, ObservedGeneration,
 };
 use ids::DeviceId;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 fn time(seconds: u64) -> SystemTime {
     SystemTime::UNIX_EPOCH + Duration::from_secs(seconds)

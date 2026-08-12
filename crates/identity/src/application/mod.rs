@@ -123,10 +123,11 @@ use vocab::http::HttpResourceSharing as HttpResourceSharingMode;
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
+use rss_request_context::TenantId;
 use uuid::Uuid;
 use vocab::{
     CoreError, CoreErrorKind, GrantPermission, HttpRouteAuth, ProjectionField, PublicDetail,
-    RoutePermissionId, TenantId,
+    RoutePermissionId,
 };
 
 #[cfg(test)]
@@ -476,7 +477,7 @@ impl<S: diport::Signer + Send + Sync + 'static> LoginService<S> {
             // typed canonical actor subject（generated `subject: uuid::Uuid`，#1277 F1：schema `format:uuid`
             // 收紧后非 UUID subject 在 wire decode 即不可表达，consumer 无需 parse）。
             subject: user_id.as_uuid(),
-            tenant_id: tenant.as_uuid(),
+            tenant_id: uuid::Uuid::from_bytes(tenant.octets()),
             occurred_at: unix_secs(now),
         };
         // EventId 是独立 opaque 标识（非 session_id；session_id 敏感，不得进 broker metadata/日志）。
@@ -654,7 +655,7 @@ impl CredentialSecurityService {
             account,
             initiator: crate::domain::CredentialSecurityInitiator::authenticated(
                 tenant,
-                vocab::PrincipalKind::User,
+                rss_request_context::PrincipalKind::User,
                 user_id.as_uuid().hyphenated().to_string(),
             ),
             occurred_at: now,
@@ -820,7 +821,7 @@ impl CredentialSecurityService {
         }
         let initiator = crate::domain::CredentialSecurityInitiator::authenticated(
             evidence.tenant_id(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             evidence.user_id().as_uuid().hyphenated().to_string(),
         );
         let command =
@@ -852,7 +853,7 @@ impl CredentialSecurityService {
         }
         let initiator = crate::domain::CredentialSecurityInitiator::authenticated(
             evidence.tenant_id(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             evidence.user_id().as_uuid().hyphenated().to_string(),
         );
         let command = crate::domain::CredentialSecurityCommand::logout_all(
@@ -1067,7 +1068,7 @@ impl<S: diport::Signer + Send + Sync + 'static> RefreshService<S> {
     pub async fn rotate(
         &self,
         receipt: RefreshProducerReceipt,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         presented: &authn::RefreshToken,
     ) -> Result<RefreshBundle, RefreshError> {
         let tenant_scope = tenant_repo_scope(tenant);
@@ -1463,14 +1464,14 @@ async fn refresh_handler_bytes<S: diport::Signer + Send + Sync + 'static>(
 struct AuthSubjectContext {
     tenant: TenantId,
     subject: String,
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
     projection: ResourceProjection,
 }
 
 struct AuthUserContext {
     tenant: TenantId,
     user_id: ids::UserId,
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
 }
 
 #[derive(Clone)]
@@ -1594,7 +1595,8 @@ impl ContractAuthorizer {
             ContractAuthPolicy::SelfScoped => {
                 if matches!(
                     ctx.kind,
-                    vocab::PrincipalKind::User | vocab::PrincipalKind::Admin
+                    rss_request_context::PrincipalKind::User
+                        | rss_request_context::PrincipalKind::Admin
                 ) && request
                     .resource
                     .as_ref()
@@ -1780,15 +1782,15 @@ impl ContractAuthorizer {
         contract_id: &'static str,
         permission: RoutePermissionId,
     ) -> Result<RouteAuthorizationDecision, AuthReject> {
-        if ctx.kind == vocab::PrincipalKind::SuperAdmin
+        if ctx.kind == rss_request_context::PrincipalKind::SuperAdmin
             && projection_enabled_route(contract_id, permission)
         {
             return Ok(RouteAuthorizationDecision::Allow);
         }
-        let runtime_inventory_rss_user = ctx.kind == vocab::PrincipalKind::User
+        let runtime_inventory_rss_user = ctx.kind == rss_request_context::PrincipalKind::User
             && contract_id == RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id()
             && RUNTIME_INVENTORY_HTTP_SPEC.route.auth() == HttpRouteAuth::Permission(permission);
-        let rss_user_session_logout = ctx.kind == vocab::PrincipalKind::User
+        let rss_user_session_logout = ctx.kind == rss_request_context::PrincipalKind::User
             && matches!(
                 (contract_id, permission),
                 (
@@ -1799,14 +1801,14 @@ impl ContractAuthorizer {
                     RoutePermissionId::IdentitySessionLogoutAll
                 )
             );
-        let rss_user_account_status = ctx.kind == vocab::PrincipalKind::User
+        let rss_user_account_status = ctx.kind == rss_request_context::PrincipalKind::User
             && [ACCOUNT_STATUS_GET_HTTP_SPEC, ACCOUNT_STATUS_SET_HTTP_SPEC]
                 .iter()
                 .any(|spec| {
                     spec.route.contract_id() == contract_id
                         && spec.route.auth() == HttpRouteAuth::Permission(permission)
                 });
-        if ctx.kind != vocab::PrincipalKind::Admin
+        if ctx.kind != rss_request_context::PrincipalKind::Admin
             && !runtime_inventory_rss_user
             && !rss_user_session_logout
             && !rss_user_account_status
@@ -1836,7 +1838,7 @@ impl ContractAuthorizer {
         auth: &AuthUserContext,
         scope: &PolicyRouteScope,
     ) -> Result<(), AuthReject> {
-        if auth.kind != vocab::PrincipalKind::Admin {
+        if auth.kind != rss_request_context::PrincipalKind::Admin {
             return Err(AuthReject::Forbidden);
         }
         let required = policy_management_permission(scope);
@@ -2240,15 +2242,16 @@ impl AuthReject {
     }
 }
 
-fn profile_kind_wire(kind: vocab::PrincipalKind) -> Result<IdentityProfileDataKind, AuthReject> {
+fn profile_kind_wire(
+    kind: rss_request_context::PrincipalKind,
+) -> Result<IdentityProfileDataKind, AuthReject> {
     match kind {
-        vocab::PrincipalKind::User => Ok(IdentityProfileDataKind::User),
-        vocab::PrincipalKind::Device => Ok(IdentityProfileDataKind::Device),
-        vocab::PrincipalKind::Admin => Ok(IdentityProfileDataKind::Admin),
-        vocab::PrincipalKind::SuperAdmin => Ok(IdentityProfileDataKind::SuperAdmin),
-        vocab::PrincipalKind::Service => Ok(IdentityProfileDataKind::Service),
-        vocab::PrincipalKind::Anonymous => Ok(IdentityProfileDataKind::Anonymous),
-        _ => Err(AuthReject::Forbidden),
+        rss_request_context::PrincipalKind::User => Ok(IdentityProfileDataKind::User),
+        rss_request_context::PrincipalKind::Device => Ok(IdentityProfileDataKind::Device),
+        rss_request_context::PrincipalKind::Admin => Ok(IdentityProfileDataKind::Admin),
+        rss_request_context::PrincipalKind::SuperAdmin => Ok(IdentityProfileDataKind::SuperAdmin),
+        rss_request_context::PrincipalKind::Service => Ok(IdentityProfileDataKind::Service),
+        rss_request_context::PrincipalKind::Anonymous => Ok(IdentityProfileDataKind::Anonymous),
     }
 }
 
@@ -2270,7 +2273,7 @@ fn current_user_grant_context(req: &Request<Body>) -> Result<CurrentAuthGrant, A
         .extensions()
         .get::<AuthorizedSubject>()
         .ok_or(AuthReject::Unauthenticated)?;
-    if subject.principal_kind() != vocab::PrincipalKind::User {
+    if subject.principal_kind() != rss_request_context::PrincipalKind::User {
         return Err(AuthReject::Forbidden);
     }
     let evidence = req
@@ -3155,7 +3158,7 @@ pub(crate) fn logout_router_for_test(
             LOGOUT_HTTP_SPEC.route.contract_id(),
             vocab::RoutePermissionId::IdentitySessionLogoutCurrent,
             evidence.tenant_id(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             evidence.user_id().as_uuid().hyphenated().to_string(),
             None,
         )))
@@ -3794,11 +3797,23 @@ mod tests {
 
     #[derive(Clone, Default)]
     struct CapturingStatusSetLifecycle {
-        observed: Arc<Mutex<Vec<(CredentialSecurityEventKind, vocab::PrincipalKind)>>>,
+        observed: Arc<
+            Mutex<
+                Vec<(
+                    CredentialSecurityEventKind,
+                    rss_request_context::PrincipalKind,
+                )>,
+            >,
+        >,
     }
 
     impl CapturingStatusSetLifecycle {
-        fn observed(&self) -> Vec<(CredentialSecurityEventKind, vocab::PrincipalKind)> {
+        fn observed(
+            &self,
+        ) -> Vec<(
+            CredentialSecurityEventKind,
+            rss_request_context::PrincipalKind,
+        )> {
             self.observed
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -4157,7 +4172,7 @@ mod tests {
                 ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
                 vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tenant,
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "admin-subj",
                 Some(httpserve::RouteResource::new(CANON_USER).expect("canonical route resource")),
             ));
@@ -4181,7 +4196,7 @@ mod tests {
             ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
             vocab::RoutePermissionId::IdentityAccountSecurityWrite,
             tenant,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             CANON_USER,
             Some(httpserve::RouteResource::new(CANON_USER).expect("canonical route resource")),
         ));
@@ -4203,7 +4218,7 @@ mod tests {
                 ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
                 vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tid(OTHER_TENANT),
-                vocab::PrincipalKind::User,
+                rss_request_context::PrincipalKind::User,
                 CANON_USER,
                 Some(httpserve::RouteResource::new(CANON_USER).expect("canonical route resource")),
             ));
@@ -4247,7 +4262,7 @@ mod tests {
                 ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
                 vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tenant,
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "opaque-admin",
                 None,
             ));
@@ -4273,7 +4288,7 @@ mod tests {
                 ACCOUNT_STATUS_GET_HTTP_SPEC.route.contract_id(),
                 vocab::RoutePermissionId::IdentityAccountSecurityRead,
                 tenant,
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "opaque-admin",
                 None,
             ));
@@ -4338,7 +4353,7 @@ mod tests {
             ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
             vocab::RoutePermissionId::IdentityAccountSecurityWrite,
             tenant,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             "opaque-admin",
             None,
         ));
@@ -4356,7 +4371,7 @@ mod tests {
                 CredentialSecurityEventKind::Account(
                     authn::AccountSecurityEventKind::AccountReactivated,
                 ),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )]
         );
     }
@@ -4400,7 +4415,7 @@ mod tests {
                     requested,
                     crate::domain::CredentialSecurityInitiator::authenticated(
                         tenant,
-                        vocab::PrincipalKind::Admin,
+                        rss_request_context::PrincipalKind::Admin,
                         "opaque-admin",
                     ),
                 )
@@ -4437,7 +4452,7 @@ mod tests {
                 ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
                 vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tenant,
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "opaque-admin",
                 None,
             ));
@@ -4632,7 +4647,7 @@ mod tests {
             PASSWORD_CHANGE_HTTP_SPEC.route.contract_id(),
             vocab::RoutePermissionId::IdentityProfileWrite,
             tenant,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             CANON_USER,
             None,
         ));
@@ -4655,7 +4670,7 @@ mod tests {
             LOGOUT_HTTP_SPEC.route.contract_id(),
             vocab::RoutePermissionId::IdentitySessionLogoutCurrent,
             evidence.tenant_id(),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             evidence.user_id().as_uuid().hyphenated().to_string(),
             None,
         ));
@@ -5041,7 +5056,7 @@ mod tests {
 
     fn assert_profile_auth_event(
         sink: &RecordingAuthAuditSink,
-        principal_kind: vocab::PrincipalKind,
+        principal_kind: rss_request_context::PrincipalKind,
         outcome: diport::AuditOutcome,
     ) {
         assert_route_auth_event(
@@ -5055,7 +5070,7 @@ mod tests {
     fn assert_route_auth_event(
         sink: &RecordingAuthAuditSink,
         contract_id: &'static str,
-        principal_kind: vocab::PrincipalKind,
+        principal_kind: rss_request_context::PrincipalKind,
         outcome: diport::AuditOutcome,
     ) {
         let events = sink.events();
@@ -5319,7 +5334,7 @@ mod tests {
         proof: ::httpserve::StatelessLocalOnlyMountedRouteProof<
             ::generated::http::identity_v1::profile::RouteMarker,
         >,
-        authenticated: Option<(vocab::PrincipalKind, &str)>,
+        authenticated: Option<(rss_request_context::PrincipalKind, &str)>,
     ) -> (axum::Router, ::testkit::local_only::LocalOnlyObservers) {
         let router = if let Some((kind, subject)) = authenticated {
             router.layer(axum::Extension(httpserve::Authenticated::new(
@@ -5355,7 +5370,7 @@ mod tests {
         proof: ::httpserve::StatelessLocalOnlyMountedRouteProof<
             ::generated::http::identity_v1::profile::RouteMarker,
         >,
-        authenticated: Option<(vocab::PrincipalKind, &str)>,
+        authenticated: Option<(rss_request_context::PrincipalKind, &str)>,
     ) -> testkit::ContractResponse {
         let (router, observers) = profile_local_only_parts(router, proof, authenticated);
         ::testkit::local_only::assert_local_only(observers, || {
@@ -5395,7 +5410,7 @@ mod tests {
         policies: crate::internal::mem::InMemPolicyRepo,
         bindings: crate::internal::mem::InMemRoleBindingLifecycle,
         resource_attributes: crate::internal::mem::InMemResourceAttributeRepo,
-        calls: Arc<std::sync::Mutex<Vec<(IdentityLocalOnlyRead, vocab::TenantId)>>>,
+        calls: Arc<std::sync::Mutex<Vec<(IdentityLocalOnlyRead, rss_request_context::TenantId)>>>,
         business_write_effects:
             ::testkit::local_only::ProviderCounter<::testkit::local_only::BusinessWrite>,
         fail_on: Option<IdentityLocalOnlyRead>,
@@ -5516,7 +5531,7 @@ mod tests {
                 .count()
         }
 
-        fn scopes_for(&self, read: IdentityLocalOnlyRead) -> Vec<vocab::TenantId> {
+        fn scopes_for(&self, read: IdentityLocalOnlyRead) -> Vec<rss_request_context::TenantId> {
             self.calls
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -6025,7 +6040,7 @@ mod tests {
             PROFILE_HTTP_SPEC.route.contract_id(),
             vocab::RoutePermissionId::IdentityProfileRead,
             tid(CANON_TENANT),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             subject,
             None,
         )
@@ -6036,7 +6051,7 @@ mod tests {
             ROLES_LIST_HTTP_SPEC.route.contract_id(),
             vocab::RoutePermissionId::IdentityRoleRead,
             tid(CANON_TENANT),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             subject,
             None,
         )
@@ -6416,7 +6431,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             role.clone(),
@@ -6602,7 +6617,10 @@ mod tests {
         // subject_id = canonical user id（登录标识不进 broker metadata）。
         assert_eq!(*envelope.contract(), SESSION_CREATED_SPEC.contract());
         assert_eq!(envelope.subject_id().as_str(), CANON_USER);
-        assert_eq!(envelope.actor().kind(), vocab::PrincipalKind::User);
+        assert_eq!(
+            envelope.actor().kind(),
+            rss_request_context::PrincipalKind::User
+        );
     }
 
     #[tokio::test]
@@ -7292,7 +7310,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             role(
@@ -7328,7 +7346,7 @@ mod tests {
                 contract_id: ROLES_ASSIGN_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::IdentityRoleAssign,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -7341,7 +7359,7 @@ mod tests {
                 contract_id: ACCOUNT_STATUS_SET_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::IdentityAccountSecurityWrite,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: Some(httpserve::RouteResource::new(CANON_USER).expect("route resource")),
@@ -7358,7 +7376,7 @@ mod tests {
                 contract_id: ACCOUNT_STATUS_GET_HTTP_SPEC.route.contract_id(),
                 permission: get_permission,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: Some(httpserve::RouteResource::new(CANON_USER).expect("route resource")),
@@ -7413,7 +7431,7 @@ mod tests {
                     contract_id: spec.route.contract_id(),
                     permission,
                     tenant_id: Some(tid(CANON_TENANT)),
-                    principal_kind: vocab::PrincipalKind::Admin,
+                    principal_kind: rss_request_context::PrincipalKind::Admin,
                     principal_id: CANON_USER.to_string(),
                     federated_permissions: None,
                     resource: None,
@@ -7463,7 +7481,7 @@ mod tests {
                     contract_id: spec.route.contract_id(),
                     permission,
                     tenant_id: Some(tid(CANON_TENANT)),
-                    principal_kind: vocab::PrincipalKind::User,
+                    principal_kind: rss_request_context::PrincipalKind::User,
                     principal_id: CANON_USER.to_string(),
                     federated_permissions: None,
                     resource: None,
@@ -7512,7 +7530,7 @@ mod tests {
                 contract_id: RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::RuntimeInventoryRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -7525,7 +7543,7 @@ mod tests {
                 contract_id: RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::RuntimeInventoryRead,
                 tenant_id: None,
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -7534,7 +7552,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::RuntimeInventoryRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -7543,7 +7561,7 @@ mod tests {
                 contract_id: RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -7579,7 +7597,7 @@ mod tests {
                 contract_id: RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::RuntimeInventoryRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -7611,7 +7629,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -7652,7 +7670,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -7681,14 +7699,14 @@ mod tests {
         let ctx = AuthSubjectContext {
             tenant: tid(CANON_TENANT),
             subject: "a".repeat(257),
-            kind: vocab::PrincipalKind::Admin,
+            kind: rss_request_context::PrincipalKind::Admin,
             projection: ResourceProjection::default_masked(),
         };
         let request = RouteAuthorizationRequest {
             contract_id: "other.contract",
             permission: vocab::RoutePermissionId::IdentityPolicyRead,
             tenant_id: Some(tid(CANON_TENANT)),
-            principal_kind: vocab::PrincipalKind::Admin,
+            principal_kind: rss_request_context::PrincipalKind::Admin,
             principal_id: ctx.subject.clone(),
             federated_permissions: None,
             resource: None,
@@ -7737,7 +7755,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: "a".repeat(257),
                 federated_permissions: None,
                 resource: None,
@@ -7776,7 +7794,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: Some(route_resource()),
@@ -7823,7 +7841,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: Some(route_resource()),
@@ -7874,7 +7892,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: Some(route_resource()),
@@ -7924,7 +7942,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: Some(route_resource()),
@@ -7971,7 +7989,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: Some(route_resource()),
@@ -7989,14 +8007,14 @@ mod tests {
         let ctx = AuthSubjectContext {
             tenant: tid(CANON_TENANT),
             subject: CANON_USER.to_string(),
-            kind: vocab::PrincipalKind::User,
+            kind: rss_request_context::PrincipalKind::User,
             projection: ResourceProjection::default_masked(),
         };
         let request = RouteAuthorizationRequest {
             contract_id: "other.contract",
             permission: vocab::RoutePermissionId::IdentityPolicyRead,
             tenant_id: Some(tid(CANON_TENANT)),
-            principal_kind: vocab::PrincipalKind::User,
+            principal_kind: rss_request_context::PrincipalKind::User,
             principal_id: CANON_USER.to_string(),
             federated_permissions: None,
             resource: Some(route_resource()),
@@ -8047,7 +8065,7 @@ mod tests {
                 contract_id: SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8077,7 +8095,7 @@ mod tests {
                 SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 PolicyEffect::Allow,
-                PolicyObligations::new(Some(vocab::ScopedTenant::Tenant), vec![]),
+                PolicyObligations::new(Some(rss_request_context::RowScope::Tenant), vec![]),
             ),
         ));
         let authorizer = ContractAuthorizer::new(
@@ -8093,7 +8111,7 @@ mod tests {
                 contract_id: SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8112,7 +8130,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             role(
@@ -8149,7 +8167,7 @@ mod tests {
                 contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8175,7 +8193,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             role(
@@ -8208,7 +8226,7 @@ mod tests {
                 contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8241,7 +8259,7 @@ mod tests {
                 contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::SuperAdmin,
+                principal_kind: rss_request_context::PrincipalKind::SuperAdmin,
                 principal_id: "super-admin".to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8329,7 +8347,7 @@ mod tests {
                 contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8384,7 +8402,7 @@ mod tests {
                 contract_id: PROFILE_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::IdentityProfileRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8435,7 +8453,7 @@ mod tests {
                 contract_id: PROFILE_HTTP_SPEC.route.contract_id(),
                 permission: vocab::RoutePermissionId::IdentityProfileRead,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::User,
+                principal_kind: rss_request_context::PrincipalKind::User,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: Some(httpserve::RouteResource::new(CANON_USER).expect("self resource")),
@@ -8483,7 +8501,7 @@ mod tests {
                 contract_id: AUDIT_LIST_HTTP_SPEC.route.contract_id(),
                 permission: vocab::AUDIT_READ_PERMISSION,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8522,7 +8540,7 @@ mod tests {
                 contract_id: SETTINGS_CONFIG_HTTP_SPEC.route.contract_id(),
                 permission,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8541,7 +8559,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             role("role-admin", "Admin", &[external_permission.as_str()]),
@@ -8569,7 +8587,7 @@ mod tests {
                 contract_id: "other.contract",
                 permission: external_permission,
                 tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: vocab::PrincipalKind::Admin,
+                principal_kind: rss_request_context::PrincipalKind::Admin,
                 principal_id: CANON_USER.to_string(),
                 federated_permissions: None,
                 resource: None,
@@ -8657,7 +8675,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             seeded_role.clone(),
@@ -8720,7 +8738,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             seeded_role.clone(),
@@ -8789,7 +8807,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             role("role-a", "A", &["identity:role:read"]),
@@ -8801,7 +8819,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             role("role-b", "B", &["identity:policy:update"]),
@@ -8844,7 +8862,7 @@ mod tests {
             RoleMutationActor::for_test_user(
                 tid(CANON_TENANT),
                 uid(CANON_USER),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
             )
             .expect("authenticated role actor"),
             role("role-a", "A", &["identity:role:read"]),
@@ -9168,7 +9186,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9222,7 +9240,7 @@ mod tests {
         assert_route_auth_event(
             &auth_sink,
             ROLES_LIST_HTTP_SPEC.route.contract_id(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             diport::AuditOutcome::Success,
         );
     }
@@ -9238,7 +9256,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9293,7 +9311,7 @@ mod tests {
         assert_route_auth_event(
             &auth_sink,
             ACCOUNT_STATUS_GET_HTTP_SPEC.route.contract_id(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             diport::AuditOutcome::Success,
         );
     }
@@ -9309,7 +9327,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9360,7 +9378,7 @@ mod tests {
         assert_route_auth_event(
             &auth_sink,
             POLICIES_GET_HTTP_SPEC.route.contract_id(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             diport::AuditOutcome::Success,
         );
     }
@@ -9376,7 +9394,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9430,7 +9448,7 @@ mod tests {
         assert_route_auth_event(
             &auth_sink,
             POLICIES_LIST_HTTP_SPEC.route.contract_id(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             diport::AuditOutcome::Success,
         );
     }
@@ -9445,7 +9463,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9521,7 +9539,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9597,7 +9615,7 @@ mod tests {
         );
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9671,7 +9689,7 @@ mod tests {
         let missing_permission_router =
             missing_permission_router.layer(::axum::Extension(httpserve::Authenticated::new(
                 httpserve::NonRssTestScheme::FederatedAccessToken,
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 CANON_USER,
                 Some(tid(CANON_TENANT)),
             )));
@@ -9702,7 +9720,7 @@ mod tests {
         assert_route_auth_event(
             &missing_permission_sink,
             POLICIES_LIST_HTTP_SPEC.route.contract_id(),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             diport::AuditOutcome::Failure {
                 reason: "forbidden",
             },
@@ -9719,7 +9737,7 @@ mod tests {
         let cross_tenant_router =
             cross_tenant_router.layer(::axum::Extension(httpserve::Authenticated::new(
                 httpserve::NonRssTestScheme::FederatedAccessToken,
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 CANON_USER,
                 Some(other_tenant),
             )));
@@ -9773,7 +9791,7 @@ mod tests {
         );
         let roles_router = roles_router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9799,7 +9817,7 @@ mod tests {
         );
         let get_router = get_router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9825,7 +9843,7 @@ mod tests {
         );
         let list_router = list_router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -9895,7 +9913,7 @@ mod tests {
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
                         httpserve::NonRssTestScheme::FederatedAccessToken,
-                        vocab::PrincipalKind::Admin,
+                        rss_request_context::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
                     )));
@@ -9924,7 +9942,7 @@ mod tests {
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
                         httpserve::NonRssTestScheme::FederatedAccessToken,
-                        vocab::PrincipalKind::Admin,
+                        rss_request_context::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
                     )));
@@ -9953,7 +9971,7 @@ mod tests {
                     );
                     let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
                         httpserve::NonRssTestScheme::FederatedAccessToken,
-                        vocab::PrincipalKind::Admin,
+                        rss_request_context::PrincipalKind::Admin,
                         CANON_USER,
                         Some(tid(CANON_TENANT)),
                     )));
@@ -9984,7 +10002,7 @@ mod tests {
                                 contract_id: "other.contract",
                                 permission: vocab::RoutePermissionId::IdentityPolicyRead,
                                 tenant_id: Some(tid(CANON_TENANT)),
-                                principal_kind: vocab::PrincipalKind::Admin,
+                                principal_kind: rss_request_context::PrincipalKind::Admin,
                                 principal_id: CANON_USER.to_string(),
                                 federated_permissions: None,
                                 resource: Some(route_resource()),
@@ -10032,7 +10050,7 @@ mod tests {
             PROFILE_HTTP_SPEC.route.contract_id(),
             vocab::RoutePermissionId::IdentityProfileRead,
             tid(CANON_TENANT),
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             CANON_USER,
             None,
             projection_for(&[vocab::ProjectionField::IdentityProfileSubject]).expect("projection"),
@@ -10088,7 +10106,7 @@ mod tests {
         let (router, proof) = self::finalized_profile_router(capture, &[], auth_sink.clone());
         let router = router.layer(::axum::Extension(httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             CANON_USER,
             Some(tid(CANON_TENANT)),
         )));
@@ -10133,7 +10151,7 @@ mod tests {
         assert_eq!(decoded.data.kind, IdentityProfileDataKind::User);
         assert_profile_auth_event(
             &auth_sink,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             diport::AuditOutcome::Success,
         );
     }
@@ -10151,7 +10169,7 @@ mod tests {
         let response = profile_local_only_call(
             router,
             proof,
-            Some((vocab::PrincipalKind::User, CANON_USER)),
+            Some((rss_request_context::PrincipalKind::User, CANON_USER)),
         )
         .await;
 
@@ -10162,7 +10180,7 @@ mod tests {
         assert_eq!(decoded.data.kind, IdentityProfileDataKind::User);
         assert_profile_auth_event(
             &auth_sink,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             diport::AuditOutcome::Success,
         );
     }
@@ -10190,7 +10208,7 @@ mod tests {
         let response = profile_local_only_call(
             router,
             proof,
-            Some((vocab::PrincipalKind::Device, CANON_USER)),
+            Some((rss_request_context::PrincipalKind::Device, CANON_USER)),
         )
         .await;
 
@@ -10199,7 +10217,7 @@ mod tests {
             .expect("non-self-service principal -> 403");
         assert_profile_auth_event(
             &auth_sink,
-            vocab::PrincipalKind::Device,
+            rss_request_context::PrincipalKind::Device,
             diport::AuditOutcome::Failure {
                 reason: "forbidden",
             },

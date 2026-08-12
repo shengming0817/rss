@@ -36,8 +36,8 @@ pub(super) const UNVERIFIED_AUDIT_LEDGER_VERIFY_OPERATOR: &str = "unverified-ser
 #[derive(Debug)]
 pub(super) struct AuditLedgerVerifyArgs {
     pub(super) operator_service_token: OperatorServiceToken,
-    pub(super) operator_tenant: vocab::TenantId,
-    pub(super) tenant: vocab::TenantId,
+    pub(super) operator_tenant: rss_request_context::TenantId,
+    pub(super) tenant: rss_request_context::TenantId,
     pub(super) batch: vocab::Limit,
 }
 
@@ -56,7 +56,7 @@ pub enum AuditLedgerVerifyCommandPreparation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct AuditLedgerVerifyGrant {
-    pub(super) tenant: vocab::TenantId,
+    pub(super) tenant: rss_request_context::TenantId,
 }
 
 pub(super) fn parse_audit_ledger_verify_batch(raw: &str) -> anyhow::Result<vocab::Limit> {
@@ -203,7 +203,7 @@ pub(super) fn parse_audit_ledger_verify_grants(
             unreachable!("len checked");
         };
         grants.push(AuditLedgerVerifyGrant {
-            tenant: vocab::TenantId::parse(tenant).with_context(|| {
+            tenant: rss_request_context::TenantId::parse(tenant).with_context(|| {
                 format!("{AUDIT_LEDGER_VERIFY_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
             })?,
         });
@@ -238,7 +238,7 @@ pub(super) fn authorize_audit_ledger_verify_operator(
 
 pub(super) async fn verified_audit_ledger_verify_operator(
     service_token: &str,
-    operator_tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
     pdp: &diport::DynPdp<'_>,
 ) -> anyhow::Result<authn::VerifiedMaintenanceServiceOperator> {
     verified_service_maintenance_operator(

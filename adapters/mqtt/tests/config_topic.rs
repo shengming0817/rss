@@ -7,7 +7,7 @@
 
 use ids::DeviceId;
 use mqtt::{CredentialGeneration, DeviceScope, MqttTopicPolicy, MqttsEndpoint};
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 const TENANT: &str = "018f3f42-a7c1-7d31-8ed9-6a93261b71f0";
 const DEVICE: &str = "018f3f42-b8d2-7c42-9fea-7ba4372c82a1";

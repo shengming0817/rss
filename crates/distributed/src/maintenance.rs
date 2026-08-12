@@ -301,7 +301,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: coordinator tests use fixed known-valid tenant/contract fixtures.
     fn backlog_metric_sample(depth: u64, oldest_age_seconds: u64) -> BacklogMetricSample {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
             .expect("valid tenant fixture");
         let contract =
             OutboxContractId::parse("identity.session-created").expect("valid contract fixture");

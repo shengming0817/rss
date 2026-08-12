@@ -1512,7 +1512,7 @@ impl PgSagaOperatorDeps {
     pub async fn record_saga_maintenance_audit(
         &self,
         operator_subject: &str,
-        target_tenant: vocab::TenantId,
+        target_tenant: rss_request_context::TenantId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
@@ -1535,7 +1535,7 @@ impl PgSagaOperatorDeps {
             .bind(secs)
             .bind(nanos)
             .bind(operator_subject)
-            .bind(target_tenant.as_uuid().to_string())
+            .bind(target_tenant.to_string())
             .bind(resource_id)
             .bind(action)
             .bind(outcome)
@@ -1641,7 +1641,7 @@ impl PgL2DrRecoveryDeps {
     async fn record_l2_dr_admission_audit(
         &self,
         operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         admission_epoch: primitives::AdmissionEpochId,
         action: &str,
         stage: &str,
@@ -1660,7 +1660,7 @@ impl PgL2DrRecoveryDeps {
         .bind(secs)
         .bind(nanos)
         .bind(operator_subject.as_str())
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(admission_epoch.as_uuid().to_string())
         .bind(action)
         .bind(stage)
@@ -1677,7 +1677,7 @@ impl PgL2DrRecoveryDeps {
     pub async fn record_l2_dr_admission_start_audit(
         &self,
         operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         admission_epoch: primitives::AdmissionEpochId,
         action: &str,
         request_id: uuid::Uuid,
@@ -1698,7 +1698,7 @@ impl PgL2DrRecoveryDeps {
     pub async fn record_l2_dr_admission_finish_audit(
         &self,
         operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         admission_epoch: primitives::AdmissionEpochId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -1720,7 +1720,7 @@ impl PgL2DrRecoveryDeps {
     pub async fn l2_dr_admission_status(
         &self,
         admission_epoch: primitives::AdmissionEpochId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Result<Option<PgL2DrAdmissionState>, PgError> {
         let row: Option<(
             String,
@@ -1740,7 +1740,7 @@ impl PgL2DrRecoveryDeps {
              FROM public.rss_l2_dr_admission_observe($1::uuid, $2::uuid)",
         )
         .bind(admission_epoch.as_uuid().to_string())
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .fetch_optional(&self.executor.store_arc().pool)
         .await
         .map_err(PgError::L2DrAdmission)?;
@@ -1785,7 +1785,7 @@ impl PgL2DrRecoveryDeps {
         )
         .bind(admission_epoch.as_uuid().to_string())
         .bind(plan.epoch_id().as_uuid().to_string())
-        .bind(plan.tenant().as_uuid().to_string())
+        .bind(plan.tenant().to_string())
         .bind(plan.digest().as_bytes().as_slice())
         .bind(sqlx::types::Json(declared_instances))
         .bind(requires_startup_epoch_witness)
@@ -1799,12 +1799,12 @@ impl PgL2DrRecoveryDeps {
     pub async fn request_l2_dr_admission_resume(
         &self,
         admission_epoch: primitives::AdmissionEpochId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         lane: &str,
     ) -> Result<(), PgError> {
         sqlx::query("SELECT public.rss_l2_dr_admission_request_resume($1::uuid, $2::uuid, $3)")
             .bind(admission_epoch.as_uuid().to_string())
-            .bind(tenant.as_uuid().to_string())
+            .bind(tenant.to_string())
             .bind(lane)
             .execute(&self.executor.store_arc().pool)
             .await
@@ -1846,7 +1846,7 @@ impl PgL2DrRecoveryDeps {
         .bind(secs)
         .bind(nanos)
         .bind(operator_subject.as_str())
-        .bind(plan.tenant().as_uuid().to_string())
+        .bind(plan.tenant().to_string())
         .bind(plan.epoch_id().as_uuid().to_string())
         .bind(plan.digest().as_bytes().as_slice())
         .bind(start_audit_id.to_string())
@@ -1868,7 +1868,7 @@ impl PgL2DrRecoveryDeps {
     pub async fn record_l2_dr_recovery_finish_audit_subject(
         &self,
         operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
-        target_tenant: vocab::TenantId,
+        target_tenant: rss_request_context::TenantId,
         epoch_id: uuid::Uuid,
         start_audit_id: uuid::Uuid,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -1885,7 +1885,7 @@ impl PgL2DrRecoveryDeps {
         .bind(secs)
         .bind(nanos)
         .bind(operator_subject.as_str())
-        .bind(target_tenant.as_uuid().to_string())
+        .bind(target_tenant.to_string())
         .bind(epoch_id.to_string())
         .bind(outcome)
         .bind(failure_reason)
@@ -1997,7 +1997,7 @@ impl eventexec::L2DrRecoveryStore for PgL2DrRecoveryDeps {
              $8::bytea, $9, $10::uuid, $11::uuid)",
         )
         .bind(plan.epoch_id().as_uuid().to_string())
-        .bind(plan.tenant().as_uuid().to_string())
+        .bind(plan.tenant().to_string())
         .bind(plan.direction().as_label())
         .bind(plan.database_restore_point().get())
         .bind(plan.broker_restore_point().get())
@@ -2022,7 +2022,7 @@ impl eventexec::L2DrRecoveryStore for PgL2DrRecoveryDeps {
                 .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
         let durable_epoch_id = eventexec::RecoveryEpochId::parse(&row.result_epoch_id)
             .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
-        let durable_tenant = vocab::TenantId::parse(&row.result_tenant_id)
+        let durable_tenant = rss_request_context::TenantId::parse(&row.result_tenant_id)
             .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
         let durable_start_audit_id = uuid::Uuid::parse_str(&row.result_start_audit_id)
             .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
@@ -2144,7 +2144,7 @@ impl PgMaintenanceDeps {
         &self,
         resource_kind: &str,
         operator_subject: &str,
-        tenant_context: Option<vocab::TenantId>,
+        tenant_context: Option<rss_request_context::TenantId>,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
@@ -2173,7 +2173,7 @@ impl PgMaintenanceDeps {
         .bind(secs)
         .bind(nanos)
         .bind(operator_subject)
-        .bind(tenant_context.map(|tenant| tenant.as_uuid().to_string()))
+        .bind(tenant_context.map(|tenant| tenant.to_string()))
         .bind(resource_kind)
         .bind(resource_id)
         .bind(action)
@@ -2210,7 +2210,7 @@ impl PgMaintenanceDeps {
     pub async fn record_dlq_maintenance_audit(
         &self,
         operator_subject: &str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         start_audit_id: &diport::DlqOperatorStartAuditId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
@@ -2256,7 +2256,7 @@ impl PgMaintenanceDeps {
     pub async fn record_saga_maintenance_audit(
         &self,
         operator_subject: &str,
-        target_tenant: vocab::TenantId,
+        target_tenant: rss_request_context::TenantId,
         action: &str,
         outcome: MaintenanceAuditOutcome<'_>,
         resource_id: &str,
@@ -3509,7 +3509,7 @@ mod tests {
             _delivery_policy: EventDeliveryPolicy::release(),
             clock: Arc::new(EpochClock),
         };
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
         let projection = eventexec::ProjectionId::parse("audit.session-projection")?;
         let selector = eventexec::ProjectionSelector::new(
             tenant,
@@ -3543,7 +3543,7 @@ mod tests {
     #[test]
     fn projection_target_keeps_definition_identity_and_shadow_generation_independent()
     -> Result<(), Box<dyn std::error::Error>> {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
         let projection = eventexec::ProjectionId::parse("audit.session-projection")?;
         let scope = eventexec::WorkflowRuntimePlan::generated_projection_source_scope_fixture(
             &projection,
@@ -3559,7 +3559,7 @@ mod tests {
         assert!(ProjectionOperatorTarget::bind(&rollback, &scope).is_ok());
 
         let other_tenant = eventexec::ProjectionSelector::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d480")?,
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d480")?,
             projection,
             eventexec::ProjectionVersion::parse("rollback-v1")?,
         );

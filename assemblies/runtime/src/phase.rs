@@ -477,6 +477,7 @@ pub(crate) struct Finalized<'a> {
     listeners: crate::routes::FinalizedListenerSet,
     probe_receipt: crate::routes::FinalizedProbeReceipt,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+    platform_host: runtimeexec::RuntimeHostView,
 }
 
 impl sealed::Sealed for Planned<'_> {}

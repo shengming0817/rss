@@ -30,7 +30,7 @@ where
 
     pub(crate) async fn seal(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         plaintext: Plaintext,
         object_key: &DlxArchiveObjectKey,
     ) -> Result<DlxArchiveCiphertext, DlxLifecycleError> {
@@ -62,7 +62,7 @@ where
 
     pub(crate) async fn open(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         ciphertext: DlxArchiveCiphertext,
         object_key: &DlxArchiveObjectKey,
     ) -> Result<Plaintext, DlxLifecycleError> {
@@ -89,7 +89,7 @@ where
 }
 
 fn archive_aad(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     object_key: &DlxArchiveObjectKey,
     operation: DlxLifecycleOperation,
 ) -> Result<secure::DerivedAad, DlxLifecycleError> {
@@ -242,8 +242,8 @@ mod tests {
         )
     }
 
-    fn tenant(raw: &str) -> Result<vocab::TenantId, Box<dyn std::error::Error>> {
-        Ok(vocab::TenantId::parse(raw)?)
+    fn tenant(raw: &str) -> Result<rss_request_context::TenantId, Box<dyn std::error::Error>> {
+        Ok(rss_request_context::TenantId::parse(raw)?)
     }
 
     fn object_key(raw: &str) -> Result<DlxArchiveObjectKey, Box<dyn std::error::Error>> {

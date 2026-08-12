@@ -13,8 +13,8 @@ fn id() -> Result<DeadLetterId, Box<dyn std::error::Error>> {
     Ok(DeadLetterId::parse("018f31a8-893d-7a52-8e17-3ca9df50120b")?)
 }
 
-fn tenant() -> Result<vocab::TenantId, Box<dyn std::error::Error>> {
-    Ok(vocab::TenantId::parse(
+fn tenant() -> Result<rss_request_context::TenantId, Box<dyn std::error::Error>> {
+    Ok(rss_request_context::TenantId::parse(
         "11111111-2222-4333-8444-555555555555",
     )?)
 }
@@ -126,7 +126,7 @@ fn worm_metadata_validation_rejects_checksum_and_expiry() -> Result<(), Box<dyn 
 fn coordinates() -> Result<
     (
         DeadLetterId,
-        vocab::TenantId,
+        rss_request_context::TenantId,
         DlxArchiveObjectKey,
         ArchiveChecksum,
     ),

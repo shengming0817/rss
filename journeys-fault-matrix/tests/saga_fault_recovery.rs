@@ -836,11 +836,13 @@ fn assemble(
     })
 }
 
-fn tenant() -> Result<vocab::TenantId> {
-    Ok(vocab::TenantId::parse(&Uuid::new_v4().to_string())?)
+fn tenant() -> Result<rss_request_context::TenantId> {
+    Ok(rss_request_context::TenantId::parse(
+        &Uuid::new_v4().to_string(),
+    )?)
 }
 
-fn instance(tenant: vocab::TenantId) -> Result<SagaInstanceRef> {
+fn instance(tenant: rss_request_context::TenantId) -> Result<SagaInstanceRef> {
     Ok(SagaInstanceRef::new(tenant, SagaId::new(Uuid::new_v4()))?)
 }
 

@@ -62,7 +62,7 @@ pub struct DlqEntrySummary {
     kind: DlqEntryKind,
     id: String,
     source: DeadLetterSource,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     message_id: String,
     producer_domain: String,
     consumer_domain: Option<String>,
@@ -82,7 +82,7 @@ impl DlqEntrySummary {
         kind: DlqEntryKind,
         id: impl Into<String>,
         source: DeadLetterSource,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         message_id: impl Into<String>,
         producer_domain: impl Into<String>,
         consumer_domain: Option<String>,
@@ -124,7 +124,7 @@ impl DlqEntrySummary {
         self.source
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -279,7 +279,7 @@ impl DlqInspectRequest {
         }
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.authorization.tenant()
     }
 
@@ -331,7 +331,7 @@ impl DlqListQuery {
         self
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.authorization.tenant()
     }
 
@@ -449,7 +449,7 @@ impl DlqReplayRequest {
         }
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.authorization.tenant()
     }
 
@@ -567,7 +567,7 @@ impl OutboxExpiredResolutionRequest {
         }
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.authorization.tenant()
     }
 
@@ -607,7 +607,7 @@ impl DlqRedriveRequest {
         }
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.authorization.tenant()
     }
 
@@ -838,7 +838,7 @@ impl DlqError {
 
 /// Emit a DLQ replay/redrive counter with closed labels.
 fn record_dlq_redrive_metric(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     kind: DlqMutationKind,
     outcome: DlqMutationMetricOutcome,
 ) {
@@ -851,7 +851,7 @@ fn record_dlq_redrive_metric(
     .increment(1);
 }
 
-pub fn record_dlq_replay(tenant: vocab::TenantId, outcome: DlqReplayOutcome) {
+pub fn record_dlq_replay(tenant: rss_request_context::TenantId, outcome: DlqReplayOutcome) {
     record_dlq_redrive_metric(
         tenant,
         DlqMutationKind::DeadLetterReplay,
@@ -859,7 +859,10 @@ pub fn record_dlq_replay(tenant: vocab::TenantId, outcome: DlqReplayOutcome) {
     );
 }
 
-pub fn record_dlq_outbox_redrive(tenant: vocab::TenantId, outcome: DlqRedriveOutcome) {
+pub fn record_dlq_outbox_redrive(
+    tenant: rss_request_context::TenantId,
+    outcome: DlqRedriveOutcome,
+) {
     record_dlq_redrive_metric(
         tenant,
         DlqMutationKind::OutboxDlxRedrive,
@@ -868,7 +871,7 @@ pub fn record_dlq_outbox_redrive(tenant: vocab::TenantId, outcome: DlqRedriveOut
 }
 
 pub fn record_outbox_expired_resolution(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     outcome: OutboxExpiredResolutionOutcome,
 ) {
     record_dlq_redrive_metric(
@@ -878,7 +881,11 @@ pub fn record_outbox_expired_resolution(
     );
 }
 
-pub fn record_dlq_mutation_error(tenant: vocab::TenantId, kind: DlqMutationKind, error: &DlqError) {
+pub fn record_dlq_mutation_error(
+    tenant: rss_request_context::TenantId,
+    kind: DlqMutationKind,
+    error: &DlqError,
+) {
     record_dlq_redrive_metric(tenant, kind, DlqMutationMetricOutcome::error(error));
 }
 
@@ -921,7 +928,7 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn authorization<A: diport::DlqOperatorAction>(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> diport::DlqOperatorAuthorization<A> {
         diport::test_support::dlq_operator_authorization(
             vocab::ServiceCallerDomain::MaintenanceOperator,
@@ -943,7 +950,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id.
     fn list_summary_debug_does_not_expose_payload_bytes() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let summary = DlqEntrySummary::new(
             DlqEntryKind::DeadLetter,
@@ -971,7 +978,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id.
     fn query_limit_is_bounded() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         assert_eq!(
             DlqListQuery::new(authorization(tenant))
@@ -991,7 +998,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses known canonical ids.
     fn list_result_reports_cursor_when_more_rows_exist() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let rows: Vec<_> = (0..3)
             .map(|i| {
@@ -1025,7 +1032,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id.
     fn list_result_filters_by_contract_id_before_pagination() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let rows = vec![
             DlqEntrySummary::new(
@@ -1081,7 +1088,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id.
     fn list_result_filters_producer_and_consumer_domains_independently() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let rows = ["audit", "search"]
             .into_iter()
@@ -1121,7 +1128,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id.
     fn list_cursor_is_keyset_not_offset() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let rows: Vec<_> = (0..4)
             .map(|i| {
@@ -1200,7 +1207,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: unit test fixture uses a known canonical tenant id.
     fn list_cursor_paginates_same_second_rows_without_skipping() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let rows: Vec<_> = (0..3)
             .map(|i| {
@@ -1277,7 +1284,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     // reason: typed operator fixtures are fixed non-empty values and a canonical tenant/event id.
     fn expired_outbox_resolution_request_is_typed_and_shape_closed() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         let event_id = IdemKey::parse("evt-blocked").expect("canonical event id");
         let evidence = IdemKey::parse("evt-compensation").expect("canonical evidence id");
@@ -1320,7 +1327,7 @@ mod tests {
     fn dlq_redrive_metric_uses_closed_kind_and_outcome_labels() {
         let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
         let handle = recorder.handle();
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .expect("canonical tenant");
         metrics::with_local_recorder(&recorder, || {
             record_dlq_replay(tenant, DlqReplayOutcome::Inserted);

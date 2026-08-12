@@ -54,7 +54,7 @@ pub(super) fn parse_config_value_maintenance_operation(
 pub(super) struct SettingsConfigValueMaintenanceArgs {
     pub(super) options: ConfigValueMaintenanceOptions,
     pub(super) operator_service_token: OperatorServiceToken,
-    pub(super) operator_tenant: vocab::TenantId,
+    pub(super) operator_tenant: rss_request_context::TenantId,
 }
 
 /// Opaque command whose argv and stdin token were validated before runtime setup.
@@ -127,11 +127,11 @@ Tenant scope requires exactly one of --tenant <uuid> or --all-tenants.",
 
         /// Operator tenant that minted the operator service token (UUID).
         #[arg(long, value_parser = parse_operator_tenant_cli)]
-        operator_tenant: vocab::TenantId,
+        operator_tenant: rss_request_context::TenantId,
 
         /// Target one tenant (UUID). Mutually exclusive with `--all-tenants`.
         #[arg(long, value_parser = parse_tenant_cli)]
-        tenant: Option<vocab::TenantId>,
+        tenant: Option<rss_request_context::TenantId>,
 
         /// Explicitly scan all tenants. Required when `--tenant` is omitted; mutually exclusive
         /// with `--tenant`.
@@ -265,7 +265,7 @@ pub(super) const UNVERIFIED_CONFIG_MAINTENANCE_OPERATOR: &str = "unverified-serv
 
 pub(super) async fn verified_config_value_maintenance_operator(
     service_token: &str,
-    operator_tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
     pdp: &diport::DynPdp<'_>,
 ) -> anyhow::Result<authn::VerifiedMaintenanceServiceOperator> {
     verified_service_maintenance_operator(

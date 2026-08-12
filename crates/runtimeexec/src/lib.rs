@@ -13,6 +13,8 @@
 
 pub mod config;
 pub mod inventory;
+mod platform_host;
+pub use platform_host::RuntimeHostView;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
@@ -377,6 +379,7 @@ pub struct LaunchPlan<Adapter, ProbeReceipt, ReadyHook> {
     on_ready: ReadyHook,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     lifecycle_batches: LaunchLifecycle,
+    platform_host: Option<RuntimeHostView>,
 }
 
 impl<Adapter, ProbeReceipt, ReadyHook> LaunchPlan<Adapter, ProbeReceipt, ReadyHook> {
@@ -398,7 +401,15 @@ impl<Adapter, ProbeReceipt, ReadyHook> LaunchPlan<Adapter, ProbeReceipt, ReadyHo
                 batches: lifecycle_batches,
                 total_drain_budget,
             },
+            platform_host: None,
         }
+    }
+
+    /// Attach the sole RuntimeExec-owned Platform host projection to this launch lifecycle.
+    #[must_use]
+    pub fn with_platform_host(mut self, host: RuntimeHostView) -> Self {
+        self.platform_host = Some(host);
+        self
     }
 }
 
@@ -528,12 +539,12 @@ where
         startup,
         total_drain_budget,
     } = plan;
-    let mut owner = ShutdownOwner::new(total_drain_budget);
+    let mut owner = ShutdownOwner::new(total_drain_budget, None);
     let shutdown = match install_shutdown() {
         Ok(shutdown) => shutdown,
         Err(error) => {
             let (runtime, stack) = owner.into_parts();
-            return finish_launch(runtime, stack, total_drain_budget, Err(error)).await;
+            return finish_launch(runtime, stack, total_drain_budget, Err(error), None).await;
         }
     };
     let mut shutdown = Box::pin(shutdown);
@@ -576,13 +587,14 @@ where
                 trace_exporter,
                 batches,
                 || Ok(shutdown),
+                None,
             )
             .await
         }
     };
 
     let (runtime, stack) = owner.into_parts();
-    finish_launch(runtime, stack, total_drain_budget, launch_result).await
+    finish_launch(runtime, stack, total_drain_budget, launch_result, None).await
 }
 
 fn preserve_startup_result(
@@ -625,12 +637,13 @@ where
         on_ready,
         trace_exporter,
         lifecycle_batches,
+        platform_host,
     } = plan;
     let LaunchLifecycle {
         batches: lifecycle_batches,
         total_drain_budget,
     } = lifecycle_batches;
-    let mut owner = ShutdownOwner::new(total_drain_budget);
+    let mut owner = ShutdownOwner::new(total_drain_budget, platform_host.clone());
     let launch_result = execute_launch(
         owner.stack_mut(),
         adapter,
@@ -639,11 +652,19 @@ where
         trace_exporter,
         lifecycle_batches,
         install_shutdown,
+        platform_host.as_ref(),
     )
     .await;
 
     let (runtime, stack) = owner.into_parts();
-    finish_launch(runtime, stack, total_drain_budget, launch_result).await
+    finish_launch(
+        runtime,
+        stack,
+        total_drain_budget,
+        launch_result,
+        platform_host,
+    )
+    .await
 }
 
 /// Cancellation-safe owner for the execute phase.
@@ -656,14 +677,16 @@ struct ShutdownOwner {
     runtime: Handle,
     stack: Option<ShutdownStack>,
     total_drain_budget: TotalDrainBudget,
+    platform_host: Option<RuntimeHostView>,
 }
 
 impl ShutdownOwner {
-    fn new(total_drain_budget: TotalDrainBudget) -> Self {
+    fn new(total_drain_budget: TotalDrainBudget, platform_host: Option<RuntimeHostView>) -> Self {
         Self {
             runtime: Handle::current(),
             stack: Some(ShutdownStack::new(CancellationToken::new())),
             total_drain_budget,
+            platform_host,
         }
     }
 
@@ -688,7 +711,12 @@ impl Drop for ShutdownOwner {
             return;
         };
         tracing::warn!("launch future dropped; continuing runtime resource drain in background");
-        let _drain = spawn_drain(&self.runtime, stack, self.total_drain_budget);
+        let _drain = spawn_drain(
+            &self.runtime,
+            stack,
+            self.total_drain_budget,
+            self.platform_host.clone(),
+        );
     }
 }
 
@@ -697,12 +725,13 @@ async fn finish_launch(
     stack: ShutdownStack,
     total_drain_budget: TotalDrainBudget,
     launch_result: anyhow::Result<()>,
+    platform_host: Option<RuntimeHostView>,
 ) -> anyhow::Result<RuntimeOutputs> {
     log_drain_start(&launch_result);
     // The drain task owns the stack before this function reaches its first await. Dropping the
     // outer launch future therefore detaches only this JoinHandle; Tokio keeps the drain task
     // running to complete the full LIFO sequence.
-    let drain = spawn_drain(&runtime, stack, total_drain_budget);
+    let drain = spawn_drain(&runtime, stack, total_drain_budget, platform_host.clone());
     let drain_result = match drain.await {
         Ok(result) => result,
         Err(error) => Err(anyhow::anyhow!(
@@ -717,9 +746,15 @@ fn spawn_drain(
     runtime: &Handle,
     stack: ShutdownStack,
     total_drain_budget: TotalDrainBudget,
+    platform_host: Option<RuntimeHostView>,
 ) -> JoinHandle<anyhow::Result<()>> {
     runtime.spawn(async move {
-        report_shutdown_failures(stack.shutdown_within(total_drain_budget.duration()).await)
+        let result =
+            report_shutdown_failures(stack.shutdown_within(total_drain_budget.duration()).await);
+        if let Some(host) = platform_host {
+            host.mark_stopped();
+        }
+        result
     })
 }
 
@@ -745,6 +780,7 @@ async fn execute_launch<Adapter, ProbeReceipt, ReadyHook, Ready, InstallShutdown
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     lifecycle_batches: LaunchLifecycleBatches,
     install_shutdown: InstallShutdown,
+    platform_host: Option<&RuntimeHostView>,
 ) -> anyhow::Result<()>
 where
     Adapter: LaunchAdapter<ProbeReceipt>,
@@ -761,15 +797,27 @@ where
     let mut transaction = LaunchTransaction { stack };
     let prepared = adapter.prepare(probe_receipt, &mut transaction).await?;
     let activated = Adapter::activate(prepared, transaction.commit())?;
+    if let Some(host) = platform_host {
+        // Listener activation has finished registering resources. Push admission last so LIFO
+        // closes it first and waits for admitted handlers before any listener/provider drain.
+        register_platform_admission(stack, host);
+    }
     let readiness = on_ready(activated.into_inventory());
     tokio::pin!(readiness);
     tokio::pin!(shutdown);
     tokio::select! {
         biased;
         result = &mut shutdown => return result,
-        result = &mut readiness => result?,
+        result = &mut readiness => {
+            result?;
+            if let Some(host) = platform_host { host.mark_ready(); }
+        },
     }
     shutdown.await
+}
+
+fn register_platform_admission(stack: &mut ShutdownStack, host: &RuntimeHostView) {
+    stack.register_detached(host.managed_resource());
 }
 
 fn register_lifecycle_outputs(

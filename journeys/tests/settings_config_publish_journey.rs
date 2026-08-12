@@ -30,10 +30,10 @@ use generated::event::settings_v1::{
 use generated::http::settings_v1::SettingsConfigPublishRequest;
 use memory::{FixedClock, MemBus, MemEmitter};
 use primitives::{AuthPlan, AuthScheme, ListenerKind};
+use rss_request_context::{PrincipalKind, TenantId};
 use settings::{SecretResolveService, SettingsDomain, SettingsService, empty_secret_ports};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt;
-use vocab::{PrincipalKind, TenantId};
 
 mod common;
 
@@ -46,10 +46,10 @@ const NOW_SECS: u64 = 1_000;
 
 fn actor(tenant: TenantId) -> Result<OutboxActor> {
     Ok(OutboxActor::scoped(
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         OpaqueActorId::from_opaque("settings-journey-actor")?,
         tenant,
-        vocab::ScopedTenant::Tenant,
+        rss_request_context::RowScope::Tenant,
     ))
 }
 

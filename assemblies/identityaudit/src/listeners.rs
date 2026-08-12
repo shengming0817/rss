@@ -606,7 +606,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_inventory_admin_pairs_rss_user_bridge_with_identity_durable_authorizer()
     -> anyhow::Result<()> {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001797")?;
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000001797")?;
         let mut bindings = vec![identity_composition::test_support::binding()?];
         let (mut registry, _output) = bootstrap::compose_bindings(&mut bindings)?;
         registry
@@ -624,7 +624,7 @@ mod tests {
                 .contract_id(),
             permission: vocab::RoutePermissionId::RuntimeInventoryRead,
             tenant_id: Some(tenant),
-            principal_kind: vocab::PrincipalKind::User,
+            principal_kind: rss_request_context::PrincipalKind::User,
             principal_id: "unbound-rss-user".to_string(),
             federated_permissions: None,
             resource: None,

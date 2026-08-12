@@ -18,13 +18,13 @@ use axum::body::Body;
 use axum::http::{Method, Request, StatusCode, header};
 use axum::routing::get;
 use primitives::{AuthPlan, AuthScheme, ListenerKind, RouteAuthOptOut};
+use rss_request_context::PrincipalKind;
 use std::future::Future;
 use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt; // oneshot
-use vocab::PrincipalKind;
 
 use httpserve::{
     Authenticated, AuthenticatedRoutes, RouteAuthorizationDecision, RouteAuthorizationRequest,
@@ -86,8 +86,8 @@ const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const PRINCIPAL: &str = "11111111-2222-4333-8444-555555555555";
 
 #[allow(clippy::unwrap_used)]
-fn tenant() -> vocab::TenantId {
-    vocab::TenantId::parse(TENANT).unwrap()
+fn tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse(TENANT).unwrap()
 }
 
 fn authed(scheme: httpserve::NonRssTestScheme, kind: PrincipalKind) -> Authenticated {

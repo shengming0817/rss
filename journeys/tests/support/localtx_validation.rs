@@ -39,6 +39,7 @@ use postgres::{
     PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
 };
 use primitives::{AuthPlan, AuthScheme, ListenerKind, MacKey};
+use rss_request_context::{PrincipalKind, TenantId};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use settings::ports::{
@@ -50,7 +51,6 @@ use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode
 use tokio::sync::Barrier;
 use tower::ServiceExt;
 use uuid::Uuid;
-use vocab::{PrincipalKind, TenantId};
 
 const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 const TENANT_B: &str = "a47ac10b-58cc-4372-a567-0e02b2c3d470";

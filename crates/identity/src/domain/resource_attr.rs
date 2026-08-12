@@ -137,7 +137,7 @@ impl ResourceAttributeVersion {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceAttribute {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     route_scope: PolicyRouteScope,
     resource_id: ResourceAttributeResourceId,
     key: ResourceAttributeKey,
@@ -150,7 +150,7 @@ pub struct ResourceAttribute {
 impl ResourceAttribute {
     #[allow(clippy::too_many_arguments)]
     pub fn hydrate(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         route_scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         key: ResourceAttributeKey,
@@ -175,7 +175,7 @@ impl ResourceAttribute {
     }
 
     pub fn build(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         route_scope: PolicyRouteScope,
         resource_id: ResourceAttributeResourceId,
         key: ResourceAttributeKey,
@@ -195,7 +195,7 @@ impl ResourceAttribute {
         )
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -252,9 +252,9 @@ mod tests {
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const RESOURCE: &str = "550e8400-e29b-41d4-a716-446655440000";
 
-    fn tenant() -> vocab::TenantId {
+    fn tenant() -> rss_request_context::TenantId {
         #[allow(clippy::expect_used)]
-        vocab::TenantId::parse(TENANT).expect("tenant")
+        rss_request_context::TenantId::parse(TENANT).expect("tenant")
     }
 
     fn scope() -> PolicyRouteScope {

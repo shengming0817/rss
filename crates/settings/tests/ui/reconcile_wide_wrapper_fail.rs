@@ -11,7 +11,7 @@ impl ReconcileSubscriber for WideReconciler {
     fn reconcile(
         &self,
         _message: diport::Message,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
     ) -> Pin<Box<dyn Future<Output = consistency::HandleResult> + Send + 'static>> {
         let service = Arc::clone(&self.service);
         Box::pin(async move {

@@ -5,7 +5,7 @@
 #![allow(unused)]
 
 use runctx::PrincipalFacet;
-use vocab::PrincipalKind;
+use rss_request_context::PrincipalKind;
 
 // G：authn crate impl runctx::PrincipalFacet 不触发（生产唯一 impl-er：已验证 Principal 派生）。
 struct AuthnPrincipal;

@@ -31,7 +31,8 @@ use diport::{Clock, DynSecretResolver, SecretMaterial, SecretResolver};
 use generated::http::settings_v7::{
     SPEC as SECRET_RESOLVE_HTTP_SPEC, SettingsSecretResolveData, SettingsSecretResolveResponse,
 };
-use vocab::{CoreError, CoreErrorKind, TenantId};
+use rss_request_context::TenantId;
+use vocab::{CoreError, CoreErrorKind};
 
 use crate::application::{authenticated_tenant_scope, request_id_from, wire_version};
 use crate::domain::{
@@ -607,7 +608,7 @@ mod tests {
     use std::time::{Duration, SystemTime};
 
     use diport::{DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolverError};
-    use vocab::TenantId;
+    use rss_request_context::TenantId;
 
     use super::*;
     use crate::domain::{SecretKey, SecretRef, StoreId};
@@ -615,8 +616,8 @@ mod tests {
 
     use axum::routing::post;
     use httpserve::AuthorizedSubject;
+    use rss_request_context::PrincipalKind;
     use testkit::ContractRequest;
-    use vocab::PrincipalKind;
 
     const TENANT_STR: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B_STR: &str = "00000000-0000-4000-8000-000000000abc";

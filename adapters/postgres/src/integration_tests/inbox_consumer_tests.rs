@@ -760,7 +760,7 @@ async fn t_dlx_lifecycle_requires_verified_worm_receipt_before_bounded_purge() -
     .await?;
     assert_eq!(hardened_definers, 8);
 
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let domain = unique_domain("dlx-lifecycle");
     let writer = store.dead_letter(test_dlx_payload_protector());
     for message in ["verified-old", "unverified-old", "verified-recent"] {
@@ -1027,7 +1027,7 @@ async fn t_dlx_poison_candidate_is_quarantined_without_starving_retryable_peer()
     )
     .await?;
     let repository = runtime.repository();
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let domain = unique_domain("dlx-poison-claim");
     let poison_message = unique_event_id("dlx-poison");
     let retryable_message = unique_event_id("dlx-retryable");
@@ -1169,7 +1169,7 @@ async fn t_dlx_receipt_retention_boundary_and_hot_row_rearchive_recovery() -> Te
 
     let (_fixture, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let message_id = unique_event_id("dlx-retention-boundary");
     store
         .dead_letter(test_dlx_payload_protector())
@@ -1299,7 +1299,7 @@ async fn t_dlx_lifecycle_fixed_batch_boundaries_are_100_1000_100() -> TestResult
 
     let (_fixture, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).unwrap();
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap();
     let domain = unique_domain("dlx-fixed-batches");
     let seed_message = unique_event_id("dlx-fixed-seed");
     store
@@ -1551,7 +1551,7 @@ async fn t15b_backlog_returns_exact_multi_tenant_contract_map() -> TestResult {
 
     let domain = unique_domain("t15b-scope-map");
     let tenant_a = test_tenant();
-    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let tenant_b = rss_request_context::TenantId::parse(COTX_TENANT_B)?;
     for (tenant, contract_id, count) in [
         (tenant_a, "metrics.alpha", 2_u8),
         (tenant_a, "metrics.beta", 1_u8),

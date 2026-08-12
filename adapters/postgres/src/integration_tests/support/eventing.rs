@@ -152,7 +152,7 @@ pub(in super::super) async fn prepare_projection_source_outbox_event(
     store: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     prepare_projection_source_outbox_event_with_payload(
         store,
@@ -168,7 +168,7 @@ pub(in super::super) async fn prepare_projection_source_outbox_event_with_payloa
     store: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     payload: &[u8],
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let entry = EventEntry::new(
@@ -205,7 +205,7 @@ pub(in super::super) async fn append_projection_source_event_for_tenant(
     app: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     append_projection_source_event_with_payload_for_tenant(
         app,
@@ -221,7 +221,7 @@ pub(in super::super) async fn append_projection_source_event_with_payload_for_te
     app: &PgStore,
     binding: vocab::ProjectionInputBinding,
     event_id: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     payload: &[u8],
 ) -> Result<i64, Box<dyn std::error::Error + Send + Sync>> {
     let entry = EventEntry::new(
@@ -528,7 +528,7 @@ where
 
 pub(in super::super) async fn reviewed_session_event(
     event_id: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     envelope_subject: &str,
     actor: diport::OutboxActor,
     session_id: uuid::Uuid,
@@ -685,7 +685,7 @@ pub(in super::super) fn make_test_env_with_contract_metadata(
 pub(in super::super) fn make_test_env_for_tenant(
     domain: &str,
     contract_id: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> OutboxEnvelope {
     OutboxEnvelope::new(
         domain.to_string(),
@@ -701,7 +701,7 @@ pub(in super::super) struct SeedFactSnapshot {
 
 pub(in super::super) async fn seed_conflicting_outbox_fact(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &str,
 ) -> Result<SeedFactSnapshot, TestError> {
     let entry = EventEntry::new(
@@ -781,8 +781,8 @@ pub(in super::super) struct ProjectionHighWaterFixture {
     pub(in super::super) app: PgStore,
     pub(in super::super) operator_store: crate::pool::VerifiedPgProjectionOperatorStore,
     pub(in super::super) source_store: crate::pool::VerifiedPgProjectionSourceReadStore,
-    pub(in super::super) tenant: vocab::TenantId,
-    pub(in super::super) other_tenant: vocab::TenantId,
+    pub(in super::super) tenant: rss_request_context::TenantId,
+    pub(in super::super) other_tenant: rss_request_context::TenantId,
     pub(in super::super) binding: vocab::ProjectionInputBinding,
     pub(in super::super) foreign_binding: vocab::ProjectionInputBinding,
     pub(in super::super) scope: eventexec::ProjectionSourceScope,
@@ -811,8 +811,8 @@ impl ProjectionHighWaterFixture {
             )),
         )
         .await?;
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-        let other_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let other_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let fixture = ProjectionConformanceFixture::primary();
         let binding = projection_conformance_inputs(fixture)
             .into_iter()
@@ -882,7 +882,7 @@ pub(in super::super) async fn append_projection_high_water_fixture_event(
 
 pub(in super::super) async fn projection_record_from_journal(
     owner: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     lsn: i64,
 ) -> Result<consistency::ProjectionEventRecord, TestError> {
     let (
@@ -2420,7 +2420,7 @@ pub(in super::super) async fn localtx_assert_backend_quarantined(
 
 pub(in super::super) async fn run_localtx_deadline_write<T, F>(
     scoped: &crate::cotx::TenantDb<ServingWriteLane>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     budget: consistency::LocalTxExecutionBudget,
     write: F,
 ) -> (Result<T, settings::ports::ConfigRepoError>, usize)
@@ -2528,7 +2528,7 @@ pub(in super::super) async fn seed_outbox_dlx(
 
 pub(in super::super) async fn direct_outbox_redrive(
     pool: sqlx::PgPool,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: String,
 ) -> Result<i64, sqlx::Error> {
     let mut tx = pool.begin().await?;

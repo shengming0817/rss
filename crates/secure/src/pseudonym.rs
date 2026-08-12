@@ -3,8 +3,8 @@
 use std::num::NonZeroU16;
 
 use hmac::{Hmac, Mac as _};
+use rss_request_context::TenantId;
 use sha2::Sha256;
-use vocab::TenantId;
 
 use crate::RedactionHashKey;
 
@@ -149,7 +149,7 @@ fn pseudonymize(
     }
     let mut message = Vec::new();
     push_length_prefixed(&mut message, CONTEXT);
-    push_length_prefixed(&mut message, tenant.as_uuid().as_bytes());
+    push_length_prefixed(&mut message, &tenant.octets());
     push_length_prefixed(&mut message, domain.as_bytes());
     push_length_prefixed(&mut message, value);
     let mut mac = match Hmac::<Sha256>::new_from_slice(key.key.as_bytes()) {

@@ -5,7 +5,7 @@ use diport::{
 
 fn main() {
     let tenant =
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
     let header = EnvelopeHeader::new(
         tenant,
         EnvelopeSchemaVersion::parse("v1").expect("version"),

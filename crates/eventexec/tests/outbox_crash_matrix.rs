@@ -69,7 +69,8 @@ impl CrashClaim {
     fn new(row: &DurableRow, lease_token: String, lease_deadline_epoch_micros: i64) -> Self {
         Self {
             subject: OutboxMetricSubject::new(
-                vocab::TenantId::parse(&row.delivery.tenant_id).expect("valid tenant"),
+                rss_request_context::TenantId::parse(&row.delivery.tenant_id)
+                    .expect("valid tenant"),
                 OutboxContractId::parse(&row.delivery.contract_id).expect("valid contract"),
             ),
             message_id: row.delivery.message_id.clone(),

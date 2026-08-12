@@ -519,7 +519,7 @@ impl AuthenticatedDeviceDelivery {
 }
 
 impl DeviceIngressDelivery for AuthenticatedDeviceDelivery {
-    fn tenant(&self) -> vocab::TenantId {
+    fn tenant(&self) -> rss_request_context::TenantId {
         self.scope.tenant()
     }
 
@@ -621,7 +621,7 @@ impl MqttSession {
     /// sole routing authority, independently of the desired certificate generation in payload.
     pub async fn send_command(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         device: ids::DeviceId,
         message_id: &MessageId,
         payload: Vec<u8>,
@@ -643,7 +643,7 @@ impl MqttSession {
     /// configured scope is the sole credential-generation authority.
     pub async fn send_application_receipt(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         device: ids::DeviceId,
         message_id: &MessageId,
         payload: Vec<u8>,
@@ -661,7 +661,7 @@ impl MqttSession {
     async fn send_downlink(
         &self,
         contract: DownlinkContract,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         device: ids::DeviceId,
         message_id: &MessageId,
         payload: Vec<u8>,
@@ -815,7 +815,7 @@ enum DownlinkContract {
 
 struct DownlinkPublish {
     contract: DownlinkContract,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: ids::DeviceId,
     message_id: String,
     payload: Vec<u8>,
@@ -2158,7 +2158,8 @@ mod tests {
         let mut publish = Publish::new("uplink", QoS::AtLeastOnce, Vec::new(), None);
         publish.pkid = u16::try_from(epoch).unwrap_or(1);
         let scope = crate::DeviceScope::new(
-            vocab::TenantId::parse("11111111-1111-4111-8111-111111111111").expect("tenant"),
+            rss_request_context::TenantId::parse("11111111-1111-4111-8111-111111111111")
+                .expect("tenant"),
             ids::DeviceId::parse("22222222-2222-4222-8222-222222222222").expect("device"),
             crate::CredentialGeneration::new(2).expect("generation"),
         );

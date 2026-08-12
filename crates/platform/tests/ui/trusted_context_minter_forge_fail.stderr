@@ -1,0 +1,5 @@
+error[E0451]: field `seal` of struct `TrustedContextMinter` is private
+ --> tests/ui/trusted_context_minter_forge_fail.rs:4:42
+  |
+4 |     let _forged = TrustedContextMinter { seal: 1 };
+  |                                          ^^^^ private field

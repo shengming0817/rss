@@ -1,5 +1,6 @@
 //! `PgResourceAttributeRepo` —— identity durable resource attribute store / resolver（#1590）。
 
+use rss_request_context::TenantId;
 use std::collections::HashMap;
 use std::time::SystemTime;
 
@@ -7,7 +8,7 @@ use identity::ports::PolicyRouteScope;
 use identity::ports::{
     IdentityError, PolicyValue, PolicyValueRef, ResourceAttribute, ResourceAttributeKey,
     ResourceAttributeReadRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
-    ResourceAttributeVersion, ResourceAttributeWriteRepo, TenantId, TenantRepoScope,
+    ResourceAttributeVersion, ResourceAttributeWriteRepo, TenantRepoScope,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::Row;

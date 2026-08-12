@@ -12,10 +12,10 @@
 
 ## #2107 atomic RSS cutover
 
-- [ ] Extract `rss-contract` and `rss-request-context`, then delete duplicate identities.
-- [ ] Replace Platform crypto, synchronous Handler and lifecycle ownership with the async application waist.
-- [ ] Land private AuthN/AuthZ mint plus OIDC and RuntimeExec bridges.
-- [ ] Update composition, Release API baseline and exact package proof in the same PR.
+- [x] Extract `rss-contract` and `rss-request-context`, then delete duplicate identities.
+- [x] Replace Platform crypto, synchronous Handler and lifecycle ownership with the async application waist.
+- [x] Land private AuthN/AuthZ mint plus OIDC and RuntimeExec bridges.
+- [x] Update composition, Release API baseline and exact package proof in the same PR.
 - [ ] Exact-check ADR-026's canonical receipt with the cutover additions in `plan.md`; retain no compatibility path.
 
 ## #2108 external first-green

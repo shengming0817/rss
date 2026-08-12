@@ -149,10 +149,10 @@ impl PolicyVersion {
 
 /// Policy obligations captured by PDP evaluation.
 ///
-/// Row-scope uses `ScopedTenant`, not `RowScope`, so ordinary policy rows cannot express `All`.
+/// Row-scope uses `RowScope`, not `RowScope`, so ordinary policy rows cannot express `All`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct PolicyObligations {
-    row_scope: Option<vocab::ScopedTenant>,
+    row_scope: Option<rss_request_context::RowScope>,
     field_mask: Vec<AttributeKey>,
 }
 
@@ -161,14 +161,17 @@ impl PolicyObligations {
         Self::default()
     }
 
-    pub fn new(row_scope: Option<vocab::ScopedTenant>, field_mask: Vec<AttributeKey>) -> Self {
+    pub fn new(
+        row_scope: Option<rss_request_context::RowScope>,
+        field_mask: Vec<AttributeKey>,
+    ) -> Self {
         Self {
             row_scope,
             field_mask,
         }
     }
 
-    pub fn row_scope(&self) -> Option<vocab::ScopedTenant> {
+    pub fn row_scope(&self) -> Option<rss_request_context::RowScope> {
         self.row_scope
     }
 
@@ -943,7 +946,7 @@ impl PolicyRule {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Policy {
     id: PolicyId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     route_scope: PolicyRouteScope,
     version: PolicyVersion,
     effective_from: SystemTime,
@@ -954,7 +957,11 @@ pub struct Policy {
 impl Policy {
     /// 域内测试用构造器：默认 version=1、立即生效、不带 route 约束。
     #[cfg(test)]
-    pub(crate) fn new(id: PolicyId, tenant: vocab::TenantId, rules: Vec<PolicyRule>) -> Self {
+    pub(crate) fn new(
+        id: PolicyId,
+        tenant: rss_request_context::TenantId,
+        rules: Vec<PolicyRule>,
+    ) -> Self {
         Self {
             id,
             tenant,
@@ -972,7 +979,7 @@ impl Policy {
     /// 跨 crate 受控重建 funnel（postgres adapter 从持久化行重建）。
     pub fn hydrate(
         id: &str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         route_scope: PolicyRouteScope,
         version: u32,
         effective_from: SystemTime,
@@ -996,7 +1003,7 @@ impl Policy {
     /// 构建新的 authoring policy；新 row 的 CAS version 固定从 1 开始。
     pub fn build(
         id: &str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         route_scope: PolicyRouteScope,
         effective_from: SystemTime,
         effective_until: Option<SystemTime>,
@@ -1017,7 +1024,7 @@ impl Policy {
         &self.id
     }
 
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -1079,7 +1086,7 @@ impl PolicyEvaluation {
 }
 
 pub(crate) fn evaluate_abac_for_tenant(
-    tenant: Option<vocab::TenantId>,
+    tenant: Option<rss_request_context::TenantId>,
     attrs: &[AbacAttribute],
     policy: &Policy,
 ) -> PolicyEvaluation {
@@ -1112,7 +1119,7 @@ pub(crate) fn evaluate_abac_for_tenant(
 }
 
 pub(crate) fn evaluate_policies_for_tenant(
-    tenant: Option<vocab::TenantId>,
+    tenant: Option<rss_request_context::TenantId>,
     attrs: &[AbacAttribute],
     policies: &[Policy],
 ) -> PolicyEvaluation {
@@ -1286,9 +1293,11 @@ mod tests {
     };
     use crate::domain::{AttributeKey, DecimalValue, PolicyId, PolicyValue};
     use authn::Principal;
+    use rss_request_context::PrincipalKind;
+    use rss_request_context::RowScope;
+    use rss_request_context::TenantId;
     use rstest::rstest;
-    use vocab::tenant::{ScopedTenant, TenantId};
-    use vocab::{Decision, PrincipalKind};
+    use vocab::Decision;
 
     const TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -1657,7 +1666,7 @@ mod tests {
 
     #[test]
     fn obligations_are_preserved_but_route_allow_requires_empty_obligations() {
-        let obligations = PolicyObligations::new(Some(ScopedTenant::Tenant), vec![akey("email")]);
+        let obligations = PolicyObligations::new(Some(RowScope::Tenant), vec![akey("email")]);
         let rule = PolicyRule::with_obligations(
             PolicyCondition::new(akey("role"), eq(aval("admin"))),
             PolicyEffect::Allow,
@@ -1685,7 +1694,7 @@ mod tests {
             vec![PolicyRule::with_obligations(
                 PolicyCondition::new(akey("dept"), eq(aval("eng"))),
                 PolicyEffect::Allow,
-                PolicyObligations::new(Some(ScopedTenant::Tenant), vec![]),
+                PolicyObligations::new(Some(RowScope::Tenant), vec![]),
             )],
         );
         let attrs = vec![attr("role", "admin"), attr("dept", "eng")];

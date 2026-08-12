@@ -16,6 +16,7 @@ workspace = true
 test-util = []
 
 [dependencies]
+rss-request-context.workspace = true
 # 基础/引擎（仅用到的 path dep；ids/secure/support/consistency 未用 → 不声明，避免 cargo-udeps 多余依赖）
 vocab = { path = "../vocab" }           # CoreError / CoreErrorKind / PublicDetail（wire error mapper 单源）
 primitives = { path = "../primitives" } # AuthPlan / resolve_requirement / HealthReport（健康聚合）
@@ -45,6 +46,7 @@ metrics = { workspace = true }
 thiserror = { workspace = true }
 ipnet = { workspace = true }
 tokio = { workspace = true, features = ["time"] } # 全请求 server budget；timeout 通过 drop 取消整条 request future
+tokio-util.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

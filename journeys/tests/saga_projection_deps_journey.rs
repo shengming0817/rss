@@ -137,7 +137,7 @@ fn demo_harness() -> Result<DemoHarness> {
 }
 
 fn instance() -> Result<SagaInstanceRef> {
-    let tenant = vocab::TenantId::parse(TENANT)?;
+    let tenant = rss_request_context::TenantId::parse(TENANT)?;
     Ok(SagaInstanceRef::new(
         tenant,
         SagaId::new(uuid::Uuid::from_u128(1637)),

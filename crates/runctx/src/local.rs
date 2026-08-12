@@ -48,9 +48,9 @@ pub struct MissingCtx;
 mod tests {
     use crate::ctx::{AppCtx, PrincipalFacet, RequestCtx, TestPrincipalFacet};
     use crate::local::{MissingCtx, scope, try_current, try_with};
+    use rss_request_context::PrincipalKind;
+    use rss_request_context::TenantId;
     use std::sync::Arc;
-    use vocab::PrincipalKind;
-    use vocab::tenant::TenantId;
 
     // 测试 fixture：把任意 label 确定性映射到合法 canonical UUID（distinct label ⇒ distinct id，
     // 同 label ⇒ 同 id），使租户隔离 / 相等断言可辨。`DefaultHasher` 在**同次运行内**确定即够本测试

@@ -1,5 +1,5 @@
 fn main() {
-    let tenant = vocab::TenantId::parse("00000000-0000-0000-0000-000000000001").unwrap();
+    let tenant = rss_request_context::TenantId::parse("00000000-0000-0000-0000-000000000001").unwrap();
     let identity = diport::SagaWorkerIdentity::new(
         "billing",
         diport::SagaContractId::parse("billing.checkout").unwrap(),

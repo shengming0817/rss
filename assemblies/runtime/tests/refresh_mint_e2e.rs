@@ -290,7 +290,7 @@ fn vault_jwt_issuer(vault_uri: &str) -> authn::JwtIssuer<diport::RssAccessProfil
 
 #[allow(clippy::expect_used)]
 fn refresh_backend(settlement: RefreshSettlement) -> RefreshBackend {
-    let tenant = vocab::TenantId::parse(TENANT).expect("tenant");
+    let tenant = rss_request_context::TenantId::parse(TENANT).expect("tenant");
     let user_id = ids::UserId::parse(USER_ID).expect("user");
     let epoch = authn::AuthnEpoch::hydrate(5).expect("epoch");
     let issued_at = UNIX_EPOCH + Duration::from_secs((NOW - 30) as u64);
@@ -426,7 +426,7 @@ async fn vault_signed_access_jwt_verifies_via_oidc_bridge() {
 
     // 2. 经 vault Signer（mock）从完整 AuthGrant 铸 RSS User access JWT。
     let issuer = vault_jwt_issuer(&server.uri());
-    let tenant = vocab::TenantId::parse(TENANT).expect("canonical tenant");
+    let tenant = rss_request_context::TenantId::parse(TENANT).expect("canonical tenant");
     let grant = authn::AuthGrant::new_active(
         tenant,
         ids::UserId::parse(USER_ID).expect("canonical user id"),
@@ -479,7 +479,7 @@ async fn refresh_non_acknowledged_settlements_never_release_bearers() {
         .respond_with(TransitSignResponder { sk: sk_jwt() })
         .mount(&server)
         .await;
-    let tenant = vocab::TenantId::parse(TENANT).expect("tenant");
+    let tenant = rss_request_context::TenantId::parse(TENANT).expect("tenant");
 
     // The fake deliberately has no Applied branch: only the PostgreSQL settlement funnel may mint
     // the commit acknowledgement. The real Applied path is covered by

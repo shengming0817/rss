@@ -440,7 +440,7 @@ impl ClaimHydrationError {
 }
 
 struct TenantAuthoritySignInput<'a> {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     domain: &'a str,
     contract_id: &'a str,
     topic: &'a str,
@@ -579,7 +579,7 @@ impl RelayPublishFailure {
 /// reserved key 拒绝由 `metadata_try_insert_rejects_reserved_key` 负向单测守 anti-vacuity。
 #[derive(Clone)]
 pub(crate) struct OutboxMetadata {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     contract_version: String,
     schema_hash: String,
     map: serde_json::Map<String, serde_json::Value>,
@@ -599,7 +599,7 @@ impl OutboxMetadata {
     /// #1224 接线（emit 侧 `tracewire::capture_current`）；correlation 已接线 #1160；principal 待 #1397。
     pub(crate) fn new(
         occurred_at_secs: i64,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         contract: vocab::ContractBinding,
     ) -> Self {
         // KEY_OCCURRED_AT = diport 单源（#1160 A4）。
@@ -631,7 +631,7 @@ impl OutboxMetadata {
     }
 
     /// 借出 envelope 所属 tenant；与 JSON metadata 中 `tenantId` 同源，避免生产路径运行期反解析。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub(crate) fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -766,7 +766,7 @@ pub(crate) fn unix_secs(t: SystemTime) -> i64 {
 /// 全部缺失（worker 任务 / 批次未绑 correlation、无 otel）→ 仅含 occurred_at，不 panic（fail-open，不阻投递）。
 pub(crate) fn metadata_with_ambient(
     occurred_at_secs: i64,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     contract: vocab::ContractBinding,
 ) -> OutboxMetadata {
     let mut m = OutboxMetadata::new(occurred_at_secs, tenant, contract);
@@ -802,7 +802,7 @@ pub(crate) struct OutboxEnvelope {
     contract_id: String,
     contract_version: String,
     schema_hash: String,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     metadata: OutboxMetadata,
     causation_id: Option<String>,
     partition_key: Option<String>,
@@ -873,7 +873,7 @@ impl OutboxEnvelope {
     }
 
     /// 借出 tenant_id；outbox 表列、RLS 与 metadata `tenantId` 共享此类型层来源。
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub(crate) fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -945,7 +945,7 @@ impl OutboxAppendError {
 /// `INSERT INTO outbox`。
 pub(crate) struct ReplayedOutboxAppend {
     pub(crate) event_id: String,
-    pub(crate) tenant: vocab::TenantId,
+    pub(crate) tenant: rss_request_context::TenantId,
     pub(crate) domain: String,
     pub(crate) topic: String,
     pub(crate) contract_id: String,
@@ -1010,7 +1010,7 @@ impl OutboxWriteEntry for StoredOutboxEntry {
 /// own adjacent construction because its payload and metadata remain zeroize-on-drop all the way
 /// to the SQL bind boundary rather than being copied into ordinary envelope buffers.
 pub(crate) struct CanonicalOutboxFact<'a> {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &'a str,
     domain: &'a str,
     topic: &'a str,
@@ -1061,7 +1061,7 @@ impl<'a> CanonicalOutboxFact<'a> {
         }
     }
 
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub(crate) fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -1622,7 +1622,7 @@ fn local_publish_budget_available(
 impl PgOutbox {
     async fn settle_delivery_window_expired(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         claimed: &PgClaimedOutboxEntry,
         phase: SameIdDeliveryPhase,
     ) -> Result<consistency::Disposition, EngineError> {
@@ -1904,7 +1904,7 @@ fn record_same_id_window_expired(
 impl PgOutbox {
     async fn settle_publish_failure(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         claimed: &PgClaimedOutboxEntry,
         err: &RelayPublishFailure,
     ) -> Result<consistency::Disposition, EngineError> {
@@ -2250,8 +2250,9 @@ fn parse_metadata_json(json: &str) -> Result<serde_json::Value, EngineError> {
     }
 }
 
-fn parse_tenant_id(raw: &str) -> Result<vocab::TenantId, EngineError> {
-    vocab::TenantId::parse(raw).map_err(|_| EngineError::new(EngineErrorKind::Invariant))
+fn parse_tenant_id(raw: &str) -> Result<rss_request_context::TenantId, EngineError> {
+    rss_request_context::TenantId::parse(raw)
+        .map_err(|_| EngineError::new(EngineErrorKind::Invariant))
 }
 
 fn parse_outbox_contract_id(raw: &str) -> Result<OutboxContractId, EngineError> {
@@ -2270,7 +2271,7 @@ fn parse_metric_subject(
 
 fn metadata_json_with_column_tenant(
     json: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Result<serde_json::Value, EngineError> {
     let mut metadata = parse_metadata_json(json)?;
     let serde_json::Value::Object(ref mut map) = metadata else {
@@ -2285,7 +2286,7 @@ fn metadata_json_with_column_tenant(
 
 fn metadata_json_with_relay_failure(
     json: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     contract_version: &str,
     schema_hash: &str,
     relay_failure_reason: Option<&'static str>,
@@ -2682,8 +2683,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).expect("canonical tenant")
     }
 
     fn metadata(occurred_at_secs: i64) -> OutboxMetadata {
@@ -2795,10 +2796,10 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn actor(raw: &str) -> OutboxActor {
         OutboxActor::scoped(
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             OpaqueActorId::from_opaque(raw).expect("valid actor id"),
             tenant(),
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         )
     }
 

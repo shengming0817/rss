@@ -144,7 +144,7 @@ fn sk_jwt() -> SigningKey {
 
 #[allow(clippy::expect_used)]
 fn readiness_context_b64(tenant: &str) -> String {
-    let tenant = vocab::TenantId::parse(tenant).expect("canonical readiness tenant");
+    let tenant = rss_request_context::TenantId::parse(tenant).expect("canonical readiness tenant");
     let aad = secure::ProtectionContext::authenticated_request(
         tenant,
         "readiness.probe",
@@ -596,7 +596,7 @@ async fn seed_role_revision(
     pool: &PgPool,
     tenant: TenantId,
     actor: &str,
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
     role: &Role,
 ) -> TestResult {
     let mut tx = pool.begin().await?;
@@ -701,7 +701,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
         &observation_pool,
         tenant,
         CANON_USER,
-        vocab::PrincipalKind::User,
+        rss_request_context::PrincipalKind::User,
         &logout_role,
     )
     .await?;
@@ -717,7 +717,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
             ProducerMarker::for_test(ROLES_ASSIGN_PRODUCER).into_receipt(),
             tenant,
             ids::UserId::parse(CANON_USER)?,
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             CANON_USER.to_string(),
             logout_role_id,
         )
@@ -1076,7 +1076,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
         &observation_pool,
         tenant,
         CANON_USER,
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         &Role::hydrate(
             "session-owner",
             "All-session logout only",
@@ -1107,7 +1107,7 @@ async fn wire_identity_logout_current_all_e2e() -> TestResult {
         &observation_pool,
         tenant,
         CANON_USER,
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         &Role::hydrate(
             "session-owner",
             "Current and all session logout",
@@ -1403,7 +1403,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         &assertion_pool,
         tenant,
         CANON_USER,
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         &admin_role,
     )
     .await?;
@@ -1411,7 +1411,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
         &assertion_pool,
         tenant,
         CANON_USER,
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         &Role::hydrate(
             OPERATOR_ROLE,
             "Operator",
@@ -1431,7 +1431,7 @@ async fn wire_identity_roles_binding_http_persists_and_emits_outbox_e2e() -> Tes
             ProducerMarker::for_test(ROLES_ASSIGN_PRODUCER).into_receipt(),
             tenant,
             actor,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_USER.to_string(),
             admin_role_id,
         )

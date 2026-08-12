@@ -126,7 +126,7 @@ async fn authenticate(
     let Some(tenant) = principal.tenant() else {
         return VerifyOutcome::Rejected;
     };
-    if principal.kind() != vocab::PrincipalKind::User {
+    if principal.kind() != rss_request_context::PrincipalKind::User {
         return VerifyOutcome::Rejected;
     }
     let principal = Arc::new(principal);
@@ -149,7 +149,7 @@ async fn authenticate(
 fn allow_evidence(
     validated_grant: identity::ValidatedAuthGrant,
     principal: &authn::Principal,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Option<(Authenticated, identity::CurrentAuthGrant)> {
     let current = validated_grant.into_current_auth_grant();
     if !current.binds_principal(tenant, principal.audit_subject()) {

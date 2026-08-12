@@ -189,11 +189,11 @@ pub diport::audit_sink::AuditEvent::correlation_id: core::option::Option<alloc::
 pub diport::audit_sink::AuditEvent::occurred_at: std::time::SystemTime
 pub diport::audit_sink::AuditEvent::outcome: diport::audit_sink::AuditOutcome
 pub diport::audit_sink::AuditEvent::principal_id: alloc::string::String
-pub diport::audit_sink::AuditEvent::principal_kind: vocab::principal::PrincipalKind
+pub diport::audit_sink::AuditEvent::principal_kind: rss_request_context::PrincipalKind
 pub diport::audit_sink::AuditEvent::request_id: core::option::Option<alloc::string::String>
 pub diport::audit_sink::AuditEvent::resource_id: alloc::string::String
 pub diport::audit_sink::AuditEvent::resource_kind: &'static str
-pub diport::audit_sink::AuditEvent::tenant_id: core::option::Option<vocab::tenant::TenantId>
+pub diport::audit_sink::AuditEvent::tenant_id: core::option::Option<rss_request_context::TenantId>
 impl core::clone::Clone for diport::audit_sink::AuditEvent
 pub fn diport::audit_sink::AuditEvent::clone(&self) -> diport::audit_sink::AuditEvent
 impl core::fmt::Debug for diport::audit_sink::AuditEvent
@@ -667,14 +667,14 @@ pub fn diport::dead_letter_store::DeadLetterRecord::contract_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::error_summary(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
-pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, diport::dead_letter_store::DeadLetterProvenance, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::dead_letter_store::DeadLetterRecord::new(rss_request_context::TenantId, impl core::convert::Into<alloc::string::String>, diport::dead_letter_store::DeadLetterProvenance, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
 pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &diport::RedactedBytes
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
 pub fn diport::dead_letter_store::DeadLetterRecord::producer_domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::provenance(&self) -> &diport::dead_letter_store::DeadLetterProvenance
 pub fn diport::dead_letter_store::DeadLetterRecord::source(&self) -> diport::dead_letter_store::DeadLetterSource
-pub fn diport::dead_letter_store::DeadLetterRecord::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::dead_letter_store::DeadLetterRecord::tenant(&self) -> rss_request_context::TenantId
 pub fn diport::dead_letter_store::DeadLetterRecord::topic(&self) -> &str
 impl core::clone::Clone for diport::dead_letter_store::DeadLetterRecord
 pub fn diport::dead_letter_store::DeadLetterRecord::clone(&self) -> diport::dead_letter_store::DeadLetterRecord
@@ -1302,13 +1302,13 @@ impl core::panic::unwind_safe::UnwindSafe for diport::envelope::MetadataError
 pub struct diport::envelope::EnvelopeHeader
 impl diport::envelope::EnvelopeHeader
 pub fn diport::envelope::EnvelopeHeader::correlation(&self) -> core::option::Option<&str>
-pub fn diport::envelope::EnvelopeHeader::new(vocab::tenant::TenantId, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
+pub fn diport::envelope::EnvelopeHeader::new(rss_request_context::TenantId, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
 pub fn diport::envelope::EnvelopeHeader::occurred_at_secs(&self) -> core::option::Option<i64>
 pub fn diport::envelope::EnvelopeHeader::partition_key(&self) -> core::option::Option<&consistency::outbox::PartitionKey>
 pub fn diport::envelope::EnvelopeHeader::schema_hash(&self) -> &diport::envelope::EnvelopeSchemaHash
 pub fn diport::envelope::EnvelopeHeader::schema_version(&self) -> &diport::envelope::EnvelopeSchemaVersion
 pub fn diport::envelope::EnvelopeHeader::tenant_authority(&self) -> core::option::Option<&str>
-pub fn diport::envelope::EnvelopeHeader::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn diport::envelope::EnvelopeHeader::tenant_id(&self) -> rss_request_context::TenantId
 pub fn diport::envelope::EnvelopeHeader::trace(&self) -> core::option::Option<&str>
 pub fn diport::envelope::EnvelopeHeader::try_from_metadata(&diport::envelope::EnvelopeMetadata, core::option::Option<consistency::outbox::PartitionKey>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
 impl core::clone::Clone for diport::envelope::EnvelopeHeader
@@ -1339,7 +1339,7 @@ pub fn diport::envelope::EnvelopeMetadata::len(&self) -> usize
 pub fn diport::envelope::EnvelopeMetadata::occurred_at_secs(&self) -> core::option::Option<i64>
 pub fn diport::envelope::EnvelopeMetadata::schema_hash(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaHash>
 pub fn diport::envelope::EnvelopeMetadata::schema_version(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaVersion>
-pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<vocab::tenant::TenantId>
+pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<rss_request_context::TenantId>
 pub fn diport::envelope::EnvelopeMetadata::try_insert(&mut self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<(), diport::envelope::MetadataError>
 impl core::clone::Clone for diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::clone(&self) -> diport::envelope::EnvelopeMetadata
@@ -2464,11 +2464,11 @@ impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OpaqueActo
 pub struct diport::outbox_emitter::OutboxActor
 impl diport::outbox_emitter::OutboxActor
 pub fn diport::outbox_emitter::OutboxActor::actor_id(&self) -> &diport::outbox_emitter::OpaqueActorId
-pub fn diport::outbox_emitter::OutboxActor::kind(&self) -> vocab::principal::PrincipalKind
-pub fn diport::outbox_emitter::OutboxActor::scope(&self) -> vocab::tenant::RowScope
-pub fn diport::outbox_emitter::OutboxActor::scoped(vocab::principal::PrincipalKind, diport::outbox_emitter::OpaqueActorId, vocab::tenant::TenantId, vocab::tenant::ScopedTenant) -> Self
+pub fn diport::outbox_emitter::OutboxActor::kind(&self) -> rss_request_context::PrincipalKind
+pub fn diport::outbox_emitter::OutboxActor::scope(&self) -> vocab::tenant::VisibilityScope
+pub fn diport::outbox_emitter::OutboxActor::scoped(rss_request_context::PrincipalKind, diport::outbox_emitter::OpaqueActorId, rss_request_context::TenantId, rss_request_context::RowScope) -> Self
 pub fn diport::outbox_emitter::OutboxActor::service(diport::outbox_emitter::OpaqueActorId) -> Self
-pub fn diport::outbox_emitter::OutboxActor::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+pub fn diport::outbox_emitter::OutboxActor::tenant(&self) -> core::option::Option<rss_request_context::TenantId>
 impl core::clone::Clone for diport::outbox_emitter::OutboxActor
 pub fn diport::outbox_emitter::OutboxActor::clone(&self) -> diport::outbox_emitter::OutboxActor
 impl core::cmp::Eq for diport::outbox_emitter::OutboxActor
@@ -2507,10 +2507,10 @@ impl diport::outbox_emitter::OutboxEnvelopeParts
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::actor(&self) -> &diport::outbox_emitter::OutboxActor
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::causation_id(&self) -> core::option::Option<&diport::outbox_emitter::EnvelopeCausationId>
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::contract(&self) -> &vocab::contract::binding::ContractBinding
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>, core::option::Option<diport::outbox_emitter::EnvelopeCausationId>)
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor) -> Self
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, rss_request_context::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>, core::option::Option<diport::outbox_emitter::EnvelopeCausationId>)
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, rss_request_context::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor) -> Self
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::subject_id(&self) -> &diport::outbox_emitter::EnvelopeSubjectId
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::tenant(&self) -> rss_request_context::TenantId
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_causation_id(self, diport::outbox_emitter::EnvelopeCausationId) -> Self
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_partition_key(self, consistency::outbox::PartitionKey) -> Self
 impl core::clone::Clone for diport::outbox_emitter::OutboxEnvelopeParts
@@ -2782,20 +2782,20 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedClaimShape
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedClaimShapeError
 pub enum diport::pdp::VerifiedClaimsView<'a>
 pub diport::pdp::VerifiedClaimsView::FederatedAccess
-pub diport::pdp::VerifiedClaimsView::FederatedAccess::kind: vocab::principal::PrincipalKind
+pub diport::pdp::VerifiedClaimsView::FederatedAccess::kind: rss_request_context::PrincipalKind
 pub diport::pdp::VerifiedClaimsView::FederatedAccess::permissions: &'a diport::pdp::VerifiedFederatedPermissions
 pub diport::pdp::VerifiedClaimsView::FederatedAccess::subject: &'a str
-pub diport::pdp::VerifiedClaimsView::FederatedAccess::tenant: core::option::Option<vocab::tenant::TenantId>
+pub diport::pdp::VerifiedClaimsView::FederatedAccess::tenant: core::option::Option<rss_request_context::TenantId>
 pub diport::pdp::VerifiedClaimsView::ProjectionOperator
 pub diport::pdp::VerifiedClaimsView::ProjectionOperator::caller: vocab::service::ServiceCallerDomain
-pub diport::pdp::VerifiedClaimsView::ProjectionOperator::tenant: vocab::tenant::TenantId
+pub diport::pdp::VerifiedClaimsView::ProjectionOperator::tenant: rss_request_context::TenantId
 pub diport::pdp::VerifiedClaimsView::RssUser
 pub diport::pdp::VerifiedClaimsView::RssUser::grant: &'a diport::pdp::VerifiedAccessGrantFacts
-pub diport::pdp::VerifiedClaimsView::RssUser::tenant: vocab::tenant::TenantId
+pub diport::pdp::VerifiedClaimsView::RssUser::tenant: rss_request_context::TenantId
 pub diport::pdp::VerifiedClaimsView::RssUser::user_id: ids::UserId
 pub diport::pdp::VerifiedClaimsView::ServiceToken
 pub diport::pdp::VerifiedClaimsView::ServiceToken::caller: vocab::service::ServiceCallerDomain
-pub diport::pdp::VerifiedClaimsView::ServiceToken::tenant: vocab::tenant::TenantId
+pub diport::pdp::VerifiedClaimsView::ServiceToken::tenant: rss_request_context::TenantId
 impl<'a> core::marker::Freeze for diport::pdp::VerifiedClaimsView<'a>
 impl<'a> core::marker::Send for diport::pdp::VerifiedClaimsView<'a>
 impl<'a> core::marker::Sync for diport::pdp::VerifiedClaimsView<'a>
@@ -2959,8 +2959,8 @@ impl<'a> core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenRe
 impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayScope<'a>
 pub struct diport::pdp::ServiceTokenTenantBinding(_)
 impl diport::pdp::ServiceTokenTenantBinding
-pub fn diport::pdp::ServiceTokenTenantBinding::new(vocab::tenant::TenantId) -> Self
-pub fn diport::pdp::ServiceTokenTenantBinding::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::pdp::ServiceTokenTenantBinding::new(rss_request_context::TenantId) -> Self
+pub fn diport::pdp::ServiceTokenTenantBinding::tenant(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::clone(&self) -> diport::pdp::ServiceTokenTenantBinding
 impl core::fmt::Debug for diport::pdp::ServiceTokenTenantBinding
@@ -3025,10 +3025,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedAccessGran
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedAccessGrantFacts
 pub struct diport::pdp::VerifiedClaims
 impl diport::pdp::VerifiedClaims
-pub fn diport::pdp::VerifiedClaims::federated_access(impl core::convert::Into<alloc::string::String>, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind, diport::pdp::VerifiedFederatedPermissions) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
-pub fn diport::pdp::VerifiedClaims::projection_operator(vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> Self
-pub fn diport::pdp::VerifiedClaims::rss_user(ids::UserId, vocab::tenant::TenantId, diport::pdp::VerifiedAccessGrantFacts) -> Self
-pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> Self
+pub fn diport::pdp::VerifiedClaims::federated_access(impl core::convert::Into<alloc::string::String>, core::option::Option<rss_request_context::TenantId>, rss_request_context::PrincipalKind, diport::pdp::VerifiedFederatedPermissions) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
+pub fn diport::pdp::VerifiedClaims::projection_operator(vocab::service::ServiceCallerDomain, rss_request_context::TenantId) -> Self
+pub fn diport::pdp::VerifiedClaims::rss_user(ids::UserId, rss_request_context::TenantId, diport::pdp::VerifiedAccessGrantFacts) -> Self
+pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain, rss_request_context::TenantId) -> Self
 pub fn diport::pdp::VerifiedClaims::view(&self) -> diport::pdp::VerifiedClaimsView<'_>
 impl core::clone::Clone for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::clone(&self) -> diport::pdp::VerifiedClaims
@@ -3469,8 +3469,8 @@ impl core::panic::unwind_safe::UnwindSafe for diport::revocation_store::CertNotA
 pub struct diport::revocation_store::CertScope
 impl diport::revocation_store::CertScope
 pub fn diport::revocation_store::CertScope::device(&self) -> ids::DeviceId
-pub fn diport::revocation_store::CertScope::new(vocab::tenant::TenantId, ids::DeviceId) -> Self
-pub fn diport::revocation_store::CertScope::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::revocation_store::CertScope::new(rss_request_context::TenantId, ids::DeviceId) -> Self
+pub fn diport::revocation_store::CertScope::tenant(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for diport::revocation_store::CertScope
 pub fn diport::revocation_store::CertScope::clone(&self) -> diport::revocation_store::CertScope
 impl core::cmp::Eq for diport::revocation_store::CertScope
@@ -4166,7 +4166,7 @@ pub type diport::DynSagaDurableStore<'_>::Privilege = diport::LocalPrivilege
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for &diport::DynSagaDurableStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4177,7 +4177,7 @@ pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&self, d
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for &mut diport::DynSagaDurableStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4188,7 +4188,7 @@ pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&sel
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4199,7 +4199,7 @@ pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::termina
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for diport::DynSagaDurableStore<'dynosaur_struct>
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4508,7 +4508,7 @@ pub const fn diport::saga_durable_store::SagaOperatorAuthorization<A>::identity(
 pub const fn diport::saga_durable_store::SagaOperatorAuthorization<A>::instance(&self) -> consistency::saga::SagaInstanceRef
 pub fn diport::saga_durable_store::SagaOperatorAuthorization<A>::issue(sagaauthmint::SagaOperatorMint, vocab::service::ServiceCallerDomain, consistency::saga::SagaWorkerIdentity, consistency::saga::SagaInstanceRef, <A as diport::saga_durable_store::SagaOperatorAction>::Evidence, diport::saga_durable_store::SagaOperatorStartAuditId) -> Self
 pub const fn diport::saga_durable_store::SagaOperatorAuthorization<A>::start_audit_id(&self) -> &diport::saga_durable_store::SagaOperatorStartAuditId
-pub fn diport::saga_durable_store::SagaOperatorAuthorization<A>::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::saga_durable_store::SagaOperatorAuthorization<A>::tenant(&self) -> rss_request_context::TenantId
 impl<A: core::fmt::Debug + diport::saga_durable_store::SagaOperatorAction> core::fmt::Debug for diport::saga_durable_store::SagaOperatorAuthorization<A> where <A as diport::saga_durable_store::SagaOperatorAction>::Evidence: core::fmt::Debug
 pub fn diport::saga_durable_store::SagaOperatorAuthorization<A>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<A> core::marker::Freeze for diport::saga_durable_store::SagaOperatorAuthorization<A> where <A as diport::saga_durable_store::SagaOperatorAction>::Evidence: core::marker::Freeze
@@ -4789,8 +4789,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_durable_store::Sag
 impl core::panic::unwind_safe::UnwindSafe for diport::saga_durable_store::SagaStepCompletion
 pub struct diport::saga_durable_store::SagaTenantCursor
 impl diport::saga_durable_store::SagaTenantCursor
-pub const fn diport::saga_durable_store::SagaTenantCursor::new(vocab::tenant::TenantId) -> Self
-pub const fn diport::saga_durable_store::SagaTenantCursor::tenant(self) -> vocab::tenant::TenantId
+pub const fn diport::saga_durable_store::SagaTenantCursor::new(rss_request_context::TenantId) -> Self
+pub const fn diport::saga_durable_store::SagaTenantCursor::tenant(self) -> rss_request_context::TenantId
 impl core::clone::Clone for diport::saga_durable_store::SagaTenantCursor
 pub fn diport::saga_durable_store::SagaTenantCursor::clone(&self) -> diport::saga_durable_store::SagaTenantCursor
 impl core::cmp::Eq for diport::saga_durable_store::SagaTenantCursor
@@ -4809,10 +4809,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_durable_store::Sag
 impl core::panic::unwind_safe::UnwindSafe for diport::saga_durable_store::SagaTenantCursor
 pub struct diport::saga_durable_store::SagaTenantPage
 impl diport::saga_durable_store::SagaTenantPage
-pub fn diport::saga_durable_store::SagaTenantPage::into_parts(self) -> (alloc::vec::Vec<vocab::tenant::TenantId>, core::option::Option<diport::saga_durable_store::SagaTenantCursor>)
-pub fn diport::saga_durable_store::SagaTenantPage::new(alloc::vec::Vec<vocab::tenant::TenantId>, core::option::Option<diport::saga_durable_store::SagaTenantCursor>) -> Self
+pub fn diport::saga_durable_store::SagaTenantPage::into_parts(self) -> (alloc::vec::Vec<rss_request_context::TenantId>, core::option::Option<diport::saga_durable_store::SagaTenantCursor>)
+pub fn diport::saga_durable_store::SagaTenantPage::new(alloc::vec::Vec<rss_request_context::TenantId>, core::option::Option<diport::saga_durable_store::SagaTenantCursor>) -> Self
 pub const fn diport::saga_durable_store::SagaTenantPage::next(&self) -> core::option::Option<diport::saga_durable_store::SagaTenantCursor>
-pub fn diport::saga_durable_store::SagaTenantPage::tenants(&self) -> &[vocab::tenant::TenantId]
+pub fn diport::saga_durable_store::SagaTenantPage::tenants(&self) -> &[rss_request_context::TenantId]
 impl core::cmp::Eq for diport::saga_durable_store::SagaTenantPage
 impl core::cmp::PartialEq for diport::saga_durable_store::SagaTenantPage
 pub fn diport::saga_durable_store::SagaTenantPage::eq(&self, &diport::saga_durable_store::SagaTenantPage) -> bool
@@ -4921,7 +4921,7 @@ impl core::panic::unwind_safe::UnwindSafe for diport::saga_durable_store::Stored
 pub trait diport::saga_durable_store::SagaDurableStore: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::saga_durable_store::SagaDurableStore::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::saga_durable_store::SagaDurableStore::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn diport::saga_durable_store::SagaDurableStore::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn diport::saga_durable_store::SagaDurableStore::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::saga_durable_store::SagaDurableStore::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::saga_durable_store::SagaDurableStore::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::saga_durable_store::SagaDurableStore::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4932,7 +4932,7 @@ pub fn diport::saga_durable_store::SagaDurableStore::terminal_receipt(&self, dip
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for &diport::DynSagaDurableStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4943,7 +4943,7 @@ pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&self, d
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for &mut diport::DynSagaDurableStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4954,7 +4954,7 @@ pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&sel
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4965,7 +4965,7 @@ pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::termina
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for diport::DynSagaDurableStore<'dynosaur_struct>
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -4976,7 +4976,7 @@ pub fn diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&self, di
 pub trait diport::saga_durable_store::SagaDurableStoreLocal: core::marker::Send + core::marker::Sync
 pub async fn diport::saga_durable_store::SagaDurableStoreLocal::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>
 pub async fn diport::saga_durable_store::SagaDurableStoreLocal::get(&self, &consistency::saga::SagaInstanceRef) -> core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>
-pub async fn diport::saga_durable_store::SagaDurableStoreLocal::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>
+pub async fn diport::saga_durable_store::SagaDurableStoreLocal::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>
 pub async fn diport::saga_durable_store::SagaDurableStoreLocal::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>
 pub async fn diport::saga_durable_store::SagaDurableStoreLocal::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>
 pub async fn diport::saga_durable_store::SagaDurableStoreLocal::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>
@@ -4987,7 +4987,7 @@ pub async fn diport::saga_durable_store::SagaDurableStoreLocal::terminal_receipt
 impl<TraitVariantBlanketType: diport::saga_durable_store::SagaDurableStore> diport::saga_durable_store::SagaDurableStoreLocal for TraitVariantBlanketType
 pub async fn TraitVariantBlanketType::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>
 pub async fn TraitVariantBlanketType::get(&self, &consistency::saga::SagaInstanceRef) -> core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>
-pub async fn TraitVariantBlanketType::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>
+pub async fn TraitVariantBlanketType::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>
 pub async fn TraitVariantBlanketType::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>
 pub async fn TraitVariantBlanketType::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>
 pub async fn TraitVariantBlanketType::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>
@@ -5139,13 +5139,13 @@ impl diport::DiPortEffect for diport::DynSecretResolver<'_>
 pub type diport::DynSecretResolver<'_>::Effect = diport::AuthEffect
 pub type diport::DynSecretResolver<'_>::Privilege = diport::LocalPrivilege
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
-pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
-pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
-pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
-pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynSecretResolver<'dynosaur_struct>
@@ -5195,19 +5195,19 @@ impl core::marker::UnsafeUnpin for diport::secret_resolver::SecretMaterial
 impl core::panic::unwind_safe::RefUnwindSafe for diport::secret_resolver::SecretMaterial
 impl core::panic::unwind_safe::UnwindSafe for diport::secret_resolver::SecretMaterial
 pub trait diport::secret_resolver::SecretResolver: core::marker::Send + core::marker::Sync
-pub fn diport::secret_resolver::SecretResolver::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn diport::secret_resolver::SecretResolver::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
-pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
-pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
-pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
-pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 pub trait diport::secret_resolver::SecretResolverLocal
-pub async fn diport::secret_resolver::SecretResolverLocal::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>
+pub async fn diport::secret_resolver::SecretResolverLocal::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>
 impl<TraitVariantBlanketType: diport::secret_resolver::SecretResolver> diport::secret_resolver::SecretResolverLocal for TraitVariantBlanketType
-pub async fn TraitVariantBlanketType::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>
+pub async fn TraitVariantBlanketType::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>
 pub mod diport::signer
 #[repr(transparent)] pub struct diport::signer::DynSigner<'dynosaur_struct>
 impl<'dynosaur_struct> diport::DynSigner<'dynosaur_struct>
@@ -6915,20 +6915,20 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedClaimShape
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedClaimShapeError
 pub enum diport::VerifiedClaimsView<'a>
 pub diport::VerifiedClaimsView::FederatedAccess
-pub diport::VerifiedClaimsView::FederatedAccess::kind: vocab::principal::PrincipalKind
+pub diport::VerifiedClaimsView::FederatedAccess::kind: rss_request_context::PrincipalKind
 pub diport::VerifiedClaimsView::FederatedAccess::permissions: &'a diport::pdp::VerifiedFederatedPermissions
 pub diport::VerifiedClaimsView::FederatedAccess::subject: &'a str
-pub diport::VerifiedClaimsView::FederatedAccess::tenant: core::option::Option<vocab::tenant::TenantId>
+pub diport::VerifiedClaimsView::FederatedAccess::tenant: core::option::Option<rss_request_context::TenantId>
 pub diport::VerifiedClaimsView::ProjectionOperator
 pub diport::VerifiedClaimsView::ProjectionOperator::caller: vocab::service::ServiceCallerDomain
-pub diport::VerifiedClaimsView::ProjectionOperator::tenant: vocab::tenant::TenantId
+pub diport::VerifiedClaimsView::ProjectionOperator::tenant: rss_request_context::TenantId
 pub diport::VerifiedClaimsView::RssUser
 pub diport::VerifiedClaimsView::RssUser::grant: &'a diport::pdp::VerifiedAccessGrantFacts
-pub diport::VerifiedClaimsView::RssUser::tenant: vocab::tenant::TenantId
+pub diport::VerifiedClaimsView::RssUser::tenant: rss_request_context::TenantId
 pub diport::VerifiedClaimsView::RssUser::user_id: ids::UserId
 pub diport::VerifiedClaimsView::ServiceToken
 pub diport::VerifiedClaimsView::ServiceToken::caller: vocab::service::ServiceCallerDomain
-pub diport::VerifiedClaimsView::ServiceToken::tenant: vocab::tenant::TenantId
+pub diport::VerifiedClaimsView::ServiceToken::tenant: rss_request_context::TenantId
 impl<'a> core::marker::Freeze for diport::pdp::VerifiedClaimsView<'a>
 impl<'a> core::marker::Send for diport::pdp::VerifiedClaimsView<'a>
 impl<'a> core::marker::Sync for diport::pdp::VerifiedClaimsView<'a>
@@ -7040,11 +7040,11 @@ pub diport::AuditEvent::correlation_id: core::option::Option<alloc::string::Stri
 pub diport::AuditEvent::occurred_at: std::time::SystemTime
 pub diport::AuditEvent::outcome: diport::audit_sink::AuditOutcome
 pub diport::AuditEvent::principal_id: alloc::string::String
-pub diport::AuditEvent::principal_kind: vocab::principal::PrincipalKind
+pub diport::AuditEvent::principal_kind: rss_request_context::PrincipalKind
 pub diport::AuditEvent::request_id: core::option::Option<alloc::string::String>
 pub diport::AuditEvent::resource_id: alloc::string::String
 pub diport::AuditEvent::resource_kind: &'static str
-pub diport::AuditEvent::tenant_id: core::option::Option<vocab::tenant::TenantId>
+pub diport::AuditEvent::tenant_id: core::option::Option<rss_request_context::TenantId>
 impl core::clone::Clone for diport::audit_sink::AuditEvent
 pub fn diport::audit_sink::AuditEvent::clone(&self) -> diport::audit_sink::AuditEvent
 impl core::fmt::Debug for diport::audit_sink::AuditEvent
@@ -7193,8 +7193,8 @@ impl core::panic::unwind_safe::UnwindSafe for diport::revocation_store::CertNotA
 pub struct diport::CertScope
 impl diport::revocation_store::CertScope
 pub fn diport::revocation_store::CertScope::device(&self) -> ids::DeviceId
-pub fn diport::revocation_store::CertScope::new(vocab::tenant::TenantId, ids::DeviceId) -> Self
-pub fn diport::revocation_store::CertScope::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::revocation_store::CertScope::new(rss_request_context::TenantId, ids::DeviceId) -> Self
+pub fn diport::revocation_store::CertScope::tenant(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for diport::revocation_store::CertScope
 pub fn diport::revocation_store::CertScope::clone(&self) -> diport::revocation_store::CertScope
 impl core::cmp::Eq for diport::revocation_store::CertScope
@@ -7371,14 +7371,14 @@ pub fn diport::dead_letter_store::DeadLetterRecord::contract_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::error_summary(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::message_id(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::metadata(&self) -> &diport::envelope::EnvelopeMetadata
-pub fn diport::dead_letter_store::DeadLetterRecord::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, diport::dead_letter_store::DeadLetterProvenance, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::envelope::EnvelopeMetadata) -> Self
+pub fn diport::dead_letter_store::DeadLetterRecord::new(rss_request_context::TenantId, impl core::convert::Into<alloc::string::String>, diport::dead_letter_store::DeadLetterProvenance, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, alloc::vec::Vec<u8>, diport::dead_letter_store::DeadLetterSummary, u32, diport::envelope::EnvelopeMetadata) -> Self
 pub fn diport::dead_letter_store::DeadLetterRecord::num_attempts(&self) -> u32
 pub fn diport::dead_letter_store::DeadLetterRecord::original_payload(&self) -> &diport::RedactedBytes
 pub fn diport::dead_letter_store::DeadLetterRecord::payload_len(&self) -> usize
 pub fn diport::dead_letter_store::DeadLetterRecord::producer_domain(&self) -> &str
 pub fn diport::dead_letter_store::DeadLetterRecord::provenance(&self) -> &diport::dead_letter_store::DeadLetterProvenance
 pub fn diport::dead_letter_store::DeadLetterRecord::source(&self) -> diport::dead_letter_store::DeadLetterSource
-pub fn diport::dead_letter_store::DeadLetterRecord::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::dead_letter_store::DeadLetterRecord::tenant(&self) -> rss_request_context::TenantId
 pub fn diport::dead_letter_store::DeadLetterRecord::topic(&self) -> &str
 impl core::clone::Clone for diport::dead_letter_store::DeadLetterRecord
 pub fn diport::dead_letter_store::DeadLetterRecord::clone(&self) -> diport::dead_letter_store::DeadLetterRecord
@@ -7442,10 +7442,10 @@ impl !core::panic::unwind_safe::UnwindSafe for diport::acker::Delivery
 pub struct diport::DlqOperatorAuthorization<A: diport::DlqOperatorAction>
 impl<A: diport::DlqOperatorAction> diport::DlqOperatorAuthorization<A>
 pub const fn diport::DlqOperatorAuthorization<A>::caller(&self) -> vocab::service::ServiceCallerDomain
-pub fn diport::DlqOperatorAuthorization<A>::issue(dlqauthmint::DlqOperatorMint, vocab::service::ServiceCallerDomain, alloc::string::String, vocab::tenant::TenantId, diport::DlqOperatorStartAuditId) -> Self
+pub fn diport::DlqOperatorAuthorization<A>::issue(dlqauthmint::DlqOperatorMint, vocab::service::ServiceCallerDomain, alloc::string::String, rss_request_context::TenantId, diport::DlqOperatorStartAuditId) -> Self
 pub fn diport::DlqOperatorAuthorization<A>::operator_subject(&self) -> &str
 pub const fn diport::DlqOperatorAuthorization<A>::start_audit_id(&self) -> &diport::DlqOperatorStartAuditId
-pub const fn diport::DlqOperatorAuthorization<A>::tenant(&self) -> vocab::tenant::TenantId
+pub const fn diport::DlqOperatorAuthorization<A>::tenant(&self) -> rss_request_context::TenantId
 impl<A: diport::DlqOperatorAction> core::fmt::Debug for diport::DlqOperatorAuthorization<A>
 pub fn diport::DlqOperatorAuthorization<A>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<A> core::marker::Freeze for diport::DlqOperatorAuthorization<A>
@@ -8184,7 +8184,7 @@ pub type diport::DynSagaDurableStore<'_>::Privilege = diport::LocalPrivilege
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for &diport::DynSagaDurableStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -8195,7 +8195,7 @@ pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&self, d
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for &mut diport::DynSagaDurableStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -8206,7 +8206,7 @@ pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&sel
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -8217,7 +8217,7 @@ pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::termina
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for diport::DynSagaDurableStore<'dynosaur_struct>
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -8280,13 +8280,13 @@ impl diport::DiPortEffect for diport::DynSecretResolver<'_>
 pub type diport::DynSecretResolver<'_>::Effect = diport::AuthEffect
 pub type diport::DynSecretResolver<'_>::Privilege = diport::LocalPrivilege
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
-pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
-pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
-pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
-pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> core::marker::Send for diport::DynSecretResolver<'dynosaur_struct>
 impl<'dynosaur_struct> !core::marker::Sized for diport::DynSecretResolver<'dynosaur_struct>
@@ -8430,13 +8430,13 @@ impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::EnvelopeCa
 pub struct diport::EnvelopeHeader
 impl diport::envelope::EnvelopeHeader
 pub fn diport::envelope::EnvelopeHeader::correlation(&self) -> core::option::Option<&str>
-pub fn diport::envelope::EnvelopeHeader::new(vocab::tenant::TenantId, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
+pub fn diport::envelope::EnvelopeHeader::new(rss_request_context::TenantId, diport::envelope::EnvelopeSchemaVersion, diport::envelope::EnvelopeSchemaHash) -> Self
 pub fn diport::envelope::EnvelopeHeader::occurred_at_secs(&self) -> core::option::Option<i64>
 pub fn diport::envelope::EnvelopeHeader::partition_key(&self) -> core::option::Option<&consistency::outbox::PartitionKey>
 pub fn diport::envelope::EnvelopeHeader::schema_hash(&self) -> &diport::envelope::EnvelopeSchemaHash
 pub fn diport::envelope::EnvelopeHeader::schema_version(&self) -> &diport::envelope::EnvelopeSchemaVersion
 pub fn diport::envelope::EnvelopeHeader::tenant_authority(&self) -> core::option::Option<&str>
-pub fn diport::envelope::EnvelopeHeader::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn diport::envelope::EnvelopeHeader::tenant_id(&self) -> rss_request_context::TenantId
 pub fn diport::envelope::EnvelopeHeader::trace(&self) -> core::option::Option<&str>
 pub fn diport::envelope::EnvelopeHeader::try_from_metadata(&diport::envelope::EnvelopeMetadata, core::option::Option<consistency::outbox::PartitionKey>) -> core::result::Result<Self, diport::envelope::EnvelopeHeaderError>
 impl core::clone::Clone for diport::envelope::EnvelopeHeader
@@ -8467,7 +8467,7 @@ pub fn diport::envelope::EnvelopeMetadata::len(&self) -> usize
 pub fn diport::envelope::EnvelopeMetadata::occurred_at_secs(&self) -> core::option::Option<i64>
 pub fn diport::envelope::EnvelopeMetadata::schema_hash(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaHash>
 pub fn diport::envelope::EnvelopeMetadata::schema_version(&self) -> core::option::Option<diport::envelope::EnvelopeSchemaVersion>
-pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<vocab::tenant::TenantId>
+pub fn diport::envelope::EnvelopeMetadata::tenant_id(&self) -> core::option::Option<rss_request_context::TenantId>
 pub fn diport::envelope::EnvelopeMetadata::try_insert(&mut self, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>) -> core::result::Result<(), diport::envelope::MetadataError>
 impl core::clone::Clone for diport::envelope::EnvelopeMetadata
 pub fn diport::envelope::EnvelopeMetadata::clone(&self) -> diport::envelope::EnvelopeMetadata
@@ -8946,11 +8946,11 @@ impl core::panic::unwind_safe::UnwindSafe for diport::outbox_emitter::OpaqueActo
 pub struct diport::OutboxActor
 impl diport::outbox_emitter::OutboxActor
 pub fn diport::outbox_emitter::OutboxActor::actor_id(&self) -> &diport::outbox_emitter::OpaqueActorId
-pub fn diport::outbox_emitter::OutboxActor::kind(&self) -> vocab::principal::PrincipalKind
-pub fn diport::outbox_emitter::OutboxActor::scope(&self) -> vocab::tenant::RowScope
-pub fn diport::outbox_emitter::OutboxActor::scoped(vocab::principal::PrincipalKind, diport::outbox_emitter::OpaqueActorId, vocab::tenant::TenantId, vocab::tenant::ScopedTenant) -> Self
+pub fn diport::outbox_emitter::OutboxActor::kind(&self) -> rss_request_context::PrincipalKind
+pub fn diport::outbox_emitter::OutboxActor::scope(&self) -> vocab::tenant::VisibilityScope
+pub fn diport::outbox_emitter::OutboxActor::scoped(rss_request_context::PrincipalKind, diport::outbox_emitter::OpaqueActorId, rss_request_context::TenantId, rss_request_context::RowScope) -> Self
 pub fn diport::outbox_emitter::OutboxActor::service(diport::outbox_emitter::OpaqueActorId) -> Self
-pub fn diport::outbox_emitter::OutboxActor::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+pub fn diport::outbox_emitter::OutboxActor::tenant(&self) -> core::option::Option<rss_request_context::TenantId>
 impl core::clone::Clone for diport::outbox_emitter::OutboxActor
 pub fn diport::outbox_emitter::OutboxActor::clone(&self) -> diport::outbox_emitter::OutboxActor
 impl core::cmp::Eq for diport::outbox_emitter::OutboxActor
@@ -8998,10 +8998,10 @@ impl diport::outbox_emitter::OutboxEnvelopeParts
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::actor(&self) -> &diport::outbox_emitter::OutboxActor
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::causation_id(&self) -> core::option::Option<&diport::outbox_emitter::EnvelopeCausationId>
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::contract(&self) -> &vocab::contract::binding::ContractBinding
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>, core::option::Option<diport::outbox_emitter::EnvelopeCausationId>)
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, vocab::tenant::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor) -> Self
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::into_parts(self) -> (vocab::contract::binding::ContractBinding, rss_request_context::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor, core::option::Option<consistency::outbox::PartitionKey>, core::option::Option<diport::outbox_emitter::EnvelopeCausationId>)
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::new(vocab::contract::binding::ContractBinding, rss_request_context::TenantId, diport::outbox_emitter::EnvelopeSubjectId, diport::outbox_emitter::OutboxActor) -> Self
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::subject_id(&self) -> &diport::outbox_emitter::EnvelopeSubjectId
-pub fn diport::outbox_emitter::OutboxEnvelopeParts::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::outbox_emitter::OutboxEnvelopeParts::tenant(&self) -> rss_request_context::TenantId
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_causation_id(self, diport::outbox_emitter::EnvelopeCausationId) -> Self
 pub fn diport::outbox_emitter::OutboxEnvelopeParts::with_partition_key(self, consistency::outbox::PartitionKey) -> Self
 impl core::clone::Clone for diport::outbox_emitter::OutboxEnvelopeParts
@@ -9505,7 +9505,7 @@ pub const fn diport::saga_durable_store::SagaOperatorAuthorization<A>::identity(
 pub const fn diport::saga_durable_store::SagaOperatorAuthorization<A>::instance(&self) -> consistency::saga::SagaInstanceRef
 pub fn diport::saga_durable_store::SagaOperatorAuthorization<A>::issue(sagaauthmint::SagaOperatorMint, vocab::service::ServiceCallerDomain, consistency::saga::SagaWorkerIdentity, consistency::saga::SagaInstanceRef, <A as diport::saga_durable_store::SagaOperatorAction>::Evidence, diport::saga_durable_store::SagaOperatorStartAuditId) -> Self
 pub const fn diport::saga_durable_store::SagaOperatorAuthorization<A>::start_audit_id(&self) -> &diport::saga_durable_store::SagaOperatorStartAuditId
-pub fn diport::saga_durable_store::SagaOperatorAuthorization<A>::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::saga_durable_store::SagaOperatorAuthorization<A>::tenant(&self) -> rss_request_context::TenantId
 impl<A: core::fmt::Debug + diport::saga_durable_store::SagaOperatorAction> core::fmt::Debug for diport::saga_durable_store::SagaOperatorAuthorization<A> where <A as diport::saga_durable_store::SagaOperatorAction>::Evidence: core::fmt::Debug
 pub fn diport::saga_durable_store::SagaOperatorAuthorization<A>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl<A> core::marker::Freeze for diport::saga_durable_store::SagaOperatorAuthorization<A> where <A as diport::saga_durable_store::SagaOperatorAction>::Evidence: core::marker::Freeze
@@ -9786,8 +9786,8 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_durable_store::Sag
 impl core::panic::unwind_safe::UnwindSafe for diport::saga_durable_store::SagaStepCompletion
 pub struct diport::SagaTenantCursor
 impl diport::saga_durable_store::SagaTenantCursor
-pub const fn diport::saga_durable_store::SagaTenantCursor::new(vocab::tenant::TenantId) -> Self
-pub const fn diport::saga_durable_store::SagaTenantCursor::tenant(self) -> vocab::tenant::TenantId
+pub const fn diport::saga_durable_store::SagaTenantCursor::new(rss_request_context::TenantId) -> Self
+pub const fn diport::saga_durable_store::SagaTenantCursor::tenant(self) -> rss_request_context::TenantId
 impl core::clone::Clone for diport::saga_durable_store::SagaTenantCursor
 pub fn diport::saga_durable_store::SagaTenantCursor::clone(&self) -> diport::saga_durable_store::SagaTenantCursor
 impl core::cmp::Eq for diport::saga_durable_store::SagaTenantCursor
@@ -9806,10 +9806,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::saga_durable_store::Sag
 impl core::panic::unwind_safe::UnwindSafe for diport::saga_durable_store::SagaTenantCursor
 pub struct diport::SagaTenantPage
 impl diport::saga_durable_store::SagaTenantPage
-pub fn diport::saga_durable_store::SagaTenantPage::into_parts(self) -> (alloc::vec::Vec<vocab::tenant::TenantId>, core::option::Option<diport::saga_durable_store::SagaTenantCursor>)
-pub fn diport::saga_durable_store::SagaTenantPage::new(alloc::vec::Vec<vocab::tenant::TenantId>, core::option::Option<diport::saga_durable_store::SagaTenantCursor>) -> Self
+pub fn diport::saga_durable_store::SagaTenantPage::into_parts(self) -> (alloc::vec::Vec<rss_request_context::TenantId>, core::option::Option<diport::saga_durable_store::SagaTenantCursor>)
+pub fn diport::saga_durable_store::SagaTenantPage::new(alloc::vec::Vec<rss_request_context::TenantId>, core::option::Option<diport::saga_durable_store::SagaTenantCursor>) -> Self
 pub const fn diport::saga_durable_store::SagaTenantPage::next(&self) -> core::option::Option<diport::saga_durable_store::SagaTenantCursor>
-pub fn diport::saga_durable_store::SagaTenantPage::tenants(&self) -> &[vocab::tenant::TenantId]
+pub fn diport::saga_durable_store::SagaTenantPage::tenants(&self) -> &[rss_request_context::TenantId]
 impl core::cmp::Eq for diport::saga_durable_store::SagaTenantPage
 impl core::cmp::PartialEq for diport::saga_durable_store::SagaTenantPage
 pub fn diport::saga_durable_store::SagaTenantPage::eq(&self, &diport::saga_durable_store::SagaTenantPage) -> bool
@@ -9987,8 +9987,8 @@ impl<'a> core::panic::unwind_safe::RefUnwindSafe for diport::pdp::ServiceTokenRe
 impl<'a> core::panic::unwind_safe::UnwindSafe for diport::pdp::ServiceTokenReplayScope<'a>
 pub struct diport::ServiceTokenTenantBinding(_)
 impl diport::pdp::ServiceTokenTenantBinding
-pub fn diport::pdp::ServiceTokenTenantBinding::new(vocab::tenant::TenantId) -> Self
-pub fn diport::pdp::ServiceTokenTenantBinding::tenant(&self) -> vocab::tenant::TenantId
+pub fn diport::pdp::ServiceTokenTenantBinding::new(rss_request_context::TenantId) -> Self
+pub fn diport::pdp::ServiceTokenTenantBinding::tenant(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for diport::pdp::ServiceTokenTenantBinding
 pub fn diport::pdp::ServiceTokenTenantBinding::clone(&self) -> diport::pdp::ServiceTokenTenantBinding
 impl core::fmt::Debug for diport::pdp::ServiceTokenTenantBinding
@@ -10222,10 +10222,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for diport::pdp::VerifiedAccessGran
 impl core::panic::unwind_safe::UnwindSafe for diport::pdp::VerifiedAccessGrantFacts
 pub struct diport::VerifiedClaims
 impl diport::pdp::VerifiedClaims
-pub fn diport::pdp::VerifiedClaims::federated_access(impl core::convert::Into<alloc::string::String>, core::option::Option<vocab::tenant::TenantId>, vocab::principal::PrincipalKind, diport::pdp::VerifiedFederatedPermissions) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
-pub fn diport::pdp::VerifiedClaims::projection_operator(vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> Self
-pub fn diport::pdp::VerifiedClaims::rss_user(ids::UserId, vocab::tenant::TenantId, diport::pdp::VerifiedAccessGrantFacts) -> Self
-pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> Self
+pub fn diport::pdp::VerifiedClaims::federated_access(impl core::convert::Into<alloc::string::String>, core::option::Option<rss_request_context::TenantId>, rss_request_context::PrincipalKind, diport::pdp::VerifiedFederatedPermissions) -> core::result::Result<Self, diport::pdp::VerifiedClaimShapeError>
+pub fn diport::pdp::VerifiedClaims::projection_operator(vocab::service::ServiceCallerDomain, rss_request_context::TenantId) -> Self
+pub fn diport::pdp::VerifiedClaims::rss_user(ids::UserId, rss_request_context::TenantId, diport::pdp::VerifiedAccessGrantFacts) -> Self
+pub fn diport::pdp::VerifiedClaims::service_token(vocab::service::ServiceCallerDomain, rss_request_context::TenantId) -> Self
 pub fn diport::pdp::VerifiedClaims::view(&self) -> diport::pdp::VerifiedClaimsView<'_>
 impl core::clone::Clone for diport::pdp::VerifiedClaims
 pub fn diport::pdp::VerifiedClaims::clone(&self) -> diport::pdp::VerifiedClaims
@@ -10775,7 +10775,7 @@ pub fn diport::DynRevocationStore<'dynosaur_struct>::shutdown(&self) -> impl cor
 pub trait diport::SagaDurableStore: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::SagaDurableStore::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::SagaDurableStore::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn diport::SagaDurableStore::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn diport::SagaDurableStore::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::SagaDurableStore::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::SagaDurableStore::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::SagaDurableStore::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -10786,7 +10786,7 @@ pub fn diport::SagaDurableStore::terminal_receipt(&self, diport::saga_durable_st
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for &diport::DynSagaDurableStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -10797,7 +10797,7 @@ pub fn &diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&self, d
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for &mut diport::DynSagaDurableStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -10808,7 +10808,7 @@ pub fn &mut diport::DynSagaDurableStore<'dynosaur_struct>::terminal_receipt(&sel
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -10819,7 +10819,7 @@ pub fn alloc::boxed::Box<diport::DynSagaDurableStore<'dynosaur_struct>>::termina
 impl<'dynosaur_struct> diport::saga_durable_store::SagaDurableStore for diport::DynSagaDurableStore<'dynosaur_struct>
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::claim(&self, diport::saga_durable_store::SagaClaimRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaClaimOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::get(&self, &consistency::saga::SagaInstanceRef) -> impl core::future::future::Future<Output = core::result::Result<core::option::Option<consistency::saga::SagaInstanceRecord>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
-pub fn diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, vocab::tenant::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
+pub fn diport::DynSagaDurableStore<'dynosaur_struct>::list_runnable(&self, &consistency::saga::SagaWorkerIdentity, rss_request_context::TenantId, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<alloc::vec::Vec<diport::saga_durable_store::SagaRunnableInstance>, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::mutate(&self, &consistency::saga::SagaLease, diport::saga_durable_store::SagaDurableMutation) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaDurableMutationOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::recovery_snapshot(&self, diport::saga_durable_store::SagaRecoveryRequest) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaRecoveryOutcome, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaDurableStore<'dynosaur_struct>::register(&self, diport::saga_durable_store::SagaStartAuthorization, diport::saga_durable_store::SagaInstanceRegistration) -> impl core::future::future::Future<Output = core::result::Result<consistency::saga::SagaInstanceRecord, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
@@ -10864,15 +10864,15 @@ impl<'dynosaur_struct> diport::saga_durable_store::SagaTenantSource for diport::
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::list_runnable_tenants(&self, &consistency::saga::SagaWorkerIdentity, core::option::Option<diport::saga_durable_store::SagaTenantCursor>, core::num::nonzero::NonZeroUsize) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaTenantPage, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub fn diport::DynSagaTenantSource<'dynosaur_struct>::observe_unresolved(&self, &consistency::saga::SagaWorkerIdentity) -> impl core::future::future::Future<Output = core::result::Result<diport::saga_durable_store::SagaUnresolvedObservation, diport::saga_durable_store::SagaDurableStoreError>> + core::marker::Send
 pub trait diport::SecretResolver: core::marker::Send + core::marker::Sync
-pub fn diport::SecretResolver::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn diport::SecretResolver::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
-pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn &diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for &mut diport::DynSecretResolver<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
-pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn &mut diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>> where Self: core::marker::Send + core::marker::Sync
-pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn alloc::boxed::Box<diport::DynSecretResolver<'dynosaur_struct>>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 impl<'dynosaur_struct> diport::secret_resolver::SecretResolver for diport::DynSecretResolver<'dynosaur_struct>
-pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, vocab::tenant::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
+pub fn diport::DynSecretResolver<'dynosaur_struct>::resolve(&self, rss_request_context::TenantId, &diport::secret_resolver::SecretCoordinate) -> impl core::future::future::Future<Output = core::result::Result<diport::secret_resolver::SecretMaterial, diport::secret_resolver::SecretResolverError>> + core::marker::Send + core::marker::Sync
 pub trait diport::ServiceTokenReplayStore: core::marker::Send + core::marker::Sync + core::marker::Send
 pub fn diport::ServiceTokenReplayStore::check_and_record(&self, &diport::pdp::ServiceTokenReplayKey, std::time::SystemTime, diport::pdp::ServiceTokenReplayDeadline) -> impl core::future::future::Future<Output = core::result::Result<diport::pdp::ServiceTokenReplayDisposition, diport::pdp::ServiceTokenReplayStoreError>> + core::marker::Send
 impl<'dynosaur_struct> diport::pdp::ServiceTokenReplayStore for &diport::DynServiceTokenReplayStore<'dynosaur_struct> where Self: core::marker::Send + core::marker::Sync
