@@ -2,7 +2,7 @@
 
 - **Status**：Accepted
 - **Date**：2026-08-01
-- **Last updated**：2026-08-11
+- **Last updated**：2026-08-12
 - **Scope**：[`project-scope.md`](../rules/project-scope.md) 的项目目标与目标验收边界
 
 ## Context
@@ -100,8 +100,10 @@ maturity 或 conformance receipt，且必须汇入既有 assembly governance/com
 1. **core**：runtime lifecycle、HTTP、PostgreSQL LocalTx、external OIDC/verified Principal、TenantContext/RLS/authz、
    tracing/health/readiness。
 2. **eventing**：`core` 加 AMQP、outbox/inbox、settlement、DLQ、idempotency 与 recovery。
-3. **device-security**：在真实 device/workload identity consumer、credential/replay/fencing、production assembly 与
-   operator recovery 闭合后激活。
+3. **device-security**：已由
+   [`ADR-028`](202608120423-028-device-security-candidate-scope.md) 接纳 candidate scope；以六契约公共窄腰、真实
+   external consumer、credential/replay/fencing、federated operator recovery owner/evidence 和原地演进的
+   `deviceidentity` assembly 为闭包，当前只授权最低充分 T1/T2。
 
 profile identity、dependency closure、provider capability、typed config 与 runtime inventory 从 assembly/profile metadata
 派生。profile 的支持承诺由真实 provider conformance、production join evidence 和 release artifact 共同激活。
@@ -113,7 +115,7 @@ profile identity、dependency closure、provider capability、typed config 与 r
 |------------------|---------------------|-------------------------|----------|--------------|
 | `core` | `assemblies/runtime` | `server::server` / Docker `runtime` target | candidate；当前 runtime 尚未形成 core-only closure | 尚无 profile canonical journey；legacy runtime smoke 只作迁移 evidence |
 | `eventing` | `assemblies/runtime` | `server::server` / Docker `runtime` target | candidate | 尚无 profile canonical journey；SettingsOnly 四项 evidence 是迁移来源，不是 eventing owner |
-| `device-security` | 未指定 | 未指定 | conditional；未满足激活条件 | 零 T3，不得预建 artifact/journey |
+| `device-security` | `assemblies/deviceidentity`（原地演进） | 预留 candidate identity：`deviceidentity::deviceidentity-server` / Docker `deviceidentity-runtime`；当前均不存在 | candidate scope；当前 assembly 仍 compile-only draft pilot | 零 T3；无 hardening trigger，不得登记 Evidence ID/selector/journey |
 
 `core` 与 `eventing` 可以复用同一 release image，但必须各自通过闭值 profile configuration/plan 证明依赖闭包；不能以同一
 binary/image 存在推导两个 profile 均已激活。`identityaudit` 与 `settingsonly` 不映射为 official profile artifact。
@@ -125,14 +127,18 @@ artifact 的 config/startup/readiness/drain/restart，`AcceptedValueStreamJoin` 
 value stream 在 production process/provider 组合后独有的 join hazard。assembly、domain、contract、provider、adapter、
 consistency level、binary/image、`profile = "production"` 或 `supported` lifecycle 都不能单独授权 T3，也不得创造第三类 owner。
 
-GA 主线的可授权产品面只有 `core` 和 `eventing`。profile 状态依次为：ADR 接纳的 `candidate`；scope freeze 后由正式
+ADR 已接纳、因而未来可以逐项申请 GA-hardening trigger 的 official candidate 闭集只有 `core`、`eventing` 与
+`device-security`；其中 `core`/`eventing` 属 GA 主线，`device-security` 服从 ADR-028 的独立候选路径。当前三者均为
+`candidate`，当前 `hardening-authorized` 与 `active` 集合均为空。profile 状态依次为：ADR 接纳的 `candidate`；scope freeze 后由正式
 GA-hardening acceptance trigger 逐项放行的 `hardening-authorized`；designated artifact、真实 provider conformance、
 T1/T2 前置和 candidate production join evidence 全部真实通过后原子进入 `active`。candidate evidence 在激活前不是
 canonical owner、不能进入普通 PR required selection，也不能替换 legacy carrier；这消除“active 才能建 T3、但激活又需要
 T3”的循环。activation transition 必须把该 profile 唯一 designated production artifact 原子提升为唯一 canonical
 production artifact，不允许 candidate 与 active artifact 并存为两个 owner。
-`device-security` 不属于当前 active T3 范围；激活它必须先经独立 scope/ADR PR。L3 是一致性语义，
-不是独立产品 profile；真实 L3 value stream 只能在产品承诺已接纳后，作为 `eventing` 的显式 evidence
+`device-security` 已完成独立 scope/ADR 接纳，因此无需再次修改 scope 才能申请未来 trigger；但它仍不属于当前 active 或
+hardening-authorized T3 范围。其 candidate
+implementation、hardening trigger、T3 evidence plan/carrier 与 activation transition 继续严格按 ADR-028 分离。L3 是
+一致性语义，不是独立产品 profile；真实 L3 value stream 只能在产品承诺已接纳后，作为 `eventing` 的显式 evidence
 item 候选，其 owner 只能是 `AcceptedValueStreamJoin`，不得创建独立 L3 T3 产品面。
 
 每个官方 profile 最多有一个 canonical production artifact 和一个 canonical journey carrier。多个 join hazard
@@ -214,7 +220,7 @@ target、case、fixture、service 或 image。
 | 2 | `core` profile 的 config、composition、lifecycle、diagnostic 与 production join 闭环 | provider conformance、assembly identity、readiness/drain/restart T3 |
 | 3 | `eventing` profile 的 L2 producer/consumer/recovery 闭环 | LocalTx/outbox/inbox T2、broker/process join T3 |
 | 4a | `eventing` 已接纳的真实 L3 value stream | primitive correctness 保持 T2；只有独立接纳的 production join hazard 可进入 `AcceptedValueStreamJoin` T3 |
-| 4b（conditional） | `device-security` L4/zero-trust slice | 当前只允许最低充分 T1/T2；artifact、journey 与 restart/takeover/fencing/operator recovery T3 在独立 scope/ADR 接纳前全部 blocked |
+| 4b（candidate scope） | `device-security` L4/zero-trust slice | 按 ADR-028 只允许最低充分 T1/T2；当前 compile-only pilot 不构成 reserved binary/image 的实现，任何 T3 仍需 hardening trigger 与独立 issue/PR |
 
 实施跟踪采用一个 Epic 与可独立交付的 PBI；默认不建立 Feature 层。每个 PBI 对应一个 primary capability owner、一个
 可验证 outcome 和一个 PR 级变更闭包。`core` T3、`eventing` T3 与任何后续条件 T3 分别是独立 issue/
@@ -236,6 +242,6 @@ PR；不将多个 profile 的 T3 收敛成一个无法独立审批、执行和�
 - 官方 profile 的 dependency closure、provider posture、runtime inventory 与 release artifact identity 一致。
 - 新增或变更 T3 的 issue/PR 与产品实现分离，并对不可下沉至 T1/T2 的 production join hazard 给出可审查的必要性证明。
 - `identityaudit`/`settingsonly` 不再扩展独立产品/T3 身份；只在官方 profile 和外部 consumer 边界闭合后按独立迁移决策退出核心发布面。
-- L3/L4 primitive 先以最低充分 T1/T2 闭合；`device-security` 的产品激活与任何 T3 只在独立 scope/ADR 接纳后，
-  再按其明确承诺的真实纵向 consumer 与 evidence 要求闭合。
+- L3/L4 primitive 先以最低充分 T1/T2 闭合；`device-security` 已接纳 candidate scope，但产品激活与任何 T3 仍须
+  按 ADR-028 的真实纵向 consumer、candidate first-green、独立 hardening/T3 issue 与原子 activation 要求闭合。
 - Epic/PBI 拆分保持 capability owner、proof owner 与 production evidence item 一一可追踪。

@@ -136,6 +136,26 @@ SPI 证明稳定共同语义前，不提取通用 provider vocabulary crate。
   fetch/refresh/freshness；只有 AuthN/AuthZ funnel 持有的私有 sealed mint capability 可以构造 trusted context。
   Platform 不接收 raw token/JWKS，不验证凭据，也不 mint identity。
 
+### Device-security candidate 边界
+
+- [`ADR-028`](../architecture/202608120423-028-device-security-candidate-scope.md) 只接纳 `device-security` candidate
+  产品身份和最低充分 T1/T2。Candidate scope 不等同于 production artifact 已存在、contract active、hardening trigger
+  或 T3 授权；任何缺失 carrier 都保持 draft/compile-only，而不是由文档或 issue 状态补齐。
+- RSS 拥有 provider-neutral desired/reported、generation/fencing、command/receipt、reconcile、authenticated transport
+  admission 和对 external authorized artifact 的窄消费。外部系统继续拥有 PKI/CA/EST/CSR/CRL/OCSP、Resource Security
+  Fact source/authoring lifecycle、MDM/fleet/device operations；RSS 可消费窄 projection，但不拥有其管理面。
+- Candidate public waist 只允许从已接纳的六个 DeviceLatent contract 单源派生。Resource Security Fact write 不在该
+  exact set；若未来真实 RSS runtime consumer 需要持续 ingress，必须另立 scope/ADR/PBI 原子替换 contract set，不能保留
+  six/seven 双路径。
+- Candidate T1/T2 只可证明必填构造、配置验证、provider conformance、组件级 reload/restart/fencing/disable/drain 与
+  static artifact correctness；designated binary/image 的真实进程 startup/readiness/restart/drain 或
+  secret/CA/config/image join 必须等待 hardening trigger，并由内置完整 evidence plan 的独立 T3 carrier issue/PR 证明。
+- `rss-incubator` 的真实 rotation consumer 仍是外部产品 owner和 T1/T2 consumer evidence 来源，不是 RSS official
+  profile、production acceptance 或 activation owner；其 bootstrap 不能充当 production fact authority。
+- Operator recovery 采用 federated owner：RSS 只提供授权 inspection、自动 repair 与 fail-closed pause/drain seam，
+  incubator 产品拥有授权恢复编排/runbook，External control plane 拥有资源/PKI remediation action 与 audit receipt；
+  activation 必须证明三者闭环，但不得因此新增 RSS 第七契约或 MDM/fleet 控制面。
+
 ### Observability / Health / Local CI
 
 - **拥有**：结构化日志与脱敏、低基数 metrics、trace continuity、health/readiness、runtime inventory、RSS 语义的
@@ -155,6 +175,9 @@ SPI 证明稳定共同语义前，不提取通用 provider vocabulary crate。
   Release Surface 与 artifact correctness；incubator 自行拥有 workspace、lock、产品构建、CI、发布和安全响应，且只能
   单向消费不可变 Release Surface artifact。具体迁移边界见
   [`ADR-026`](../architecture/202608111253-026-rss-incubator-ownership-migration.md)。
+- `device-security` 的 capability-specific candidate public waist、consumer 与 activation handoff 以
+  [`ADR-028`](../architecture/202608120423-028-device-security-candidate-scope.md) 为准；在 package/image 尚未物化时，
+  预留 identity 不构成 Release Surface 或兼容承诺。
 
 ## 验证范围矩阵
 

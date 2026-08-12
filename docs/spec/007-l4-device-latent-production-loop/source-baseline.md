@@ -1,6 +1,6 @@
 # DeviceLatent L4 specification source baseline
 
-This document is the provenance and current-code evidence owner for issue #1892. It records what was received, what was observed at implementation time, and how stale source assumptions were absorbed. It does not define target behavior; see [spec.md](./spec.md) and [contract-set.md](./contracts/contract-set.md).
+This document is the provenance and current-code evidence owner for issue #1892 and its #2109 candidate-scope rebaseline. It records what was received, what was observed at each decision baseline, and how stale source assumptions were absorbed. It does not define target behavior; see [spec.md](./spec.md) and [contract-set.md](./contracts/contract-set.md).
 
 ## Implementation baseline
 
@@ -24,6 +24,15 @@ The repository already has the durable reconcile substrate; the DeviceLatent PBI
 - `docs/rules/reconcile.md` is the current behavior guide for this substrate. It records the same five-table boundary and the existing claim/pause/drain/release and lease/epoch semantics.
 
 Consequently, #1898 is limited to durable wake-version and failure-streak extensions plus the atomic join between a DeviceLatent desired update and the existing target-due state. #1899 is limited to the missing bounded concurrent execution and fairness increment. Neither PBI re-creates next-run scheduling, due claiming, lease/epoch fencing, pause, drain, or release.
+
+## 2026-08-12 candidate-scope rebaseline
+
+- Decision baseline: `origin/develop@7fabf4e36c526c4187c0d7a2bb8f8f96873456b4`.
+- Received `rss-main-user-device-abac-speckit-20260811.zip`: SHA-256 `a714c58a4846ee9e38d5e955fa7e8a19933c8dee2e5718bbb99919d03564a6b8`.
+- Received `rss-incubator-secure-device-rotation-speckit-20260811.zip`: SHA-256 `47a603d91c1117d2b341a02e29ff40132dcfad554cdb26d2620d2c3baa5b8051`.
+- ADR-028 accepts `device-security` only as candidate scope. The current `deviceidentity` target remains a draft, compile-only library pilot with no binary, image, mounted contracts, production provider closure, or formal non-test production mint.
+- #1910 closed without implementing activation; ADR-028 supersedes its direct activation/T3 route. Future candidate integration and any later hardening/T3 activation require independent owners.
+- The exact RSS public waist remains the existing six draft contracts. Resource Security Fact is an External/incubator bootstrap or product fact, not a seventh RSS ingress or a compatibility path.
 
 ## Accepted contract amendment
 
@@ -68,7 +77,7 @@ The received-archive hashes below remain immutable provenance and intentionally 
 | The source implementation commit `08de5ceb…` and fixed migration range `0067`–`0070` are current | Rejected. The implementation baseline and migration head above are authoritative; later PBIs allocate numbers when they execute. |
 | A new persistent revocation work package is required (`PR-10`, `T060`–`T065`) | Removed. Persistence already exists; all certificate work reuses the current store and security rules. |
 | A generic `TargetWakeStore` is the selected abstraction | Rejected. #1898 owns a purpose-specific durable scheduling transaction and repair behavior. |
-| A production Compose pilot proves closure | Rejected. #1904 is a draft simulator pilot only. Production activation remains blocked on #1910 and an assembly-level external PKI provider closure. |
+| A production Compose pilot proves closure | Rejected. #1904 is a draft simulator pilot only. ADR-028 owns a future candidate-integration handoff; #1910 is no longer an activation or T3 owner. |
 | L4 needs its own `l4-closure` gate and required CI job | Rejected. #1909 extends the existing typed registry/code-generation verification path and CI-impact behavior. |
 | PR count, task count, case count, random-sequence count, or changed-line count is a pass condition | Rejected. Changed-line ranges remain planning budgets only; proof comes from the carriers mapped by the ADR and traceability table. |
 | The received ADR can be imported with number 018 | Rejected because ADR-018 already exists. Its content was re-adjudicated into ADR-022; this source filename and hash are retained only here. |

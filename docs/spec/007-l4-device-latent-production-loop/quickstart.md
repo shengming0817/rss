@@ -28,6 +28,7 @@ Run the one-time, non-committed specification smoke for file inventory, requirem
 
   test "$(find "$spec_dir" -type f | wc -l | tr -d ' ')" -eq 20
   test -f docs/architecture/202607291724-022-l4-device-latent-production-loop.md
+  test -f docs/architecture/202608120423-028-device-security-candidate-scope.md
 
   rg -o '^- \*\*(N?FR-[0-9]{3}[a-z]?):' "$spec_dir/spec.md" |
     sed -E 's/^- \*\*([^:]+):/\1/' | sort >"$spec_ids"
@@ -37,7 +38,7 @@ Run the one-time, non-committed specification smoke for file inventory, requirem
   test "$(uniq -d "$spec_ids" | wc -l | tr -d ' ')" -eq 0
   test "$(uniq -d "$trace_ids" | wc -l | tr -d ' ')" -eq 0
   cmp "$spec_ids" "$trace_ids"
-  for pbi in $(seq 1893 1910); do
+  for pbi in $(seq 1893 1909); do
     rg -q "#$pbi" "$spec_dir/tasks.md"
   done
 
@@ -101,16 +102,6 @@ cargo xtask assembly generate-providers --check
 
 The #1904 target is a `compile-only`, library-only composition proof. Its six proposal contracts remain draft, and these commands do not claim a binary, listener, image, runtime journey, production provider closure, or deployable artifact. The #1906 journey is a T2 production-ineligible simulator join; it does not activate proposal contracts or claim a production assembly. The #1907 command is a T2 Medium PostgreSQL/worker join proof; it is not T3, does not activate proposal contracts, and does not expand the NFR-012 fault matrix beyond the two owned hazards. The #1908 journey is the unique T2 owner for the two NFR-013 broker/backpressure plus durable-ingress join hazards. Its scheduled owner is ReleaseCheck/nightly—not PR or Adaptive CI—and the command above is the manual diagnostic entry point; reuse #1902's broker-tests command above for standalone transport/session/authentication evidence.
 
-## Commands introduced by later PBIs
+## No activation command
 
-The following are placeholders for delivery discoverability, not commands that exist at this specification baseline. Run each only after its owner PBI introduces the corresponding repository target; use the target's checked-in help rather than inventing an alternate path.
-
-```sh
-# #1896/#1897/#1898/#1900, after their PostgreSQL conformance targets exist
-cargo nextest run -E 'test(device_certificate)'
-
-# #1910 remains dormant behind the External-PKI `flag-cond` trigger. It has no production
-# activation command or repository target until that trigger is satisfied and separately implemented.
-```
-
-Later PBIs must replace a placeholder if the repository exposes a different canonical target. They must not add a second command surface solely to preserve this example.
+The current `deviceidentity` target is draft and compile-only. There is no production candidate binary, image, provider closure, activation target, or activation command to run. Future ADR-028 work must document the single checked-in command exposed by its real carrier; this guide does not reserve or invent a compatibility command.

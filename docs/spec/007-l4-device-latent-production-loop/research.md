@@ -42,9 +42,19 @@ The six identities and proposal shapes are owned by [contract-set.md](./contract
 
 ## Decision: provider closure and command authorization are distinct
 
-External PKI owns CA policy, EST/CSR processing, SAN and key-usage authorization, signing, CRL/OCSP, and certificate lifecycle. A sealed assembly-level `ExternalPkiProviderClosure` proves the selected provider, production configuration and conformance evidence required for activation. It grants no tenant/device authorization. Each command separately requires a sealed `AuthorizedCertificateArtifact` bound to tenant, device, desired generation, policy, public key, certificate chain and expiry. Its internal receipt exposes non-forgeable `CertScope`, `CertSerial`, and `CertNotAfter` capabilities for readiness and the existing revocation lookup. Commands still carry only its opaque artifact identity and digest; private keys, raw CSRs, serial authorization, and unapproved certificate material are excluded.
+External PKI owns CA policy, EST/CSR processing, SAN and key-usage authorization, signing, CRL/OCSP, and certificate
+lifecycle. A future candidate assembly requires a sealed assembly-level provider closure proving the selected provider,
+production configuration and conformance evidence. It grants no tenant/device authorization. Each command separately requires
+a sealed `AuthorizedCertificateArtifact` bound to tenant, device, desired generation, policy, public key, certificate chain and
+expiry. Its internal receipt exposes non-forgeable `CertScope`, `CertSerial`, and `CertNotAfter` capabilities for readiness and
+the existing revocation lookup. Commands still carry only its opaque artifact identity and digest; private keys, raw CSRs,
+serial authorization, and unapproved certificate material are excluded. The assembly-level type and formal production mint
+are not implemented at the current head.
 
-The simulator planned by #1904 proves orchestration only and stays draft. #1910 may activate the runtime path only after external PKI supplies `ExternalPkiProviderClosure` and the production assembly requires it. Possessing any one authorized artifact cannot unlock the assembly, and possessing provider closure cannot authorize an individual command.
+The simulator delivered by #1904 proves orchestration only and stays draft. ADR-028 supersedes #1910's direct activation
+route: future candidate implementation must first materialize the separate closure and real consumer at T1/T2; hardening/T3
+and atomic activation remain independent. Possessing any one authorized artifact cannot unlock the assembly, and possessing
+provider closure cannot authorize an individual command.
 
 Rejected alternatives:
 
@@ -55,7 +65,7 @@ Rejected alternatives:
 
 ## Decision: reuse the persistent revocation model
 
-The existing PostgreSQL revocation key `(tenant_id, device_id, serial)` and `not_after` retention semantics remain the only revocation model. This effort neither adds a second `serial_digest/reason` table nor reopens persistence as unfinished work.
+The existing PostgreSQL revocation key `(tenant_id, device_id, serial)` and `not_after` retention semantics remain the sole RSS decision-side projection/cache/lookup. External PKI retains lifecycle/publication authority. This effort neither adds a second `serial_digest/reason` table nor reopens persistence as unfinished work.
 
 ## Decision: MQTT production behavior is explicit and closed
 
@@ -65,7 +75,11 @@ Production MQTT is always compiled and exposes one `MqttSession`, not interchang
 
 The device credential carries exactly one URI SAN `urn:rss:mqtt-device:v1:{tenant}:{device}:{generation}`. A formal Mosquitto v5 message plugin obtains that peer certificate from the broker API, checks the SAN against the exact uplink topic, rejects client-supplied reserved assertion properties and signs principal, topic, correlation, SHA-256 payload digest, QoS and retain with Ed25519. The signing key remains broker-only; RSS receives the public verification key. Only a valid assertion for the current policy can produce a non-forgeable `AuthenticatedDeviceDelivery`, whose one-shot capability performs success PUBACK. A topic, payload or user property can be checked against the credential-derived principal but cannot construct or override it. Pre-authentication assertion/topic rejection is terminally settled with MQTT v5 negative PUBACK by a move-only adapter-private carrier; it does not mint authenticated delivery, durable commit, receipt, or broker-acceptance authority. An unknown negative-ACK transport outcome fails closed and stops rather than reconnecting the poison delivery.
 
-Downlink PUBACK yields only the non-copyable `BrokerAccepted` transport capability. It does not mean device acknowledgement, durable ingress or application receipt. #1902 owns the standalone transport, authentication, session and broker proof; #1903 owns durable ingress and post-commit receipt, #1908 owns only cross-boundary broker/backpressure/ingress hazards, and #1910 owns assembly activation, required providers, readiness and drain. These later PBIs consume this boundary without reopening it.
+Downlink PUBACK yields only the non-copyable `BrokerAccepted` transport capability. It does not mean device acknowledgement,
+durable ingress or application receipt. #1902 owns the standalone transport, authentication, session and broker proof; #1903
+owns durable ingress and post-commit receipt; #1908 owns only cross-boundary broker/backpressure/ingress hazards. ADR-028
+hands typed candidate construction, provider seams and component lifecycle to future T1/T2 implementation; designated
+binary/image process startup/readiness/restart/drain and activation wait for a hardening-authorized T3 owner.
 
 #1902's behavioral carrier is the hermetic Docker broker lane using the same mTLS/plugin image and persistence contract. An external URL cannot substitute for its PKI, ACL, signing-key or restart evidence, so there is no environment fallback. Documentation records this proof obligation but does not assert a test result; the actual command result and shard evidence remain authoritative.
 
@@ -73,10 +87,29 @@ Downlink PUBACK yields only the non-copyable `BrokerAccepted` transport capabili
 
 The frozen six-contract set contains one authorized `LocalOnly` status read and no operator mutation ingress. Therefore this proposal promises inspection, not manual resync, quarantine, unquarantine, cancel, supersede, or delete recovery. Lost-wake repair and generation-fenced supersession remain automatic internal loop behavior.
 
+Production operator recovery is a later federated join, not a seventh RSS contract: RSS contributes inspection, automatic
+repair and fail-closed pause/drain seams; the incubator product contributes authorized orchestration/runbook; External
+control planes contribute resource/PKI remediation actions and audit receipts. ADR-028 requires that join as hardening/T3
+activation evidence.
+
 Rejected alternatives:
 
 - Describing an operation without an ingress contract creates an unverifiable API promise.
 - Adding a seventh recovery contract would widen the approved contract set and is excluded from this proposal.
+
+## Decision: Resource Security Fact is not a seventh contract
+
+Device authorization may consume a narrow tenant/resource projection through the existing Common ABAC PIP seam, but the
+fact source, authoring lifecycle and management plane remain External. The `rss-incubator` reference environment may seed
+facts and policy as disposable candidate/T2 bootstrap; that bootstrap is neither an RSS Release API nor production authority.
+
+Rejected alternatives:
+
+- Adding a Resource Security Fact write contract would break the approved six-contract exact set without a proven RSS
+  runtime consumer or authority model.
+- Treating bootstrap data as current production truth erases freshness, replay, audit and ownership failure modes.
+- Exposing the existing internal resource-attribute write repository would leak an implementation seam and create a generic
+  device inventory/control-plane surface.
 
 ## Decision: use existing delivery and verification architecture
 

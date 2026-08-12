@@ -28,17 +28,19 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 ### 公开发布命名
 
 上述 concat/no-dash/no-`rss-` 规则只约束仓内 workspace identity。进入正向 Release Surface 的公开 registry
-package 使用品牌 **RSS** 与 `rss-` 前缀；首批两个 Standalone Component 的映射固定为：
+package 使用品牌 **RSS** 与 `rss-` 前缀；已接纳的 internal → public 映射固定为：
 
 | repository path / internal dependency key | public Cargo package | registry owner |
 |---|---|---|
 | `diagctx` | `rss-diag-context` | `github:shengming0817:rss-maintainers` |
 | `tracewire` | `rss-trace-context` | `github:shengming0817:rss-maintainers` |
 | `platform` | `rss-platform` | `github:shengming0817:rss-maintainers` |
+| `crates/devicesecuritycontracts` / `devicesecuritycontracts`（candidate，尚未物化） | `rss-device-security-contracts` | `github:shengming0817:rss-maintainers` |
 
 规范源码仓库是 [`shengming0817/rss`](https://github.com/shengming0817/rss)。2026-08-09 UTC 的 crates.io
 检查确认精确名称 `rss` 已被无关的 RSS feed 读写 crate 占用，而 `rss-diag-context`、
-`rss-trace-context` 与 `rss-platform` 当时未登记。未登记只是一项带时间的冲突检查，不构成名称保留、ownership 或发布授权；首次
+`rss-trace-context` 与 `rss-platform` 当时未登记；2026-08-12 UTC 的 Cargo registry 精确查询对
+`rss-device-security-contracts` 也未返回登记项。未登记只是一项带时间的冲突检查，不构成名称保留、ownership 或发布授权；首次
 发布前必须重新查询精确名称，并在 crate 创建后验证 registry owner 列表。`crates/diagctx` / `diagctx` 与
 `crates/tracewire` / `tracewire` 分别是仓内路径与 dependency rename key，不构成旧 package alias。Cargo closure
 PBI 直接采用上表公开 package identity。未完成最终 API 与同 revision artifact proof 的 package 保持

@@ -13,7 +13,7 @@ Wave 3: #1897 || #1902
 Wave 4: #1898 -> #1899 -> #1900 -> #1901 -> #1903 -> #1904
 Wave 5: #1905 || #1906
 Wave 6: #1907 -> #1908 -> #1909
-Wave 7: external PKI provider closure -> #1910 conditional activation
+Future handoff: ADR-028 candidate integration -> separately authorized hardening/T3 activation
 ```
 
 The linear presentation is a safety schedule, not permission to ignore direct prerequisites:
@@ -28,7 +28,7 @@ The linear presentation is a safety schedule, not permission to ignore direct pr
 - #1902 can proceed beside #1897 because its transport security and session work does not own domain persistence.
 - #1904 is a draft simulator-backed pilot only. It does not activate the proposal contracts.
 - #1909 extends the existing registry, code-generation, verification, CI-impact, and evidence paths; it does not create a parallel gate or required job.
-- #1910 may enable the active runtime path only after all repository dependencies and a sealed assembly-level `ExternalPkiProviderClosure` are present. Each command still requires its own `AuthorizedCertificateArtifact`.
+- Waves 1–6 close the implemented T1/T2 capability baseline. They do not authorize a production candidate, T3, or activation. ADR-028 owns the future candidate-integration and activation DAG; each command must still require its own `AuthorizedCertificateArtifact`, separate from any future assembly-wide provider closure.
 
 When two nominally parallel PBIs discover an overlapping schema, migration, transaction, generated output, or assembly surface, their work is serialized at that surface. The earlier owner lands the shared shape; the dependent owner rebases and consumes it instead of introducing a second fact source.
 
@@ -55,7 +55,6 @@ Changed-line ranges are design and review budgets. They help keep a PBI cohesive
 | #1907 | 1,700–1,990 |
 | #1908 | 1,700–1,990 |
 | #1909 | 1,450–1,800 |
-| #1910 | 900–1,400 handwritten; generated output reported separately |
 
 Exceeding a range prompts scope and ownership review, not an automated failure. Splitting is appropriate only when it preserves one semantic owner and does not create compatibility layers or duplicate proofs.
 
@@ -64,9 +63,9 @@ Exceeding a range prompts scope and ownership review, not an automated failure. 
 1. Land vocabulary, proposal contract implementation, and persistent models while every DeviceLatent contract remains draft.
 2. Introduce durable scheduling, fencing, the authorized-artifact boundary, secure MQTT, and post-commit ingress receipts behind inactive assembly wiring.
 3. Run the simulator-backed #1904 pilot as a draft integration exercise. Its artifacts and receipts remain production-ineligible by type.
-4. Add bounded operations and the minimum fault evidence at the unique T1/T2/T3 owners recorded in [traceability.md](./traceability.md).
+4. Add bounded operations and the minimum fault evidence at the unique T1/T2 owners recorded in [traceability.md](./traceability.md).
 5. Extend existing repository verification and impact selection in #1909 without creating an L4-specific parallel closure path.
-6. In #1910, validate `ExternalPkiProviderClosure`, persistent providers, secure transport, readiness, and drain as one production assembly join. Only then may the proposal identities become active; command authorization remains per-artifact.
+6. Stop at the draft, compile-only candidate boundary. Future candidate integration, real-consumer evidence, and any later hardening/T3 activation require the independent owners and transition defined by ADR-028; they are not work authorized by this plan.
 
 Each invariant must have one canonical primary proof with a minimum sufficient Hard or Medium carrier assigned by [ADR-022](../../architecture/202607291724-022-l4-device-latent-production-loop.md). A Hard carrier is sufficient when construction, generated shape, or a database constraint makes the invalid state unrepresentable. An independent behavioral Medium proof is required for runtime hazards such as transaction joins, real network/broker behavior, restart or takeover, concurrency, and drain. If the assigned carrier cannot prove the claim, the owner narrows or defers it rather than relying on prose.
 
@@ -75,6 +74,6 @@ Each invariant must have one canonical primary proof with a minimum sufficient H
 - Unactivated Rust, schema, and code-generated changes are reverted as a coherent unit. No alias, shim, dual reader, or dual writer remains.
 - Database migrations are forward-only. On failure, pause writers and workers, preserve durable facts, and roll forward with a corrective migration.
 - MQTT and assembly rollback means disable, pause, and deterministically drain. It never downgrades to plaintext, software-CA, simulator, or in-memory providers.
-- #1910 rollback disables the active runtime path and retains state, receipts, audit records, and evidence. An already active contract does not return to draft; its lifecycle remains active or advances through the repository's formal deprecated lifecycle.
+- The current rollback boundary remains draft and compile-only: disable or remove candidate wiring coherently while retaining durable facts and evidence. If a later ADR-028 activation is authorized, that independent change must define its own fail-closed disable/drain rollback; an active contract must never regress to draft.
 
 Rollback does not reinterpret an ACK as convergence, discard committed ingress evidence, or manufacture an external PKI authorization receipt.

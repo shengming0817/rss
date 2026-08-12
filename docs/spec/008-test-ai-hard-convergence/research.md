@@ -16,7 +16,7 @@
 | Provider conformance | PostgreSQL 与 AMQP 已有 catalog enrollment | 把“接入 suite”改为“差量去重与特有失效模式保留” |
 | Vault live tests | #1978 已把 live case 迁到显式 `adapters/vault/tests/live_vault` target（`autotests=false` + `required-features=["integration"]`，无 lib/`#[ignore]`）。#1982 在同 target 以独立 signing/derived-encryption key 补齐一次运行可完成的 adapter live readiness 与 warm-outage（TCP cut）；composition readiness 算法、`#1933` live join、transit T1、T3 仍各有独立 owner。本文档只记录事实，不是 enforcement。 | eligibility 与 adapter live T2 已分 owner 落地 |
 | T3 scope | 当前 `project-scope.md` 仍由 production assembly + join hazard 拥有 | product-surface 先走 ADR amendment |
-| Official profiles | ADR-024 已声明 core/eventing，device-security 条件激活 | 不再声称实施分支缺少 ADR-024 |
+| Official profiles | ADR-024 已声明 core/eventing；ADR-028 接纳 device-security candidate scope，但未授权 hardening、T3 或 active | 不再把 conditional 或 issue closed 误读为激活 |
 | runtime baseline | baseline 已包含 fixture/builder carrier 缩减（关联 #1886） | 后续新建 rule-to-carrier 语义删除 PBI，不复用旧 issue |
 | testkit external PG | baseline 仍含 external PG role provisioning 与 container/fixture lifecycle 耦合（关联 #1769） | 工作纳入新的 testkit closeout PBI，旧 issue 以 superseded 关闭 |
 
@@ -54,6 +54,8 @@
 
 静态 `assemblies/artifacts.toml` 可以保存稳定 identity 和 selector，但 same-head receipts、历史 transition 与
 产品接纳判断仍由 PBI/PR review evidence 承载。
+
+#1983 仅处置 `runtime`、`identityaudit`、`settingsonly`、`core` 与 `eventing` 的既有 T3 收敛；它与 device-security 独立且不提供其 candidate、carrier 或 activation 证明。device-security 必须遵循 ADR-028 的独立候选集成与后续硬化触发。
 
 ### 外部 companion 延迟激活
 

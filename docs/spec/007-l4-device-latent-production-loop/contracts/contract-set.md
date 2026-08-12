@@ -1,8 +1,13 @@
 # DeviceLatent Target Contract Set
 
-**Lifecycle:** Draft proposal only
+**Lifecycle:** Materialized Draft candidate set
 
-These files freeze target identities, kinds, consistency, and payload shapes for later implementation. They are not live `contracts/**` manifests, generated bindings, transport registrations, or evidence that a production path exists. Activation requires the implementation owners to materialize and validate them through the repository's existing contract/codegen funnel.
+These files freeze target identities, kinds, consistency, and payload shapes. The six identities now have `contracts/**`
+manifests and generated candidate bindings, but every lifecycle remains `draft`; they are not mounted transport routes,
+active public contracts, or evidence that a production path exists. ADR-028 reserves a future
+`rss-device-security-contracts` candidate package derived from this exact set without making that package a current artifact;
+its internal-to-public identity and registry owner are defined only by
+[`architecture.md` §公开发布命名](../../../rules/architecture.md#公开发布命名).
 
 ## Frozen set
 
@@ -17,7 +22,14 @@ These files freeze target identities, kinds, consistency, and payload shapes for
 
 `identity.device-certificate-status-get` is `LocalOnly`: it is a pure authorized read of already durable identity/deviceloop state. It publishes no fact and performs no business mutation.
 
-The later implementation directly replaces the empty draft `identity.reconcile-loop`. There is no alias, compatibility shim, dual contract, old reader, or dual write. Until that replacement is implemented, the identities in this folder remain proposals.
+The materialized manifests directly replaced the empty draft `identity.reconcile-loop`. There is no alias, compatibility
+shim, dual contract, old reader, or dual write. The resulting identities remain Draft candidates until the independent
+activation transition.
+
+This exact set has no Resource Security Fact write ingress. Resource fact source/authoring lifecycle remains External;
+candidate/test bootstrap may prepare a narrow Common ABAC projection but is not a production authority or a seventh
+contract. Adding a real RSS runtime ingress requires a separate scope/ADR/PBI and an atomic exact-set replacement, never a
+parallel six/seven path.
 
 ## Shared wire decisions
 
@@ -37,8 +49,18 @@ The later implementation directly replaces the empty draft `identity.reconcile-l
 - Production MQTT authentication derives a sealed `(tenant, device, credentialGeneration)` principal from the verified mTLS credential. Payload and topic fields cannot override it; mismatch or stale credential generation fails closed against transport credential policy. Credential generation is not the desired certificate generation being installed.
 - The authorized operator surface in this frozen set is the `LocalOnly` status read only. Automatic repair and fenced supersession are internal behavior, not manual resync, quarantine, unquarantine, cancel, supersede, or delete contracts.
 
-## Activation boundary
+## Candidate and activation boundary
 
-A deterministic simulator can exercise a draft pilot but cannot activate these contracts. Production activation requires an assembly-level sealed `ExternalPkiProviderClosure` proving the selected provider, production configuration, and conformance closure. Every command separately requires a sealed `AuthorizedCertificateArtifact` bound to tenant, device, generation, policy, public key, certificate chain, and expiry. Its internal sealed receipt supplies typed `CertScope`, `CertSerial`, and `CertNotAfter` (or an equally non-forgeable capability) for readiness and revocation checks; the device command remains limited to opaque artifact ID and digest. Neither capability can substitute for the other. External PKI owns CA hierarchy, EST/CSR authorization, SAN/key-usage authorization, signing, CRL/OCSP, and certificate lifecycle. RSS consumes the authorized public artifact reference and receipt only.
+A deterministic simulator can exercise a draft pilot but cannot mint candidate production eligibility or activate these
+contracts. Candidate implementation requires an assembly-level sealed provider closure proving the selected provider,
+production configuration, and conformance closure. Every command separately requires a sealed
+`AuthorizedCertificateArtifact` bound to tenant, device, generation, policy, public key, certificate chain, and expiry. Its
+internal sealed receipt supplies typed `CertScope`, `CertSerial`, and `CertNotAfter` (or an equally non-forgeable capability)
+for readiness and revocation checks; the device command remains limited to opaque artifact ID and digest. Neither capability
+can substitute for the other. External PKI owns CA hierarchy, EST/CSR authorization, SAN/key-usage authorization, signing,
+CRL/OCSP, and certificate lifecycle. RSS consumes the authorized public artifact reference and receipt only.
+
+The repository does not yet implement that assembly-wide closure or a formal production mint. Even after the candidate T1/T2
+closure exists, activation still requires ADR-028's independent hardening/T3 first-green and atomic six-contract transition.
 
 The current PostgreSQL revocation store keyed by `(tenant_id, device_id, serial)` with `not_after` remains the only RSS revocation model. None of these shapes creates a second revocation identity.

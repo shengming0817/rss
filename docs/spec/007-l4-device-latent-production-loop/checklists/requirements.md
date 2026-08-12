@@ -7,14 +7,14 @@ This checklist records the quality review of the #1892 proposal. It is review ev
 - [x] The proposal stays within RSS desired/reported convergence, durable facts, transport, authorization, and assembly boundaries.
 - [x] External PKI retains CA, enrollment authorization, signing, revocation publication, and certificate-lifecycle ownership.
 - [x] Simulator output is explicitly draft and cannot activate a production path.
-- [x] The existing persistent revocation store remains the sole RSS revocation model.
+- [x] The existing persistent revocation store remains the sole RSS decision-side projection; External PKI retains lifecycle/publication authority.
 - [x] No generic scheduler, device-management control plane, deployment projection, or CI platform is introduced.
 
 ## Requirement quality
 
-- [x] User stories distinguish desired acceptance, command receipt, reported convergence, and production activation.
+- [x] User stories distinguish desired acceptance, command receipt, reported convergence, candidate eligibility, and independently authorized activation.
 - [x] Functional requirements are stable, testable, and independent of fixed migration numbers or historical implementation paths.
-- [x] Non-functional requirements bind tenant safety, durability, bounded execution, redaction, and reversible activation to observable behavior.
+- [x] Non-functional requirements bind tenant safety, durability, bounded execution, redaction, and component disable/drain to observable behavior while leaving process activation/rollback to independent T3 authorization.
 - [x] Direct replacement is explicit; no alias, shim, dual reader, dual write, or retained draft contract is required.
 - [x] ACK is not treated as convergence, and only matching reported state can establish readiness.
 
@@ -24,7 +24,7 @@ This checklist records the quality review of the #1892 proposal. It is review ev
 - [x] [spec.md](../spec.md) alone owns user stories, FR/NFR, boundaries, and success semantics.
 - [x] [data-model.md](../data-model.md) alone owns logical identities, state relationships, and transaction boundaries.
 - [x] [contracts/contract-set.md](../contracts/contract-set.md) and its schemas alone own proposal identities, kinds, consistency, and wire shapes.
-- [x] [traceability.md](../traceability.md) alone assigns each requirement to one PBI and one primary proof.
+- [x] [traceability.md](../traceability.md) alone assigns each requirement to one implemented PBI/proof or one explicit future handoff.
 - [x] [plan.md](../plan.md) alone owns delivery ordering, parallel boundaries, review budgets, rollout, and rollback.
 - [x] [tasks.md](../tasks.md) contains executable PBI checklists without copying dependency, budget, or dynamic status metadata.
 - [x] [quickstart.md](../quickstart.md) contains runnable commands without becoming an architecture fact source.
@@ -41,6 +41,6 @@ This checklist records the quality review of the #1892 proposal. It is review ev
 
 - [x] The contract proposal contains six identities and eight parseable JSON proposal documents; this review does not claim meta-schema validation.
 - [x] Traceability dynamically matches every FR/NFR declared in the specification exactly once.
-- [x] Every implementation PBI from #1893 through #1910 has an executable checklist.
-- [x] Each requirement has one canonical T1, T2, or T3 primary proof.
-- [x] Rollout keeps the simulator pilot draft, requires assembly-level external PKI provider closure for activation, and separately requires a per-command authorized artifact.
+- [x] Completed PBIs #1893–#1909 have executable checklists; the superseded #1910 activation route is not retained as dormant work.
+- [x] Each requirement maps exactly once to an implemented canonical T1/T2 proof or an explicit ADR-028 future handoff that cannot be mistaken for completed evidence.
+- [x] Rollout stops at the draft, compile-only pilot. Future candidate integration must keep an assembly-wide external-PKI provider closure separate from each command's authorized artifact, and activation requires independent hardening/T3 authorization.

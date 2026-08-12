@@ -154,17 +154,20 @@ Exact-target wake advances durable target state. Periodic resynchronization rema
 
 ### CertificateRevocation
 
-The existing `PgRevocationStore` model remains authoritative:
+The existing `PgRevocationStore` remains the sole RSS decision-side revocation projection/cache/lookup:
 
 - identity: `(tenant_id, device_id, serial)`;
 - lifecycle evidence includes `not_after`;
 - repeated revoke is idempotent under that identity.
 
-No second revocation entity, digest-keyed table, or independent reason model is introduced by this feature. External PKI remains responsible for certificate revocation publication and lifecycle services; RSS uses its existing revocation record within the current boundary.
+No second revocation entity, digest-keyed table, or independent reason model is introduced by this feature. External PKI remains the authoritative owner of certificate revocation publication and lifecycle services; RSS uses its existing projection for fail-closed decisions within the current boundary.
 
 ### ExternalPkiProviderClosure
 
-This sealed assembly-level capability proves that one selected external provider, its production configuration digest, and its provider-conformance evidence form an eligible production dependency. It is required by #1910 before runtime activation. It contains no tenant/device/generation authorization and cannot authorize an individual command.
+This is the target shape for a future sealed assembly-level capability proving that one selected external provider, its
+production configuration digest, and its provider-conformance evidence form an eligible candidate dependency. It contains no
+tenant/device/generation authorization and cannot authorize an individual command. The current repository has no such type or
+formal production mint; ADR-028 assigns both to future candidate T1/T2 implementation and keeps activation separate.
 
 ### AuthorizedCertificateArtifact
 
@@ -196,7 +199,7 @@ output.
 
 Deletion is internal desired state, not an HTTP/operator surface. An expected-generation CAS sets
 `deletion_requested_at` while retaining `finalizer_present`. The reconciler enumerates every retained
-artifact receipt and records revocation through the existing `PgRevocationStore`; authoritative
+artifact receipt and records the RSS-side revocation projection through the existing `PgRevocationStore`;
 `now >= not_after` is the only expiry evidence, and an empty receipt set means no certificate was ever
 authorized. Only a single lease-CAS PostgreSQL transaction may recheck that every receipt is revoked or
 expired, write `Deleting/DeletionComplete`, release the finalizer, disable the target, append the attempt
