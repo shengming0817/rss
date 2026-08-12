@@ -5994,6 +5994,7 @@ mod tests {
         };
         let checkout = step_by_id(job, "audit-checkout");
         let setup = step_by_id(job, "audit-setup");
+        let prose = step_by_id(job, "audit-prose-scan");
         let audit = step_by_id(job, "audit-run");
         schedule_is_utc
             && yaml_scalar(job, "if")
@@ -6023,6 +6024,14 @@ mod tests {
                                 && yaml_scalar(with, "tool-cache-epoch") == Some("v4")
                                 && yaml_scalar(with, "compiler-cache-epoch") == Some("v4")
                         })
+            })
+            && step_ids_are_ordered(job, &["audit-setup", "audit-prose-scan", "audit-run"])
+            && prose.is_some_and(|step| {
+                yaml_keys_exact(step, &["continue-on-error", "id", "name", "run"])
+                    && yaml_field(step, "continue-on-error").and_then(serde_yaml_ng::Value::as_bool)
+                        == Some(true)
+                    && yaml_scalar(step, "run")
+                        == Some("bash hack/automation/prose-advisory-scan.sh scan")
             })
             && audit.and_then(|step| yaml_scalar(step, "run"))
                 == Some("cargo run --locked -p xtask -- ci audit")
@@ -6504,6 +6513,18 @@ mod tests {
             );
         }
         for (label, red_caller) in [
+            (
+                "blocking prose advisory",
+                caller.replacen("        continue-on-error: true\n        run: bash hack/automation/prose-advisory-scan.sh scan", "        continue-on-error: false\n        run: bash hack/automation/prose-advisory-scan.sh scan", 1),
+            ),
+            (
+                "wrong prose advisory entrypoint",
+                caller.replacen(
+                    "run: bash hack/automation/prose-advisory-scan.sh scan",
+                    "run: bash hack/automation/prose-advisory-scan.sh selftest",
+                    1,
+                ),
+            ),
             (
                 "wrong execution outcome binding",
                 caller.replacen(

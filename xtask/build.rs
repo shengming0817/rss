@@ -5,7 +5,7 @@ use std::fs;
 use std::io;
 use std::path::PathBuf;
 
-const EXPECTED_TOOLS: [&str; 10] = [
+const EXPECTED_TOOLS: [&str; 11] = [
     "cargo-nextest",
     "cargo-llvm-cov",
     "cargo-deny",
@@ -15,6 +15,7 @@ const EXPECTED_TOOLS: [&str; 10] = [
     "cargo-public-api",
     "cargo-semver-checks",
     "sccache",
+    "ripgrep",
     "promtool",
 ];
 
@@ -79,7 +80,14 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         if !matches!(
             probe,
-            "nextest" | "llvm-cov" | "dylint" | "direct" | "receipt" | "sccache" | "promtool"
+            "nextest"
+                | "llvm-cov"
+                | "dylint"
+                | "direct"
+                | "receipt"
+                | "sccache"
+                | "ripgrep"
+                | "promtool"
         ) {
             return Err(invalid_catalog(row, "invalid probe").into());
         }

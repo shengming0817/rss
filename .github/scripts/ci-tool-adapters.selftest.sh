@@ -38,8 +38,8 @@ expect_output 'test-affected owns test and coverage tools' \
 expect_output 'integration-critical owns integration tools' \
   'cargo-nextest@0.9.137,sccache@0.15.0' \
   "$ADAPTER" specs --lane integration-critical --backend all
-expect_output 'audit owns only scheduled supply-chain tools' \
-  'cargo-deny@0.19.9,cargo-audit@0.22.2,sccache@0.15.0' \
+expect_output 'audit owns pinned prose and supply-chain tools' \
+  'cargo-deny@0.19.9,cargo-audit@0.22.2,sccache@0.15.0,ripgrep@15.2.0' \
   "$ADAPTER" specs --lane audit --backend all
 expect_output 'promtool remains digest-pinned and isolated to check' \
   'promtool@3.5.3' \
@@ -53,3 +53,36 @@ for removed in ci-meta ci-core-prerequisites ci-core-tests ci-security ci-covera
 done
 expect_failure 'unknown backend fails closed' "$ADAPTER" specs --lane check --backend unknown
 expect_failure 'relative sccache candidate fails closed' "$ADAPTER" verify-sccache --candidate relative/sccache
+
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/rss-tool-adapter-selftest.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT
+fixture=$(CDPATH='' cd -- "$fixture" && pwd -P)
+mkdir -p "$fixture/.install-action/bin" "$fixture/bin"
+for spec in \
+  '.install-action/bin/cargo-deny|cargo-deny 0.19.9' \
+  '.install-action/bin/cargo-audit|cargo-audit 0.22.2' \
+  '.install-action/bin/sccache|sccache 0.15.0'; do
+  relative=${spec%%|*}
+  version=${spec#*|}
+  printf '#!/usr/bin/env bash\nprintf '\''%%s\\n'\'' '\''%s'\''\n' "$version" > "$fixture/$relative"
+  chmod +x "$fixture/$relative"
+done
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  ': > "$RSS_RG_PROBE_MARKER"' \
+  "printf '%s\\n' 'ripgrep 15.2.0 (rev e89fff89ac)'" \
+  "printf '%s\\n' '' 'features:+pcre2'" > "$fixture/bin/rg"
+chmod +x "$fixture/bin/rg"
+marker="$fixture/.rg-probed"
+RSS_RG_PROBE_MARKER="$marker" "$ADAPTER" verify --mode fresh --lane audit --root "$fixture"
+[ -f "$marker" ] || { printf 'not ok - fresh audit setup probes rg\n' >&2; exit 1; }
+rm -f "$marker"
+RSS_RG_PROBE_MARKER="$marker" "$ADAPTER" verify --mode cache --lane audit --root "$fixture"
+[ -f "$marker" ] || { printf 'not ok - cached audit setup probes rg\n' >&2; exit 1; }
+printf 'ok - fresh and cached audit setup probe pinned rg\n'
+rm -f "$marker"
+printf '\n' >> "$fixture/bin/rg"
+expect_failure 'tampered cached rg fails closed' env RSS_RG_PROBE_MARKER="$marker" \
+  "$ADAPTER" verify --mode cache --lane audit --root "$fixture"
+[ ! -f "$marker" ] || { printf 'not ok - tampered cached rg executed before seal verification\n' >&2; exit 1; }
+printf 'ok - tampered cached rg is rejected before execution\n'
