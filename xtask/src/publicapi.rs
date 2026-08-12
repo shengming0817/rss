@@ -2186,6 +2186,7 @@ mod tests {
                 .map(PackageKey::as_str)
                 .collect::<Vec<_>>(),
             vec![
+                "rss-conformance",
                 "rss-contract",
                 "rss-diag-context",
                 "rss-platform",

@@ -57,7 +57,12 @@ pub(crate) const ISOLATED_BASIS_CRATES: &[&str] = &[
 /// domain-neutral 纯 infra、无 workspace 内部边（出边全是外部 opentelemetry/tracing crate），被 service
 /// `eventexec` 和 adapters `httpd`/`postgres` 依赖（`allows(Service,Engine)` / `allows(Adapter,Engine)` 均放行；
 /// `service→service` 禁故不可置 Service 档）。
-pub(crate) const ENGINE_CRATES: &[&str] = &["consistency", "primitives", "rss-trace-context"];
+pub(crate) const ENGINE_CRATES: &[&str] = &[
+    "consistency",
+    "primitives",
+    "rss-conformance",
+    "rss-trace-context",
+];
 /// DI-infra 层（依赖基础 + 引擎；被服务 / 域 / adapter / 组合根消费）——可替换 provider 的
 /// DI port trait 单源 + dynosaur 单一 dyn-dispatch 依赖点（ADR-003）。
 pub(crate) const DIPORT_CRATES: &[&str] = &["diport"];

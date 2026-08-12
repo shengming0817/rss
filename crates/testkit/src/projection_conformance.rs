@@ -9,7 +9,7 @@
 //! INVARIANT: PROJECTION-TARGET-CONFORMANCE-01 { level = "Hard", exec = "native-compile", source = "code", native = "sealed exact tuple rejects missing, duplicate, reordered, or unknown projection scenarios and fixes the behavior output type" }.
 //! INVARIANT: PROJECTION-CONFORMANCE-FIXTURE-01 { level = "Hard", exec = "native-compile", source = "code", native = "private fields and no raw constructor limit external carriers to the canonical primary and foreign test identities" }.
 
-use crate::ConformanceErrorCategory;
+use rss_conformance::ConformanceErrorCategory;
 
 /// One complete provider-neutral Projection input identity.
 ///

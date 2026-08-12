@@ -48,10 +48,13 @@ ambiguous outcome、provider outage 等特有失效模式。
 
 ### US5 — 外部 companion 只由真实 consumer 激活（P3）
 
-`rss-conformance`、`rss-test-postgres` 与 `rss-test-eventing` 只在真实 workspace 外 consumer、独立 fixture、
-SemVer/MSRV 和支持承诺齐备后实施。
+`rss-conformance`、`rss-test-postgres` 与 `rss-test-eventing` 只在真实 workspace 外 consumer owner、独立
+fixture 计划、SemVer/MSRV、支持范围和退出路径齐备后启动。候选包可先由 producer 的不可变 file-registry
+bundle 生成，不要求或暗示 crates.io 预发布。
 
-独立验收：条件 PBI 带 `flag-cond` 和可验证 Trigger；触发前不创建 crate、公共 API 或兼容 shim。
+独立验收：条件 PBI 带 `flag-cond` 和可验证 Trigger；owner/support/version/exit 是启动条件，外部 consumer
+针对精确 producer/consumer revision 的 candidate first-green 是完成与任何 registry 发布的门。未满足完成门
+不得发布，也不得以 path/git dependency、兼容 shim 或仓内伪 consumer 绕过。
 
 ## 功能需求
 

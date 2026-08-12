@@ -9,6 +9,8 @@ members = [
   "crates/request-context",
   # Platform Public：只依赖 Foundation Public 的 provider-free 应用窄腰。
   "crates/platform",
+  # Provider-neutral public LocalTx conformance assertions.
+  "crates/conformance",
   # 基础（仅 std + 外部 crate；enumerated intra-base DAG 见 architecture.md）
   "crates/vocab",
   "crates/ids",
@@ -105,6 +107,7 @@ exclude = ["lints"]
 # Positive Release Surface selection. Unlisted packages and profile artifacts remain internal.
 [workspace.metadata.release-surface]
 packages = [
+  { package = "rss-conformance", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
   { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
   { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
   { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental", profiles = [] },

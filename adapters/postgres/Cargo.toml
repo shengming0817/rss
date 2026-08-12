@@ -179,6 +179,7 @@ name = "migration_0087_device_command_fencing_contract"
 path = "tests/migration_0087_device_command_fencing_contract.rs"
 
 [dev-dependencies]
+rss_conformance = { package = "rss-conformance", path = "../../crates/conformance", version = "0.1.0" }
 diport = { path = "../../crates/diport", features = ["test-support", "dlq-test-support"] }
 generated = { path = "../../generated" }
 toml = { workspace = true }

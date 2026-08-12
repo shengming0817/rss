@@ -87,14 +87,14 @@ async fn localtx_audit_backend_profile_commit_and_rollback() -> TestResult {
     let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
 
     let commit_writes = AtomicUsize::new(0);
-    ::testkit::localtx::assert_commit(::testkit::localtx::CommitCase::new(
+    ::rss_conformance::localtx::assert_commit(::rss_conformance::localtx::CommitCase::new(
         || async {
             commit_sink
                 .append(audit_list_tenant_command(tenant_a))
                 .await
                 .map_err(|error| {
                     AuditLocalTxProfileError::provider(
-                        testkit::ConformanceErrorCategory::Permanent,
+                        rss_conformance::ConformanceErrorCategory::Permanent,
                         error,
                     )
                 })
@@ -118,20 +118,20 @@ async fn localtx_audit_backend_profile_commit_and_rollback() -> TestResult {
         crate::auth_audit_sink::AuthAuditAppendFault::Permanent,
         1,
     );
-    ::testkit::localtx::assert_rollback(::testkit::localtx::RollbackCase::new(
+    ::rss_conformance::localtx::assert_rollback(::rss_conformance::localtx::RollbackCase::new(
         || async {
             rollback_sink
                 .append(audit_list_tenant_command(rollback_tenant))
                 .await
                 .map_err(|error| {
                     AuditLocalTxProfileError::provider(
-                        testkit::ConformanceErrorCategory::Permanent,
+                        rss_conformance::ConformanceErrorCategory::Permanent,
                         error,
                     )
                 })
                 .map_err(audit_profile_classified)
         },
-        testkit::ConformanceErrorCategory::Permanent,
+        rss_conformance::ConformanceErrorCategory::Permanent,
         || async {
             auth_audit_snapshot(&owner, rollback_tenant)
                 .await
@@ -176,7 +176,7 @@ async fn localtx_audit_backend_profile_tenant_isolation() -> TestResult {
                     .await
                     .map_err(|error| {
                         AuditLocalTxProfileError::provider(
-                            testkit::ConformanceErrorCategory::Permanent,
+                            rss_conformance::ConformanceErrorCategory::Permanent,
                             error,
                         )
                     })
@@ -244,7 +244,10 @@ async fn localtx_audit_backend_profile_retry_policy() -> TestResult {
         .append(audit_list_tenant_command(success_tenant))
         .await
         .map_err(|error| {
-            AuditLocalTxProfileError::provider(testkit::ConformanceErrorCategory::Transient, error)
+            AuditLocalTxProfileError::provider(
+                rss_conformance::ConformanceErrorCategory::Transient,
+                error,
+            )
         })?;
     assert_eq!(success_probe.attempts(success_tenant), 2);
     assert_eq!(auth_audit_snapshot(&owner, success_tenant).await?, 1);
@@ -253,7 +256,10 @@ async fn localtx_audit_backend_profile_retry_policy() -> TestResult {
         .append(audit_list_tenant_command(permanent_tenant))
         .await
         .map_err(|error| {
-            AuditLocalTxProfileError::provider(testkit::ConformanceErrorCategory::Permanent, error)
+            AuditLocalTxProfileError::provider(
+                rss_conformance::ConformanceErrorCategory::Permanent,
+                error,
+            )
         }) {
         Ok(()) => {
             return Err(std::io::Error::other("permanent audit append fault must fail").into());
@@ -262,7 +268,7 @@ async fn localtx_audit_backend_profile_retry_policy() -> TestResult {
     };
     assert_eq!(
         audit_profile_category(&permanent),
-        testkit::ConformanceErrorCategory::Permanent
+        rss_conformance::ConformanceErrorCategory::Permanent
     );
     assert_eq!(permanent_probe.attempts(permanent_tenant), 1);
     assert_eq!(auth_audit_snapshot(&owner, permanent_tenant).await?, 0);
@@ -271,7 +277,10 @@ async fn localtx_audit_backend_profile_retry_policy() -> TestResult {
         .append(audit_list_tenant_command(exhaustion_tenant))
         .await
         .map_err(|error| {
-            AuditLocalTxProfileError::provider(testkit::ConformanceErrorCategory::Transient, error)
+            AuditLocalTxProfileError::provider(
+                rss_conformance::ConformanceErrorCategory::Transient,
+                error,
+            )
         }) {
         Ok(()) => {
             return Err(
@@ -282,7 +291,7 @@ async fn localtx_audit_backend_profile_retry_policy() -> TestResult {
     };
     assert_eq!(
         audit_profile_category(&exhausted),
-        testkit::ConformanceErrorCategory::Transient
+        rss_conformance::ConformanceErrorCategory::Transient
     );
     assert_eq!(exhaustion_probe.attempts(exhaustion_tenant), 3);
     assert_eq!(auth_audit_snapshot(&owner, exhaustion_tenant).await?, 0);
@@ -327,8 +336,8 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
     let rollback_failed_probe = rollback_failed_sink.append_attempt_probe();
     let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
-    ::testkit::localtx::assert_commit_unknown_no_replay(
-        ::testkit::localtx::CommitUnknownCase::new(
+    ::rss_conformance::localtx::assert_commit_unknown_no_replay(
+        ::rss_conformance::localtx::CommitUnknownCase::new(
             || async {
                 poll_with_local_recorder(
                     &recorder,
@@ -337,19 +346,18 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
                 .await
                 .map_err(|error| {
                     AuditLocalTxProfileError::provider(
-                        testkit::ConformanceErrorCategory::CommitUnknown,
+                        rss_conformance::ConformanceErrorCategory::CommitUnknown,
                         error,
                     )
                 })
                 .map_err(audit_profile_classified)
             },
-            testkit::ConformanceErrorCategory::CommitUnknown,
             || unknown_probe.attempts(unknown_tenant),
         ),
     )
     .await?;
-    ::testkit::localtx::assert_rollback_failed_no_replay(
-        ::testkit::localtx::RollbackFailedCase::new(
+    ::rss_conformance::localtx::assert_rollback_failed_no_replay(
+        ::rss_conformance::localtx::RollbackFailedCase::new(
             || async {
                 poll_with_local_recorder(
                     &recorder,
@@ -358,13 +366,12 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
                 .await
                 .map_err(|error| {
                     AuditLocalTxProfileError::provider(
-                        testkit::ConformanceErrorCategory::RollbackFailed,
+                        rss_conformance::ConformanceErrorCategory::RollbackFailed,
                         error,
                     )
                 })
                 .map_err(audit_profile_classified)
             },
-            testkit::ConformanceErrorCategory::RollbackFailed,
             || rollback_failed_probe.attempts(rollback_failed_tenant),
         ),
     )
@@ -644,8 +651,10 @@ async fn ta4b_audit_tenant_conformance() -> TestResult {
             }
         },
         |error| match error {
-            audit::ports::AuditError::Storage(_) => testkit::ConformanceErrorCategory::Storage,
-            _ => testkit::ConformanceErrorCategory::Permanent,
+            audit::ports::AuditError::Storage(_) => {
+                rss_conformance::ConformanceErrorCategory::Storage
+            }
+            _ => rss_conformance::ConformanceErrorCategory::Permanent,
         },
     )
     .await?;

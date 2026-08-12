@@ -1345,13 +1345,16 @@ pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
 pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Finding> {
     edges
         .iter()
-        .filter(|edge| layers::is_test_support(&edge.from))
+        .filter(|edge| {
+            layers::is_test_support(&edge.from)
+                && !(edge.from == "testkit" && edge.to == "rss-conformance")
+        })
         .map(|edge| {
             finding(
                 Rule::TestSupportInternalShipped,
                 edge.from.clone(),
                 format!(
-                    "{} {}.{} → `{}`：test-support 库只准依赖外部 crate，禁止 shipped workspace 内部依赖（INVARIANT LAYER-DEPS-10）",
+                    "{} {}.{} → `{}`：test-support 库只准依赖外部 crate；唯一例外是 testkit → rss-conformance（INVARIANT LAYER-DEPS-10）",
                     edge.from_manifest, edge.section, edge.key, edge.to
                 ),
             )
@@ -2597,6 +2600,22 @@ mod tests {
     #[test]
     fn test_support_internal_dependencies_green_no_shipped_edge() {
         assert!(check_test_support_internal_dependencies(&[]).is_empty());
+    }
+
+    #[test]
+    fn test_support_internal_dependencies_allows_testkit_conformance_edge() {
+        assert!(
+            check_test_support_internal_dependencies(&[e("testkit", "rss-conformance")]).is_empty()
+        );
+        assert_eq!(
+            check_test_support_internal_dependencies(&[e("tracewiretest", "rss-conformance")])
+                .len(),
+            1
+        );
+        assert!(
+            check_test_support_internal_dependencies(&[e("identity", "rss-conformance")])
+                .is_empty()
+        );
     }
 
     // ---- LAYER-DEPS-09：scoped construction 的 test-support feature 进 shipped 依赖表 ----

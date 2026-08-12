@@ -10,13 +10,13 @@
 //!
 //! ```
 //! use std::cell::Cell;
-//! use testkit::{ConformanceErrorCategory, localtx::{ClassifiedError, CommitCase, assert_commit}};
+//! use rss_conformance::{ConformanceErrorCategory, localtx::{ClassifiedError, CommitCase, assert_commit}};
 //!
 //! struct SecretProviderError;
 //! #[derive(PartialEq)]
 //! struct Snapshot(u32);
 //!
-//! # async fn example() -> Result<(), testkit::localtx::LocalTxConformanceError> {
+//! # async fn example() -> Result<(), rss_conformance::localtx::LocalTxConformanceError> {
 //! let _classified = ClassifiedError::new(ConformanceErrorCategory::Storage, SecretProviderError);
 //! let writes = Cell::new(0_u32);
 //! assert_commit(CommitCase::new(
@@ -237,6 +237,21 @@ where
 }
 
 /// Fixture for validation or authorization rejection with no durable mutation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NoWriteRejection {
+    Validation,
+    Authorization,
+}
+
+impl From<NoWriteRejection> for ConformanceErrorCategory {
+    fn from(value: NoWriteRejection) -> Self {
+        match value {
+            NoWriteRejection::Validation => Self::Validation,
+            NoWriteRejection::Authorization => Self::Authorization,
+        }
+    }
+}
+
 pub struct RejectedNoWriteCase<A, S, V, W> {
     action: A,
     expected_category: ConformanceErrorCategory,
@@ -250,14 +265,14 @@ impl<A, S, V, W> RejectedNoWriteCase<A, S, V, W> {
     /// after the categorized rejection; the required delta is zero.
     pub fn new(
         action: A,
-        expected_category: ConformanceErrorCategory,
+        expected_category: NoWriteRejection,
         snapshot: S,
         baseline: V,
         mutation_count: W,
     ) -> Self {
         Self {
             action,
-            expected_category,
+            expected_category: expected_category.into(),
             snapshot,
             baseline,
             mutation_count,
@@ -296,16 +311,14 @@ where
 /// Commit-unknown fixture. It deliberately has no snapshot or write-count probe.
 pub struct CommitUnknownCase<A, C> {
     action: A,
-    expected_category: ConformanceErrorCategory,
     attempt_count: C,
 }
 
 impl<A, C> CommitUnknownCase<A, C> {
     /// Builds an isolated commit-unknown fixture; the action-local attempt count must be one.
-    pub fn new(action: A, expected_category: ConformanceErrorCategory, attempt_count: C) -> Self {
+    pub fn new(action: A, attempt_count: C) -> Self {
         Self {
             action,
-            expected_category,
             attempt_count,
         }
     }
@@ -314,16 +327,14 @@ impl<A, C> CommitUnknownCase<A, C> {
 /// Rollback-failed fixture. It deliberately has no snapshot or write-count probe.
 pub struct RollbackFailedCase<A, C> {
     action: A,
-    expected_category: ConformanceErrorCategory,
     attempt_count: C,
 }
 
 impl<A, C> RollbackFailedCase<A, C> {
     /// Builds an isolated rollback-failed fixture; the action-local attempt count must be one.
-    pub fn new(action: A, expected_category: ConformanceErrorCategory, attempt_count: C) -> Self {
+    pub fn new(action: A, attempt_count: C) -> Self {
         Self {
             action,
-            expected_category,
             attempt_count,
         }
     }
@@ -341,7 +352,7 @@ where
     assert_no_replay(
         LocalTxStage::CommitUnknownAction,
         case.action,
-        case.expected_category,
+        ConformanceErrorCategory::CommitUnknown,
         case.attempt_count,
     )
     .await
@@ -359,7 +370,7 @@ where
     assert_no_replay(
         LocalTxStage::RollbackFailedAction,
         case.action,
-        case.expected_category,
+        ConformanceErrorCategory::RollbackFailed,
         case.attempt_count,
     )
     .await
@@ -491,7 +502,7 @@ mod tests {
         let mutations = Cell::new(0);
         assert_rejected_no_write(RejectedNoWriteCase::new(
             || async { Err::<(), _>(error(ConformanceErrorCategory::Authorization)) },
-            ConformanceErrorCategory::Authorization,
+            NoWriteRejection::Authorization,
             || async { Ok::<_, ClassifiedError<SensitiveError>>(Snapshot(state.get())) },
             Snapshot(7),
             || mutations.get(),
@@ -501,14 +512,12 @@ mod tests {
 
         assert_commit_unknown_no_replay(CommitUnknownCase::new(
             || async { Err::<(), _>(error(ConformanceErrorCategory::CommitUnknown)) },
-            ConformanceErrorCategory::CommitUnknown,
             || 1,
         ))
         .await
         .expect("commit unknown passes");
         assert_rollback_failed_no_replay(RollbackFailedCase::new(
             || async { Err::<(), _>(error(ConformanceErrorCategory::RollbackFailed)) },
-            ConformanceErrorCategory::RollbackFailed,
             || 1,
         ))
         .await
@@ -610,7 +619,7 @@ mod tests {
     async fn rejected_operation_that_mutates_is_caught() {
         let result = assert_rejected_no_write(RejectedNoWriteCase::new(
             || async { Err::<(), _>(error(ConformanceErrorCategory::Validation)) },
-            ConformanceErrorCategory::Validation,
+            NoWriteRejection::Validation,
             || async { Ok::<_, ClassifiedError<SensitiveError>>(Snapshot(7)) },
             Snapshot(7),
             || 1,
@@ -630,7 +639,6 @@ mod tests {
     async fn settlement_categories_and_replays_are_caught_without_cross_wiring_types() {
         let wrong_commit = assert_commit_unknown_no_replay(CommitUnknownCase::new(
             || async { Err::<(), _>(error(ConformanceErrorCategory::RollbackFailed)) },
-            ConformanceErrorCategory::CommitUnknown,
             || 1,
         ))
         .await;
@@ -644,7 +652,6 @@ mod tests {
 
         let wrong_rollback = assert_rollback_failed_no_replay(RollbackFailedCase::new(
             || async { Err::<(), _>(error(ConformanceErrorCategory::CommitUnknown)) },
-            ConformanceErrorCategory::RollbackFailed,
             || 1,
         ))
         .await;
@@ -658,7 +665,6 @@ mod tests {
 
         let commit = assert_commit_unknown_no_replay(CommitUnknownCase::new(
             || async { Err::<(), _>(error(ConformanceErrorCategory::CommitUnknown)) },
-            ConformanceErrorCategory::CommitUnknown,
             || 2,
         ))
         .await;
@@ -673,7 +679,6 @@ mod tests {
 
         let rollback = assert_rollback_failed_no_replay(RollbackFailedCase::new(
             || async { Err::<(), _>(error(ConformanceErrorCategory::RollbackFailed)) },
-            ConformanceErrorCategory::RollbackFailed,
             || 3,
         ))
         .await;

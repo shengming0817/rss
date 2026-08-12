@@ -6,7 +6,7 @@
 //!
 //! ref: launchbadge/sqlx examples/postgres/transaction/src/main.rs@v0.8.6
 
-use crate::ConformanceErrorCategory;
+use rss_conformance::ConformanceErrorCategory;
 use std::fmt::Debug;
 use std::future::Future;
 
@@ -1777,7 +1777,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn retry_boundary_rejects_threshold_one_before_running_actions() {
-        use crate::ConformanceErrorCategory;
+        use rss_conformance::ConformanceErrorCategory;
 
         let ran = Cell::new(false);
         let case = RetryBoundaryCase::new(
