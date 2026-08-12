@@ -155,7 +155,7 @@ repository = "https://github.com/shengming0817/rss"
 [workspace.dependencies]
 rss-contract = { path = "crates/contract", version = "0.1.0" }
 rss-request-context = { path = "crates/request-context", version = "0.1.0" }
-rss-platform = { path = "crates/platform", version = "0.2.0" }
+rss-platform = { path = "crates/platform", version = "0.3.0" }
 # 运行时 / 序列化 / 错误 / 日志
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
 tokio-util = { version = "0.7", features = ["rt"] }   # CancellationToken（tokio_util::sync::CancellationToken，cargo feature = "rt"）；见 bootstrap shutdown 范式

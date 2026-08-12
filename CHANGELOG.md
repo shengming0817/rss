@@ -16,10 +16,10 @@ registry release; exact-artifact RC approval and publication follow [RELEASES.md
 - Establish authority-free tenant/request values, redacted principals, deadlines, cancellation observation and closed obligation views.
 - Keep trusted mint, cancellation trigger, deadline extension and cross-tenant authority internal.
 
-### rss-platform 0.2.0
+### rss-platform 0.3.0
 
-- Replace the pre-cutover 0.2 crypto/lifecycle/synchronous surface with a typed asynchronous application waist and read-only host projection.
-- The package remains experimental at 0.2.0. This is an intentional in-version breaking replacement with no compatibility promise, alias, shim, conversion, feature-gated fallback or dual baseline.
+- Replace the v0.2 crypto/lifecycle/synchronous surface with a typed asynchronous application waist and read-only host projection.
+- This is an intentional breaking cutover with no alias, shim, conversion, feature-gated fallback or dual baseline.
 
 ### rss-diag-context 0.1.0
 

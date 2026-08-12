@@ -60,8 +60,7 @@ workspace 结构与分层仍以 [`architecture.md`](architecture.md) 为准，�
 profile 与公开符号仍从 Cargo metadata、manifest、schema、codegen 和 release surface 派生。
 
 以下 Platform vNext 条款已由 #2107 原子 cutover 激活。当前 Cargo graph、Release API、codegen、RuntimeExec
-bridge 与 production composition 是现行边界；pre-cutover 0.2 API 仅为历史，不提供 compatibility authority。
-这里的历史仅指 pre-cutover 0.2 API；当前实验版允许在 0.2.0 内直接替换该 API，不保留兼容层。
+bridge 与 production composition 是现行边界；v0.2 仅为历史，不提供 compatibility authority。
 
 ### Domain Governance
 

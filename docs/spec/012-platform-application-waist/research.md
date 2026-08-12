@@ -5,7 +5,7 @@ here but must not copy this mapping.
 
 ## Current-head findings
 
-The pre-cutover 0.2 implementation places static ES256/JWKS verification and a synchronous handler/drain state machine inside
+The v0.2 implementation places static ES256/JWKS verification and a synchronous handler/drain state machine inside
 Platform, while contract and request identities are duplicated across public/internal vocabularies. RuntimeExec
 already has the authoritative inventory mint/reader path. Keeping the old Platform owners while extracting the new
 ones would create dual authority, dual IDs or a non-compiling intermediate revision.

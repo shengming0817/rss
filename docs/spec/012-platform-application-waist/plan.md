@@ -14,8 +14,7 @@ exclusively in [`research.md`](research.md).
 
 #2107 is the sole RSS implementation owner. One PR extracts both Foundation packages, migrates all IDs, changes
 Platform to its async waist, moves Auth authority and RuntimeExec projection bridges, updates composition, Release API
-and package proof, and replaces the pre-cutover 0.2 API/baseline in place while retaining experimental package version
-0.2.0. Partial merges and compatibility stages are forbidden.
+and package proof, and deletes the v0.2 API/baseline. Partial merges and compatibility stages are forbidden.
 
 #2124/#2127 and #2125/#2128 start only after #2107/#2108 complete and their own evidence plans pass. They are not in
 this implementation wave.
@@ -55,7 +54,7 @@ cutover checks; it does not define a smaller receipt or a second rollback protoc
 4. #2107 then binds that receipt and merges every RSS owner/baseline change together. The result remains linked from
    the issue/PR; it is not copied into a committed receipt, evidence database or release registry.
 
-Rollback also consumes ADR-026. Before registry publication, reject the candidate and retain the pre-cutover revision. After publication,
+Rollback also consumes ADR-026. Before registry publication, reject the candidate and retain v0.2. After publication,
 never “discard” or reuse the immutable version: block product release, return the incubator pin/root lock to the last
 known-green artifact and re-run canonical CI, then publish a fixed RSS version or yank the defective version when the
 registry permits. If the RSS cutover already merged, those consumer/artifact steps happen before any whole-revision
@@ -63,7 +62,7 @@ RSS revert. No rollback restores the RSS-owned submodule, a compatibility path, 
 
 ## Verification protocol
 
-- Human architecture review checks that ADR/rules/spec have one normative target model and label pre-cutover 0.2 only as history;
+- Human architecture review checks that ADR/rules/spec have one normative target model and label v0.2 only as history;
   Markdown wording is not an enforcement carrier or merge gate.
 - Existing focused checks re-prove dependency-first release closure, package-proof selected/planned/executed equality,
   Release API forbidden leakage and RuntimeExec inventory mint/reader ownership.
