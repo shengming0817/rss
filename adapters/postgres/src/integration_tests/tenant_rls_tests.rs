@@ -2394,39 +2394,41 @@ async fn reconcile_rls_grants_and_tenant_isolation() -> TestResult {
     Ok(())
 }
 
-/// migration 0046：resource_attributes 必须授予 rss_app 窄 DML 权限，并由 FORCE RLS 执行 tenant isolation。
+/// migration 0107：ledger is tenant-scoped and every non-owner consumer is read-only.
 #[tokio::test(flavor = "multi_thread")]
-async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult {
+async fn resource_security_fact_ledger_rls_grants_and_tenant_isolation() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
 
-    let (rls_enabled, rls_forced, can_select, can_insert, can_update, can_delete): (
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-        bool,
-    ) = sqlx::query_as(
+    let (
+        rls_enabled,
+        rls_forced,
+        can_select,
+        can_insert,
+        can_update,
+        can_delete,
+        audit_can_select,
+    ): (bool, bool, bool, bool, bool, bool, bool) = sqlx::query_as(
         "SELECT c.relrowsecurity, c.relforcerowsecurity, \
-                has_table_privilege('rss_app', 'resource_attributes', 'SELECT'), \
-                has_table_privilege('rss_app', 'resource_attributes', 'INSERT'), \
-                has_table_privilege('rss_app', 'resource_attributes', 'UPDATE'), \
-                has_table_privilege('rss_app', 'resource_attributes', 'DELETE') \
+                has_table_privilege('rss_app', 'resource_security_fact_revisions', 'SELECT'), \
+                has_table_privilege('rss_app', 'resource_security_fact_revisions', 'INSERT'), \
+                has_table_privilege('rss_app', 'resource_security_fact_revisions', 'UPDATE'), \
+                has_table_privilege('rss_app', 'resource_security_fact_revisions', 'DELETE'), \
+                has_table_privilege('rss_audit_admin', 'resource_security_fact_revisions', 'SELECT') \
          FROM pg_class c \
          JOIN pg_namespace n ON n.oid = c.relnamespace \
-         WHERE n.nspname = 'public' AND c.relname = 'resource_attributes'",
+         WHERE n.nspname = 'public' AND c.relname = 'resource_security_fact_revisions'",
     )
     .fetch_one(&store.pool)
     .await?;
-    assert!(rls_enabled, "resource_attributes must ENABLE RLS");
-    assert!(rls_forced, "resource_attributes must FORCE RLS");
-    assert!(can_select, "rss_app must SELECT resource_attributes");
-    assert!(can_insert, "rss_app must INSERT resource_attributes");
-    assert!(can_update, "rss_app must UPDATE resource_attributes");
+    assert!(rls_enabled && rls_forced);
+    assert_eq!(
+        (can_select, can_insert, can_update, can_delete),
+        (true, false, false, false)
+    );
     assert!(
-        !can_delete,
-        "rss_app must not DELETE resource_attributes; expire is versioned tombstone UPDATE"
+        !audit_can_select,
+        "audit-admin exact capability excludes fact ledger"
     );
 
     sqlx::query("GRANT rss_app TO CURRENT_USER")
@@ -2439,7 +2441,7 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
 
     {
         let mut tx = store.pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE rss_app")
+        sqlx::query("SET LOCAL ROLE rss_resource_fact_bootstrap")
             .execute(&mut *tx)
             .await?;
         sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
@@ -2447,13 +2449,11 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
             .execute(&mut *tx)
             .await?;
         sqlx::query(
-            "INSERT INTO resource_attributes \
-             (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
-             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.owner', jsonb_build_object('valueType', 'string', 'value', 'owner-a'), 1, now(), NULL)",
+            "SELECT public.rss_apply_resource_security_fact_revision(
+                $1::uuid, $2::uuid, 'resource.owner', 1, 'test-control-plane', 'owner-a', NULL,
+                clock_timestamp() - interval '1 second', clock_timestamp() + interval '5 minutes')",
         )
         .bind(&tenant_a)
-        .bind(POLICY_CONTRACT_ID)
-        .bind(POLICY_PERMISSION)
         .bind(&resource_id)
         .execute(&mut *tx)
         .await?;
@@ -2470,7 +2470,7 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
             .execute(&mut *tx)
             .await?;
         let cnt: (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM resource_attributes WHERE attribute_key = 'resource.owner'",
+            "SELECT count(*) FROM resource_security_fact_revisions WHERE fact_key = 'resource.owner'",
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -2488,7 +2488,7 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
             .execute(&mut *tx)
             .await?;
         let cnt: (i64,) = sqlx::query_as(
-            "SELECT count(*) FROM resource_attributes WHERE attribute_key = 'resource.owner'",
+            "SELECT count(*) FROM resource_security_fact_revisions WHERE fact_key = 'resource.owner'",
         )
         .fetch_one(&mut *tx)
         .await?;
@@ -2498,7 +2498,7 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
 
     {
         let mut tx = store.pool.begin().await?;
-        sqlx::query("SET LOCAL ROLE rss_app")
+        sqlx::query("SET LOCAL ROLE rss_resource_fact_bootstrap")
             .execute(&mut *tx)
             .await?;
         sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
@@ -2506,19 +2506,21 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
             .execute(&mut *tx)
             .await?;
         let result = sqlx::query(
-            "INSERT INTO resource_attributes \
-             (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
-             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.owner', jsonb_build_object('valueType', 'string', 'value', 'owner-b'), 1, now(), NULL)",
+            "SELECT public.rss_apply_resource_security_fact_revision(
+                $1::uuid, $2::uuid, 'resource.owner', 1, 'test-control-plane', 'owner-b', NULL,
+                clock_timestamp() - interval '1 second', clock_timestamp() + interval '5 minutes')",
         )
         .bind(&tenant_b)
-        .bind(POLICY_CONTRACT_ID)
-        .bind(POLICY_PERMISSION)
         .bind(uuid::Uuid::new_v4().to_string())
         .execute(&mut *tx)
         .await;
-        assert!(
-            result.is_err(),
-            "WITH CHECK must reject tenant B row while rss.tenant_id is tenant A"
+        let error = result.expect_err("bootstrap tenant mismatch must be rejected in the funnel");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("42501")
         );
         tx.rollback().await?;
     }
@@ -2528,25 +2530,72 @@ async fn resource_attribute_repo_rls_grants_and_tenant_isolation() -> TestResult
         sqlx::query("SET LOCAL ROLE rss_app")
             .execute(&mut *tx)
             .await?;
-        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM resource_attributes")
+        let cnt: (i64,) = sqlx::query_as("SELECT count(*) FROM resource_security_fact_revisions")
             .fetch_one(&mut *tx)
             .await?;
         assert_eq!(
             cnt.0, 0,
-            "missing rss.tenant_id must make resource_attributes invisible"
+            "missing rss.tenant_id must make fact ledger invisible"
+        );
+        tx.rollback().await?;
+    }
+
+    {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_resource_fact_bootstrap")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind("00000000-0000-0000-0000-000000000000")
+            .execute(&mut *tx)
+            .await?;
+        let error = sqlx::query(
+            "SELECT public.rss_apply_resource_security_fact_revision(
+                '00000000-0000-0000-0000-000000000000'::uuid, $1::uuid,
+                'resource.owner', 1, 'test-control-plane', 'owner-nil', NULL,
+                clock_timestamp() - interval '1 second', clock_timestamp() + interval '5 minutes')",
+        )
+        .bind(uuid::Uuid::new_v4().to_string())
+        .execute(&mut *tx)
+        .await
+        .expect_err("nil tenant must be rejected by the bootstrap funnel");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("42501")
+        );
+        tx.rollback().await?;
+    }
+
+    for statement in [
+        "UPDATE resource_security_fact_revisions SET source_id = 'tampered'",
+        "DELETE FROM resource_security_fact_revisions",
+        "TRUNCATE resource_security_fact_revisions",
+    ] {
+        let mut tx = store.pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_app")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(&tenant_a)
+            .execute(&mut *tx)
+            .await?;
+        assert!(
+            sqlx::query(statement).execute(&mut *tx).await.is_err(),
+            "serving role must not mutate append-only fact ledger: {statement}"
         );
         tx.rollback().await?;
     }
 
     {
         let result = sqlx::query(
-            "INSERT INTO resource_attributes \
-             (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value, version, effective_from, effective_until) \
-             VALUES ($1::uuid, $2, $3, $4::uuid, 'resource.id', jsonb_build_object('valueType', 'string', 'value', 'reserved'), 1, now(), NULL)",
+            "INSERT INTO resource_security_fact_revisions
+             (tenant_id, device_id, fact_key, revision, source_id, owner_principal_id, observed_at, expires_at)
+             VALUES ($1::uuid, $2::uuid, 'resource.id', 1, 'source', 'reserved', now(), now() + interval '1 minute')",
         )
         .bind(&tenant_a)
-        .bind(POLICY_CONTRACT_ID)
-        .bind(POLICY_PERMISSION)
         .bind(uuid::Uuid::new_v4().to_string())
         .execute(&store.pool)
         .await;

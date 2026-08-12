@@ -1,3 +1,3 @@
-use identity::ports::{DynResourceAttributeRepo, ResourceAttributeRepo};
+use identity::ports::{DynResourceSecurityFactWriteRepo, ResourceSecurityFactWriteRepo};
 
 fn main() {}

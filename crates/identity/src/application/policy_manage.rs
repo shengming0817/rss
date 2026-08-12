@@ -22,19 +22,17 @@ use generated::http::identity_v1::{
     policies_update as update_wire,
     policies_update::{IdentityPoliciesUpdateRequest, IdentityPoliciesUpdateResponse},
 };
-use generated::http::{HttpSpec, SPECS as HTTP_SPECS};
 use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vocab::{HttpRouteAuth, http::HttpResourceSharing as HttpResourceSharingMode};
 
 use super::{EventWireProjectionError, unix_secs};
 use crate::domain::{
     AttributeKey, EqualityPredicate, IdentityError, MembershipPredicate, Operator, OperatorInput,
     OperatorInputError, OperatorRef, OrderingPredicate, Policy, PolicyCondition, PolicyEffect,
     PolicyId, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyScalarInput, PolicyValue,
-    PolicyValueRef, PolicyValueType, PolicyVersion, ResourcePolicyAttributeKey, ScalarOperandInput,
-    ScalarOperandRef, StringPredicate, TypedPolicyValueInput,
+    PolicyValueRef, PolicyValueType, PolicyVersion, ScalarOperandInput, ScalarOperandRef,
+    StringPredicate, TypedPolicyValueInput,
 };
 use crate::ports::{
     DynPolicyLifecycle, DynPolicyRepo, PoliciesCreateProducerReceipt,
@@ -220,7 +218,6 @@ pub struct PolicyManageService {
     policies: Arc<DynPolicyRepo<'static>>,
     lifecycle: Arc<DynPolicyLifecycle<'static>>,
     clock: Box<dyn Clock>,
-    http_specs: &'static [HttpSpec],
 }
 
 /// Policy 查询侧：仅持有已分类的认证读 port，不暴露 lifecycle、clock 或 outbox 能力。
@@ -281,7 +278,6 @@ impl PolicyManageService {
             policies,
             lifecycle,
             clock,
-            http_specs: HTTP_SPECS,
         }
     }
 
@@ -296,21 +292,6 @@ impl PolicyManageService {
             .await
             .map_err(map_identity_error)?
             .ok_or(PolicyManageError::PolicyNotFound)
-    }
-
-    #[cfg(test)]
-    fn new_with_http_specs(
-        policies: Arc<DynPolicyRepo<'static>>,
-        lifecycle: Arc<DynPolicyLifecycle<'static>>,
-        clock: Box<dyn Clock>,
-        http_specs: &'static [HttpSpec],
-    ) -> Self {
-        Self {
-            policies,
-            lifecycle,
-            clock,
-            http_specs,
-        }
     }
 
     #[tracing::instrument(
@@ -336,7 +317,6 @@ impl PolicyManageService {
             draft.rules,
         )
         .map_err(|_| PolicyManageError::InvalidPolicy)?;
-        reject_global_resource_policy(policy.route_scope(), policy.rules(), self.http_specs)?;
         let event = self
             .event_parts(PolicyEventDraft {
                 tenant,
@@ -382,7 +362,6 @@ impl PolicyManageService {
             draft.rules,
         )
         .map_err(|_| PolicyManageError::InvalidPolicy)?;
-        reject_global_resource_policy(policy.route_scope(), policy.rules(), self.http_specs)?;
         let event = self
             .event_parts(PolicyEventDraft {
                 tenant,
@@ -584,42 +563,6 @@ fn wire_time(raw: i64) -> Result<SystemTime, PolicyManageError> {
     SystemTime::UNIX_EPOCH
         .checked_add(Duration::from_secs(secs))
         .ok_or(PolicyManageError::InvalidPolicy)
-}
-
-fn reject_global_resource_policy(
-    scope: &PolicyRouteScope,
-    rules: &[PolicyRule],
-    specs: &[HttpSpec],
-) -> Result<(), PolicyManageError> {
-    if route_scope_is_global_resource_in(scope, specs)
-        && rules_use_dynamic_resource_attributes(rules)?
-    {
-        return Err(PolicyManageError::InvalidPolicy);
-    }
-    Ok(())
-}
-
-fn route_scope_is_global_resource_in(scope: &PolicyRouteScope, specs: &[HttpSpec]) -> bool {
-    specs.iter().any(|spec| {
-        spec.route.contract_id() == scope.contract_id()
-            && spec.route.auth() == HttpRouteAuth::Permission(scope.permission())
-            && spec.resource_sharing.mode == HttpResourceSharingMode::Global
-    })
-}
-
-fn rules_use_dynamic_resource_attributes(rules: &[PolicyRule]) -> Result<bool, PolicyManageError> {
-    for rule in rules {
-        if policy_attribute_key_is_dynamic_resource(rule.attribute_key())? {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
-fn policy_attribute_key_is_dynamic_resource(key: &AttributeKey) -> Result<bool, PolicyManageError> {
-    ResourcePolicyAttributeKey::classify(key)
-        .map(|classified| classified.is_dynamic())
-        .map_err(|_| PolicyManageError::InvalidPolicy)
 }
 
 fn typed_rules_from_wire(
@@ -1775,19 +1718,6 @@ mod tests {
         (PolicyManageService::new(policies, lifecycle, clock()), repo)
     }
 
-    fn service_with_specs(
-        repo: crate::internal::mem::InMemPolicyRepo,
-        http_specs: &'static [HttpSpec],
-    ) -> (PolicyManageService, crate::internal::mem::InMemPolicyRepo) {
-        let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(repo.clone()));
-        let lifecycle: Arc<DynPolicyLifecycle<'static>> =
-            Arc::from(DynPolicyLifecycle::new_box(repo.clone()));
-        (
-            PolicyManageService::new_with_http_specs(policies, lifecycle, clock(), http_specs),
-            repo,
-        )
-    }
-
     fn create_request(policy_id: &str) -> IdentityPoliciesCreateRequest {
         serde_json::from_value(serde_json::json!({
             "policyId": policy_id,
@@ -1823,55 +1753,44 @@ mod tests {
         .expect("update request json")
     }
 
-    fn global_static_create_request(policy_id: &str) -> IdentityPoliciesCreateRequest {
+    fn resource_fact_create_request(
+        policy_id: &str,
+        attribute: &str,
+    ) -> IdentityPoliciesCreateRequest {
         serde_json::from_value(serde_json::json!({
             "policyId": policy_id,
-            "contractId": "identity.global-resource",
+            "contractId": "identity.policies-list",
             "permission": "identity:policy:read",
             "effectiveFrom": 1_700_000_000,
             "rules": [{
                 "condition": {
-                    "attribute": "principal.kind",
-                    "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "literal", "valueType": "string", "value": "admin" } }
-                },
-                "effect": "allow"
-            }]
-        }))
-        .expect("global static create request json")
-    }
-
-    fn global_dynamic_create_request(policy_id: &str) -> IdentityPoliciesCreateRequest {
-        serde_json::from_value(serde_json::json!({
-            "policyId": policy_id,
-            "contractId": "identity.global-resource",
-            "permission": "identity:policy:read",
-            "effectiveFrom": 1_700_000_000,
-            "rules": [{
-                "condition": {
-                    "attribute": "resource.owner",
+                    "attribute": attribute,
                     "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "attribute", "valueType": "string", "attribute": "principal.id" } }
                 },
                 "effect": "allow"
             }]
         }))
-        .expect("global dynamic create request json")
+        .expect("resource fact create request json")
     }
 
-    fn global_dynamic_update_request(expected: u32) -> IdentityPoliciesUpdateRequest {
+    fn resource_fact_update_request(
+        expected: u32,
+        attribute: &str,
+    ) -> IdentityPoliciesUpdateRequest {
         serde_json::from_value(serde_json::json!({
-            "contractId": "identity.global-resource",
+            "contractId": "identity.policies-list",
             "permission": "identity:policy:read",
             "effectiveFrom": 1_700_000_010,
             "expectedVersion": expected,
             "rules": [{
                 "condition": {
-                    "attribute": "resource.owner",
+                    "attribute": attribute,
                     "operator": { "family": "equality", "predicate": "eq", "operand": { "kind": "attribute", "valueType": "string", "attribute": "principal.id" } }
                 },
                 "effect": "allow"
             }]
         }))
-        .expect("global dynamic update request json")
+        .expect("resource fact update request json")
     }
 
     fn deactivate_request(expected: u32) -> IdentityPoliciesDeactivateRequest {
@@ -1879,84 +1798,8 @@ mod tests {
             .expect("deactivate request json")
     }
 
-    fn synthetic_global_spec() -> HttpSpec {
-        HttpSpec {
-            mount_key: "identity_v1::global_resource",
-            route: vocab::HttpRouteEvidence::from_static(
-                vocab::HttpContractOwner::domain("identity"),
-                vocab::ContractBinding::from_static(
-                    "identity",
-                    "identity.global-resource",
-                    "v1",
-                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                ),
-                "/api/v1/identity/global/{resourceId}",
-                "GET",
-                &[],
-                vocab::HttpSuccessStatus::new(200),
-                vocab::HttpIdempotency::Idempotent,
-                vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityPolicyRead),
-                Some("resourceId"),
-                false,
-                vocab::http::HttpResourceSharing::Global,
-                vocab::HttpConsistencyLevel::LocalOnly,
-                vocab::HttpEffectProfile::new(&[
-                    vocab::HttpEffectKind::Auth,
-                    vocab::HttpEffectKind::Read,
-                ]),
-            ),
-            local_tx: None,
-            resource_sharing: generated::http::HttpResourceSharingSpec {
-                mode: HttpResourceSharingMode::Global,
-                reason: Some("shared synthetic test route"),
-            },
-            projection_fields: &[],
-            headers: &[],
-        }
-    }
-
-    fn synthetic_global_specs() -> &'static [HttpSpec] {
-        Box::leak(Box::new([synthetic_global_spec()]))
-    }
-
-    fn global_scope() -> PolicyRouteScope {
-        PolicyRouteScope::parse("identity.global-resource", "identity:policy:read")
-            .expect("global scope")
-    }
-
-    fn dynamic_resource_rule() -> PolicyRule {
-        PolicyRule::with_obligations(
-            PolicyCondition::new(
-                AttributeKey::new("resource.owner"),
-                Operator::try_from(OperatorInput::Equality {
-                    predicate: EqualityPredicate::Eq,
-                    operand: ScalarOperandInput::Attribute {
-                        value_type: PolicyValueType::String,
-                        attribute: "principal.id".to_string(),
-                    },
-                })
-                .expect("canonical operator"),
-            ),
-            PolicyEffect::Allow,
-            PolicyObligations::empty(),
-        )
-    }
-
     fn decode(payload: &[u8]) -> IdentityPolicyUpdatedPayload {
         serde_json::from_slice(payload).expect("policy-updated payload decodes")
-    }
-
-    #[test]
-    fn global_resource_specs_reject_dynamic_resource_policy_rules() {
-        let specs = [synthetic_global_spec()];
-        let rules = vec![dynamic_resource_rule()];
-
-        assert!(route_scope_is_global_resource_in(&global_scope(), &specs));
-        assert!(rules_use_dynamic_resource_attributes(&rules).expect("rules classify"));
-        assert!(matches!(
-            reject_global_resource_policy(&global_scope(), &rules, &specs),
-            Err(PolicyManageError::InvalidPolicy)
-        ));
     }
 
     #[test]
@@ -2081,7 +1924,7 @@ mod tests {
             "contractId": "identity.policies-list",
             "permission": "identity:policy:read",
             "effectiveFrom": 1_700_000_000,
-            "rules": [{"condition":{"attribute":"resource.rank","operator":{"family":"ordering","predicate":"gt","operand":{"kind":"literal","valueType":"string","value":"3"}}},"effect":"allow"}]
+            "rules": [{"condition":{"attribute":"principal.rank","operator":{"family":"ordering","predicate":"gt","operand":{"kind":"literal","valueType":"string","value":"3"}}},"effect":"allow"}]
         });
         assert!(serde_json::from_value::<IdentityPoliciesCreateRequest>(payload).is_err());
     }
@@ -2175,7 +2018,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(index, operator)| serde_json::json!({
-                "condition": {"attribute": format!("resource.test{index}"), "operator": operator},
+                "condition": {"attribute": format!("principal.test{index}"), "operator": operator},
                 "effect": "allow"
             }))
             .collect::<Vec<_>>();
@@ -2496,57 +2339,61 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_policy_rejects_global_resource_dynamic_attrs_without_write_or_event() {
-        let (service, probe) = service_with_specs(
-            crate::internal::mem::InMemPolicyRepo::new(),
-            synthetic_global_specs(),
-        );
-        let t = tenant();
-
-        let err = service
-            .create_policy(
-                create_receipt(),
-                t,
-                actor(),
-                rss_request_context::PrincipalKind::Admin,
-                PolicyCreateDraft::try_from(global_dynamic_create_request("policy-global-dyn"))
-                    .expect("create draft"),
-            )
-            .await
-            .expect_err("global resource dynamic attr must be rejected");
-
-        assert!(matches!(err, PolicyManageError::InvalidPolicy));
-        assert!(probe.emitted().is_empty(), "rejected create must not emit");
-        assert!(matches!(
-            service
-                .find_policy_for_management(
+    async fn create_policy_rejects_resource_facts_without_write_or_event() {
+        for (index, attribute) in [
+            "resource.owner",
+            "resource.riskClass",
+            "resource.location",
+            "resource.software",
+            "resource.fleet",
+            "resource.inventory.kind",
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (service, probe) = service_with(crate::internal::mem::InMemPolicyRepo::new());
+            let t = tenant();
+            let policy_id = format!("policy-resource-fact-{index}");
+            let err = service
+                .create_policy(
+                    create_receipt(),
                     t,
-                    PolicyId::parse("policy-global-dyn").expect("policy id"),
+                    actor(),
+                    rss_request_context::PrincipalKind::Admin,
+                    PolicyCreateDraft::try_from(resource_fact_create_request(
+                        &policy_id, attribute,
+                    ))
+                    .expect("create draft"),
                 )
-                .await,
-            Err(PolicyManageError::PolicyNotFound)
-        ));
+                .await
+                .expect_err("generic policy resource fact must be rejected");
+            assert!(matches!(err, PolicyManageError::InvalidPolicy));
+            assert!(probe.emitted().is_empty(), "rejected create must not emit");
+            assert!(matches!(
+                service
+                    .find_policy_for_management(t, PolicyId::parse(&policy_id).expect("policy id"),)
+                    .await,
+                Err(PolicyManageError::PolicyNotFound)
+            ));
+        }
     }
 
     #[tokio::test]
-    async fn update_policy_rejects_global_resource_dynamic_attrs_without_write_or_event() {
-        let (service, probe) = service_with_specs(
-            crate::internal::mem::InMemPolicyRepo::new(),
-            synthetic_global_specs(),
-        );
+    async fn update_policy_rejects_resource_fact_without_write_or_event() {
+        let (service, probe) = service_with(crate::internal::mem::InMemPolicyRepo::new());
         let t = tenant();
-        let policy_id = PolicyId::parse("policy-global-static").expect("policy id");
+        let policy_id = PolicyId::parse("policy-resource-fact-update").expect("policy id");
         let created = service
             .create_policy(
                 create_receipt(),
                 t,
                 actor(),
                 rss_request_context::PrincipalKind::Admin,
-                PolicyCreateDraft::try_from(global_static_create_request(policy_id.as_str()))
+                PolicyCreateDraft::try_from(create_request(policy_id.as_str()))
                     .expect("create draft"),
             )
             .await
-            .expect("static global policy is allowed");
+            .expect("ordinary policy is allowed");
         assert_eq!(created.version().get(), 1);
         assert_eq!(probe.emitted().len(), 1);
 
@@ -2558,12 +2405,12 @@ mod tests {
                 rss_request_context::PrincipalKind::Admin,
                 PolicyUpdateDraft::try_from_wire(
                     policy_id.clone(),
-                    global_dynamic_update_request(created.version().get()),
+                    resource_fact_update_request(created.version().get(), "resource.owner"),
                 )
                 .expect("update draft"),
             )
             .await
-            .expect_err("global resource dynamic attr update must be rejected");
+            .expect_err("generic policy resource fact update must be rejected");
 
         assert!(matches!(err, PolicyManageError::InvalidPolicy));
         assert_eq!(probe.emitted().len(), 1, "rejected update must not emit");

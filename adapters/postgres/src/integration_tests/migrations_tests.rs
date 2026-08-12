@@ -1896,6 +1896,140 @@ async fn migration_0075_resource_scope_collision_fails_closed_and_rolls_back() -
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0107_legacy_resource_fact_aborts_atomically() -> TestResult {
+    let (_fixture, store) = connect_pg().await?;
+    migrations_through(106).run(&store.pool).await?;
+    let tenant = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let resource = "11111111-2222-4333-8444-555555555555";
+    sqlx::query(
+        "INSERT INTO resource_attributes
+         (tenant_id, contract_id, permission, resource_id, attribute_key, attribute_value,
+          version, effective_from, effective_until)
+         VALUES ($1::uuid, 'identity.roles', 'identity:role:read', $2::uuid,
+                 'resource.owner',
+                 '{\"valueType\":\"string\",\"value\":\"legacy-owner\"}'::jsonb,
+                 1, to_timestamp(1), to_timestamp(2))",
+    )
+    .bind(tenant)
+    .bind(resource)
+    .execute(&store.pool)
+    .await?;
+
+    let error = sqlx::migrate!("./migrations")
+        .run(&store.pool)
+        .await
+        .expect_err("legacy fact without source/freshness provenance must abort 0107");
+    assert!(
+        error
+            .to_string()
+            .contains("legacy resource_attributes require external re-authoring"),
+        "{error}"
+    );
+    let legacy_count: i64 = sqlx::query_scalar("SELECT count(*) FROM resource_attributes")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(
+        legacy_count, 1,
+        "failed migration must preserve legacy evidence"
+    );
+    let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ledger, 106, "failed migration must not advance the ledger");
+    let replacement_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('public.resource_security_fact_revisions') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(
+        !replacement_exists,
+        "failed migration must not expose partial schema"
+    );
+
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0107_unsupported_resource_policy_aborts_atomically() -> TestResult {
+    let (_fixture, store) = connect_pg().await?;
+    migrations_through(106).run(&store.pool).await?;
+    let tenant = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    let rules = r#"{"rules":[{"condition":{"attribute":"resource.location","operator":{"family":"equality","predicate":"eq","operand":{"kind":"literal","valueType":"string","value":"lab"}}},"effect":"allow"}]}"#;
+    sqlx::query(
+        "INSERT INTO abac_policies
+         (tenant_id, id, contract_id, permission, effective_from, rules)
+         VALUES ($1::uuid, 'legacy-resource-policy', 'identity.roles',
+                 'identity:role:read', to_timestamp(1), $2::jsonb)",
+    )
+    .bind(tenant)
+    .bind(rules)
+    .execute(&store.pool)
+    .await?;
+
+    let error = sqlx::migrate!("./migrations")
+        .run(&store.pool)
+        .await
+        .expect_err("unsupported persisted resource key must abort 0107");
+    assert!(
+        error.to_string().contains("unsupported resource facts"),
+        "{error}"
+    );
+    let policy_count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM abac_policies WHERE id = 'legacy-resource-policy'",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(policy_count, 1, "failed migration must preserve the policy");
+    let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ledger, 106);
+    let replacement_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('public.resource_security_fact_revisions') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(!replacement_exists);
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn migration_0107_rejects_unsafe_preexisting_security_role() -> TestResult {
+    let (_fixture, store) = connect_pg().await?;
+    migrations_through(106).run(&store.pool).await?;
+    sqlx::query("CREATE ROLE rss_resource_fact_funnel_owner LOGIN BYPASSRLS")
+        .execute(&store.pool)
+        .await?;
+    let error = sqlx::migrate!("./migrations")
+        .run(&store.pool)
+        .await
+        .expect_err("unsafe cluster-global role must abort 0107");
+    assert!(
+        error
+            .to_string()
+            .contains("security role attributes are unsafe"),
+        "{error}"
+    );
+    let ledger: i64 = sqlx::query_scalar("SELECT max(version) FROM _sqlx_migrations")
+        .fetch_one(&store.pool)
+        .await?;
+    assert_eq!(ledger, 106);
+    let replacement_exists: bool = sqlx::query_scalar(
+        "SELECT to_regclass('public.resource_security_fact_revisions') IS NOT NULL",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert!(!replacement_exists);
+    sqlx::query("DROP ROLE rss_resource_fact_funnel_owner")
+        .execute(&store.pool)
+        .await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
 /// 0066 is a non-rolling return-contract cutover: upgrading the real 0065 ledger preserves rows,
 /// removes the legacy result shapes, and makes the new typed settlement usable atomically.
 #[tokio::test(flavor = "multi_thread")]

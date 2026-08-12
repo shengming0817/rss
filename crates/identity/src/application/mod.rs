@@ -120,7 +120,6 @@ use eventexec::event::ReviewedEvent;
 use generated::event::identity_v1::session_created::{
     IdentitySessionCreatedPayload, SPEC as SESSION_CREATED_SPEC,
 };
-use vocab::http::HttpResourceSharing as HttpResourceSharingMode;
 // ListenerKind 仅测试断言用（lib 经 typed `route_group::<Primary>` 不再传运行期 ListenerKind 值）。
 #[cfg(test)]
 use primitives::ListenerKind;
@@ -140,19 +139,19 @@ use crate::domain::{
     POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
     PolicyAllowEvaluation, PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope,
     PolicyValue, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
-    ResourceAttributeKey, ResourceAttributeResolution, ResourceAttributeResourceId,
-    ResourcePolicyAttributeKey, RoleId, evaluate_policies_for_tenant,
+    ResourceSecurityFactKey, ResourceSecurityFactPolicyKey, ResourceSecurityFactResolution, RoleId,
+    evaluate_policies_for_tenant,
 };
 use crate::ports::{
     AccountReactivationLifecycle, AccountSecurityReadRepo, AccountStatusSetProducerReceipt,
     AuthGrantLifecycle, AuthGrantProvider, CredentialRepo, DynAccountReactivationLifecycle,
     DynAccountSecurityReadRepo, DynAuthGrantLifecycle, DynCredentialRepo,
-    DynIdentitySecurityLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
+    DynIdentitySecurityLifecycle, DynPolicyRepo, DynResourceSecurityFactReadRepo,
     DynRoleBindingReadRepo, DynRoleReadRepo, IdentitySecurityLifecycle, LoginGrantMutation,
     LoginProducerReceipt, LogoutAllProducerReceipt, LogoutCurrentProducerReceipt,
     PasswordChangeProducerReceipt, PersistedLoginGrantReceipt, PersistedRefreshRotationReceipt,
     PolicyPage, PolicyRepo, RefreshExecutionCommand, RefreshExecutionOutcome,
-    RefreshProducerReceipt, RefreshTokenStore, ResourceAttributeReadRepo, RoleBindingReadRepo,
+    RefreshProducerReceipt, RefreshTokenStore, ResourceSecurityFactReadRepo, RoleBindingReadRepo,
     RolePage, RoleReadRepo, TenantRepoScope,
 };
 #[cfg(test)]
@@ -1481,7 +1480,6 @@ struct ContractAuthorizer {
     roles: Arc<DynRoleReadRepo<'static>>,
     binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
     policies: Arc<DynPolicyRepo<'static>>,
-    resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -1558,19 +1556,30 @@ fn contract_auth_policy(
     Ok(ContractAuthPolicy::RolePermission(request.permission))
 }
 
+fn policies_contain_resource_security_facts(
+    policies: &[crate::domain::Policy],
+) -> Result<bool, AuthReject> {
+    for rule in policies.iter().flat_map(crate::domain::Policy::rules) {
+        let key = ResourceSecurityFactPolicyKey::classify(rule.attribute_key())
+            .map_err(|_| AuthReject::Forbidden)?;
+        if key.into_fact().is_some() {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 impl ContractAuthorizer {
     fn new(
         roles: Arc<DynRoleReadRepo<'static>>,
         binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
         policies: Arc<DynPolicyRepo<'static>>,
-        resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             roles,
             binding_reads,
             policies,
-            resource_attribute_reads,
             clock,
         }
     }
@@ -1722,69 +1731,14 @@ impl ContractAuthorizer {
             log_durable_policy_failure(ctx, request, reason);
             return Err(AuthReject::Forbidden);
         }
-        let mut attrs = route_policy_attributes(ctx, request)?;
-        let required_keys = required_resource_attribute_keys(&policies)?;
-        if !required_keys.is_empty() {
-            attrs.extend(
-                self.resolve_resource_policy_attributes(ctx, request, scope, required_keys, now)
-                    .await?,
-            );
+        if policies_contain_resource_security_facts(&policies)? {
+            return Err(AuthReject::Forbidden);
         }
+        let attrs = route_policy_attributes(ctx, request)?;
         Ok((
             evaluate_policies_for_tenant(Some(ctx.tenant), &attrs, &policies),
             now,
         ))
-    }
-
-    async fn resolve_resource_policy_attributes(
-        &self,
-        ctx: &AuthSubjectContext,
-        request: &RouteAuthorizationRequest,
-        scope: PolicyRouteScope,
-        required_keys: Vec<ResourceAttributeKey>,
-        now: SystemTime,
-    ) -> Result<Vec<AbacAttribute>, AuthReject> {
-        let resource_id = request_resource_attribute_id(ctx, request)?;
-        let tenant_scope = tenant_repo_scope(ctx.tenant);
-        let resolved = self
-            .resource_attribute_reads
-            .resolve_effective(
-                tenant_scope,
-                scope.clone(),
-                resource_id.clone(),
-                required_keys.clone(),
-                now,
-            )
-            .await
-            .map_err(|err| {
-                tracing::warn!(
-                    error = %err,
-                    error_chain = %secure::redact_error(&err),
-                    tenant_id = %ctx.tenant,
-                    contract_id = request.contract_id,
-                    permission = %request.permission,
-                    "identity contract authorizer resource attribute lookup failed"
-                );
-                AuthReject::Forbidden
-            })?;
-        match resolved {
-            ResourceAttributeResolution::Known(attrs) => known_resource_attributes_to_abac(
-                ctx,
-                request,
-                &scope,
-                &resource_id,
-                &required_keys,
-                attrs,
-            ),
-            ResourceAttributeResolution::Missing(key) => {
-                log_resource_attribute_resolution_failure(ctx, request, &key, "missing");
-                Err(AuthReject::Forbidden)
-            }
-            ResourceAttributeResolution::Stale(key) => {
-                log_resource_attribute_resolution_failure(ctx, request, &key, "stale");
-                Err(AuthReject::Forbidden)
-            }
-        }
     }
 
     async fn authorize_role_permission(
@@ -1978,14 +1932,12 @@ pub fn build_contract_authorizer(
     roles: Arc<DynRoleReadRepo<'static>>,
     binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
     policies: Arc<DynPolicyRepo<'static>>,
-    resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
     clock: Arc<dyn Clock>,
 ) -> Arc<dyn RouteAuthorizer> {
     Arc::new(ContractAuthorizer::new(
         roles,
         binding_reads,
         policies,
-        resource_attribute_reads,
         clock,
     ))
 }
@@ -2160,146 +2112,100 @@ fn route_policy_attributes(
     Ok(attrs)
 }
 
-fn required_resource_attribute_keys(
-    policies: &[Policy],
-) -> Result<Vec<ResourceAttributeKey>, AuthReject> {
-    let mut keys = Vec::new();
-    for policy in policies {
-        for rule in policy.rules() {
-            collect_resource_attribute_key(rule.attribute_key(), &mut keys)?;
-        }
+/// Fail-closed error returned by [`DeviceResourceFactPip`].
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum DeviceResourceFactPipError {
+    /// The External projection could not supply a complete, current, scope-bound fact set.
+    #[error("resource security fact projection is unavailable")]
+    Unavailable,
+}
+
+/// Typed Resource Security Fact policy-information point for the future device-policy handler.
+///
+/// This capability deliberately accepts only a sealed [`DeviceCertificateScope`]. Generic HTTP
+/// authorization cannot mint that scope or access the backing repository. The observation window
+/// is evaluated as `[observed_at, expires_at)` with an injected clock.
+pub struct DeviceResourceFactPip {
+    reads: Arc<DynResourceSecurityFactReadRepo<'static>>,
+    clock: Arc<dyn Clock>,
+}
+
+impl DeviceResourceFactPip {
+    /// Construct the read-only PIP from the External projection capability.
+    pub fn new(
+        reads: Arc<DynResourceSecurityFactReadRepo<'static>>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self { reads, clock }
     }
-    Ok(keys)
-}
 
-fn collect_resource_attribute_key(
-    key: &AttributeKey,
-    keys: &mut Vec<ResourceAttributeKey>,
-) -> Result<(), AuthReject> {
-    let Some(parsed) = ResourcePolicyAttributeKey::classify(key)
-        .map_err(|_| AuthReject::Forbidden)?
-        .into_dynamic()
-    else {
-        return Ok(());
-    };
-    if !keys.iter().any(|existing| existing == &parsed) {
-        keys.push(parsed);
+    /// Resolve an exact set of latest facts for an already-authorized tenant/device scope.
+    ///
+    /// Missing, stale, duplicated, unexpected, cross-scope, future, malformed, or provider-error
+    /// results all collapse to [`DeviceResourceFactPipError::Unavailable`]. No older revision or
+    /// RBAC baseline is consulted.
+    pub async fn resolve(
+        &self,
+        scope: crate::device_certificate::DeviceCertificateScope,
+        required_keys: Vec<ResourceSecurityFactKey>,
+    ) -> Result<Vec<AbacAttribute>, DeviceResourceFactPipError> {
+        let now = self.clock.now();
+        let tenant_scope = tenant_repo_scope(scope.tenant());
+        let resolved = self
+            .reads
+            .resolve_latest(tenant_scope, scope, required_keys.clone(), now)
+            .await
+            .map_err(|err| {
+                tracing::warn!(
+                    error = %err,
+                    error_chain = %secure::redact_error(&err),
+                    tenant_id = %scope.tenant(),
+                    device_id = %scope.device().as_uuid(),
+                    "device resource security fact lookup failed"
+                );
+                DeviceResourceFactPipError::Unavailable
+            })?;
+        let ResourceSecurityFactResolution::Known(facts) = resolved else {
+            return Err(DeviceResourceFactPipError::Unavailable);
+        };
+        validate_known_resource_security_facts(scope, now, &required_keys, facts)
     }
-    Ok(())
 }
 
-fn request_resource_attribute_id(
-    ctx: &AuthSubjectContext,
-    request: &RouteAuthorizationRequest,
-) -> Result<ResourceAttributeResourceId, AuthReject> {
-    request_resource_attribute_id_in(ctx, request, HTTP_SPECS)
-}
-
-fn request_resource_attribute_id_in(
-    ctx: &AuthSubjectContext,
-    request: &RouteAuthorizationRequest,
-    specs: &[HttpSpec],
-) -> Result<ResourceAttributeResourceId, AuthReject> {
-    if route_resource_sharing_is_global_in(request, specs) {
-        tracing::warn!(
-            tenant_id = %ctx.tenant,
-            contract_id = request.contract_id,
-            permission = %request.permission,
-            "identity contract authorizer rejects dynamic resource attributes on global resource route"
-        );
-        return Err(AuthReject::Forbidden);
-    }
-    let Some(resource) = request.resource.as_ref() else {
-        tracing::warn!(
-            tenant_id = %ctx.tenant,
-            contract_id = request.contract_id,
-            permission = %request.permission,
-            "identity contract authorizer resource attributes required without route resource"
-        );
-        return Err(AuthReject::Forbidden);
-    };
-    ResourceAttributeResourceId::parse(resource.id()).map_err(|_| AuthReject::Forbidden)
-}
-
-fn known_resource_attributes_to_abac(
-    ctx: &AuthSubjectContext,
-    request: &RouteAuthorizationRequest,
-    scope: &PolicyRouteScope,
-    resource_id: &ResourceAttributeResourceId,
-    required_keys: &[ResourceAttributeKey],
-    attrs: Vec<crate::domain::ResourceAttribute>,
-) -> Result<Vec<AbacAttribute>, AuthReject> {
-    let mut seen = Vec::with_capacity(attrs.len());
-    let mut out = Vec::with_capacity(attrs.len());
-    for attr in attrs {
-        if attr.tenant() != ctx.tenant
-            || attr.route_scope() != scope
-            || attr.resource_id() != resource_id
+fn validate_known_resource_security_facts(
+    scope: crate::device_certificate::DeviceCertificateScope,
+    now: SystemTime,
+    required_keys: &[ResourceSecurityFactKey],
+    facts: Vec<crate::domain::ResourceSecurityFact>,
+) -> Result<Vec<AbacAttribute>, DeviceResourceFactPipError> {
+    let mut seen = Vec::with_capacity(facts.len());
+    let mut out = Vec::with_capacity(facts.len());
+    for fact in facts {
+        if fact.tenant() != scope.tenant()
+            || fact.device() != scope.device()
+            || !fact.is_fresh_at(now)
         {
-            log_resource_attribute_known_invalid(ctx, request, attr.key(), "scope-mismatch");
-            return Err(AuthReject::Forbidden);
+            return Err(DeviceResourceFactPipError::Unavailable);
         }
-        if !required_keys.iter().any(|required| required == attr.key()) {
-            log_resource_attribute_known_invalid(ctx, request, attr.key(), "unexpected-key");
-            return Err(AuthReject::Forbidden);
+        if !required_keys.iter().any(|required| *required == fact.key()) {
+            return Err(DeviceResourceFactPipError::Unavailable);
         }
-        if seen.iter().any(|existing| existing == attr.key()) {
-            log_resource_attribute_known_invalid(ctx, request, attr.key(), "duplicate-key");
-            return Err(AuthReject::Forbidden);
+        if seen.iter().any(|existing| *existing == fact.key()) {
+            return Err(DeviceResourceFactPipError::Unavailable);
         }
-        seen.push(attr.key().clone());
-        out.push(attr.to_abac_attribute());
+        seen.push(fact.key());
+        out.push(
+            fact.to_abac_attribute()
+                .map_err(|_| DeviceResourceFactPipError::Unavailable)?,
+        );
     }
     for key in required_keys {
         if !seen.iter().any(|seen_key| seen_key == key) {
-            log_resource_attribute_resolution_failure(ctx, request, key, "missing");
-            return Err(AuthReject::Forbidden);
+            return Err(DeviceResourceFactPipError::Unavailable);
         }
     }
     Ok(out)
-}
-
-fn log_resource_attribute_resolution_failure(
-    ctx: &AuthSubjectContext,
-    request: &RouteAuthorizationRequest,
-    key: &ResourceAttributeKey,
-    reason: &'static str,
-) {
-    tracing::warn!(
-        tenant_id = %ctx.tenant,
-        contract_id = request.contract_id,
-        permission = %request.permission,
-        attribute_key = key.as_str(),
-        reason,
-        "identity contract authorizer resource attribute resolution failed"
-    );
-}
-
-fn log_resource_attribute_known_invalid(
-    ctx: &AuthSubjectContext,
-    request: &RouteAuthorizationRequest,
-    key: &ResourceAttributeKey,
-    reason: &'static str,
-) {
-    tracing::warn!(
-        tenant_id = %ctx.tenant,
-        contract_id = request.contract_id,
-        permission = %request.permission,
-        attribute_key = key.as_str(),
-        reason,
-        "identity contract authorizer resource attribute repo returned invalid known set"
-    );
-}
-
-fn route_resource_sharing_is_global_in(
-    request: &RouteAuthorizationRequest,
-    specs: &[HttpSpec],
-) -> bool {
-    specs.iter().any(|spec| {
-        spec.route.contract_id() == request.contract_id
-            && spec.route.auth() == HttpRouteAuth::Permission(request.permission)
-            && spec.resource_sharing.mode == HttpResourceSharingMode::Global
-    })
 }
 
 fn policy_attr(key: &str, value: &str) -> Result<AbacAttribute, AuthReject> {
@@ -3511,7 +3417,6 @@ pub struct IdentityDomainDeps<S> {
     pub roles: Arc<DynRoleReadRepo<'static>>,
     pub binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
     pub policies: Arc<DynPolicyRepo<'static>>,
-    pub resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
     pub clock: Arc<dyn Clock>,
 }
 
@@ -3523,7 +3428,6 @@ pub struct FederatedIdentityDomainDeps {
     pub roles: Arc<DynRoleReadRepo<'static>>,
     pub binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
     pub policies: Arc<DynPolicyRepo<'static>>,
-    pub resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
     pub clock: Arc<dyn Clock>,
 }
 
@@ -3542,14 +3446,12 @@ impl IdentityCommonDomain {
         roles: Arc<DynRoleReadRepo<'static>>,
         binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
         policies: Arc<DynPolicyRepo<'static>>,
-        resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
         clock: Arc<dyn Clock>,
     ) -> Self {
         let authorizer = Arc::new(ContractAuthorizer::new(
             Arc::clone(&roles),
             binding_reads,
             Arc::clone(&policies),
-            resource_attribute_reads,
             clock,
         ));
         Self {
@@ -3613,7 +3515,6 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
             roles,
             binding_reads,
             policies,
-            resource_attribute_reads,
             clock,
         } = deps;
         Self {
@@ -3626,7 +3527,6 @@ impl<S: diport::Signer + Send + Sync + 'static> IdentityDomain<S> {
                 roles,
                 binding_reads,
                 policies,
-                resource_attribute_reads,
                 clock,
             ),
         }
@@ -3641,7 +3541,6 @@ impl FederatedIdentityDomain {
             roles,
             binding_reads,
             policies,
-            resource_attribute_reads,
             clock,
         } = deps;
         Self {
@@ -3651,7 +3550,6 @@ impl FederatedIdentityDomain {
                 roles,
                 binding_reads,
                 policies,
-                resource_attribute_reads,
                 clock,
             ),
         }
@@ -3788,8 +3686,8 @@ mod tests {
 
     use crate::ports::{
         AccountSecurityReadRepo, AccountSecurityState, Credential, DynPolicyLifecycle, Operator,
-        PipAttributeKey, Policy, PolicyCondition, PolicyEffect, PolicyObligations, PolicyRule,
-        Role, StringPredicate,
+        Policy, PolicyCondition, PolicyEffect, PolicyObligations, PolicyRule, Role,
+        StringPredicate,
     };
     use authn::CredentialSecurityEventKind;
     use diport::OutboxEmitError;
@@ -5385,7 +5283,6 @@ mod tests {
             roles: roles_for_list,
             binding_reads: Arc::from(DynRoleBindingReadRepo::new_box(binding_provider)),
             policies,
-            resource_attribute_reads: empty_resource_attribute_repo(),
             clock: make_shared_clock(now_secs),
         })
     }
@@ -5410,7 +5307,6 @@ mod tests {
             roles: roles_for_list,
             binding_reads: Arc::from(DynRoleBindingReadRepo::new_box(binding_provider)),
             policies,
-            resource_attribute_reads: empty_resource_attribute_repo(),
             clock: make_shared_clock(now_secs),
         })
     }
@@ -5520,18 +5416,16 @@ mod tests {
         PolicyList,
         PolicyEffective,
         BindingList,
-        ResourceAttributes,
     }
 
     impl IdentityLocalOnlyRead {
-        const ALL: [Self; 7] = [
+        const ALL: [Self; 6] = [
             Self::RoleFind,
             Self::RoleList,
             Self::PolicyFind,
             Self::PolicyList,
             Self::PolicyEffective,
             Self::BindingList,
-            Self::ResourceAttributes,
         ];
     }
 
@@ -5540,7 +5434,6 @@ mod tests {
         roles: crate::internal::mem::InMemRoleRepo,
         policies: crate::internal::mem::InMemPolicyRepo,
         bindings: crate::internal::mem::InMemRoleBindingLifecycle,
-        resource_attributes: crate::internal::mem::InMemResourceAttributeRepo,
         calls: Arc<std::sync::Mutex<Vec<(IdentityLocalOnlyRead, rss_request_context::TenantId)>>>,
         business_write_effects:
             ::testkit::local_only::ProviderCounter<::testkit::local_only::BusinessWrite>,
@@ -5574,8 +5467,14 @@ mod tests {
                         role("role-z", "Other tenant role", &["identity:role:read"]),
                     ),
                 policies: crate::internal::mem::InMemPolicyRepo::new()
-                    .with_policy(owner_policy("policy-a"))
-                    .with_policy(owner_policy("policy-b"))
+                    .with_policy(identity_local_only_policy_for_tenant(
+                        "policy-a",
+                        tid(CANON_TENANT),
+                    ))
+                    .with_policy(identity_local_only_policy_for_tenant(
+                        "policy-b",
+                        tid(CANON_TENANT),
+                    ))
                     .with_policy(identity_local_only_policy_for_tenant(
                         "policy-z",
                         other_tenant,
@@ -5585,7 +5484,6 @@ mod tests {
                     &read_role_id,
                     CANON_USER,
                 ),
-                resource_attributes: crate::internal::mem::InMemResourceAttributeRepo::new(),
                 calls: Arc::new(std::sync::Mutex::new(Vec::new())),
                 business_write_effects: ::testkit::local_only::ProviderCounter::business_write(),
                 fail_on: None,
@@ -5624,14 +5522,10 @@ mod tests {
         }
 
         fn with_forbidden_write(read: IdentityLocalOnlyRead) -> Self {
-            let mut probe = Self {
+            let probe = Self {
                 forbidden_write_on: Some(read),
                 ..Self::default()
             };
-            if read == IdentityLocalOnlyRead::ResourceAttributes {
-                probe.resource_attributes = crate::internal::mem::InMemResourceAttributeRepo::new()
-                    .with_attribute(owner_resource_attribute(0, None));
-            }
             probe
         }
 
@@ -5775,51 +5669,21 @@ mod tests {
         }
     }
 
-    impl ResourceAttributeReadRepo for IdentityLocalOnlyReadProbe {
-        async fn resolve_effective(
-            &self,
-            tenant_scope: TenantRepoScope,
-            scope: PolicyRouteScope,
-            resource_id: ResourceAttributeResourceId,
-            required_keys: Vec<ResourceAttributeKey>,
-            at: SystemTime,
-        ) -> Result<ResourceAttributeResolution, IdentityError> {
-            self.record(IdentityLocalOnlyRead::ResourceAttributes, tenant_scope);
-            if self.forbidden_write_on == Some(IdentityLocalOnlyRead::ResourceAttributes) {
-                self.business_write_effects.record();
-            }
-            if self.fail_on == Some(IdentityLocalOnlyRead::ResourceAttributes) {
-                return Err(Self::read_failure());
-            }
-            self.resource_attributes
-                .resolve_effective(tenant_scope, scope, resource_id, required_keys, at)
-                .await
-        }
-    }
-
     struct TestRepo {
         roles: Arc<DynRoleReadRepo<'static>>,
         policies: Arc<DynPolicyRepo<'static>>,
         binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
-        resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
     }
 
     impl TestRepo {
         fn from_provider<T>(provider: Arc<T>) -> Self
         where
-            T: RoleReadRepo
-                + PolicyRepo
-                + RoleBindingReadRepo
-                + ResourceAttributeReadRepo
-                + 'static,
+            T: RoleReadRepo + PolicyRepo + RoleBindingReadRepo + 'static,
         {
             Self {
                 roles: Arc::from(DynRoleReadRepo::new_box(Arc::clone(&provider))),
                 policies: Arc::from(DynPolicyRepo::new_box(Arc::clone(&provider))),
-                binding_reads: Arc::from(DynRoleBindingReadRepo::new_box(Arc::clone(&provider))),
-                resource_attribute_reads: Arc::from(DynResourceAttributeReadRepo::new_box(
-                    provider,
-                )),
+                binding_reads: Arc::from(DynRoleBindingReadRepo::new_box(provider)),
             }
         }
     }
@@ -5897,7 +5761,6 @@ mod tests {
             roles: repo.roles,
             binding_reads: repo.binding_reads,
             policies: repo.policies,
-            resource_attribute_reads: repo.resource_attribute_reads,
             clock: make_shared_clock(1_000),
         });
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
@@ -5972,7 +5835,6 @@ mod tests {
             roles: repo.roles,
             binding_reads: repo.binding_reads,
             policies: repo.policies,
-            resource_attribute_reads: repo.resource_attribute_reads,
             clock: make_shared_clock(1_000),
         });
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
@@ -6032,7 +5894,6 @@ mod tests {
             roles: repo.roles,
             binding_reads: repo.binding_reads,
             policies: repo.policies,
-            resource_attribute_reads: repo.resource_attribute_reads,
             clock: make_shared_clock(1_000),
         });
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
@@ -6091,7 +5952,6 @@ mod tests {
             roles: repo.roles,
             binding_reads: repo.binding_reads,
             policies: repo.policies,
-            resource_attribute_reads: repo.resource_attribute_reads,
             clock: make_shared_clock(1_000),
         });
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
@@ -6122,48 +5982,6 @@ mod tests {
         .expect("finalize Primary auth")
         .into_plaintext_router_for_test();
         (router, proof)
-    }
-
-    #[allow(clippy::expect_used)]
-    fn mounted_identity_resource_authorizer(
-        repo: TestRepo,
-    ) -> (
-        Arc<ContractAuthorizer>,
-        ::httpserve::LocalOnlyMountedRouteProof<
-            ::generated::http::identity_v1::roles_list::RouteMarker,
-            RolesListHandlerState,
-        >,
-    ) {
-        let IdentityLocalOnlyAncillaryServices {
-            login,
-            refresh,
-            rbac_admin,
-            policy_manage,
-        } = identity_local_only_ancillary_services();
-        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
-            credential_security: test_credential_security(&login),
-            login,
-            refresh,
-            rbac_admin,
-            policy_manage,
-            roles: repo.roles,
-            binding_reads: repo.binding_reads,
-            policies: repo.policies,
-            resource_attribute_reads: repo.resource_attribute_reads,
-            clock: make_shared_clock(1_000),
-        });
-        let authorizer = Arc::clone(&domain.common.authorizer);
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
-        let mut finalized = registry
-            .finalize_routes()
-            .expect("finalize identity routes");
-        let (_, routes) = finalized.pop().expect("identity Primary routes");
-        let proof = ::httpserve::prove_local_only_mounted_route_state::<RolesListHandlerState, _>(
-            &routes,
-            &::generated::http::identity_v1::roles_list::ROUTE,
-        )
-        .expect("identity roles-list LocalOnly state is mounted");
-        (authorizer, proof)
     }
 
     fn user_evidence(subject: &str) -> AuthorizedSubject {
@@ -6336,34 +6154,35 @@ mod tests {
         ))
     }
 
-    fn empty_resource_attribute_repo() -> Arc<DynResourceAttributeReadRepo<'static>> {
-        resource_attribute_repo(crate::internal::mem::InMemResourceAttributeRepo::new())
+    fn empty_resource_security_fact_repo() -> Arc<DynResourceSecurityFactReadRepo<'static>> {
+        resource_security_fact_repo(crate::internal::mem::InMemResourceSecurityFactRepo::new())
     }
 
-    fn resource_attribute_repo(
-        repo: crate::internal::mem::InMemResourceAttributeRepo,
-    ) -> Arc<DynResourceAttributeReadRepo<'static>> {
-        Arc::from(DynResourceAttributeReadRepo::new_box(repo))
+    fn resource_security_fact_repo(
+        repo: crate::internal::mem::InMemResourceSecurityFactRepo,
+    ) -> Arc<DynResourceSecurityFactReadRepo<'static>> {
+        Arc::from(DynResourceSecurityFactReadRepo::new_box(repo))
     }
 
-    struct IncompleteKnownResourceAttributeRepo;
+    struct KnownResourceSecurityFactRepo(Vec<crate::domain::ResourceSecurityFact>);
 
-    impl ResourceAttributeReadRepo for IncompleteKnownResourceAttributeRepo {
-        async fn resolve_effective(
+    impl ResourceSecurityFactReadRepo for KnownResourceSecurityFactRepo {
+        async fn resolve_latest(
             &self,
             _tenant_scope: TenantRepoScope,
-            _scope: PolicyRouteScope,
-            _resource_id: ResourceAttributeResourceId,
-            _required_keys: Vec<ResourceAttributeKey>,
+            _device_scope: crate::device_certificate::DeviceCertificateScope,
+            _required_keys: Vec<ResourceSecurityFactKey>,
             _at: SystemTime,
-        ) -> Result<ResourceAttributeResolution, IdentityError> {
-            Ok(ResourceAttributeResolution::Known(Vec::new()))
+        ) -> Result<ResourceSecurityFactResolution, IdentityError> {
+            Ok(ResourceSecurityFactResolution::Known(self.0.clone()))
         }
     }
 
-    fn incomplete_known_resource_attribute_repo() -> Arc<DynResourceAttributeReadRepo<'static>> {
-        Arc::from(DynResourceAttributeReadRepo::new_box(
-            IncompleteKnownResourceAttributeRepo,
+    fn known_resource_security_fact_repo(
+        facts: Vec<crate::domain::ResourceSecurityFact>,
+    ) -> Arc<DynResourceSecurityFactReadRepo<'static>> {
+        Arc::from(DynResourceSecurityFactReadRepo::new_box(
+            KnownResourceSecurityFactRepo(facts),
         ))
     }
 
@@ -6436,7 +6255,6 @@ mod tests {
             roles,
             bindings,
             policies,
-            empty_resource_attribute_repo(),
             make_shared_clock(now_secs),
         ));
         (
@@ -6591,80 +6409,211 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn resource_id() -> ResourceAttributeResourceId {
-        ResourceAttributeResourceId::parse(RESOURCE_ID).expect("resource id")
-    }
-
-    #[allow(clippy::expect_used)]
     fn route_resource() -> httpserve::RouteResource {
         httpserve::RouteResource::new(RESOURCE_ID).expect("route resource")
     }
 
     #[allow(clippy::expect_used)]
-    fn owner_resource_attribute(
-        effective_from_secs: u64,
-        effective_until_secs: Option<u64>,
-    ) -> crate::domain::ResourceAttribute {
-        crate::domain::ResourceAttribute::build(
+    fn owner_resource_security_fact(
+        observed_at_secs: u64,
+        expires_at_secs: u64,
+    ) -> crate::domain::ResourceSecurityFact {
+        crate::domain::ResourceSecurityFact::hydrate(
             tid(CANON_TENANT),
-            PolicyRouteScope::parse("other.contract", "identity:policy:read").expect("scope"),
-            resource_id(),
-            ResourceAttributeKey::parse("resource.owner").expect("key"),
-            PolicyValue::new(CANON_USER),
-            SystemTime::UNIX_EPOCH + Duration::from_secs(effective_from_secs),
-            effective_until_secs.map(|secs| SystemTime::UNIX_EPOCH + Duration::from_secs(secs)),
+            ids::DeviceId::parse(RESOURCE_ID).expect("device"),
+            crate::domain::ResourceFactSourceId::parse("test-control-plane").expect("source"),
+            crate::domain::ResourceSecurityFactValue::Owner(
+                crate::domain::ResourceFactPrincipalId::parse(CANON_USER).expect("principal"),
+            ),
+            1,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(observed_at_secs),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(expires_at_secs),
         )
-        .expect("resource attribute")
+        .expect("resource security fact")
     }
 
-    fn owner_policy(id: &str) -> Policy {
-        route_policy_with_condition(
-            id,
-            "other.contract",
-            vocab::RoutePermissionId::IdentityPolicyRead,
-            PolicyCondition::new(
-                AttributeKey::new("resource.owner"),
-                Operator::equal_attribute(PipAttributeKey::principal_id()),
-            ),
-            PolicyEffect::Allow,
-            PolicyObligations::empty(),
+    #[allow(clippy::expect_used)]
+    fn resource_security_fact(
+        tenant: TenantId,
+        device: &str,
+        value: crate::domain::ResourceSecurityFactValue,
+        observed_at_secs: u64,
+        expires_at_secs: u64,
+    ) -> crate::domain::ResourceSecurityFact {
+        crate::domain::ResourceSecurityFact::hydrate(
+            tenant,
+            ids::DeviceId::parse(device).expect("device"),
+            crate::domain::ResourceFactSourceId::parse("test-control-plane").expect("source"),
+            value,
+            1,
+            SystemTime::UNIX_EPOCH + Duration::from_secs(observed_at_secs),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(expires_at_secs),
+        )
+        .expect("resource security fact")
+    }
+
+    fn device_fact_scope() -> crate::device_certificate::DeviceCertificateScope {
+        crate::device_certificate::DeviceCertificateScope::from_authorized(
+            tid(CANON_TENANT),
+            ids::DeviceId::parse(RESOURCE_ID).expect("device"),
         )
     }
 
-    fn synthetic_global_spec() -> HttpSpec {
-        HttpSpec {
-            mount_key: "other_v1::contract",
-            route: vocab::HttpRouteEvidence::from_static(
-                vocab::HttpContractOwner::domain("other"),
-                vocab::ContractBinding::from_static(
-                    "other",
-                    "other.contract",
-                    "v1",
-                    "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-                ),
-                "/api/v1/other/{resourceId}",
-                "GET",
-                &[],
-                vocab::HttpSuccessStatus::new(200),
-                vocab::HttpIdempotency::Idempotent,
-                vocab::HttpRouteAuth::Permission(vocab::RoutePermissionId::IdentityPolicyRead),
-                Some("resourceId"),
-                false,
-                vocab::http::HttpResourceSharing::Global,
-                vocab::HttpConsistencyLevel::LocalOnly,
-                vocab::HttpEffectProfile::new(&[
-                    vocab::HttpEffectKind::Auth,
-                    vocab::HttpEffectKind::Read,
-                ]),
+    #[tokio::test]
+    async fn device_resource_fact_pip_resolves_exact_typed_owner_and_risk_class() {
+        let risk = resource_security_fact(
+            tid(CANON_TENANT),
+            RESOURCE_ID,
+            crate::domain::ResourceSecurityFactValue::RiskClass(
+                crate::domain::ResourceRiskClass::Restricted,
             ),
-            local_tx: None,
-            resource_sharing: ::generated::http::HttpResourceSharingSpec {
-                mode: HttpResourceSharingMode::Global,
-                reason: Some("shared synthetic test route"),
-            },
-            projection_fields: &[],
-            headers: &[],
+            0,
+            10_000,
+        );
+        let pip = DeviceResourceFactPip::new(
+            known_resource_security_fact_repo(vec![owner_resource_security_fact(0, 10_000), risk]),
+            make_shared_clock(1_000),
+        );
+        let attrs = pip
+            .resolve(
+                device_fact_scope(),
+                vec![
+                    ResourceSecurityFactKey::Owner,
+                    ResourceSecurityFactKey::RiskClass,
+                ],
+            )
+            .await
+            .expect("typed facts resolve");
+        assert_eq!(attrs.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn device_resource_fact_pip_fails_closed_for_provider_missing_stale_and_error() {
+        let cases = [
+            empty_resource_security_fact_repo(),
+            resource_security_fact_repo(
+                crate::internal::mem::InMemResourceSecurityFactRepo::new()
+                    .with_fact(owner_resource_security_fact(0, 500)),
+            ),
+            resource_security_fact_repo(
+                crate::internal::mem::InMemResourceSecurityFactRepo::failing_reads(),
+            ),
+        ];
+        for reads in cases {
+            let pip = DeviceResourceFactPip::new(reads, make_shared_clock(1_000));
+            assert!(
+                pip.resolve(device_fact_scope(), vec![ResourceSecurityFactKey::Owner])
+                    .await
+                    .is_err()
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn device_resource_fact_pip_rejects_untrusted_known_payloads() {
+        let owner = || {
+            crate::domain::ResourceSecurityFactValue::Owner(
+                crate::domain::ResourceFactPrincipalId::parse(CANON_USER).expect("principal"),
+            )
+        };
+        let risk = || {
+            crate::domain::ResourceSecurityFactValue::RiskClass(
+                crate::domain::ResourceRiskClass::Normal,
+            )
+        };
+        let other_device = "00000000-0000-4000-8000-000000000def";
+        let cases = vec![
+            vec![resource_security_fact(
+                tid(OTHER_TENANT),
+                RESOURCE_ID,
+                owner(),
+                0,
+                10_000,
+            )],
+            vec![resource_security_fact(
+                tid(CANON_TENANT),
+                other_device,
+                owner(),
+                0,
+                10_000,
+            )],
+            vec![resource_security_fact(
+                tid(CANON_TENANT),
+                RESOURCE_ID,
+                owner(),
+                2_000,
+                10_000,
+            )],
+            vec![
+                owner_resource_security_fact(0, 10_000),
+                owner_resource_security_fact(0, 10_000),
+            ],
+            vec![resource_security_fact(
+                tid(CANON_TENANT),
+                RESOURCE_ID,
+                risk(),
+                0,
+                10_000,
+            )],
+            Vec::new(),
+        ];
+        for facts in cases {
+            let pip = DeviceResourceFactPip::new(
+                known_resource_security_fact_repo(facts),
+                make_shared_clock(1_000),
+            );
+            assert!(
+                pip.resolve(device_fact_scope(), vec![ResourceSecurityFactKey::Owner])
+                    .await
+                    .is_err()
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn generic_contract_authorizer_rejects_fact_policy_without_touching_device_pip() {
+        let fact_policy = Policy::new(
+            PolicyId::parse("poisoned-fact-policy").expect("policy id"),
+            tid(CANON_TENANT),
+            vec![PolicyRule::new(
+                AttributeKey::new("resource.owner"),
+                Operator::equal(PolicyValue::new(CANON_USER)),
+                PolicyEffect::Allow,
+            )],
+        );
+        let baseline_role = role(
+            "role-fact-baseline",
+            "Fact Baseline",
+            &["identity:policy:read"],
+        );
+        let role_id = baseline_role.id().clone();
+        let authorizer = ContractAuthorizer::new(
+            Arc::from(DynRoleReadRepo::new_box(
+                crate::internal::mem::InMemRoleRepo::new()
+                    .with_role_entity(tid(CANON_TENANT), baseline_role),
+            )),
+            Arc::from(DynRoleBindingReadRepo::new_box(
+                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
+                    tid(CANON_TENANT),
+                    &role_id,
+                    CANON_USER,
+                ),
+            )),
+            policy_repo(crate::internal::mem::InMemPolicyRepo::new().with_policy(fact_policy)),
+            make_shared_clock(1_000),
+        );
+        let decision = authorizer
+            .authorize(RouteAuthorizationRequest {
+                contract_id: "test.contract",
+                permission: vocab::RoutePermissionId::IdentityPolicyRead,
+                tenant_id: Some(tid(CANON_TENANT)),
+                principal_kind: rss_request_context::PrincipalKind::Admin,
+                principal_id: CANON_USER.to_string(),
+                federated_permissions: None,
+                resource: Some(route_resource()),
+            })
+            .await;
+        assert_eq!(decision, RouteAuthorizationDecision::Deny);
     }
 
     #[allow(clippy::expect_used)]
@@ -7590,7 +7539,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
         let decision = authorizer
@@ -7662,7 +7610,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -7711,7 +7658,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -7772,7 +7718,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -7839,7 +7784,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -7871,7 +7815,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -7908,13 +7851,8 @@ mod tests {
                 PolicyObligations::empty(),
             ),
         ));
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -8009,13 +7947,8 @@ mod tests {
                 PolicyObligations::empty(),
             ),
         ));
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -8029,270 +7962,6 @@ mod tests {
             })
             .await;
         assert_eq!(decision, RouteAuthorizationDecision::Deny);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn contract_authorizer_resource_attr_allow_permits_owner_policy_without_rbac_binding() {
-        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
-            crate::internal::mem::InMemRoleRepo::new(),
-        ));
-        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
-            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
-                crate::internal::mem::InMemRoleBindingLifecycle::new(),
-            ));
-        let policies = policy_repo(
-            crate::internal::mem::InMemPolicyRepo::new().with_policy(owner_policy("policy-owner")),
-        );
-        let resource_attrs = resource_attribute_repo(
-            crate::internal::mem::InMemResourceAttributeRepo::new()
-                .with_attribute(owner_resource_attribute(0, None)),
-        );
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            resource_attrs,
-            make_shared_clock(1_000),
-        );
-
-        let decision = authorizer
-            .authorize(RouteAuthorizationRequest {
-                contract_id: "other.contract",
-                permission: vocab::RoutePermissionId::IdentityPolicyRead,
-                tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: rss_request_context::PrincipalKind::User,
-                principal_id: CANON_USER.to_string(),
-                federated_permissions: None,
-                resource: Some(route_resource()),
-            })
-            .await;
-        assert!(decision.is_allow());
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn contract_authorizer_missing_resource_attr_denies_before_rbac_baseline() {
-        let baseline_role = role(
-            "role-resource-admin",
-            "Resource Admin",
-            &["identity:policy:read"],
-        );
-        let baseline_role_id = baseline_role.id().clone();
-        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
-            crate::internal::mem::InMemRoleRepo::new()
-                .with_role_entity(tid(CANON_TENANT), baseline_role),
-        ));
-        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
-            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
-                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
-                    tid(CANON_TENANT),
-                    &baseline_role_id,
-                    CANON_USER,
-                ),
-            ));
-        let policies = policy_repo(
-            crate::internal::mem::InMemPolicyRepo::new()
-                .with_policy(owner_policy("policy-missing-resource-attr")),
-        );
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
-
-        let decision = authorizer
-            .authorize(RouteAuthorizationRequest {
-                contract_id: "other.contract",
-                permission: vocab::RoutePermissionId::IdentityPolicyRead,
-                tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: rss_request_context::PrincipalKind::Admin,
-                principal_id: CANON_USER.to_string(),
-                federated_permissions: None,
-                resource: Some(route_resource()),
-            })
-            .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Deny);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn contract_authorizer_stale_resource_attr_denies_before_rbac_baseline() {
-        let baseline_role = role(
-            "role-resource-admin",
-            "Resource Admin",
-            &["identity:policy:read"],
-        );
-        let baseline_role_id = baseline_role.id().clone();
-        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
-            crate::internal::mem::InMemRoleRepo::new()
-                .with_role_entity(tid(CANON_TENANT), baseline_role),
-        ));
-        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
-            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
-                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
-                    tid(CANON_TENANT),
-                    &baseline_role_id,
-                    CANON_USER,
-                ),
-            ));
-        let policies = policy_repo(
-            crate::internal::mem::InMemPolicyRepo::new()
-                .with_policy(owner_policy("policy-stale-resource-attr")),
-        );
-        let resource_attrs = resource_attribute_repo(
-            crate::internal::mem::InMemResourceAttributeRepo::new()
-                .with_attribute(owner_resource_attribute(0, Some(500))),
-        );
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            resource_attrs,
-            make_shared_clock(1_000),
-        );
-
-        let decision = authorizer
-            .authorize(RouteAuthorizationRequest {
-                contract_id: "other.contract",
-                permission: vocab::RoutePermissionId::IdentityPolicyRead,
-                tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: rss_request_context::PrincipalKind::Admin,
-                principal_id: CANON_USER.to_string(),
-                federated_permissions: None,
-                resource: Some(route_resource()),
-            })
-            .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Deny);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn contract_authorizer_resource_attr_store_error_denies_before_rbac_baseline() {
-        let baseline_role = role(
-            "role-resource-admin",
-            "Resource Admin",
-            &["identity:policy:read"],
-        );
-        let baseline_role_id = baseline_role.id().clone();
-        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
-            crate::internal::mem::InMemRoleRepo::new()
-                .with_role_entity(tid(CANON_TENANT), baseline_role),
-        ));
-        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
-            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
-                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
-                    tid(CANON_TENANT),
-                    &baseline_role_id,
-                    CANON_USER,
-                ),
-            ));
-        let policies = policy_repo(
-            crate::internal::mem::InMemPolicyRepo::new()
-                .with_policy(owner_policy("policy-resource-attr-store-error")),
-        );
-        let resource_attrs = resource_attribute_repo(
-            crate::internal::mem::InMemResourceAttributeRepo::failing_reads(),
-        );
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            resource_attrs,
-            make_shared_clock(1_000),
-        );
-
-        let decision = authorizer
-            .authorize(RouteAuthorizationRequest {
-                contract_id: "other.contract",
-                permission: vocab::RoutePermissionId::IdentityPolicyRead,
-                tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: rss_request_context::PrincipalKind::Admin,
-                principal_id: CANON_USER.to_string(),
-                federated_permissions: None,
-                resource: Some(route_resource()),
-            })
-            .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Deny);
-    }
-
-    #[tokio::test]
-    #[allow(clippy::expect_used)]
-    async fn contract_authorizer_incomplete_known_resource_attrs_denies_before_rbac_baseline() {
-        let baseline_role = role(
-            "role-resource-admin",
-            "Resource Admin",
-            &["identity:policy:read"],
-        );
-        let baseline_role_id = baseline_role.id().clone();
-        let roles: Arc<DynRoleReadRepo<'static>> = Arc::from(DynRoleReadRepo::new_box(
-            crate::internal::mem::InMemRoleRepo::new()
-                .with_role_entity(tid(CANON_TENANT), baseline_role),
-        ));
-        let bindings: Arc<DynRoleBindingReadRepo<'static>> =
-            Arc::from(crate::ports::DynRoleBindingReadRepo::new_box(
-                crate::internal::mem::InMemRoleBindingLifecycle::new().with_binding(
-                    tid(CANON_TENANT),
-                    &baseline_role_id,
-                    CANON_USER,
-                ),
-            ));
-        let policies = policy_repo(
-            crate::internal::mem::InMemPolicyRepo::new()
-                .with_policy(owner_policy("policy-incomplete-known-resource-attr")),
-        );
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            incomplete_known_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
-
-        let decision = authorizer
-            .authorize(RouteAuthorizationRequest {
-                contract_id: "other.contract",
-                permission: vocab::RoutePermissionId::IdentityPolicyRead,
-                tenant_id: Some(tid(CANON_TENANT)),
-                principal_kind: rss_request_context::PrincipalKind::Admin,
-                principal_id: CANON_USER.to_string(),
-                federated_permissions: None,
-                resource: Some(route_resource()),
-            })
-            .await;
-        assert_eq!(
-            decision,
-            RouteAuthorizationDecision::Deny,
-            "repo Known payloads must still cover every required resource attr before baseline"
-        );
-    }
-
-    #[test]
-    fn resource_attribute_global_route_spec_denies_dynamic_attr_resolution() {
-        let ctx = AuthSubjectContext {
-            tenant: tid(CANON_TENANT),
-            subject: CANON_USER.to_string(),
-            kind: rss_request_context::PrincipalKind::User,
-            projection: ResourceProjection::default_masked(),
-        };
-        let request = RouteAuthorizationRequest {
-            contract_id: "other.contract",
-            permission: vocab::RoutePermissionId::IdentityPolicyRead,
-            tenant_id: Some(tid(CANON_TENANT)),
-            principal_kind: rss_request_context::PrincipalKind::User,
-            principal_id: CANON_USER.to_string(),
-            federated_permissions: None,
-            resource: Some(route_resource()),
-        };
-        let specs = [synthetic_global_spec()];
-
-        assert!(route_resource_sharing_is_global_in(&request, &specs));
-        assert!(matches!(
-            request_resource_attribute_id_in(&ctx, &request, &specs),
-            Err(AuthReject::Forbidden)
-        ));
     }
 
     #[tokio::test]
@@ -8319,13 +7988,8 @@ mod tests {
                 PolicyObligations::empty(),
             ),
         ));
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -8365,13 +8029,8 @@ mod tests {
                 PolicyObligations::new(Some(rss_request_context::RowScope::Tenant), vec![]),
             ),
         ));
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -8425,7 +8084,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -8483,7 +8141,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -8516,7 +8173,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -8600,13 +8256,8 @@ mod tests {
                 ),
             ),
         ));
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -8654,13 +8305,8 @@ mod tests {
                 ),
             ),
         ));
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -8708,7 +8354,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
 
@@ -8751,13 +8396,8 @@ mod tests {
                 PolicyObligations::new(None, vec![AttributeKey::new("audit.email")]),
             ),
         ));
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
 
         let decision = authorizer
             .authorize(RouteAuthorizationRequest {
@@ -8785,13 +8425,8 @@ mod tests {
                 crate::internal::mem::InMemRoleBindingLifecycle::new(),
             ));
         let policies = policy_repo(crate::internal::mem::InMemPolicyRepo::failing_reads());
-        let authorizer = ContractAuthorizer::new(
-            roles,
-            bindings,
-            policies,
-            empty_resource_attribute_repo(),
-            make_shared_clock(1_000),
-        );
+        let authorizer =
+            ContractAuthorizer::new(roles, bindings, policies, make_shared_clock(1_000));
         let auth = SETTINGS_CONFIG_HTTP_SPEC.route.auth();
         assert!(matches!(auth, HttpRouteAuth::Permission(_)));
         let HttpRouteAuth::Permission(permission) = auth else {
@@ -8842,7 +8477,6 @@ mod tests {
             roles,
             bindings,
             empty_policy_repo(),
-            empty_resource_attribute_repo(),
             make_shared_clock(1_000),
         );
         let decision = authorizer
@@ -10134,7 +9768,6 @@ mod tests {
             RolesList,
             PoliciesGet(&'static str),
             PoliciesList,
-            ResourceAuthorizer,
         }
 
         let cases = [
@@ -10147,10 +9780,6 @@ mod tests {
             (IdentityLocalOnlyRead::PolicyList, RouteCase::PoliciesList),
             (IdentityLocalOnlyRead::PolicyEffective, RouteCase::RolesList),
             (IdentityLocalOnlyRead::BindingList, RouteCase::RolesList),
-            (
-                IdentityLocalOnlyRead::ResourceAttributes,
-                RouteCase::ResourceAuthorizer,
-            ),
         ];
         assert_eq!(
             cases.map(|(read, _)| read),
@@ -10244,33 +9873,6 @@ mod tests {
                             ContractRequest::get(POLICIES_LIST_HTTP_SPEC.route.path()),
                         )
                         .await;
-                    })
-                    .await
-                }
-                RouteCase::ResourceAuthorizer => {
-                    let (authorizer, proof) =
-                        self::mounted_identity_resource_authorizer(probe.test_repo());
-                    let observers = ::testkit::local_only::LocalOnlyObservers::new(
-                        probe.business_write_effects.handle(),
-                        ::testkit::local_only::StaticExclusion::<
-                            ::testkit::local_only::Outbox,
-                        >::from_governed(&proof),
-                        ::testkit::local_only::StaticExclusion::<
-                            ::testkit::local_only::Publish,
-                        >::from_governed(&proof),
-                    );
-                    ::testkit::local_only::assert_local_only(observers, move || async move {
-                        let _decision = authorizer
-                            .authorize(RouteAuthorizationRequest {
-                                contract_id: "other.contract",
-                                permission: vocab::RoutePermissionId::IdentityPolicyRead,
-                                tenant_id: Some(tid(CANON_TENANT)),
-                                principal_kind: rss_request_context::PrincipalKind::Admin,
-                                principal_id: CANON_USER.to_string(),
-                                federated_permissions: None,
-                                resource: Some(route_resource()),
-                            })
-                            .await;
                     })
                     .await
                 }

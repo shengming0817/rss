@@ -4240,7 +4240,7 @@ struct DurableOperatorCase {
 
 fn profile_attribute(value: PolicyValue) -> Result<AbacAttribute, IdentityError> {
     Ok(AbacAttribute::new(
-        AttributeKey::parse("resource.profile").map_err(|_| IdentityError::InvalidPolicy)?,
+        AttributeKey::parse("principal.profile").map_err(|_| IdentityError::InvalidPolicy)?,
         value,
     ))
 }
@@ -4482,7 +4482,7 @@ fn durable_operator_policy(
 ) -> Result<Policy, IdentityError> {
     let rules = vec![PolicyRule::with_obligations(
         PolicyCondition::new(
-            AttributeKey::parse("resource.profile").map_err(|_| IdentityError::InvalidPolicy)?,
+            AttributeKey::parse("principal.profile").map_err(|_| IdentityError::InvalidPolicy)?,
             operator,
         ),
         effect,
@@ -5217,130 +5217,624 @@ async fn policy_repo_active_window_conformance() -> TestResult {
     Ok(())
 }
 
-/// resource attribute repo：Known/Missing/Stale 是闭枚举，CAS 写入与 tombstone 均 fail-closed。
-#[tokio::test(flavor = "multi_thread")]
-async fn resource_attribute_repo_resolve_and_cas_conformance() -> TestResult {
-    let (_pg, store) = connect_pg().await?;
-    store.run_migrations().await?;
-    let repo = PgResourceAttributeRepo::from_unverified_for_test(&store);
-    let tenant = role_tenant(ROLE_TENANT_A)?;
+/// Resource Security Fact PIP selects the latest revision before freshness evaluation.
+struct FixedResourceFactClock(std::time::SystemTime);
 
-    let created = repo
-        .upsert(
-            identity_scope(tenant),
-            resource_attribute_fixture(tenant, "resource.owner", "owner-a", 10, None)?,
-            None,
-        )
-        .await?;
-    assert_eq!(
-        created.version(),
-        ResourceAttributeVersion::first(),
-        "new resource attribute version starts at 1"
-    );
+impl diport::Clock for FixedResourceFactClock {
+    fn now(&self) -> std::time::SystemTime {
+        self.0
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_security_fact_repo_latest_and_freshness_conformance() -> TestResult {
+    let (pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let reader_config = rss_app_read_config(&pg, &store).await?;
+    let verified_reader = crate::PgStore::connect_verified_read(&reader_config).await?;
+    let repo = PgResourceSecurityFactRepo::new(&verified_reader);
+    let tenant = role_tenant(ROLE_TENANT_A)?;
+    let device = ids::DeviceId::parse(RESOURCE_SECURITY_FACT_DEVICE_ID)?;
+    sqlx::query(
+        "INSERT INTO resource_security_fact_revisions
+         (tenant_id, device_id, fact_key, revision, source_id, owner_principal_id,
+          observed_at, expires_at)
+         VALUES ($1::uuid, $2::uuid, 'resource.owner', 1, 'test-control-plane', 'owner-a',
+                 to_timestamp(10), to_timestamp(30))",
+    )
+    .bind(tenant.to_string())
+    .bind(device.as_uuid().to_string())
+    .execute(&store.pool)
+    .await?;
+    let device_scope =
+        identity::ports::device_certificate::DeviceCertificateScope::for_test(tenant, device);
 
     let known = repo
-        .resolve_effective(
+        .resolve_latest(
             identity_scope(tenant),
-            policy_scope()?,
-            resource_attribute_id()?,
-            vec![resource_attribute_key("resource.owner")?],
+            device_scope,
+            vec![ResourceSecurityFactKey::Owner],
             policy_time(20),
         )
         .await?;
-    let ResourceAttributeResolution::Known(attrs) = known else {
+    let ResourceSecurityFactResolution::Known(facts) = known else {
         return Err(std::io::Error::other(format!(
-            "expected known resource attribute, got {known:?}"
+            "expected known resource security fact, got {known:?}"
         ))
         .into());
     };
-    assert_eq!(attrs.len(), 1);
-    assert_eq!(attrs[0].value().string_value(), Some("owner-a"));
+    assert_eq!(facts.len(), 1);
+    assert_eq!(facts[0].revision().get(), 1);
+
+    let pip = identity::DeviceResourceFactPip::new(
+        std::sync::Arc::from(identity::ports::DynResourceSecurityFactReadRepo::new_box(
+            PgResourceSecurityFactRepo::new(&verified_reader),
+        )),
+        std::sync::Arc::new(FixedResourceFactClock(policy_time(20))),
+    );
+    let attrs = pip
+        .resolve(device_scope, vec![ResourceSecurityFactKey::Owner])
+        .await?;
+    assert_eq!(
+        attrs.len(),
+        1,
+        "production-shaped reader must feed typed PIP"
+    );
+    let tenant_b = role_tenant(ROLE_TENANT_B)?;
+    let tenant_b_scope =
+        identity::ports::device_certificate::DeviceCertificateScope::for_test(tenant_b, device);
+    assert!(
+        pip.resolve(tenant_b_scope, vec![ResourceSecurityFactKey::Owner])
+            .await
+            .is_err(),
+        "reader RLS and typed PIP must reject a cross-tenant scope"
+    );
 
     let missing = repo
-        .resolve_effective(
+        .resolve_latest(
             identity_scope(tenant),
-            policy_scope()?,
-            resource_attribute_id()?,
-            vec![resource_attribute_key("resource.missing")?],
-            policy_time(20),
-        )
-        .await?;
-    assert!(
-        matches!(missing, ResourceAttributeResolution::Missing(key) if key.as_str() == "resource.missing")
-    );
-
-    repo.upsert(
-        identity_scope(tenant),
-        resource_attribute_fixture(tenant, "resource.stale_owner", "owner-a", 1, Some(5))?,
-        None,
-    )
-    .await?;
-    let stale = repo
-        .resolve_effective(
-            identity_scope(tenant),
-            policy_scope()?,
-            resource_attribute_id()?,
-            vec![resource_attribute_key("resource.stale_owner")?],
-            policy_time(20),
-        )
-        .await?;
-    assert!(
-        matches!(stale, ResourceAttributeResolution::Stale(key) if key.as_str() == "resource.stale_owner")
-    );
-
-    let conflict = repo
-        .upsert(
-            identity_scope(tenant),
-            resource_attribute_fixture(tenant, "resource.owner", "owner-b", 10, None)?,
-            Some(ResourceAttributeVersion::new(99)?),
-        )
-        .await;
-    assert!(matches!(conflict, Err(IdentityError::VersionConflict)));
-
-    let updated = repo
-        .upsert(
-            identity_scope(tenant),
-            resource_attribute_fixture(tenant, "resource.owner", "owner-b", 10, None)?,
-            Some(created.version()),
-        )
-        .await?;
-    assert_eq!(updated.version().get(), 2);
-
-    let stale_expire = repo
-        .expire(
-            identity_scope(tenant),
-            policy_scope()?,
-            resource_attribute_id()?,
-            resource_attribute_key("resource.owner")?,
-            ResourceAttributeVersion::first(),
-        )
-        .await;
-    assert!(matches!(stale_expire, Err(IdentityError::VersionConflict)));
-
-    assert!(
-        repo.expire(
-            identity_scope(tenant),
-            policy_scope()?,
-            resource_attribute_id()?,
-            resource_attribute_key("resource.owner")?,
-            updated.version(),
-        )
-        .await?,
-        "expire at current version succeeds"
-    );
-    let after_expire = repo
-        .resolve_effective(
-            identity_scope(tenant),
-            policy_scope()?,
-            resource_attribute_id()?,
-            vec![resource_attribute_key("resource.owner")?],
+            device_scope,
+            vec![ResourceSecurityFactKey::RiskClass],
             policy_time(20),
         )
         .await?;
     assert!(matches!(
-        after_expire,
-        ResourceAttributeResolution::Missing(_)
+        missing,
+        ResourceSecurityFactResolution::Missing(ResourceSecurityFactKey::RiskClass)
     ));
+
+    sqlx::query(
+        "INSERT INTO resource_security_fact_revisions
+         (tenant_id, device_id, fact_key, revision, source_id, owner_principal_id,
+          observed_at, expires_at)
+         VALUES ($1::uuid, $2::uuid, 'resource.owner', 2, 'test-control-plane', 'owner-b',
+                 to_timestamp(15), to_timestamp(18))",
+    )
+    .bind(tenant.to_string())
+    .bind(device.as_uuid().to_string())
+    .execute(&store.pool)
+    .await?;
+    let stale = repo
+        .resolve_latest(
+            identity_scope(tenant),
+            device_scope,
+            vec![ResourceSecurityFactKey::Owner],
+            policy_time(20),
+        )
+        .await?;
+    assert!(
+        matches!(
+            stale,
+            ResourceSecurityFactResolution::Stale(ResourceSecurityFactKey::Owner)
+        ),
+        "latest expired revision must not fall back to revision 1"
+    );
+
+    assert!(
+        pip.resolve(device_scope, vec![ResourceSecurityFactKey::Owner])
+            .await
+            .is_err(),
+        "typed PIP must not fall back after the latest revision expires"
+    );
+
+    drop(repo);
+    drop(pip);
+    verified_reader.store_arc().shutdown().await?;
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_security_fact_reader_preserves_subsecond_freshness_boundaries() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = rss_request_context::TenantId::parse(ROLE_TENANT_A)?;
+    let device = ids::DeviceId::parse(RESOURCE_SECURITY_FACT_DEVICE_ID)?;
+    sqlx::query(
+        "INSERT INTO resource_security_fact_revisions
+         (tenant_id, device_id, fact_key, revision, source_id, owner_principal_id,
+          observed_at, expires_at)
+         VALUES ($1::uuid, $2::uuid, 'resource.owner', 1, 'test-control-plane', 'owner-a',
+                 to_timestamp(1000.1), to_timestamp(1000.5))",
+    )
+    .bind(tenant.to_string())
+    .bind(device.as_uuid().to_string())
+    .execute(&store.pool)
+    .await?;
+    let repo = PgResourceSecurityFactRepo::from_unverified_for_test(&store);
+    let scope = identity::test_support::device_certificate_scope(tenant, device);
+    let expired_at = SystemTime::UNIX_EPOCH + Duration::from_millis(1_000_600);
+    assert!(matches!(
+        repo.resolve_latest(
+            identity_scope(tenant),
+            scope,
+            vec![ResourceSecurityFactKey::Owner],
+            expired_at,
+        )
+        .await?,
+        ResourceSecurityFactResolution::Stale(ResourceSecurityFactKey::Owner)
+    ));
+
+    let future_device = ids::DeviceId::parse("00000000-0000-4000-8000-000000000aac")?;
+    sqlx::query(
+        "INSERT INTO resource_security_fact_revisions
+         (tenant_id, device_id, fact_key, revision, source_id, owner_principal_id,
+          observed_at, expires_at)
+         VALUES ($1::uuid, $2::uuid, 'resource.owner', 1, 'test-control-plane', 'owner-a',
+                 to_timestamp(1000.5), to_timestamp(1001.5))",
+    )
+    .bind(tenant.to_string())
+    .bind(future_device.as_uuid().to_string())
+    .execute(&store.pool)
+    .await?;
+    let future_scope = identity::test_support::device_certificate_scope(tenant, future_device);
+    let before_observation = SystemTime::UNIX_EPOCH + Duration::from_millis(1_000_400);
+    assert!(matches!(
+        repo.resolve_latest(
+            identity_scope(tenant),
+            future_scope,
+            vec![ResourceSecurityFactKey::Owner],
+            before_observation,
+        )
+        .await?,
+        ResourceSecurityFactResolution::Stale(ResourceSecurityFactKey::Owner)
+    ));
+    store.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn resource_security_fact_bootstrap_cas_replay_and_acl_conformance() -> TestResult {
+    let (_pg, store) = connect_pg().await?;
+    store.run_migrations().await?;
+    let tenant = ROLE_TENANT_A;
+    let device = RESOURCE_SECURITY_FACT_DEVICE_ID;
+
+    #[allow(clippy::too_many_arguments)]
+    async fn apply_fact(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        device: &str,
+        key: &str,
+        revision: i64,
+        source: &str,
+        principal: Option<&str>,
+        risk_class: Option<&str>,
+        observed_at: i64,
+        expires_at: i64,
+    ) -> Result<String, sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        sqlx::query("SET LOCAL ROLE rss_resource_fact_bootstrap")
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+            .bind(tenant)
+            .execute(&mut *tx)
+            .await?;
+        let outcome: String = sqlx::query_scalar(
+            "SELECT public.rss_apply_resource_security_fact_revision(
+                $1::uuid, $2::uuid, $3, $4, $5, $6,
+                $7, to_timestamp($8), to_timestamp($9))::text",
+        )
+        .bind(tenant)
+        .bind(device)
+        .bind(key)
+        .bind(revision)
+        .bind(source)
+        .bind(principal)
+        .bind(risk_class)
+        .bind(observed_at)
+        .bind(expires_at)
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(outcome)
+    }
+
+    async fn apply_owner(
+        pool: &sqlx::PgPool,
+        tenant: &str,
+        device: &str,
+        revision: i64,
+        principal: &str,
+        observed_at: i64,
+        expires_at: i64,
+    ) -> Result<String, sqlx::Error> {
+        apply_fact(
+            pool,
+            tenant,
+            device,
+            "resource.owner",
+            revision,
+            "test-control-plane",
+            Some(principal),
+            None,
+            observed_at,
+            expires_at,
+        )
+        .await
+    }
+
+    let now: i64 = sqlx::query_scalar("SELECT extract(epoch FROM clock_timestamp())::bigint")
+        .fetch_one(&store.pool)
+        .await?;
+    let (left, right) = tokio::join!(
+        apply_owner(
+            &store.pool,
+            tenant,
+            device,
+            1,
+            "owner-a",
+            now - 1,
+            now + 300
+        ),
+        apply_owner(
+            &store.pool,
+            tenant,
+            device,
+            1,
+            "owner-a",
+            now - 1,
+            now + 300
+        ),
+    );
+    let outcomes = [left?, right?];
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| *outcome == "Applied")
+            .count(),
+        1
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|outcome| *outcome == "Replay")
+            .count(),
+        1
+    );
+
+    let conflict = apply_owner(
+        &store.pool,
+        tenant,
+        device,
+        1,
+        "owner-b",
+        now - 1,
+        now + 300,
+    )
+    .await;
+    assert_eq!(
+        conflict
+            .expect_err("same revision with different payload must conflict")
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("P2111")
+    );
+    assert_eq!(
+        apply_owner(
+            &store.pool,
+            tenant,
+            device,
+            2,
+            "owner-b",
+            now - 1,
+            now + 300
+        )
+        .await?,
+        "Applied"
+    );
+    assert_eq!(
+        apply_owner(
+            &store.pool,
+            tenant,
+            device,
+            2,
+            "owner-b",
+            now - 1,
+            now + 300
+        )
+        .await?,
+        "Replay"
+    );
+
+    for (source, principal, observed_at, expires_at, reason) in [
+        (
+            "other-control-plane",
+            "owner-b",
+            now - 1,
+            now + 300,
+            "source",
+        ),
+        ("test-control-plane", "owner-c", now - 1, now + 300, "value"),
+        (
+            "test-control-plane",
+            "owner-b",
+            now - 2,
+            now + 300,
+            "observed_at",
+        ),
+        (
+            "test-control-plane",
+            "owner-b",
+            now - 1,
+            now + 301,
+            "expires_at",
+        ),
+    ] {
+        let error = apply_fact(
+            &store.pool,
+            tenant,
+            device,
+            "resource.owner",
+            2,
+            source,
+            Some(principal),
+            None,
+            observed_at,
+            expires_at,
+        )
+        .await
+        .expect_err("same revision with any changed fingerprint field must conflict");
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some("P2111"),
+            "changed {reason} must conflict without appending"
+        );
+    }
+
+    assert_eq!(
+        apply_fact(
+            &store.pool,
+            tenant,
+            device,
+            "resource.riskClass",
+            1,
+            "test-control-plane",
+            None,
+            Some("restricted"),
+            now - 1,
+            now + 300,
+        )
+        .await?,
+        "Applied"
+    );
+    assert_eq!(
+        apply_fact(
+            &store.pool,
+            tenant,
+            device,
+            "resource.riskClass",
+            1,
+            "test-control-plane",
+            None,
+            Some("restricted"),
+            now - 1,
+            now + 300,
+        )
+        .await?,
+        "Replay"
+    );
+    let risk_repo = PgResourceSecurityFactRepo::from_unverified_for_test(&store);
+    let risk_scope = identity::test_support::device_certificate_scope(
+        rss_request_context::TenantId::parse(tenant)?,
+        ids::DeviceId::parse(device)?,
+    );
+    let risk = risk_repo
+        .resolve_latest(
+            identity_scope(rss_request_context::TenantId::parse(tenant)?),
+            risk_scope,
+            vec![ResourceSecurityFactKey::RiskClass],
+            policy_time(u64::try_from(now)?),
+        )
+        .await?;
+    assert!(matches!(risk, ResourceSecurityFactResolution::Known(ref facts) if facts.len() == 1));
+
+    let expired_replay_device = "00000000-0000-4000-8000-000000000aad";
+    sqlx::query(
+        "INSERT INTO resource_security_fact_revisions
+         (tenant_id, device_id, fact_key, revision, source_id, owner_principal_id,
+          observed_at, expires_at)
+         VALUES ($1::uuid, $2::uuid, 'resource.owner', 1, 'test-control-plane', 'owner-expired',
+                 to_timestamp($3), to_timestamp($4))",
+    )
+    .bind(tenant)
+    .bind(expired_replay_device)
+    .bind(now - 300)
+    .bind(now - 100)
+    .execute(&store.pool)
+    .await?;
+    assert_eq!(
+        apply_fact(
+            &store.pool,
+            tenant,
+            expired_replay_device,
+            "resource.owner",
+            1,
+            "test-control-plane",
+            Some("owner-expired"),
+            None,
+            now - 300,
+            now - 100,
+        )
+        .await?,
+        "Replay",
+        "durable exact replay remains stable after expiry"
+    );
+
+    let mut long_tx = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_resource_fact_bootstrap")
+        .execute(&mut *long_tx)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant)
+        .execute(&mut *long_tx)
+        .await?;
+    sqlx::query("SELECT pg_sleep(0.05)")
+        .execute(&mut *long_tx)
+        .await?;
+    let expired_during_transaction = sqlx::query(
+        "SELECT public.rss_apply_resource_security_fact_revision(
+            $1::uuid, '00000000-0000-4000-8000-000000000aae'::uuid,
+            'resource.owner', 1, 'test-control-plane', 'owner-clock', NULL,
+            transaction_timestamp(), transaction_timestamp() + interval '20 milliseconds')",
+    )
+    .bind(tenant)
+    .execute(&mut *long_tx)
+    .await
+    .expect_err("acceptance uses call time, not transaction start time");
+    assert_eq!(
+        expired_during_transaction
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("22023")
+    );
+    long_tx.rollback().await?;
+    for (revision, observed_at, expires_at, reason) in [
+        (1, now - 1, now + 300, "old revision"),
+        (4, now - 1, now + 300, "revision gap"),
+        (3, now + 30, now + 300, "future observation"),
+        (3, now - 30, now - 1, "expired input"),
+    ] {
+        let error = apply_owner(
+            &store.pool,
+            tenant,
+            device,
+            revision,
+            "owner-c",
+            observed_at,
+            expires_at,
+        )
+        .await
+        .expect_err(reason);
+        let expected = if revision == 1 || revision == 4 {
+            "P2111"
+        } else {
+            "22023"
+        };
+        assert_eq!(
+            error
+                .as_database_error()
+                .and_then(sqlx::error::DatabaseError::code)
+                .as_deref(),
+            Some(expected),
+            "{reason} must have a stable non-transient class"
+        );
+    }
+    let initial_gap = apply_owner(
+        &store.pool,
+        tenant,
+        "00000000-0000-4000-8000-000000000aaa",
+        2,
+        "owner-a",
+        now - 1,
+        now + 300,
+    )
+    .await
+    .expect_err("initial revision must be one");
+    assert_eq!(
+        initial_gap
+            .as_database_error()
+            .and_then(sqlx::error::DatabaseError::code)
+            .as_deref(),
+        Some("P2111")
+    );
+
+    let mut mismatch_tx = store.pool.begin().await?;
+    sqlx::query("SET LOCAL ROLE rss_resource_fact_bootstrap")
+        .execute(&mut *mismatch_tx)
+        .await?;
+    sqlx::query("SELECT set_config('rss.tenant_id', $1, true)")
+        .bind(tenant)
+        .execute(&mut *mismatch_tx)
+        .await?;
+    let mismatch = sqlx::query(
+        "SELECT public.rss_apply_resource_security_fact_revision(
+            $1::uuid, '00000000-0000-4000-8000-000000000aab'::uuid,
+            'resource.riskClass', 1, 'test-control-plane', 'owner-a', NULL,
+            clock_timestamp() - interval '1 second', clock_timestamp() + interval '5 minutes')",
+    )
+    .bind(tenant)
+    .execute(&mut *mismatch_tx)
+    .await;
+    assert!(mismatch.is_err(), "key/value mismatch must be rejected");
+    mismatch_tx.rollback().await?;
+    let count: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM resource_security_fact_revisions
+         WHERE tenant_id = $1::uuid AND device_id = $2::uuid",
+    )
+    .bind(tenant)
+    .bind(device)
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(
+        count, 3,
+        "replay/conflict must not append an audit revision"
+    );
+
+    let acl: (bool, bool, bool, bool, bool, bool) = sqlx::query_as(
+        "SELECT
+            has_table_privilege('rss_app', 'resource_security_fact_revisions', 'SELECT'),
+            has_table_privilege('rss_app', 'resource_security_fact_revisions', 'INSERT'),
+            has_table_privilege('rss_app', 'resource_security_fact_revisions', 'UPDATE'),
+            has_table_privilege('rss_app', 'resource_security_fact_revisions', 'DELETE'),
+            has_table_privilege('rss_resource_fact_bootstrap', 'resource_security_fact_revisions', 'SELECT'),
+            has_table_privilege('rss_resource_fact_bootstrap', 'resource_security_fact_revisions', 'INSERT')",
+    )
+    .fetch_one(&store.pool)
+    .await?;
+    assert_eq!(acl, (true, false, false, false, false, false));
+
+    for invalid_sql in [
+        "INSERT INTO resource_security_fact_revisions
+         (tenant_id, device_id, fact_key, revision, source_id, owner_principal_id,
+          observed_at, expires_at)
+         VALUES ('f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                 '11111111-2222-4333-8444-555555555555', 'resource.location', 1,
+                 'source', 'owner', now(), now() + interval '1 minute')",
+        "INSERT INTO resource_security_fact_revisions
+         (tenant_id, device_id, fact_key, revision, source_id, risk_class,
+          observed_at, expires_at)
+         VALUES ('f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                 '11111111-2222-4333-8444-555555555555', 'resource.owner', 1,
+                 'source', 'normal', now(), now() + interval '1 minute')",
+        "INSERT INTO resource_security_fact_revisions
+         (tenant_id, device_id, fact_key, revision, source_id, risk_class,
+          observed_at, expires_at)
+         VALUES ('f47ac10b-58cc-4372-a567-0e02b2c3d479',
+                 '11111111-2222-4333-8444-555555555555', 'resource.riskClass', 1,
+                 'source', 'normal', now(), now())",
+    ] {
+        assert!(
+            sqlx::query(invalid_sql).execute(&store.pool).await.is_err(),
+            "raw SQL must not bypass typed ledger constraints"
+        );
+    }
 
     store.shutdown().await?;
     Ok(())

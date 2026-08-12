@@ -44,10 +44,10 @@ pub mod ports;
 pub use application::{
     AccessGrantValidationError, AccountStatusChangeError, AuthGrantServices,
     AuthGrantValidationService, ChangePasswordError, CredentialSecurityService, CurrentAuthGrant,
-    FederatedIdentityDomain, FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps,
-    LoginError, LoginService, PolicyManageError, PolicyManageService, RbacAdminError,
-    RbacAdminService, RefreshBundle, RefreshError, RefreshService, ValidatedAuthGrant,
-    build_contract_authorizer,
+    DeviceResourceFactPip, DeviceResourceFactPipError, FederatedIdentityDomain,
+    FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps, LoginError, LoginService,
+    PolicyManageError, PolicyManageService, RbacAdminError, RbacAdminService, RefreshBundle,
+    RefreshError, RefreshService, ValidatedAuthGrant, build_contract_authorizer,
 };
 /// Demo/journey 首发 token 装配（seed-login/test 门控；生产经组合根注入 vault `Signer`，#1252）。
 #[cfg(any(test, feature = "seed-login"))]
@@ -103,6 +103,14 @@ pub mod test_support {
     #[allow(clippy::expect_used)]
     pub fn user_id(raw: &str) -> ids::UserId {
         ids::UserId::parse(raw).expect("test user id must be canonical")
+    }
+
+    /// Mint the sealed tenant/device scope for downstream adapter conformance tests.
+    pub fn device_certificate_scope(
+        tenant: TenantId,
+        device: ids::DeviceId,
+    ) -> crate::ports::device_certificate::DeviceCertificateScope {
+        crate::device_certificate::DeviceCertificateScope::from_authorized(tenant, device)
     }
 
     /// Mint a role-mutation actor from a canonical test identity.

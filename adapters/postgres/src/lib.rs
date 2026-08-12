@@ -90,7 +90,7 @@ mod reconcile_test_driver;
 #[cfg(feature = "domain-identity")]
 mod refresh_token_store;
 #[cfg(feature = "domain-identity")]
-mod resource_attribute_repo;
+mod resource_security_fact_repo;
 mod revocation;
 mod revocation_sweeper;
 #[cfg(feature = "domain-identity")]
@@ -266,7 +266,7 @@ pub use reconcile::{PgMaintenanceReconcileStore, PgReconcileStore};
 #[cfg(feature = "domain-identity")]
 pub use refresh_token_store::PgRefreshTokenStore;
 #[cfg(feature = "domain-identity")]
-pub use resource_attribute_repo::PgResourceAttributeRepo;
+pub use resource_security_fact_repo::PgResourceSecurityFactRepo;
 pub use revocation::PgRevocationStore;
 pub use revocation_sweeper::{
     PgRevocationSweeper, RevocationRetentionBacklog, RevocationRetentionReport,

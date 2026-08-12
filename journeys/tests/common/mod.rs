@@ -28,16 +28,15 @@ use generated::event::identity_v1::session_created;
 use identity::ports::{
     AccountReactivationLifecycle, AccountSecurityReadRepo, AccountStatusSetProducerReceipt,
     AuthOutcome, Credential, CredentialRepo, DynAccountSecurityReadRepo, DynAuthGrantLifecycle,
-    DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
-    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, IdentityError,
-    IdentitySecurityLifecycle, LoginIdentifier, LogoutAllProducerReceipt,
-    LogoutCurrentProducerReceipt, PasswordChangeProducerReceipt, PoliciesCreateProducerReceipt,
+    DynCredentialRepo, DynPolicyLifecycle, DynPolicyRepo, DynRoleBindingLifecycle,
+    DynRoleBindingReadRepo, DynRoleReadRepo, IdentityError, IdentitySecurityLifecycle,
+    LoginIdentifier, LogoutAllProducerReceipt, LogoutCurrentProducerReceipt,
+    PasswordChangeProducerReceipt, PoliciesCreateProducerReceipt,
     PoliciesDeactivateProducerReceipt, PoliciesUpdateProducerReceipt, Policy, PolicyId,
     PolicyLifecycle, PolicyListResult, PolicyPage, PolicyRepo, PolicyRouteScope, PolicyVersion,
-    RefreshExecutionCommand, RefreshExecutionOutcome, RefreshProducerReceipt, ResourceAttributeKey,
-    ResourceAttributeReadRepo, ResourceAttributeResolution, ResourceAttributeResourceId, Role,
-    RoleBinding, RoleBindingLifecycle, RoleBindingReadRepo, RoleId, RoleListResult, RolePage,
-    RoleReadRepo, RolesAssignProducerReceipt, RolesRevokeProducerReceipt, TenantRepoScope,
+    RefreshExecutionCommand, RefreshExecutionOutcome, RefreshProducerReceipt, Role, RoleBinding,
+    RoleBindingLifecycle, RoleBindingReadRepo, RoleId, RoleListResult, RolePage, RoleReadRepo,
+    RolesAssignProducerReceipt, RolesRevokeProducerReceipt, TenantRepoScope,
 };
 use identity::{
     AccountSecurityState, AccountStatusSetCommand, CredentialSecurityReceipt,
@@ -493,24 +492,6 @@ impl PolicyRepo for NoopPolicyRepo {
     }
 }
 
-struct NoopResourceAttributeRepo;
-
-impl ResourceAttributeReadRepo for NoopResourceAttributeRepo {
-    async fn resolve_effective(
-        &self,
-        _tenant_scope: TenantRepoScope,
-        _scope: PolicyRouteScope,
-        _resource_id: ResourceAttributeResourceId,
-        mut required_keys: Vec<ResourceAttributeKey>,
-        _at: std::time::SystemTime,
-    ) -> Result<ResourceAttributeResolution, IdentityError> {
-        let Some(key) = required_keys.pop() else {
-            return Ok(ResourceAttributeResolution::Known(Vec::new()));
-        };
-        Ok(ResourceAttributeResolution::Missing(key))
-    }
-}
-
 struct NoopPolicyLifecycle;
 
 impl PolicyLifecycle for NoopPolicyLifecycle {
@@ -562,9 +543,6 @@ where
     let binding_reads: Arc<DynRoleBindingReadRepo<'static>> =
         Arc::from(DynRoleBindingReadRepo::new_box(NoopRoleBindingReadRepo));
     let policies: Arc<DynPolicyRepo<'static>> = Arc::from(DynPolicyRepo::new_box(NoopPolicyRepo));
-    let resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>> = Arc::from(
-        DynResourceAttributeReadRepo::new_box(NoopResourceAttributeRepo),
-    );
     let policy_lifecycle: Arc<DynPolicyLifecycle<'static>> =
         Arc::from(DynPolicyLifecycle::new_box(NoopPolicyLifecycle));
     let rbac = Arc::new(RbacAdminService::new(
@@ -586,7 +564,6 @@ where
         roles,
         binding_reads,
         policies,
-        resource_attribute_reads,
         clock: Arc::new(memory::FixedClock::at_unix_secs(NOW_SECS)),
     })
 }

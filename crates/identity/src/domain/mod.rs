@@ -38,7 +38,7 @@ mod account;
 mod account_security;
 mod rbac;
 mod refresh;
-mod resource_attr;
+mod resource_security_fact;
 mod security_event;
 
 // 子模块类型经本枢纽 re-export，保持 `crate::domain::*` 路径（`ports` / `application` 等域内消费方不破）。
@@ -68,10 +68,10 @@ pub use refresh::{
     RefreshRotation, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
     RefreshTokenSnapshot,
 };
-pub use resource_attr::{
-    ResourceAttribute, ResourceAttributeKey, ResourceAttributeKeyError,
-    ResourceAttributeResolution, ResourceAttributeResourceId, ResourceAttributeVersion,
-    ResourcePolicyAttributeKey,
+pub use resource_security_fact::{
+    ResourceFactPrincipalId, ResourceFactSourceId, ResourceRiskClass, ResourceSecurityFact,
+    ResourceSecurityFactError, ResourceSecurityFactKey, ResourceSecurityFactPolicyKey,
+    ResourceSecurityFactResolution, ResourceSecurityFactRevision, ResourceSecurityFactValue,
 };
 // Credential（find/authenticate/save/bump 签名实体）/ LoginIdentifier（查找键签名实体）/ AuthOutcome
 // （authenticate 返回）是 pub。AccountLockout/BruteForceDecision 供 postgres adapter 在 authenticate
@@ -635,6 +635,9 @@ pub enum IdentityError {
     PermissionDenied,
     #[error("policy is invalid")]
     InvalidPolicy,
+    /// Persisted External Resource Security Fact data violated the closed projection schema.
+    #[error("resource security fact projection is invalid")]
+    InvalidResourceSecurityFactProjection,
     #[error("credential not found")]
     CredentialNotFound,
     #[error("credential version conflict")]

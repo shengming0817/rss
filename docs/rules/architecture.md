@@ -214,7 +214,7 @@ rss/
 | 数据竞争 | `Send`/`Sync` 编译期 |
 | wire struct 字段/tag 冻结 | serde derive 单源生成 |
 | active LocalOnly receipt target | codegen 只为 active LocalOnly 生成 `LocalOnlyConformanceMarker` + `LOCAL_ONLY_SPECS`；失活/改级后 canonical callsite 编译失败，opaque receipt 仅由成功 post-check 铸造（LOCAL-ONLY-RECEIPT-TARGET-01） |
-| Identity finalized authorizer capability exclusion | `RoleBindingReadRepo` / `ResourceAttributeReadRepo` 仅为 `AuthEffect + LocalPrivilege`；mutation 分别封入 `RoleBindingLifecycle(OutboxEffect)` / `ResourceAttributeWriteRepo(BusinessWriteEffect)`，旧混合接口删除；`ContractAuthorizer` / `IdentityDomainDeps` 只能接收窄读 dyn port，危险能力不可注入 LocalOnly authorizer |
+| Identity finalized authorizer capability exclusion | `RoleBindingReadRepo` 仅为 `AuthEffect + LocalPrivilege`，role mutation 封入 `RoleBindingLifecycle(OutboxEffect)`；`ResourceSecurityFactReadRepo` 只能进入接受 sealed `DeviceCertificateScope` 的 `DeviceResourceFactPip`，不得进入通用 `ContractAuthorizer` / `IdentityDomainDeps`。Fact authoring 完全留在 External bootstrap DB funnel 且无 Rust write port |
 | 进程隔离测试 | `cargo-nextest`(每测试独立进程,原生) |
 
 ### 二档(Medium)· Cargo 生态既有工具(配置 / 少量代码)

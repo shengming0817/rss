@@ -23,6 +23,54 @@ ledger gate 与部署生成共同消费。serving postgres adapter 不包含 SQL
 
 本仓只用**前向**迁移（不写 `.up.sql` / `.down.sql` 可逆对）——pre-GA、无外部消费方、回滚靠新前向迁移修正。
 
+### 0107 External Resource Security Fact hard cut
+
+`0107` 删除空的通用 `resource_attributes`，建立唯一 append-only
+`resource_security_fact_revisions` ledger。旧表非空或 policy 引用未知 `resource.*` 时迁移原子失败；不回填、
+不猜测 source/freshness、不建兼容 view、双读或双写。External bootstrap 角色只能执行固定 typed CAS function；
+serving/read 角色只有 tenant-scoped SELECT；audit-admin 无 ledger 权限。RSS production composition 只持有 typed read capability，
+不拥有 fact authoring authority。
+
+部署 preflight（必须停旧 writer 并先做整体备份）：
+
+```sql
+SELECT max(version) FROM _sqlx_migrations; -- 必须为 106
+SELECT count(*) FROM resource_attributes; -- 必须为 0
+SELECT policy.tenant_id, policy.id
+  FROM abac_policies AS policy
+ WHERE EXISTS (
+       SELECT 1
+         FROM jsonb_array_elements(policy.rules->'rules') AS rule
+        WHERE rule->'condition'->>'attribute' LIKE 'resource.%'
+          AND rule->'condition'->>'attribute' <> 'resource.id'
+ ) LIMIT 20;
+SELECT rolname, rolcanlogin, rolsuper, rolbypassrls, rolcreatedb, rolcreaterole,
+       rolreplication, rolinherit
+  FROM pg_roles WHERE rolname IN ('rss_resource_fact_bootstrap',
+    'rss_resource_fact_funnel_owner', 'rss_abac_policy_validator_owner');
+SELECT member_role.rolname AS member, granted_role.rolname AS granted_role
+  FROM pg_auth_members AS membership
+  JOIN pg_roles AS member_role ON member_role.oid = membership.member
+  JOIN pg_roles AS granted_role ON granted_role.oid = membership.roleid
+ WHERE member_role.rolname IN ('rss_resource_fact_bootstrap',
+       'rss_resource_fact_funnel_owner', 'rss_abac_policy_validator_owner')
+    OR granted_role.rolname IN ('rss_resource_fact_bootstrap',
+       'rss_resource_fact_funnel_owner', 'rss_abac_policy_validator_owner');
+```
+
+任一 legacy fact 坐标必须由 External owner 重新 author，不得补造 source/expiry；任一非法 policy 必须先由
+policy owner 删除或改写。角色碰撞必须先移除 LOGIN/SUPERUSER/BYPASSRLS/CREATEROLE/INHERIT 与所有 membership，
+不得让迁移复用危险 role。
+
+Postflight：确认 migration ledger 为 107、`to_regclass('public.resource_attributes') IS NULL`、v2 constraint
+存在且 validated；三个安全 role 均为 NOLOGIN/NOSUPERUSER/NOBYPASSRLS/NOINHERIT 且无 membership；apply function
+owner 仅为 funnel owner，EXECUTE 仅授 bootstrap；ledger 已 ENABLE/FORCE RLS，serving/read 只有 SELECT，audit-admin 无权限，
+bootstrap 无表权限，UPDATE/DELETE/TRUNCATE 均不可执行。随后用 tenant A/B/空 tenant 做读取隔离 smoke test，并
+用 revision 1→2、exact replay、旧 revision/跳号冲突做 apply smoke test。
+
+这是 forward-only 原子 hard cut，没有 down migration。若 postflight 失败，只能停止新 artifact，使用迁移前整体
+备份与旧 artifact 一起恢复；禁止只还原旧表或同时运行新旧 binary/双路径。
+
 ## 只增不改
 
 已提交的迁移文件**只增不改**（`rust-standards.md`）。例外须 ADR 说明。

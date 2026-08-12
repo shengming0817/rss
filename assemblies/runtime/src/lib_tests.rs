@@ -662,23 +662,6 @@ impl identity::ports::PolicyRepo for EmptyPolicyRepo {
     }
 }
 
-struct EmptyResourceAttributeRepo;
-
-impl identity::ports::ResourceAttributeReadRepo for EmptyResourceAttributeRepo {
-    async fn resolve_effective(
-        &self,
-        _tenant_scope: IdentityTenantRepoScope,
-        _scope: identity::ports::PolicyRouteScope,
-        _resource_id: identity::ports::ResourceAttributeResourceId,
-        _required_keys: Vec<identity::ports::ResourceAttributeKey>,
-        _at: SystemTime,
-    ) -> Result<identity::ports::ResourceAttributeResolution, identity::ports::IdentityError> {
-        Ok(identity::ports::ResourceAttributeResolution::Known(
-            Vec::new(),
-        ))
-    }
-}
-
 struct EmptyPolicyLifecycle;
 
 impl identity::ports::PolicyLifecycle for EmptyPolicyLifecycle {
@@ -1077,9 +1060,6 @@ fn test_identity_domain_with_audit_role(
         Box::new(SystemClock),
     ));
     let policies = Arc::from(identity::ports::DynPolicyRepo::new_box(EmptyPolicyRepo));
-    let resource_attribute_reads = Arc::from(
-        identity::ports::DynResourceAttributeReadRepo::new_box(EmptyResourceAttributeRepo),
-    );
     let policy_lifecycle = Arc::from(identity::ports::DynPolicyLifecycle::new_box(
         EmptyPolicyLifecycle,
     ));
@@ -1106,7 +1086,6 @@ fn test_identity_domain_with_audit_role(
         Arc::clone(&roles),
         Arc::clone(&binding_reads),
         Arc::clone(&policies),
-        Arc::clone(&resource_attribute_reads),
         Arc::new(SystemClock),
     );
     let domain = identity::IdentityDomain::new(identity::IdentityDomainDeps {
@@ -1118,7 +1097,6 @@ fn test_identity_domain_with_audit_role(
         roles,
         binding_reads,
         policies,
-        resource_attribute_reads,
         clock: Arc::new(SystemClock),
     });
     (domain, authorizer)

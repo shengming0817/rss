@@ -8,8 +8,9 @@ pub(in super::super) use diport::OutboxEnvelopeParts;
 
 pub(in super::super) use identity::ports::{
     AccountSecuritySnapshot, AuthGrantLifecycle, AuthGrantValidator, IdentityError,
-    IdentitySecurityLifecycle, LoginGrantMutation, RefreshTokenStore, TenantId,
+    IdentitySecurityLifecycle, LoginGrantMutation, RefreshTokenStore,
 };
+pub(in super::super) use rss_request_context::TenantId;
 
 pub(in super::super) async fn seed_auth_grant_account(
     store: &PgStore,
@@ -314,15 +315,14 @@ pub(in super::super) use identity::ports::{
     MembershipPredicate, Operator, OperatorInput, OrderingPredicate, POLICY_ATTR_PRINCIPAL_KIND,
     Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyLifecycle, PolicyObligations,
     PolicyPage, PolicyRepo, PolicyRouteScope, PolicyRule, PolicyScalarInput, PolicyValue,
-    PolicyValueRef, PolicyValueType, PolicyVersion, ResourceAttribute, ResourceAttributeKey,
-    ResourceAttributeReadRepo, ResourceAttributeResolution, ResourceAttributeResourceId,
-    ResourceAttributeVersion, ResourceAttributeWriteRepo, Role, RoleBinding, RoleBindingLifecycle,
-    RoleBindingReadRepo, RoleDefinitionLifecycle, RolePage, RoleReadRepo, ScalarOperandInput,
-    StringPredicate, TypedPolicyValueInput,
+    PolicyValueRef, PolicyValueType, PolicyVersion, ResourceSecurityFactKey,
+    ResourceSecurityFactReadRepo, ResourceSecurityFactResolution, Role, RoleBinding,
+    RoleBindingLifecycle, RoleBindingReadRepo, RoleDefinitionLifecycle, RolePage, RoleReadRepo,
+    ScalarOperandInput, StringPredicate, TypedPolicyValueInput,
 };
 
 pub(in super::super) use crate::{
-    PgPolicyLifecycle, PgPolicyRepo, PgResourceAttributeRepo, PgRoleBindingLifecycle,
+    PgPolicyLifecycle, PgPolicyRepo, PgResourceSecurityFactRepo, PgRoleBindingLifecycle,
     PgRoleBindingReadRepo, PgRoleDefinitionLifecycle, PgRoleRepo,
 };
 
@@ -350,7 +350,8 @@ pub(in super::super) const POLICY_CONTRACT_ID: &str = "identity.roles";
 
 pub(in super::super) const POLICY_PERMISSION: &str = "identity:role:read";
 
-pub(in super::super) const RESOURCE_ATTRIBUTE_ID: &str = "11111111-2222-4333-8444-555555555555";
+pub(in super::super) const RESOURCE_SECURITY_FACT_DEVICE_ID: &str =
+    "11111111-2222-4333-8444-555555555555";
 
 pub(in super::super) const POLICY_UPDATED_CONTRACT: vocab::ContractBinding =
     generated::event::identity_v1::policy_updated::CONTRACT;
@@ -361,35 +362,6 @@ pub(in super::super) fn policy_time(secs: u64) -> SystemTime {
 
 pub(in super::super) fn policy_scope() -> Result<PolicyRouteScope, IdentityError> {
     PolicyRouteScope::parse(POLICY_CONTRACT_ID, POLICY_PERMISSION)
-}
-
-pub(in super::super) fn resource_attribute_id() -> Result<ResourceAttributeResourceId, IdentityError>
-{
-    ResourceAttributeResourceId::parse(RESOURCE_ATTRIBUTE_ID)
-}
-
-pub(in super::super) fn resource_attribute_key(
-    raw: &str,
-) -> Result<ResourceAttributeKey, IdentityError> {
-    ResourceAttributeKey::parse(raw).map_err(|_| IdentityError::InvalidPolicy)
-}
-
-pub(in super::super) fn resource_attribute_fixture(
-    tenant: TenantId,
-    key: &str,
-    value: &str,
-    effective_from: u64,
-    effective_until: Option<u64>,
-) -> Result<ResourceAttribute, IdentityError> {
-    ResourceAttribute::build(
-        tenant,
-        policy_scope()?,
-        resource_attribute_id()?,
-        resource_attribute_key(key)?,
-        PolicyValue::parse(value).map_err(|_| IdentityError::InvalidPolicy)?,
-        policy_time(effective_from),
-        effective_until.map(policy_time),
-    )
 }
 
 pub(in super::super) fn policy_id(raw: &str) -> Result<PolicyId, IdentityError> {

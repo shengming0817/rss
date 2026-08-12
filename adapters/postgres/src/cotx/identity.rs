@@ -1032,37 +1032,34 @@ impl IdentityRead<'_, '_> {
             .collect()
     }
 
-    pub(crate) async fn resource_attribute_rows(
+    pub(crate) async fn resource_security_fact_rows(
         &mut self,
-        scope: &::identity::ports::PolicyRouteScope,
-        resource_id: &::identity::ports::ResourceAttributeResourceId,
-        required_keys: &[::identity::ports::ResourceAttributeKey],
-    ) -> Result<Vec<crate::resource_attribute_repo::RawResourceAttribute>, sqlx::Error> {
+        device: ::ids::DeviceId,
+        required_keys: &[::identity::ports::ResourceSecurityFactKey],
+    ) -> Result<Vec<crate::resource_security_fact_repo::RawResourceSecurityFact>, sqlx::Error> {
         let keys = required_keys
             .iter()
             .map(|key| key.as_str())
             .collect::<Vec<_>>();
         let rows = sqlx::query(
             r#"
-            SELECT attribute_key, attribute_value::text AS attribute_value, version,
-                   extract(epoch from effective_from)::bigint AS effective_from,
-                   extract(epoch from effective_until)::bigint AS effective_until,
-                   deleted_at IS NOT NULL AS deleted
-            FROM resource_attributes
-            WHERE tenant_id = $1::uuid AND contract_id = $2 AND permission = $3
-              AND resource_id = $4::uuid AND attribute_key = ANY($5::text[])
-              AND deleted_at IS NULL
+            SELECT DISTINCT ON (fact_key)
+                   fact_key, revision, source_id, owner_principal_id, risk_class,
+                   (extract(epoch from observed_at) * 1000000)::bigint AS observed_at_micros,
+                   (extract(epoch from expires_at) * 1000000)::bigint AS expires_at_micros
+            FROM resource_security_fact_revisions
+            WHERE tenant_id = $1::uuid AND device_id = $2::uuid
+              AND fact_key = ANY($3::text[])
+            ORDER BY fact_key, revision DESC
             "#,
         )
         .bind(self.tx.tenant.to_string())
-        .bind(scope.contract_id())
-        .bind(scope.permission().as_str())
-        .bind(resource_id.as_str())
+        .bind(device.as_uuid().to_string())
         .bind(keys)
         .fetch_all(&mut *self.tx.conn)
         .await?;
         rows.into_iter()
-            .map(crate::resource_attribute_repo::row_to_raw)
+            .map(crate::resource_security_fact_repo::row_to_raw)
             .collect()
     }
 }
@@ -1422,150 +1419,6 @@ impl IdentityWrite<'_, '_> {
         .await
         .map(|_| ())
         .map_err(crate::tx_retry::identity_storage_error)
-    }
-
-    pub(crate) async fn upsert_resource_attribute(
-        &mut self,
-        attribute: &::identity::ports::ResourceAttribute,
-        expected: Option<::identity::ports::ResourceAttributeVersion>,
-    ) -> Result<
-        Option<crate::resource_attribute_repo::RawResourceAttribute>,
-        ::identity::ports::IdentityError,
-    > {
-        if attribute.tenant() != self.tx.tenant {
-            return Err(::identity::ports::IdentityError::InvalidPolicy);
-        }
-        let version = |value: ::identity::ports::ResourceAttributeVersion| {
-            i32::try_from(value.get()).map_err(|_| ::identity::ports::IdentityError::InvalidPolicy)
-        };
-        let tenant = self.tx.tenant.to_string();
-        let row = match expected {
-            None => {
-                let first = ::identity::ports::ResourceAttributeVersion::first();
-                if attribute.version() != first {
-                    return Err(::identity::ports::IdentityError::InvalidPolicy);
-                }
-                sqlx::query(
-                    r#"
-                    INSERT INTO resource_attributes
-                        (tenant_id, contract_id, permission, resource_id,
-                         attribute_key, attribute_value, version, effective_from, effective_until)
-                    VALUES ($1::uuid, $2, $3, $4::uuid, $5, $6::jsonb, $7,
-                            to_timestamp($8), to_timestamp($9))
-                    ON CONFLICT (tenant_id, contract_id, permission, resource_id, attribute_key)
-                        DO NOTHING
-                    RETURNING attribute_key, attribute_value::text AS attribute_value, version,
-                              extract(epoch from effective_from)::bigint AS effective_from,
-                              extract(epoch from effective_until)::bigint AS effective_until,
-                              deleted_at IS NOT NULL AS deleted
-                    "#,
-                )
-                .bind(&tenant)
-                .bind(attribute.route_scope().contract_id())
-                .bind(attribute.route_scope().permission().as_str())
-                .bind(attribute.resource_id().as_str())
-                .bind(attribute.key().as_str())
-                .bind(crate::resource_attribute_repo::encode_policy_value(
-                    attribute.value(),
-                )?)
-                .bind(version(first)?)
-                .bind(crate::outbox::unix_secs(attribute.effective_from()))
-                .bind(attribute.effective_until().map(crate::outbox::unix_secs))
-                .fetch_optional(&mut *self.tx.conn)
-                .await
-            }
-            Some(expected) => {
-                sqlx::query(
-                    r#"
-                    UPDATE resource_attributes
-                    SET attribute_value = $6::jsonb, version = version + 1,
-                        effective_from = to_timestamp($7), effective_until = to_timestamp($8),
-                        deleted_at = NULL, updated_at = now()
-                    WHERE tenant_id = $1::uuid AND contract_id = $2 AND permission = $3
-                      AND resource_id = $4::uuid AND attribute_key = $5
-                      AND version = $9 AND deleted_at IS NULL
-                    RETURNING attribute_key, attribute_value::text AS attribute_value, version,
-                              extract(epoch from effective_from)::bigint AS effective_from,
-                              extract(epoch from effective_until)::bigint AS effective_until,
-                              deleted_at IS NOT NULL AS deleted
-                    "#,
-                )
-                .bind(&tenant)
-                .bind(attribute.route_scope().contract_id())
-                .bind(attribute.route_scope().permission().as_str())
-                .bind(attribute.resource_id().as_str())
-                .bind(attribute.key().as_str())
-                .bind(crate::resource_attribute_repo::encode_policy_value(
-                    attribute.value(),
-                )?)
-                .bind(crate::outbox::unix_secs(attribute.effective_from()))
-                .bind(attribute.effective_until().map(crate::outbox::unix_secs))
-                .bind(version(expected)?)
-                .fetch_optional(&mut *self.tx.conn)
-                .await
-            }
-        }
-        .map_err(crate::tx_retry::identity_storage_error)?;
-        row.map(crate::resource_attribute_repo::row_to_raw)
-            .transpose()
-            .map_err(crate::tx_retry::identity_storage_error)
-    }
-
-    pub(crate) async fn expire_resource_attribute(
-        &mut self,
-        scope: &::identity::ports::PolicyRouteScope,
-        resource_id: &::identity::ports::ResourceAttributeResourceId,
-        key: &::identity::ports::ResourceAttributeKey,
-        expected: ::identity::ports::ResourceAttributeVersion,
-    ) -> Result<crate::resource_attribute_repo::ExpireOutcome, ::identity::ports::IdentityError>
-    {
-        let expected = i32::try_from(expected.get())
-            .map_err(|_| ::identity::ports::IdentityError::InvalidPolicy)?;
-        let tenant = self.tx.tenant.to_string();
-        let updated = sqlx::query(
-            r#"
-            UPDATE resource_attributes
-            SET version = version + 1, deleted_at = now(), updated_at = now()
-            WHERE tenant_id = $1::uuid AND contract_id = $2 AND permission = $3
-              AND resource_id = $4::uuid AND attribute_key = $5
-              AND version = $6 AND deleted_at IS NULL
-            "#,
-        )
-        .bind(&tenant)
-        .bind(scope.contract_id())
-        .bind(scope.permission().as_str())
-        .bind(resource_id.as_str())
-        .bind(key.as_str())
-        .bind(expected)
-        .execute(&mut *self.tx.conn)
-        .await
-        .map_err(crate::tx_retry::identity_storage_error)?
-        .rows_affected();
-        if updated > 0 {
-            return Ok(crate::resource_attribute_repo::ExpireOutcome::Expired);
-        }
-        let active_exists = sqlx::query_scalar(
-            r#"
-            SELECT EXISTS(
-                SELECT 1 FROM resource_attributes
-                WHERE tenant_id = $1::uuid AND contract_id = $2 AND permission = $3
-                  AND resource_id = $4::uuid AND attribute_key = $5 AND deleted_at IS NULL
-            )
-            "#,
-        )
-        .bind(&tenant)
-        .bind(scope.contract_id())
-        .bind(scope.permission().as_str())
-        .bind(resource_id.as_str())
-        .bind(key.as_str())
-        .fetch_one(&mut *self.tx.conn)
-        .await
-        .map_err(crate::tx_retry::identity_storage_error)?;
-        Ok(if active_exists {
-            crate::resource_attribute_repo::ExpireOutcome::VersionConflict
-        } else {
-            crate::resource_attribute_repo::ExpireOutcome::Missing
-        })
     }
 
     pub(crate) async fn create_policy(

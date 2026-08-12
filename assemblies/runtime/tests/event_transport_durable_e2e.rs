@@ -48,13 +48,12 @@ use generated::http::settings_v1::{SPEC as SETTINGS_CONFIG_SPEC, SettingsConfigP
 use httpserve::ProducerMarker;
 use httpserve::{RouteAuthorizationDecision, RouteAuthorizationRequest, RouteResource};
 use identity::ports::{
-    AttributeKey, DynPolicyLifecycle, DynPolicyRepo, DynResourceAttributeReadRepo,
-    DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleReadRepo, EqualityPredicate,
-    MembershipPredicate, Operator, OperatorInput, POLICY_ATTR_PRINCIPAL_KIND, Policy,
-    PolicyCondition, PolicyEffect, PolicyLifecycle, PolicyObligations, PolicyRouteScope,
-    PolicyRule, PolicyScalarInput, PolicyValue, PolicyValueType, ResourceAttribute,
-    ResourceAttributeKey, ResourceAttributeResourceId, ResourceAttributeWriteRepo,
-    ScalarOperandInput, TenantId, TenantRepoScope, TypedPolicyValueInput,
+    AttributeKey, DynPolicyLifecycle, DynPolicyRepo, DynRoleBindingLifecycle,
+    DynRoleBindingReadRepo, DynRoleReadRepo, EqualityPredicate, MembershipPredicate, Operator,
+    OperatorInput, POLICY_ATTR_PRINCIPAL_KIND, Policy, PolicyCondition, PolicyEffect,
+    PolicyLifecycle, PolicyObligations, PolicyRouteScope, PolicyRule, PolicyScalarInput,
+    PolicyValue, PolicyValueType, ScalarOperandInput, TenantId, TenantRepoScope,
+    TypedPolicyValueInput,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
 use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
@@ -833,10 +832,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
     let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let roles_for_list = Arc::from(DynRoleReadRepo::new_box(id.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(id.policy_repo()));
-    let resource_attribute_reads = Arc::from(DynResourceAttributeReadRepo::new_box(
-        id.resource_attribute_repo(),
-    ));
-    let resource_attribute_writer = id.resource_attribute_repo();
     let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
         id.policy_lifecycle(Box::new(FixedClock::at_unix_secs(NOW_SECS))),
     ));
@@ -877,7 +872,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
         roles: roles_for_list,
         binding_reads,
         policies,
-        resource_attribute_reads,
         clock: Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
     });
     let (settings_configs, settings_writer, settings_secrets, settings_secret_writer) = settings_pg
@@ -1313,27 +1307,12 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 8b：identity.policy-updated active event 走生产 relay + audit ConsumerTx ─────────────
 
-    // Typed PostgreSQL resource attribute → durable policy hydrate → production authorizer join.
-    let typed_resource_id = ResourceAttributeResourceId::parse(CANON_USER)?;
+    // Durable typed principal policy → production authorizer join. Resource facts are seeded only
+    // through the External bootstrap function and are covered by PostgreSQL integration tests.
     let typed_scope = PolicyRouteScope::parse(
         "identity.account-status-get",
         "identity:account-security:read",
     )?;
-    resource_attribute_writer
-        .upsert(
-            TenantRepoScope::for_test(tenant),
-            ResourceAttribute::build(
-                tenant,
-                typed_scope.clone(),
-                typed_resource_id.clone(),
-                ResourceAttributeKey::parse("resource.clearance")?,
-                PolicyValue::integer(7),
-                SystemTime::UNIX_EPOCH + Duration::from_secs(NOW_SECS),
-                None,
-            )?,
-            None,
-        )
-        .await?;
     let typed_policy = Policy::build(
         "policy-typed-resource-runtime-e2e",
         tenant,
@@ -1342,11 +1321,11 @@ async fn event_transport_durable_e2e() -> Result<()> {
         None,
         vec![PolicyRule::with_obligations(
             PolicyCondition::new(
-                AttributeKey::parse("resource.clearance")?,
+                AttributeKey::parse(POLICY_ATTR_PRINCIPAL_KIND)?,
                 Operator::try_from(OperatorInput::Membership {
                     predicate: MembershipPredicate::In,
-                    value_type: PolicyValueType::Integer,
-                    values: vec![PolicyScalarInput::Integer(7)],
+                    value_type: PolicyValueType::String,
+                    values: vec![PolicyScalarInput::String("user".to_string())],
                 })?,
             ),
             PolicyEffect::Allow,
@@ -1382,7 +1361,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
             })
             .await,
         RouteAuthorizationDecision::authorizer_local(),
-        "typed PostgreSQL resource attributes must drive the production route authorizer"
+        "typed principal attributes must drive the production route authorizer"
     );
 
     let policy_id = "policy-runtime-e2e";

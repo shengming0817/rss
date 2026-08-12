@@ -116,9 +116,10 @@ pub use crate::domain::{
     Policy, PolicyCondition, PolicyEffect, PolicyId, PolicyObligations, PolicyRouteScope,
     PolicyRule, PolicyScalarInput, PolicyValue, PolicyValueError, PolicyValueRef, PolicyValueType,
     PolicyVersion, ReactivateAccountCommand, RefreshRotation, RefreshStatus, RefreshTokenHash,
-    RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, ResourceAttribute,
-    ResourceAttributeKey, ResourceAttributeKeyError, ResourceAttributeResolution,
-    ResourceAttributeResourceId, ResourceAttributeVersion, Role, RoleBinding, RoleId,
+    RefreshTokenId, RefreshTokenRecord, RefreshTokenSnapshot, ResourceFactPrincipalId,
+    ResourceFactSourceId, ResourceRiskClass, ResourceSecurityFact, ResourceSecurityFactError,
+    ResourceSecurityFactKey, ResourceSecurityFactPolicyKey, ResourceSecurityFactResolution,
+    ResourceSecurityFactRevision, ResourceSecurityFactValue, Role, RoleBinding, RoleId,
     ScalarOperandInput, ScalarOperandRef, StringPredicate, TypedPolicyValueInput,
 };
 use rss_request_context::TenantId;
@@ -1027,45 +1028,20 @@ pub struct PolicyListResult {
     pub has_more: bool,
 }
 
-/// Tenant-scoped resource attribute resolver used by route ABAC.
+/// Tenant/device-scoped Resource Security Fact reader used by the authorization PIP.
 ///
-/// The read port is deliberately separate from [`ResourceAttributeWriteRepo`], so a finalized
-/// LocalOnly authorizer cannot retain resource-attribute mutation capability. Resolution failures
-/// are explicit (`Missing` / `Stale`) and always fail closed.
-#[trait_variant::make(ResourceAttributeReadRepo: Send)]
-#[dynosaur(pub DynResourceAttributeReadRepo = dyn(box) ResourceAttributeReadRepo, bridge(dyn))]
+/// External control plane owns authoring. Identity deliberately exposes no write port.
+#[trait_variant::make(ResourceSecurityFactReadRepo: Send)]
+#[dynosaur(pub DynResourceSecurityFactReadRepo = dyn(box) ResourceSecurityFactReadRepo, bridge(dyn))]
 #[allow(async_fn_in_trait)]
-pub trait ResourceAttributeReadRepoLocal: Send + Sync {
-    async fn resolve_effective(
+pub trait ResourceSecurityFactReadRepoLocal: Send + Sync {
+    async fn resolve_latest(
         &self,
         tenant_scope: TenantRepoScope,
-        scope: PolicyRouteScope,
-        resource_id: ResourceAttributeResourceId,
-        required_keys: Vec<ResourceAttributeKey>,
+        device_scope: crate::device_certificate::DeviceCertificateScope,
+        required_keys: Vec<ResourceSecurityFactKey>,
         at: SystemTime,
-    ) -> Result<ResourceAttributeResolution, IdentityError>;
-}
-
-/// Tenant-scoped resource attribute mutation port.
-#[trait_variant::make(ResourceAttributeWriteRepo: Send)]
-#[dynosaur(pub DynResourceAttributeWriteRepo = dyn(box) ResourceAttributeWriteRepo, bridge(dyn))]
-#[allow(async_fn_in_trait)]
-pub trait ResourceAttributeWriteRepoLocal: Send + Sync {
-    async fn upsert(
-        &self,
-        scope: TenantRepoScope,
-        attribute: ResourceAttribute,
-        expected: Option<ResourceAttributeVersion>,
-    ) -> Result<ResourceAttribute, IdentityError>;
-
-    async fn expire(
-        &self,
-        tenant_scope: TenantRepoScope,
-        scope: PolicyRouteScope,
-        resource_id: ResourceAttributeResourceId,
-        key: ResourceAttributeKey,
-        expected: ResourceAttributeVersion,
-    ) -> Result<bool, IdentityError>;
+    ) -> Result<ResourceSecurityFactResolution, IdentityError>;
 }
 
 /// ABAC policy lifecycle DI port（domain-shaped）——policy mutation + `identity.policy-updated` outbox 的唯一写口。
@@ -1696,19 +1672,18 @@ where
     }
 }
 
-impl<T> ResourceAttributeReadRepo for std::sync::Arc<T>
+impl<T> ResourceSecurityFactReadRepo for std::sync::Arc<T>
 where
-    T: ResourceAttributeReadRepo + ?Sized,
+    T: ResourceSecurityFactReadRepo + ?Sized,
 {
-    async fn resolve_effective(
+    async fn resolve_latest(
         &self,
         tenant_scope: TenantRepoScope,
-        scope: PolicyRouteScope,
-        resource_id: ResourceAttributeResourceId,
-        required_keys: Vec<ResourceAttributeKey>,
+        device_scope: crate::device_certificate::DeviceCertificateScope,
+        required_keys: Vec<ResourceSecurityFactKey>,
         at: SystemTime,
-    ) -> Result<ResourceAttributeResolution, IdentityError> {
-        T::resolve_effective(self, tenant_scope, scope, resource_id, required_keys, at).await
+    ) -> Result<ResourceSecurityFactResolution, IdentityError> {
+        T::resolve_latest(self, tenant_scope, device_scope, required_keys, at).await
     }
 }
 
@@ -1787,8 +1762,6 @@ macro_rules! classify_identity_ports {
 
 classify_identity_ports! {
     DynPolicyRepo => diport::AuthEffect,
-    DynResourceAttributeReadRepo => diport::AuthEffect,
-    DynResourceAttributeWriteRepo => diport::BusinessWriteEffect,
     DynRoleBindingReadRepo => diport::AuthEffect,
     DynRoleReadRepo => diport::ReadEffect,
     DynRoleDefinitionLifecycle => diport::BusinessWriteEffect,
@@ -1801,6 +1774,13 @@ classify_identity_ports! {
     DynAuthGrantLifecycle => diport::OutboxEffect,
     DynIdentitySecurityLifecycle => diport::OutboxEffect,
     DynAccountReactivationLifecycle => diport::BusinessWriteEffect,
+}
+
+impl identity_port_effect_sealed::Sealed for crate::application::DeviceResourceFactPip {}
+
+impl IdentityPortEffect for crate::application::DeviceResourceFactPip {
+    type Effect = diport::AuthEffect;
+    type Privilege = diport::LocalPrivilege;
 }
 
 impl<T> identity_port_effect_sealed::Sealed for std::sync::Arc<T> where

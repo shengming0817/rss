@@ -7,10 +7,11 @@ use diport::{
 use identity::ports::{
     DynAccountReactivationLifecycle, DynAccountSecurityReadRepo, DynAuthGrantLifecycle,
     DynCredentialRepo, DynIdentitySecurityLifecycle, DynPolicyLifecycle, DynPolicyRepo,
-    DynRefreshTokenStore, DynResourceAttributeReadRepo, DynResourceAttributeWriteRepo,
+    DynRefreshTokenStore,
     DynRoleBindingLifecycle, DynRoleBindingReadRepo, DynRoleDefinitionLifecycle, DynRoleReadRepo,
     IdentityPortEffect,
 };
+use identity::DeviceResourceFactPip;
 
 fn assert_effect<T, E, P>()
 where
@@ -23,8 +24,7 @@ where
 fn main() {
     assert_effect::<DynPolicyRepo<'static>, AuthEffect, LocalPrivilege>();
 
-    assert_effect::<DynResourceAttributeReadRepo<'static>, AuthEffect, LocalPrivilege>();
-    assert_effect::<DynResourceAttributeWriteRepo<'static>, BusinessWriteEffect, LocalPrivilege>();
+    assert_effect::<DeviceResourceFactPip, AuthEffect, LocalPrivilege>();
     assert_effect::<DynRoleReadRepo<'static>, ReadEffect, LocalPrivilege>();
     assert_effect::<DynRoleBindingReadRepo<'static>, AuthEffect, LocalPrivilege>();
     assert_effect::<DynRoleDefinitionLifecycle<'static>, BusinessWriteEffect, LocalPrivilege>();

@@ -409,3 +409,15 @@ generated spec 与 route 装配不一致或出现未知 permission 时 fail-clos
 projection contract → generated spec → rendering 的完整链路，以及 ADR 中不得残留已完成项的 future-work 措辞。
 
 该命令不要求任何规则文档包含指定句子。本文件描述约束，不是它的 carrier。
+
+## External Resource Security Fact projection
+
+- Resource Security Fact 的 authoring/source-of-truth 属于 External control plane；RSS 不提供 HTTP CUD、
+  public management service 或通用 Rust write port。
+- RSS 只安装 tenant/device-bound 的 `resource.owner` 与 `resource.riskClass` typed read PIP；PIP 缺失、未来、
+  过期、错型、重复、tenant/device 不匹配或存储失败均 deny，且不得回退旧 revision。通用 policy/route 不得
+  消费 fact 或回退 RBAC baseline；唯一 production device handler 由 #2115 后续接入 sealed scope。
+- PostgreSQL 只保留 append-only `resource_security_fact_revisions` ledger。serving/read 角色只有
+  tenant-scoped SELECT，audit-admin 无 ledger 权限；bootstrap role 只有固定 typed CAS function 的 EXECUTE，
+  不持有 relation DML。
+- bootstrap fixture 不是 production authority、freshness receipt 或审计 owner；生产 External connector 需另行 scope。

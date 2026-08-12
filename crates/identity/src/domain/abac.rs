@@ -989,6 +989,15 @@ impl Policy {
         if effective_until.is_some_and(|until| until <= effective_from) {
             return Err(IdentityError::InvalidPolicy);
         }
+        for rule in &rules {
+            let key = super::ResourceSecurityFactPolicyKey::classify(rule.attribute_key())
+                .map_err(|_| IdentityError::InvalidPolicy)?;
+            // #2111 installs the typed projection only. The sole production consumer is owned by
+            // #2115, so generic durable policies must not mint a device-fact consumption path.
+            if key.into_fact().is_some() {
+                return Err(IdentityError::InvalidPolicy);
+            }
+        }
         Ok(Self {
             id: PolicyId::parse(id).map_err(|_| IdentityError::InvalidPolicy)?,
             tenant,
@@ -1479,6 +1488,27 @@ mod tests {
             Err(crate::domain::IdentityError::InvalidPolicy)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn hydrate_rejects_resource_security_facts_until_typed_device_handler_exists() {
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(10);
+        for key in [
+            "resource.owner",
+            "resource.riskClass",
+            "resource.location",
+            "resource.software",
+            "resource.fleet",
+            "resource.inventory.kind",
+        ] {
+            let scope = PolicyRouteScope::parse("identity.roles", "identity:role:read")
+                .expect("policy scope");
+            let rules = vec![rule(key, eq(aval("value")), PolicyEffect::Allow)];
+            assert!(matches!(
+                Policy::hydrate("pol-resource", tid(TENANT_A), scope, 1, base, None, rules),
+                Err(crate::domain::IdentityError::InvalidPolicy)
+            ));
+        }
     }
 
     #[test]

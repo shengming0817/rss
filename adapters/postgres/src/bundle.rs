@@ -119,7 +119,7 @@ mod device_latent;
 use crate::{
     PgAuthGrantLifecycle, PgAuthGrantProvider, PgAuthGrantValidator, PgCredentialRepo,
     PgDeviceCertificateRepository, PgDeviceCertificateStatusStore, PgIdentitySecurityLifecycle,
-    PgPolicyLifecycle, PgPolicyRepo, PgRefreshTokenStore, PgResourceAttributeRepo,
+    PgPolicyLifecycle, PgPolicyRepo, PgRefreshTokenStore, PgResourceSecurityFactRepo,
     PgRoleBindingLifecycle, PgRoleBindingReadRepo, PgRoleRepo,
 };
 #[cfg(feature = "domain-identity")]
@@ -2748,13 +2748,10 @@ impl PgDomainDeps<caps::Identity> {
         PgPolicyRepo::new(self.stores.reader_capability())
     }
 
-    /// durable resource attribute store / resolver（resource_attributes 表 + tenant scope）。
+    /// Read-only External Resource Security Fact projection.
     #[must_use]
-    pub fn resource_attribute_repo(&self) -> PgResourceAttributeRepo {
-        PgResourceAttributeRepo::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
+    pub fn resource_security_fact_repo(&self) -> PgResourceSecurityFactRepo {
+        PgResourceSecurityFactRepo::new(self.stores.reader_capability())
     }
 
     /// 角色绑定只读仓储（无 clock / mutation / outbox 能力）。
@@ -3419,7 +3416,7 @@ mod tests {
         let _ = i.credential_repo();
         let _ = i.role_repo();
         let _ = i.policy_repo();
-        let _ = i.resource_attribute_repo();
+        let _ = i.resource_security_fact_repo();
         let _ = i.role_binding_read_repo();
     }
 

@@ -13,12 +13,12 @@ use std::time::Duration;
 use bootstrap::{DomainBinding, DomainModuleResult};
 use diport::{Clock, Signer};
 use identity::{
-    AuthGrantServices, CredentialSecurityService, FederatedIdentityDomain,
+    AuthGrantServices, CredentialSecurityService, DeviceResourceFactPip, FederatedIdentityDomain,
     FederatedIdentityDomainDeps, IdentityDomain, IdentityDomainDeps, LoginService,
     PolicyManageService, RbacAdminService,
     ports::{
         DynAccountSecurityReadRepo, DynAuthGrantValidator, DynCredentialRepo, DynPolicyLifecycle,
-        DynPolicyRepo, DynResourceAttributeReadRepo, DynRoleBindingLifecycle,
+        DynPolicyRepo, DynResourceSecurityFactReadRepo, DynRoleBindingLifecycle,
         DynRoleBindingReadRepo, DynRoleReadRepo,
     },
 };
@@ -186,7 +186,6 @@ struct CommonIdentityServices {
     roles: Arc<DynRoleReadRepo<'static>>,
     binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
     policies: Arc<DynPolicyRepo<'static>>,
-    resource_attribute_reads: Arc<DynResourceAttributeReadRepo<'static>>,
 }
 
 fn common_identity_services(
@@ -196,9 +195,6 @@ fn common_identity_services(
     let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(pg.role_repo()));
     let roles_for_list = Arc::from(DynRoleReadRepo::new_box(pg.role_repo()));
     let policies = Arc::from(DynPolicyRepo::new_box(pg.policy_repo()));
-    let resource_attribute_reads = Arc::from(DynResourceAttributeReadRepo::new_box(
-        pg.resource_attribute_repo(),
-    ));
     let policy_lifecycle = Arc::from(DynPolicyLifecycle::new_box(
         pg.policy_lifecycle(boxed_clock(clock)),
     ));
@@ -222,8 +218,22 @@ fn common_identity_services(
         roles: roles_for_list,
         binding_reads,
         policies,
-        resource_attribute_reads,
     }
+}
+
+/// Build the sealed, read-only fact PIP reserved for the typed device-policy handler (#2115).
+///
+/// Generic identity routes do not receive this capability.
+pub fn device_resource_fact_pip(
+    pg: &PgDomainDeps<caps::Identity>,
+    clock: Arc<dyn Clock>,
+) -> DeviceResourceFactPip {
+    DeviceResourceFactPip::new(
+        Arc::from(DynResourceSecurityFactReadRepo::new_box(
+            pg.resource_security_fact_repo(),
+        )),
+        clock,
+    )
 }
 
 /// Build the listener-security root authorizer without mounting the identity domain.
@@ -232,13 +242,7 @@ pub fn root_contract_authorizer(
     clock: Arc<dyn Clock>,
 ) -> Arc<dyn httpserve::RouteAuthorizer> {
     let common = common_identity_services(pg, &clock);
-    identity::build_contract_authorizer(
-        common.roles,
-        common.binding_reads,
-        common.policies,
-        common.resource_attribute_reads,
-        clock,
-    )
+    identity::build_contract_authorizer(common.roles, common.binding_reads, common.policies, clock)
 }
 
 /// Build the identity domain and its lifecycle output as one owned binding.
@@ -303,7 +307,6 @@ where
         roles: common.roles,
         binding_reads: common.binding_reads,
         policies: common.policies,
-        resource_attribute_reads: common.resource_attribute_reads,
         clock,
     });
 
@@ -327,7 +330,6 @@ pub fn wire_federated(deps: FederatedIdentityModuleDeps) -> anyhow::Result<Domai
         roles: common.roles,
         binding_reads: common.binding_reads,
         policies: common.policies,
-        resource_attribute_reads: common.resource_attribute_reads,
         clock,
     });
     Ok(DomainBinding::new(
@@ -425,8 +427,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::{
-        DeviceCertificateCommandTtl, FederatedIdentityModuleDeps, IdentityModuleDeps, test_support,
-        wire, wire_federated,
+        DeviceCertificateCommandTtl, FederatedIdentityModuleDeps, IdentityModuleDeps,
+        device_resource_fact_pip, test_support, wire, wire_federated,
     };
 
     #[tokio::test]
@@ -439,6 +441,12 @@ mod tests {
 
         let binding = test_support::binding().expect("test-support binding builds");
         assert_eq!(binding.name(), "identity");
+    }
+
+    #[tokio::test]
+    async fn resource_fact_builder_uses_the_public_production_wiring_path() {
+        let pg = postgres::PgRuntimeHandle::for_module_test().for_domain();
+        let _pip = device_resource_fact_pip(&pg, Arc::new(test_support::TestClock));
     }
 
     #[tokio::test]
