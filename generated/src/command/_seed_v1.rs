@@ -64,12 +64,15 @@ pub struct SeedDoThingRequest {
 pub const CONTRACT_ID: &str = "seed.do-thing";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "_seed",
-    "seed.do-thing",
-    "v1",
-    "sha256:a369f1548799cc66da6f3d539dfd3048f7e5d94e87e8b130c3d816b5da75a71b",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "seed.do-thing",
+        "v1",
+        "sha256:a369f1548799cc66da6f3d539dfd3048f7e5d94e87e8b130c3d816b5da75a71b",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("_seed", DESCRIPTOR, "v1");
 
 /// 稳定命令 topic（broker routing key，`<domain>.commands.<name>`；active command 来自 `contract.toml`
 /// `topic`，draft 回退用 id）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
@@ -95,7 +98,7 @@ impl super::JournaledCommandContract for Contract {}
 pub async fn journal_async<J: super::CommandJournal>(
     journal: &J,
     request: SeedDoThingRequest,
-    tenant: ::vocab::TenantId,
+    tenant: ::rss_request_context::TenantId,
     subject_id: J::SubjectId,
     actor: J::Actor,
     idempotency_key: ::std::string::String,

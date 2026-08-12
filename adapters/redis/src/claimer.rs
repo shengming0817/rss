@@ -370,7 +370,7 @@ mod tests {
     // reason: 测试 fixture 使用固定合法 receipt metadata，构造失败即测试配置错误。
     fn ctx_for(tenant: &str, group: &str) -> InboxReceiptContext {
         InboxReceiptContext::new(
-            vocab::TenantId::parse(tenant).unwrap(),
+            rss_request_context::TenantId::parse(tenant).unwrap(),
             grp(group),
             "identity",
             "identity.session-created",

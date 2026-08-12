@@ -36,7 +36,7 @@ pub use crate::domain::{
     AuditChainHasher, AuditEntry, AuditError, AuditOutcome, EntryHash, ResourceRef,
     actor_kind_from_db, actor_kind_to_db,
 };
-pub use vocab::TenantId;
+use rss_request_context::TenantId;
 
 /// Generated route marker retained by the target-tenant audit append command.
 pub type AuditListTenantRouteMarker = generated::http::audit_v1::list_tenant_entries::RouteMarker;
@@ -78,7 +78,7 @@ pub struct RowRepoScope {
 impl RowRepoScope {
     #[allow(dead_code)]
     pub(crate) fn from_scoped_visibility(
-        scope: vocab::ScopedTenant,
+        scope: rss_request_context::RowScope,
         tenant: TenantRepoScope,
     ) -> Self {
         Self {
@@ -92,7 +92,7 @@ impl RowRepoScope {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(scope: vocab::ScopedTenant, tenant: TenantRepoScope) -> Self {
+    pub fn for_test(scope: rss_request_context::RowScope, tenant: TenantRepoScope) -> Self {
         Self::from_scoped_visibility(scope, tenant)
     }
 }
@@ -203,11 +203,11 @@ where
 /// 构造 funnel；append impl 直接读字段封链。
 pub struct AuditRecord {
     /// 租户标识（行级多租隔离；决定子链）。
-    pub tenant: vocab::TenantId,
+    pub tenant: rss_request_context::TenantId,
     /// 操作者标识。
     pub actor: ids::UserId,
     /// 操作者类别。
-    pub actor_kind: vocab::PrincipalKind,
+    pub actor_kind: rss_request_context::PrincipalKind,
     /// 授权动作。
     pub action: vocab::Action,
     /// 被操作资源引用。
@@ -446,7 +446,7 @@ mod tests {
             diport::AuditEvent {
                 occurred_at: std::time::UNIX_EPOCH,
                 principal_id: "principal".to_string(),
-                principal_kind: vocab::PrincipalKind::SuperAdmin,
+                principal_kind: rss_request_context::PrincipalKind::SuperAdmin,
                 tenant_id: Some(other),
                 resource_kind: "audit_entries",
                 resource_id: target.to_string(),

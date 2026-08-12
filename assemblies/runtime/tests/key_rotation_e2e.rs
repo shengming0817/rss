@@ -339,7 +339,7 @@ fn jwt_kid(token: &str) -> String {
 
 #[allow(clippy::expect_used)]
 async fn mint_user(issuer: &authn::JwtIssuer<diport::RssAccessProfile, VaultSigner>) -> String {
-    let tenant = vocab::TenantId::parse(TENANT).expect("canonical tenant");
+    let tenant = rss_request_context::TenantId::parse(TENANT).expect("canonical tenant");
     let grant = authn::AuthGrant::new_active(
         tenant,
         ids::UserId::parse(USER_ID).expect("canonical user id"),

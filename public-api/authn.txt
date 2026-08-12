@@ -341,7 +341,7 @@ impl authn::AccessGrantValidationInput
 pub fn authn::AccessGrantValidationInput::auth_time_unix_secs(&self) -> u64
 pub fn authn::AccessGrantValidationInput::authn_epoch(&self) -> authn::AuthnEpoch
 pub fn authn::AccessGrantValidationInput::grant_id(&self) -> &authn::AuthGrantId
-pub fn authn::AccessGrantValidationInput::tenant(&self) -> vocab::tenant::TenantId
+pub fn authn::AccessGrantValidationInput::tenant(&self) -> rss_request_context::TenantId
 pub fn authn::AccessGrantValidationInput::user_id(&self) -> ids::UserId
 impl core::fmt::Debug for authn::AccessGrantValidationInput
 pub fn authn::AccessGrantValidationInput::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -378,9 +378,9 @@ pub fn authn::AuthGrant::expires_at(&self) -> std::time::SystemTime
 pub fn authn::AuthGrant::hydrate(authn::AuthGrantSnapshot) -> core::result::Result<Self, authn::AuthGrantStateError>
 pub fn authn::AuthGrant::id(&self) -> &authn::AuthGrantId
 pub fn authn::AuthGrant::matches_snapshot(&self, &Self) -> bool
-pub fn authn::AuthGrant::new_active(vocab::tenant::TenantId, ids::UserId, std::time::SystemTime, authn::AuthnEpoch, std::time::SystemTime, std::time::SystemTime) -> core::result::Result<Self, authn::AuthGrantStateError>
+pub fn authn::AuthGrant::new_active(rss_request_context::TenantId, ids::UserId, std::time::SystemTime, authn::AuthnEpoch, std::time::SystemTime, std::time::SystemTime) -> core::result::Result<Self, authn::AuthGrantStateError>
 pub fn authn::AuthGrant::status(&self) -> authn::AuthGrantStatus
-pub fn authn::AuthGrant::tenant(&self) -> vocab::tenant::TenantId
+pub fn authn::AuthGrant::tenant(&self) -> rss_request_context::TenantId
 pub fn authn::AuthGrant::user_id(&self) -> ids::UserId
 impl core::clone::Clone for authn::AuthGrant
 pub fn authn::AuthGrant::clone(&self) -> authn::AuthGrant
@@ -409,8 +409,11 @@ impl core::panic::unwind_safe::RefUnwindSafe for authn::AuthGrantCloseMutation
 impl core::panic::unwind_safe::UnwindSafe for authn::AuthGrantCloseMutation
 pub struct authn::AuthGrantId(_)
 impl authn::AuthGrantId
-pub fn authn::AuthGrantId::as_str(&self) -> &str
-pub fn authn::AuthGrantId::hydrate(impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::AuthGrantIdError>
+pub fn authn::AuthGrantId::as_uuid(&self) -> uuid::Uuid
+pub fn authn::AuthGrantId::as_verified(&self) -> ids::CanonicalUuidV4
+pub fn authn::AuthGrantId::from_verified(ids::CanonicalUuidV4) -> Self
+pub fn authn::AuthGrantId::hydrate(impl core::convert::AsRef<str>) -> core::result::Result<Self, authn::AuthGrantIdError>
+pub fn authn::AuthGrantId::to_wire(&self) -> alloc::string::String
 impl core::clone::Clone for authn::AuthGrantId
 pub fn authn::AuthGrantId::clone(&self) -> authn::AuthGrantId
 impl core::cmp::Eq for authn::AuthGrantId
@@ -439,7 +442,7 @@ pub authn::AuthGrantSnapshot::created_at: std::time::SystemTime
 pub authn::AuthGrantSnapshot::expires_at: std::time::SystemTime
 pub authn::AuthGrantSnapshot::id: authn::AuthGrantId
 pub authn::AuthGrantSnapshot::status: authn::AuthGrantStatus
-pub authn::AuthGrantSnapshot::tenant: vocab::tenant::TenantId
+pub authn::AuthGrantSnapshot::tenant: rss_request_context::TenantId
 pub authn::AuthGrantSnapshot::user_id: ids::UserId
 impl core::clone::Clone for authn::AuthGrantSnapshot
 pub fn authn::AuthGrantSnapshot::clone(&self) -> authn::AuthGrantSnapshot
@@ -491,7 +494,7 @@ impl core::panic::unwind_safe::UnwindSafe for authn::CrossTenantAuditContext
 pub struct authn::CrossTenantAuditGrant
 impl authn::CrossTenantAuditGrant
 pub fn authn::CrossTenantAuditGrant::into_event(self) -> diport::audit_sink::AuditEvent
-pub fn authn::CrossTenantAuditGrant::target(&self) -> vocab::tenant::TenantId
+pub fn authn::CrossTenantAuditGrant::target(&self) -> rss_request_context::TenantId
 impl core::marker::Freeze for authn::CrossTenantAuditGrant
 impl core::marker::Send for authn::CrossTenantAuditGrant
 impl core::marker::Sync for authn::CrossTenantAuditGrant
@@ -517,7 +520,7 @@ impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'stat
 pub async fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::issue_access(&self, authn::RssAccessIssueInput<'_>) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
 pub fn authn::JwtIssuer<diport::pdp::RssAccessProfile, S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig<diport::pdp::RssAccessProfile>) -> core::result::Result<Self, authn::JwtIssueError>
 impl<S: diport::signer::Signer + core::marker::Send + core::marker::Sync + 'static> authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>
-pub async fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::issue_service_token(&self, vocab::service::ServiceCallerDomain, vocab::tenant::TenantId) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
+pub async fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::issue_service_token(&self, vocab::service::ServiceCallerDomain, rss_request_context::TenantId) -> core::result::Result<authn::MintedJwt, authn::JwtIssueError>
 pub fn authn::JwtIssuer<diport::pdp::ServiceTokenProfile, S>::new(alloc::sync::Arc<S>, alloc::boxed::Box<dyn diport::clock::Clock>, authn::JwtIssuerConfig<diport::pdp::ServiceTokenProfile>) -> core::result::Result<Self, authn::JwtIssueError>
 impl<P, S> core::marker::Freeze for authn::JwtIssuer<P, S>
 impl<P, S> core::marker::Send for authn::JwtIssuer<P, S> where S: core::marker::Sync + core::marker::Send
@@ -644,15 +647,15 @@ pub fn authn::Principal::audit_subject(&self) -> &str
 pub fn authn::Principal::from_verified_jwt(&authn::VerifiedJwt) -> core::result::Result<Self, authn::AuthnError>
 pub fn authn::Principal::from_verified_projection_operator_token(&authn::VerifiedProjectionOperatorToken) -> core::result::Result<Self, authn::AuthnError>
 pub fn authn::Principal::from_verified_service_token(&authn::VerifiedServiceToken) -> core::result::Result<Self, authn::AuthnError>
-pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
+pub fn authn::Principal::kind(&self) -> rss_request_context::PrincipalKind
 pub fn authn::Principal::matches_subject(&self, &str) -> bool
 pub fn authn::Principal::row_visibility(&self, &runctx::ctx::AppCtx) -> core::result::Result<vocab::tenant::RowVisibility, runctx::local::MissingCtx>
 pub fn authn::Principal::service_caller_domain(&self) -> core::option::Option<vocab::service::ServiceCallerDomain>
-pub fn authn::Principal::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+pub fn authn::Principal::tenant(&self) -> core::option::Option<rss_request_context::TenantId>
 impl authn::Principal
 pub fn authn::Principal::cross_tenant_audit_grant(&self, &runctx::ctx::AppCtx, &dyn diport::clock::Clock, &authn::CrossTenantAuditContext) -> core::result::Result<authn::CrossTenantAuditGrant, authn::CrossTenantGrantError>
 impl runctx::ctx::PrincipalFacet for authn::Principal
-pub fn authn::Principal::kind(&self) -> vocab::principal::PrincipalKind
+pub fn authn::Principal::kind(&self) -> rss_request_context::PrincipalKind
 pub fn authn::Principal::matches_subject(&self, &str) -> bool
 impl core::marker::Freeze for authn::Principal
 impl core::marker::Send for authn::Principal
@@ -663,7 +666,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for authn::Principal
 impl core::panic::unwind_safe::UnwindSafe for authn::Principal
 pub struct authn::ProjectionMaintenanceGrant
 impl authn::ProjectionMaintenanceGrant
-pub fn authn::ProjectionMaintenanceGrant::new(vocab::service::ServiceCallerDomain, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::ProjectionMaintenanceGrantError>
+pub fn authn::ProjectionMaintenanceGrant::new(vocab::service::ServiceCallerDomain, authn::ProjectionMaintenanceAction, rss_request_context::TenantId, impl core::convert::Into<alloc::string::String>) -> core::result::Result<Self, authn::ProjectionMaintenanceGrantError>
 impl core::cmp::Eq for authn::ProjectionMaintenanceGrant
 impl core::cmp::PartialEq for authn::ProjectionMaintenanceGrant
 pub fn authn::ProjectionMaintenanceGrant::eq(&self, &authn::ProjectionMaintenanceGrant) -> bool
@@ -679,7 +682,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for authn::ProjectionMaintenanceGra
 impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceGrant
 pub struct authn::ProjectionMaintenanceGrantSet
 impl authn::ProjectionMaintenanceGrantSet
-pub fn authn::ProjectionMaintenanceGrantSet::authorize(&self, &authn::Principal, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, &str) -> core::result::Result<authn::ProjectionMaintenanceReceipt, authn::ProjectionMaintenanceGrantError>
+pub fn authn::ProjectionMaintenanceGrantSet::authorize(&self, &authn::Principal, authn::ProjectionMaintenanceAction, rss_request_context::TenantId, &str) -> core::result::Result<authn::ProjectionMaintenanceReceipt, authn::ProjectionMaintenanceGrantError>
 pub fn authn::ProjectionMaintenanceGrantSet::new(alloc::vec::Vec<authn::ProjectionMaintenanceGrant>) -> core::result::Result<Self, authn::ProjectionMaintenanceGrantError>
 impl core::marker::Freeze for authn::ProjectionMaintenanceGrantSet
 impl core::marker::Send for authn::ProjectionMaintenanceGrantSet
@@ -690,7 +693,7 @@ impl core::panic::unwind_safe::RefUnwindSafe for authn::ProjectionMaintenanceGra
 impl core::panic::unwind_safe::UnwindSafe for authn::ProjectionMaintenanceGrantSet
 pub struct authn::ProjectionMaintenanceReceipt
 impl authn::ProjectionMaintenanceReceipt
-pub fn authn::ProjectionMaintenanceReceipt::authorizes(&self, authn::ProjectionMaintenanceAction, vocab::tenant::TenantId, &str) -> bool
+pub fn authn::ProjectionMaintenanceReceipt::authorizes(&self, authn::ProjectionMaintenanceAction, rss_request_context::TenantId, &str) -> bool
 pub const fn authn::ProjectionMaintenanceReceipt::operator_caller(&self) -> vocab::service::ServiceCallerDomain
 impl core::fmt::Debug for authn::ProjectionMaintenanceReceipt
 pub fn authn::ProjectionMaintenanceReceipt::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -878,7 +881,7 @@ impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedMtlsPeer
 pub struct authn::VerifiedProjectionOperatorToken
 impl authn::VerifiedProjectionOperatorToken
 pub fn authn::VerifiedProjectionOperatorToken::raw(&self) -> &str
-pub fn authn::VerifiedProjectionOperatorToken::tenant(&self) -> core::result::Result<vocab::tenant::TenantId, authn::AuthnError>
+pub fn authn::VerifiedProjectionOperatorToken::tenant(&self) -> core::result::Result<rss_request_context::TenantId, authn::AuthnError>
 impl core::fmt::Debug for authn::VerifiedProjectionOperatorToken
 pub fn authn::VerifiedProjectionOperatorToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for authn::VerifiedProjectionOperatorToken
@@ -891,7 +894,7 @@ impl core::panic::unwind_safe::UnwindSafe for authn::VerifiedProjectionOperatorT
 pub struct authn::VerifiedServiceToken
 impl authn::VerifiedServiceToken
 pub fn authn::VerifiedServiceToken::raw(&self) -> &str
-pub fn authn::VerifiedServiceToken::tenant(&self) -> core::result::Result<vocab::tenant::TenantId, authn::AuthnError>
+pub fn authn::VerifiedServiceToken::tenant(&self) -> core::result::Result<rss_request_context::TenantId, authn::AuthnError>
 impl core::fmt::Debug for authn::VerifiedServiceToken
 pub fn authn::VerifiedServiceToken::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
 impl core::marker::Freeze for authn::VerifiedServiceToken

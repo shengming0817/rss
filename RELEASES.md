@@ -11,11 +11,19 @@ approve every release and perform the registry publication manually; CI must not
 
 ## Versions and preparation
 
-Public crates follow Semantic Versioning independently. Before 1.0, a breaking public API change
-requires at least a minor version bump; from 1.0 onward it requires a major version bump. Every
-release must have a reviewed changelog entry, an immutable source revision, the canonical package
-and release-check evidence required by the owning specification, and successful consumption of the
-final artifact outside the workspace. An RC label or tag does not publish an artifact.
+Public crates follow Semantic Versioning independently after their first registry publication.
+Before that first publication, the accepted major/minor line is frozen and every version update may
+change only the patch component; for example, `0.3.0 -> 0.3.1` is valid while `0.3.0 -> 0.4.0` is
+not. During this unpublished experimental phase,
+breaking public API replacement does not require compatibility or a minor bump. Changing the frozen
+major/minor line requires a separate, explicit architecture decision before the candidate is formed;
+it is not a release-preparation version update.
+
+After first publication, a breaking public API change before 1.0 requires at least a minor version
+bump; from 1.0 onward it requires a major version bump. Every release must have a reviewed changelog
+entry, an immutable source revision, the canonical package and release-check evidence required by
+the owning specification, and successful consumption of the final artifact outside the workspace.
+An RC label or tag does not publish an artifact.
 
 Immediately before first publication, recheck the exact crate name and verify the intended crates.io
 owners. Names observed as available earlier are not reservations. After publication, add
@@ -65,9 +73,14 @@ release 或发布批准。每次发布必须由列名维护者批准并人工执
 
 ## 版本与准备
 
-公共 crate 独立遵循 Semantic Versioning。1.0 前，公开 API 的破坏式变更至少升级 minor；1.0 起必须升级 major。
-每次发布必须具备受 review 的 changelog、不可变源码 revision、所属规格要求的 canonical package/release-check 证据，
-并从 workspace 外成功消费最终 artifact。RC label 或 tag 不会自动发布 artifact。
+公共 crate 在首次 registry 发布后独立遵循 Semantic Versioning。首次发布前冻结已接纳的 major/minor 版本线，
+每次版本更新只能修改 patch；例如允许 `0.3.0 -> 0.3.1`，不允许 `0.3.0 -> 0.4.0`。
+在这个尚未发布的实验阶段，公开 API 可破坏式替换，不要求兼容，也不因此升级 minor。若确需更改冻结的 major/minor，
+必须在形成 candidate 前通过独立、明确的架构决策；该动作不属于发布准备时的版本更新。
+
+首次发布后，1.0 前的公开 API 破坏式变更至少升级 minor；1.0 起必须升级 major。每次发布必须具备受 review 的
+changelog、不可变源码 revision、所属规格要求的 canonical package/release-check 证据，并从 workspace 外成功消费
+最终 artifact。RC label 或 tag 不会自动发布 artifact。
 
 首次发布前必须重新检查精确 crate 名称并验证预期 crates.io owner；此前观察到名称可用不等于保留。发布后把
 `github:shengming0817:rss-maintainers` 加为 owner，并验证最终 owner 列表。

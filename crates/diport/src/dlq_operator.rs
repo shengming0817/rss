@@ -115,7 +115,7 @@ impl DlqOperatorStartAuditId {
 pub struct DlqOperatorAuthorization<A: DlqOperatorAction> {
     caller: vocab::ServiceCallerDomain,
     operator_subject: String,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     start_audit_id: DlqOperatorStartAuditId,
     action: PhantomData<A>,
 }
@@ -142,7 +142,7 @@ impl<A: DlqOperatorAction> DlqOperatorAuthorization<A> {
         _mint: dlqauthmint::DlqOperatorMint,
         caller: vocab::ServiceCallerDomain,
         operator_subject: String,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         start_audit_id: DlqOperatorStartAuditId,
     ) -> Self {
         Self {
@@ -168,7 +168,7 @@ impl<A: DlqOperatorAction> DlqOperatorAuthorization<A> {
     }
 
     /// Returns the tenant bound by the exact authorization check.
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -233,7 +233,7 @@ mod tests {
             dlqauthmint::DlqOperatorMint::capability(),
             vocab::ServiceCallerDomain::MaintenanceOperator,
             "sensitive-operator-subject".to_owned(),
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?,
             DlqOperatorStartAuditId::parse("dlq-operator-123")?,
         );
 

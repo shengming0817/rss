@@ -494,6 +494,7 @@ const RUNTIMEEXEC_INTERNAL_SHIPPED_DEPS: &[&str] = &[
     "diport",
     "eventexec",
     "primitives",
+    "rss-platform",
     "runtimeinventorymint",
     "secure",
 ];
@@ -2586,6 +2587,15 @@ mod tests {
         assert!(findings.is_empty(), "{findings:?}");
     }
 
+    #[test]
+    fn test_support_cannot_consume_public_foundation_as_shipped_dependencies() {
+        let edges = [
+            e("testkit", "rss-contract"),
+            e("testkit", "rss-request-context"),
+        ];
+        assert_eq!(check_test_support_internal_dependencies(&edges).len(), 2);
+    }
+
     /// LAYER-DEPS-10 anti-vacuity：无 shipped 出边时不误报；dev-dep 本来就不进入 `edges`。
     #[test]
     fn test_support_internal_dependencies_green_no_shipped_edge() {
@@ -3673,6 +3683,7 @@ bridge_alias = { package = "feature-bridge", path = "../feature-bridge", default
             e("runtimeexec", "diport"),
             e("runtimeexec", "eventexec"),
             e("runtimeexec", "primitives"),
+            e("runtimeexec", "rss-platform"),
             e("runtimeexec", "runtimeinventorymint"),
             e("runtimeexec", "secure"),
         ];

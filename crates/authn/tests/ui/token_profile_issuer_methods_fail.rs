@@ -3,7 +3,7 @@ use diport::{RssAccessProfile, ServiceTokenProfile};
 
 fn rss_cannot_sign_service<S>(
     issuer: &JwtIssuer<RssAccessProfile, S>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) where
     S: diport::Signer + Send + Sync + 'static,
 {

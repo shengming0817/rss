@@ -457,7 +457,7 @@ impl ReconcileTargetStatus {
 /// Payload-free reconcile target inspection result.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReconcileTargetSummary {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: String,
     reconciler_id: String,
     resource_kind: String,
@@ -468,7 +468,7 @@ pub struct ReconcileTargetSummary {
 impl ReconcileTargetSummary {
     /// Construct a validated provider result.
     pub fn new(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: String,
         reconciler_id: String,
         resource_kind: String,
@@ -492,7 +492,7 @@ impl ReconcileTargetSummary {
     }
 
     /// Owning tenant.
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -688,7 +688,7 @@ impl AttemptErrorKind {
 /// Durable target claimed by the scheduler.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimedTarget {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: String,
     lease_token: String,
     epoch: u64,
@@ -708,7 +708,7 @@ pub struct ClaimedTarget {
 pub struct ClaimedTargetRestore {
     // Target identity.
     /// Owning authenticated tenant.
-    pub tenant: vocab::TenantId,
+    pub tenant: rss_request_context::TenantId,
     /// Opaque durable target identity.
     pub target_id: String,
     /// Reconciler namespace.
@@ -750,7 +750,7 @@ impl ClaimedTarget {
     }
 
     /// Target tenant.
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -1068,7 +1068,7 @@ impl DeviceCertificateSystemProducer {
 /// outbox metadata. Fields stay private so callers cannot forge a different producer or scope.
 #[derive(Clone, PartialEq, Eq)]
 pub struct DeviceCommandAuditProof {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device_id: uuid::Uuid,
     desired_generation: PersistableDesiredGeneration,
     fence_epoch: PersistableFenceEpoch,
@@ -1150,7 +1150,7 @@ impl DeviceCommandAuditProof {
     /// closed system identity as live command review.
     #[doc(hidden)]
     pub fn restore_durable(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         device_id: uuid::Uuid,
         desired_generation: i64,
         fence_epoch: i64,
@@ -1180,7 +1180,7 @@ impl DeviceCommandAuditProof {
     }
 
     /// Owning tenant.
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -1280,7 +1280,7 @@ impl DeviceCertificateCommandEvidence {
 
     /// Owning tenant.
     #[must_use]
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.audit.tenant()
     }
 
@@ -1663,7 +1663,7 @@ pub trait ReconcileScheduleStore {
     /// degrades and safely discards or CAS releases claims without exceeding its attempt bound.
     async fn claim_due_targets(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         holder_id: &str,
         limit: ReconcileMaxInFlight,
@@ -1673,7 +1673,7 @@ pub trait ReconcileScheduleStore {
     /// Revalidate and claim one exact versioned durable wake under the normal lease/epoch fence.
     async fn claim_targeted(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         holder_id: &str,
         wake: &ReconcileWake,
@@ -1724,14 +1724,14 @@ pub trait ReconcileScheduleStore {
     /// Disable a target so future due scans skip it.
     async fn pause_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileScheduleError>;
 
     /// Re-enable a target and make it immediately due.
     async fn resume_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
     ) -> Result<(), ReconcileScheduleError>;
 }
@@ -1742,7 +1742,7 @@ pub trait ReconcileOperatorStore {
     /// Read one exact tenant/target without exposing command payloads or fact material.
     async fn inspect_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
         capability: OperatorReconcileCapability,
     ) -> Result<ReconcileTargetSummary, ReconcileScheduleError>;
@@ -1750,7 +1750,7 @@ pub trait ReconcileOperatorStore {
     /// Clear a reviewed quarantine and make the exact tenant/target immediately due.
     async fn resume_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
         capability: OperatorReconcileCapability,
     ) -> Result<ReconcileTargetSummary, ReconcileScheduleError>;
@@ -1768,7 +1768,7 @@ pub struct AttemptScope<'a, S: ReconcileScheduleStore> {
 /// Sealed attempt authority for the one device-certificate target.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeviceCertificateAttemptSnapshot {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device_id: uuid::Uuid,
     attempt_id: String,
     target_id: String,
@@ -1779,7 +1779,7 @@ pub struct DeviceCertificateAttemptSnapshot {
 
 impl DeviceCertificateAttemptSnapshot {
     /// Owning tenant.
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
     /// Canonical device target.
@@ -2032,7 +2032,7 @@ where
     reconciler: R,
     keyring: Arc<CommandIdempotencyKeyring>,
     producer: DeviceCertificateSystemProducer,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     reconciler_id: String,
     holder_id: String,
     trigger: Trigger,
@@ -2055,7 +2055,7 @@ where
         reconciler: R,
         keyring: Arc<CommandIdempotencyKeyring>,
         producer: DeviceCertificateSystemProducer,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: impl Into<String>,
         holder_id: impl Into<String>,
         _tenancy: Tenancy,
@@ -2220,7 +2220,7 @@ where
     reconciler: R,
     keyring: Arc<CommandIdempotencyKeyring>,
     producer: DeviceCertificateSystemProducer,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     reconciler_id: String,
     holder_id: String,
     trigger: Trigger,
@@ -3935,7 +3935,7 @@ mod tests {
 
     #[test]
     fn operator_summary_rejects_active_target_with_quarantine_reason() -> TestResult {
-        let tenant = vocab::TenantId::parse("018f5d8a-7b6c-7d2e-8a1b-1234567890ab")?;
+        let tenant = rss_request_context::TenantId::parse("018f5d8a-7b6c-7d2e-8a1b-1234567890ab")?;
         assert!(
             ReconcileTargetSummary::new(
                 tenant,
@@ -4222,8 +4222,9 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     // reason: fixed canonical UUID for tests.
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse("11111111-1111-1111-1111-111111111111").expect("tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("11111111-1111-1111-1111-111111111111")
+            .expect("tenant")
     }
 
     fn claimed_target() -> ClaimedTarget {
@@ -4239,7 +4240,10 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)] // reason: fixed non-zero test fixture.
-    fn claimed_device_target_with(tenant: vocab::TenantId, epoch: u64) -> ClaimedTarget {
+    fn claimed_device_target_with(
+        tenant: rss_request_context::TenantId,
+        epoch: u64,
+    ) -> ClaimedTarget {
         ClaimedTarget::restore(ClaimedTargetRestore {
             tenant,
             target_id: "22222222-2222-2222-2222-222222222222".to_owned(),
@@ -4656,7 +4660,7 @@ mod tests {
     impl ReconcileScheduleStore for FakeScheduleStore {
         async fn claim_due_targets(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant: rss_request_context::TenantId,
             _reconciler_id: &str,
             _holder_id: &str,
             limit: ReconcileMaxInFlight,
@@ -4700,7 +4704,7 @@ mod tests {
 
         async fn claim_targeted(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant: rss_request_context::TenantId,
             _reconciler_id: &str,
             _holder_id: &str,
             wake: &ReconcileWake,
@@ -4849,7 +4853,7 @@ mod tests {
 
         async fn pause_target(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant: rss_request_context::TenantId,
             _target_id: &str,
         ) -> Result<(), ReconcileScheduleError> {
             Ok(())
@@ -4857,7 +4861,7 @@ mod tests {
 
         async fn resume_target(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant: rss_request_context::TenantId,
             _target_id: &str,
         ) -> Result<(), ReconcileScheduleError> {
             Ok(())

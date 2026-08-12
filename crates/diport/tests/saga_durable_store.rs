@@ -28,7 +28,7 @@ impl SagaDurableStore for NoopDurableStore {
     async fn list_runnable(
         &self,
         _identity: &SagaWorkerIdentity,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         _limit: NonZeroUsize,
     ) -> Result<Vec<SagaRunnableInstance>, SagaDurableStoreError> {
         Ok(Vec::new())

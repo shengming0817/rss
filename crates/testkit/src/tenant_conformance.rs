@@ -66,7 +66,7 @@ pub enum TenantConformanceError {
 
 /// 断言 repo 满足最小租户隔离（round-trip + 跨租不可见 + 跨租不干扰）。
 ///
-/// 对租户标识类型 `T` 泛型（`Copy + PartialEq`，如 `vocab::TenantId`）——harness 不依赖 adapter crate，
+/// 对租户标识类型 `T` 泛型（`Copy + PartialEq`，如 `rss_request_context::TenantId`）——harness 不依赖 adapter crate，
 /// 调用方传入自己的 tenant 类型 + 按租户的写/读闭包（testkit 的唯一内部 shipped 出边为
 /// `rss-conformance`，仍为零 adapter 依赖）。
 ///

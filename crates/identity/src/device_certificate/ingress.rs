@@ -37,7 +37,7 @@ pub enum DeviceIngressContract {
 /// domain outcome do not prove that a storage transaction committed, so neither operation may
 /// mint transport acknowledgement authority.
 pub trait DeviceIngressDelivery: Sized + Send {
-    fn tenant(&self) -> vocab::TenantId;
+    fn tenant(&self) -> rss_request_context::TenantId;
     fn device(&self) -> ids::DeviceId;
     fn credential_generation(&self) -> u64;
     fn contract(&self) -> DeviceIngressContract;
@@ -46,7 +46,7 @@ pub trait DeviceIngressDelivery: Sized + Send {
 }
 
 struct DeviceIngressRequest<'a> {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: ids::DeviceId,
     credential_generation: u64,
     contract: DeviceIngressContract,
@@ -55,7 +55,7 @@ struct DeviceIngressRequest<'a> {
 }
 
 impl DeviceIngressRequest<'_> {
-    const fn tenant(&self) -> vocab::TenantId {
+    const fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
     const fn device(&self) -> ids::DeviceId {
@@ -190,7 +190,7 @@ impl PreparedDeviceIngress {
 /// Verifying a receipt produces domain data only. It does not authorize PUBACK; only the concrete
 /// provider's separately returned opaque proof may enter an assembly-private settlement runner.
 pub struct PendingDeviceIngress {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: ids::DeviceId,
     ingress_event_id: String,
     expected_evidence: DeviceIngressEvidence,
@@ -219,14 +219,14 @@ pub struct DeviceIngressReceiptMismatch;
 
 /// Verified domain outcome. This is intentionally not a settlement proof.
 pub struct DeviceIngressDomainOutcome {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: ids::DeviceId,
     ingress_event_id: String,
     receipt: DeviceIngressReceipt,
 }
 
 impl DeviceIngressDomainOutcome {
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -303,7 +303,7 @@ where
 }
 
 fn prepared(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: ids::DeviceId,
     event_id: String,
     write: DeviceIngressWrite,
@@ -645,7 +645,8 @@ mod tests {
 
     fn scope() -> DeviceCertificateScope {
         DeviceCertificateScope::for_test(
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant"),
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
+                .expect("tenant"),
             ids::DeviceId::parse("00000000-0000-4000-8000-000000000002").expect("device"),
         )
     }

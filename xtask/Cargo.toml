@@ -6,11 +6,13 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+rss-request-context.workspace = true
 assembly-schema = { path = "../crates/assembly-schema" }
 # consistency: dotted-id 文法单源（#1126）——R7 IdentSyntax `is_dotted_id` 反向 delegate
 # `consistency::Topic::parse`，消除 contract 声明面与运行期构造面的镜像漂移。xtask 是组合根
 # （Layer::Root），依赖 Engine 层 consistency 合法（layers::allows(Root, Engine)）。
 consistency = { path = "../crates/consistency" }
+rss-contract.workspace = true
 generated = { path = "../generated" }
 observ = { path = "../crates/observ" }
 vocab = { path = "../crates/vocab" }

@@ -35,7 +35,7 @@ struct CaptureStore {
 impl ReconcileScheduleStore for CaptureStore {
     async fn claim_due_targets(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         _holder_id: &str,
         _limit: ReconcileMaxInFlight,
@@ -52,7 +52,7 @@ impl ReconcileScheduleStore for CaptureStore {
 
     async fn claim_targeted(
         &self,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         _reconciler_id: &str,
         _holder_id: &str,
         _wake: &ReconcileWake,
@@ -117,7 +117,7 @@ impl ReconcileScheduleStore for CaptureStore {
 
     async fn pause_target(
         &self,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         _target_id: &str,
     ) -> Result<(), ReconcileScheduleError> {
         Ok(())
@@ -125,7 +125,7 @@ impl ReconcileScheduleStore for CaptureStore {
 
     async fn resume_target(
         &self,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         _target_id: &str,
     ) -> Result<(), ReconcileScheduleError> {
         Ok(())

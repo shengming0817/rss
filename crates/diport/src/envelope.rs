@@ -171,7 +171,7 @@ impl std::fmt::Display for EnvelopeSchemaHash {
 /// 是观测辅助字段，缺失或非标准值均 fail-open 保留为可观测字符串，不阻断业务消费。
 #[derive(Clone, PartialEq, Eq)]
 pub struct EnvelopeHeader {
-    tenant_id: vocab::TenantId,
+    tenant_id: rss_request_context::TenantId,
     schema_version: EnvelopeSchemaVersion,
     schema_hash: EnvelopeSchemaHash,
     occurred_at_secs: Option<i64>,
@@ -184,7 +184,7 @@ pub struct EnvelopeHeader {
 impl EnvelopeHeader {
     /// 由必填 header 字段构造；观测字段与分区键默认为空。
     pub fn new(
-        tenant_id: vocab::TenantId,
+        tenant_id: rss_request_context::TenantId,
         schema_version: EnvelopeSchemaVersion,
         schema_hash: EnvelopeSchemaHash,
     ) -> Self {
@@ -208,8 +208,8 @@ impl EnvelopeHeader {
         let tenant_raw = metadata
             .get(KEY_TENANT_ID)
             .ok_or(EnvelopeHeaderError::MissingTenantId)?;
-        let tenant_id =
-            vocab::TenantId::parse(tenant_raw).map_err(|_| EnvelopeHeaderError::InvalidTenantId)?;
+        let tenant_id = rss_request_context::TenantId::parse(tenant_raw)
+            .map_err(|_| EnvelopeHeaderError::InvalidTenantId)?;
 
         let version_raw = metadata
             .get(KEY_SCHEMA_VERSION)
@@ -234,7 +234,7 @@ impl EnvelopeHeader {
     }
 
     /// tenant id。
-    pub fn tenant_id(&self) -> vocab::TenantId {
+    pub fn tenant_id(&self) -> rss_request_context::TenantId {
         self.tenant_id
     }
 
@@ -410,8 +410,8 @@ impl EnvelopeMetadata {
     }
 
     /// typed 读：canonical tenant id。缺失或非 canonical 值均 fail-closed 为 `None`。
-    pub fn tenant_id(&self) -> Option<vocab::TenantId> {
-        vocab::TenantId::parse(self.get(KEY_TENANT_ID)?).ok()
+    pub fn tenant_id(&self) -> Option<rss_request_context::TenantId> {
+        rss_request_context::TenantId::parse(self.get(KEY_TENANT_ID)?).ok()
     }
 
     /// typed 读：schema version。缺失或非法均 fail-closed 为 `None`。
@@ -518,8 +518,8 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).expect("canonical tenant")
     }
 
     #[test]

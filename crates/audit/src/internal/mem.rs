@@ -18,7 +18,7 @@ use crate::ports::{
 /// in-mem 状态：每租户 append-only 子链。
 #[derive(Default)]
 struct State {
-    chains: HashMap<vocab::TenantId, Vec<AuditEntry>>,
+    chains: HashMap<rss_request_context::TenantId, Vec<AuditEntry>>,
 }
 
 /// in-mem 审计仓储（持 hasher，`Mutex` 串行化 append）——read/write ports 的**in-mem 参考 provider**（demo /
@@ -45,7 +45,7 @@ impl<M: MacVerifier> InMemAuditRepo<M> {
 #[cfg(test)]
 impl<M: MacVerifier> InMemAuditRepo<M> {
     /// 测试用：篡改某租户首条目的 entry_hash，触发 list 读时校验失败。
-    pub(crate) fn corrupt_first_entry_hash(&self, tenant: vocab::TenantId) {
+    pub(crate) fn corrupt_first_entry_hash(&self, tenant: rss_request_context::TenantId) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(chain) = state.chains.get_mut(&tenant)
             && let Some(e) = chain.first()
@@ -200,8 +200,8 @@ mod tests {
     const ACTOR: &str = "11111111-2222-4333-8444-555555555555";
 
     #[allow(clippy::expect_used)]
-    fn tenant(raw: &str) -> vocab::TenantId {
-        vocab::TenantId::parse(raw).expect("canonical tenant")
+    fn tenant(raw: &str) -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(raw).expect("canonical tenant")
     }
 
     fn scope(raw: &str) -> TenantRepoScope {
@@ -213,7 +213,7 @@ mod tests {
         AuditRecord {
             tenant: tenant(tenant_raw),
             actor: ids::UserId::parse(ACTOR).expect("actor"),
-            actor_kind: vocab::PrincipalKind::User,
+            actor_kind: rss_request_context::PrincipalKind::User,
             action: vocab::Action::parse("audit:read").expect("action"),
             resource: ResourceRef::new("session", "sess-1"),
             outcome: AuditOutcome::Success,

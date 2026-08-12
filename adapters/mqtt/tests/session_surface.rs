@@ -11,7 +11,7 @@ assert_not_impl_any!(BrokerAccepted: Clone, Copy);
 
 fn application_receipt_publish_is_transport_only<'a>(
     session: &'a MqttSession,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: ids::DeviceId,
     message_id: &'a MessageId,
     payload: Vec<u8>,
@@ -110,8 +110,8 @@ mod inplace_reconnect {
     use diport::SecretMaterial;
     use ids::DeviceId;
     use mqtt::*;
+    use rss_request_context::TenantId;
     use testkit::MqttMtlsFixture;
-    use vocab::TenantId;
 
     fn material(credential: &testkit::MqttCredential) -> MqttTlsMaterial {
         let tls = credential.tls();

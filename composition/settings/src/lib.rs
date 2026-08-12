@@ -559,7 +559,7 @@ fn readiness_to_health(readiness: PoolReadiness) -> (HealthStatus, &'static str)
 }
 
 fn keyprovider_readiness_aad(tenant: &str) -> anyhow::Result<secure::DerivedAad> {
-    let tenant = vocab::TenantId::parse(tenant)
+    let tenant = rss_request_context::TenantId::parse(tenant)
         .context("keyprovider readiness tenant constant is invalid")?;
     ProtectionContext::authenticated_request(
         tenant,
@@ -795,7 +795,7 @@ pub mod test_support {
     impl SecretResolver for TestSecretResolver {
         async fn resolve(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant: rss_request_context::TenantId,
             _coordinate: &SecretCoordinate,
         ) -> Result<SecretMaterial, SecretResolverError> {
             Err(SecretResolverError::NotFound)
@@ -973,7 +973,7 @@ mod tests {
     impl SecretResolver for ScriptedSecretResolver {
         async fn resolve(
             &self,
-            _tenant: vocab::TenantId,
+            _tenant: rss_request_context::TenantId,
             _coordinate: &SecretCoordinate,
         ) -> Result<SecretMaterial, SecretResolverError> {
             match self.mode.load(Ordering::Acquire) {
@@ -990,7 +990,7 @@ mod tests {
 
     #[allow(clippy::expect_used)]
     fn resolver_readiness_targets() -> Vec<SecretResolverReadinessTarget> {
-        let tenant = vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        let tenant = rss_request_context::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
             .expect("canonical readiness fixture tenant");
         let stores = TenantStoreAllowlist::new([(
             (tenant, "vault".to_owned()),
@@ -1030,7 +1030,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn production_constructor_derives_all_roles_from_one_sealed_vault_capability() {
-        let tenant = vocab::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        let tenant = rss_request_context::TenantId::parse("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
             .expect("canonical unused fixture tenant");
         let stores = TenantStoreAllowlist::new([(
             (tenant, "vault".to_owned()),

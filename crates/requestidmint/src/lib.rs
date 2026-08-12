@@ -8,7 +8,7 @@
 
 /// Request ID proven to originate at the HTTP middleware boundary.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WireRequestId(String);
+pub struct WireRequestId(rss_request_context::RequestId);
 
 impl WireRequestId {
     /// Mint after HTTP middleware has accepted or generated the request ID.
@@ -16,13 +16,13 @@ impl WireRequestId {
     /// Dependency governance permits this call only from `httpserve`; generated code may name the
     /// carrier in signatures but never calls this constructor.
     #[must_use]
-    pub fn from_http_middleware(value: String) -> Self {
+    pub fn from_http_middleware(value: rss_request_context::RequestId) -> Self {
         Self(value)
     }
 
     /// Borrow the verified request ID for wire serialization and structured diagnostics.
     #[must_use]
     pub fn as_str(&self) -> &str {
-        &self.0
+        self.0.as_str()
     }
 }

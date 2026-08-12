@@ -575,8 +575,8 @@ impl ProjectionTenantFatalReason {
 #[cfg(feature = "domain-settings")]
 fn projection_tenant_run_health(
     outcome: ProjectionTenantRun,
-    tenant: vocab::TenantId,
-    more_work: &mut VecDeque<vocab::TenantId>,
+    tenant: rss_request_context::TenantId,
+    more_work: &mut VecDeque<rss_request_context::TenantId>,
 ) -> bool {
     match outcome {
         ProjectionTenantRun::Clean | ProjectionTenantRun::Fenced => false,
@@ -594,13 +594,13 @@ fn projection_tenant_run_health(
     reason = "Tokio Instant compares the same monotonic worker-sweep deadline; no domain timestamp or persisted fact is derived from it"
 )]
 async fn drive_projection_round_robin<F, Fut>(
-    mut tenants: VecDeque<vocab::TenantId>,
+    mut tenants: VecDeque<rss_request_context::TenantId>,
     deadline: tokio::time::Instant,
     token: &CancellationToken,
     mut run: F,
 ) -> Result<bool, PgProjectionWorkerRuntimeError>
 where
-    F: FnMut(vocab::TenantId) -> Fut,
+    F: FnMut(rss_request_context::TenantId) -> Fut,
     Fut: Future<Output = Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError>>,
 {
     let mut degraded = false;
@@ -621,8 +621,8 @@ where
 async fn projection_worker_tenants(
     worker: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
-    after: Option<vocab::TenantId>,
-) -> Result<Vec<vocab::TenantId>, PgProjectionWorkerRuntimeError> {
+    after: Option<rss_request_context::TenantId>,
+) -> Result<Vec<rss_request_context::TenantId>, PgProjectionWorkerRuntimeError> {
     let tenants: Vec<String> = tokio::time::timeout(
         PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT,
         sqlx::query_scalar(
@@ -643,7 +643,7 @@ async fn projection_worker_tenants(
     tenants
         .into_iter()
         .map(|tenant| {
-            vocab::TenantId::parse(&tenant)
+            rss_request_context::TenantId::parse(&tenant)
                 .map_err(|_| PgProjectionWorkerRuntimeError::InvalidTenant)
         })
         .collect()
@@ -653,7 +653,7 @@ async fn projection_worker_tenants(
 async fn projection_worker_tenant_is_quarantined(
     worker: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Result<bool, PgProjectionWorkerRuntimeError> {
     tokio::time::timeout(PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT, async {
         let mut tx = worker.0.pool.begin().await?;
@@ -705,7 +705,7 @@ impl ProjectionWorkerGeneration {
 async fn resolve_projection_worker_generation(
     worker: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Result<ProjectionWorkerGeneration, PgProjectionWorkerRuntimeError> {
     let row: Option<(String, String, String, String, i64, i64)> =
         tokio::time::timeout(PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT, async {
@@ -768,7 +768,7 @@ async fn run_and_settle_projection_tenant(
     target: Arc<dyn eventexec::ProjectionTarget>,
     payload_protector: DlxPayloadProtector,
     runner: eventexec::ProjectionRunnerConfig,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     quantum: ProjectionTenantQuantum<'_>,
 ) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
     // Resolve/bind first: observe SQL requires the selected active generation. Uninitialized /
@@ -818,7 +818,7 @@ async fn run_and_settle_projection_tenant(
 async fn quarantine_projection_tenant(
     worker: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     fatal: ProjectionTenantFatal,
 ) -> Result<(), PgProjectionWorkerRuntimeError> {
     let failed_lsn = i64::try_from(fatal.failed_lsn.get())
@@ -855,7 +855,7 @@ async fn run_projection_tenant(
     target: Arc<dyn eventexec::ProjectionTarget>,
     payload_protector: DlxPayloadProtector,
     runner: eventexec::ProjectionRunnerConfig,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     metric_ctx: &ProjectionWorkerMetricCtx<'_>,
 ) -> Result<ProjectionTenantRun, PgProjectionWorkerRuntimeError> {
     let source = PgProjectionWorkerSource::new(worker, target_scope, tenant);
@@ -890,7 +890,7 @@ struct ProjectionSweepGaugeAcc {
     max_lag: f64,
     max_freshness_secs: Option<f64>,
     sum_dlq: f64,
-    observed_tenants: HashSet<vocab::TenantId>,
+    observed_tenants: HashSet<rss_request_context::TenantId>,
 }
 
 #[cfg(feature = "domain-settings")]
@@ -906,7 +906,7 @@ struct ProjectionTenantObservation {
 async fn observe_projection_tenant_gauges(
     worker: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     clock: &dyn Clock,
     gauges: &mut ProjectionSweepGaugeAcc,
 ) {
@@ -932,7 +932,7 @@ async fn observe_projection_tenant_gauges(
 async fn load_projection_tenant_observation(
     worker: &VerifiedPgProjectionWorkerStore,
     target: &ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Result<ProjectionTenantObservation, PgProjectionWorkerRuntimeError> {
     tokio::time::timeout(PROJECTION_WORKER_SHORT_OPERATION_TIMEOUT, async {
         let mut tx = worker.0.pool.begin().await?;
@@ -1755,10 +1755,10 @@ mod projection_worker_tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn more_work_round_robin_is_fair_and_deadline_bounded() {
-        let first =
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("first tenant");
-        let second =
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000002").expect("second tenant");
+        let first = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("first tenant");
+        let second = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000002")
+            .expect("second tenant");
         let mut visits = Vec::new();
         let mut counts = HashMap::new();
         let degraded = drive_projection_round_robin(
@@ -1800,8 +1800,8 @@ mod projection_worker_tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn round_robin_observes_cancellation_before_next_quantum() {
-        let tenant =
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").expect("tenant");
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
+            .expect("tenant");
         let token = CancellationToken::new();
         token.cancel();
         let mut visits = 0_u8;

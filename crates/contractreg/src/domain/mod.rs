@@ -9,34 +9,7 @@
 //!
 //! ref: casbin/casbin-rs src/model/mod.rs@master（命名空间 (domain,kind,version) + lifecycle 状态机）。
 
-// ---------------------------------------------------------------------------
-// ContractId
-// ---------------------------------------------------------------------------
-
-/// 契约标识 newtype，格式 `{domain}.{kind}.{version}`（私有字段；构造经 fallible funnel）。
-// reason: 签名冻结期字段已声明但 body 全为 todo!()，dead_code 来自冻结期（ADR-004 C8）。
-#[allow(dead_code)]
-pub(crate) struct ContractId(String);
-
-// reason: 签名冻结期方法尚无调用方，dead_code 来自冻结期（ADR-004 C8）。
-#[allow(dead_code)]
-impl ContractId {
-    /// 解析并校验格式 `{domain}.{kind}.{version}`（fail-closed）。
-    pub(crate) fn parse(_raw: &str) -> Result<Self, ContractRegError> {
-        todo!()
-    }
-
-    /// 借出底层字符串视图。
-    pub(crate) fn as_str(&self) -> &str {
-        todo!()
-    }
-}
-
-impl std::fmt::Debug for ContractId {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("ContractId").field(&self.0).finish()
-    }
-}
+pub(crate) use rss_contract::ContractId;
 
 // ---------------------------------------------------------------------------
 // ContractKind

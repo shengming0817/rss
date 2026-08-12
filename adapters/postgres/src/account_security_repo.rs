@@ -4,8 +4,9 @@ use crate::cotx::{ServingReadLane, TenantDb};
 use crate::pool::VerifiedPgReadStore;
 use identity::ports::{
     AccountSecurityReadRepo, AccountSecuritySnapshot, AccountSecurityState, AccountStatus,
-    IdentityError, TenantId, TenantRepoScope,
+    IdentityError, TenantRepoScope,
 };
+use rss_request_context::TenantId;
 
 /// PostgreSQL read model for authentication gates.
 pub struct PgAccountSecurityRepo {
@@ -151,7 +152,7 @@ mod tests {
     #[test]
     fn account_security_hydration_rejects_each_negative_persisted_timestamp()
     -> Result<(), Box<dyn std::error::Error>> {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
         let user_id = ids::UserId::parse("67e55044-10b1-426f-9247-bb680e5fe0c8")?;
 
         for (status_changed_at_micros, updated_at_micros, field) in

@@ -30,8 +30,10 @@
 #![forbid(unsafe_code)]
 
 use base64::Engine;
-use vocab::PrincipalKind;
-use vocab::tenant::{RowVisibility, ScopedTenant, TenantId};
+use rss_request_context::PrincipalKind;
+use rss_request_context::RowScope;
+use rss_request_context::TenantId;
+use vocab::tenant::RowVisibility;
 
 use primitives::authplan::{AuthPlan, AuthRequirement, RouteAuthOptOut, resolve_requirement};
 
@@ -223,7 +225,7 @@ pub enum ProjectionMaintenanceGrantError {
 
 // 主体类别 `PrincipalKind` 单一源已上移基础层 `vocab`（crates/vocab/src/principal.rs）：authn `Principal.kind` /
 // httpserve `Authenticated` 证据 / audit `actor_kind` 共用同一枚举，杜绝双源漂移。本 crate 经顶部
-// `use vocab::PrincipalKind` 消费；KIND_* claim 串 → `PrincipalKind` 的映射策略仍归本 crate（`from_verified_jwt`）。
+// `use rss_request_context::PrincipalKind` 消费；KIND_* claim 串 → `PrincipalKind` 的映射策略仍归本 crate（`from_verified_jwt`）。
 
 // ---------------------------------------------------------------------------
 // JWT claims 解码 DTO（私有，不 Serialize）
@@ -424,7 +426,7 @@ impl Principal {
 
     /// 从 principal + 请求 ctx 派生行级可见性义务（ADR-002）。
     ///
-    /// `ctx` 类型为 `runctx::AppCtx`，即 `runctx::RequestCtx<vocab::tenant::TenantId, Arc<dyn PrincipalFacet>>`
+    /// `ctx` 类型为 `runctx::AppCtx`，即 `runctx::RequestCtx<rss_request_context::TenantId, Arc<dyn PrincipalFacet>>`
     /// 别名，遵循 ADR-002 显式传 `&RequestCtx` 而非隐式线程局部的原则（本函数只读 `ctx.tenant()`；
     /// principal payload 供 diport / 审计等其它 ambient 消费者）。
     /// ctx 缺失 fail-closed（返回 [`runctx::MissingCtx`]，绝不伪造 RowScope）。
@@ -444,14 +446,14 @@ impl Principal {
         let ctx_tenant = *ctx.tenant();
         // scoped 主体：principal tenant claim 必须与已认证 ctx tenant 一致，否则 fail-closed
         // （防 tenant-A 令牌在 ctx-B 下越权派生可见域，codex review F3）。
-        let scoped = |scope: ScopedTenant| match self.tenant {
+        let scoped = |scope: RowScope| match self.tenant {
             Some(t) if t == ctx_tenant => Ok(RowVisibility::new(scope, ctx_tenant)),
             _ => Err(runctx::MissingCtx),
         };
         match self.kind {
-            PrincipalKind::User => scoped(ScopedTenant::SelfOnly),
-            PrincipalKind::Device => scoped(ScopedTenant::Device),
-            PrincipalKind::Admin => scoped(ScopedTenant::Tenant),
+            PrincipalKind::User => scoped(RowScope::SelfOnly),
+            PrincipalKind::Device => scoped(RowScope::Device),
+            PrincipalKind::Admin => scoped(RowScope::Tenant),
             // super-admin 的普通同步 scope 永不签发 All-scope；跨租户读只能经 target-bound grant、
             // route-specific durable append 和 audit-owned receipt 链闭合。
             PrincipalKind::SuperAdmin => Err(runctx::MissingCtx),
@@ -521,7 +523,7 @@ pub use crosstenant::{
 /// grant），**不是**「未审计的 403」语义——调用方须自行记录 deny 后再对外映射 HTTP 状态。
 mod crosstenant {
     use super::Principal;
-    use vocab::PrincipalKind;
+    use rss_request_context::PrincipalKind;
 
     /// 跨租户审计 grant 派生失败（fail-closed）：非 super-admin 不签发 grant。
     #[derive(Debug, thiserror::Error)]
@@ -618,14 +620,14 @@ mod crosstenant {
     /// 成功写入 typed durable appender 后才能铸造 read scope。私有字段与非 Clone 语义禁止调用方重组
     /// target/event，且彻底删除了“任意成功 callback 即视为 durable”的旁路。
     pub struct CrossTenantAuditGrant {
-        target: vocab::TenantId,
+        target: rss_request_context::TenantId,
         event: diport::AuditEvent,
         _seal: (),
     }
 
     impl CrossTenantAuditGrant {
         /// 该授权 grant 绑定的目标租户。
-        pub fn target(&self) -> vocab::TenantId {
+        pub fn target(&self) -> rss_request_context::TenantId {
             self.target
         }
 
@@ -691,7 +693,7 @@ pub mod test_support {
         AccessToken, Principal, PrincipalKind, VerifiedMaintenanceServiceOperator,
         VerifiedServiceToken,
     };
-    use vocab::tenant::TenantId;
+    use rss_request_context::TenantId;
 
     /// 构造测试 [`Principal`]（kind / subject / tenant 任意；不进生产 / wire 路径）。
     pub fn principal(
@@ -1128,7 +1130,7 @@ impl VerifiedServiceToken {
     ///
     /// This is the sole ambient tenant authority for service-token routes; header challengers never
     /// become a second source.
-    pub fn tenant(&self) -> Result<vocab::TenantId, AuthnError> {
+    pub fn tenant(&self) -> Result<rss_request_context::TenantId, AuthnError> {
         match self.claims.view() {
             diport::VerifiedClaimsView::ServiceToken { tenant, .. } => Ok(tenant),
             _ => Err(AuthnError::PrincipalInvalid),
@@ -1201,7 +1203,7 @@ impl VerifiedProjectionOperatorToken {
     }
 
     /// Signed canonical tenant carried by the verified token.
-    pub fn tenant(&self) -> Result<vocab::TenantId, AuthnError> {
+    pub fn tenant(&self) -> Result<rss_request_context::TenantId, AuthnError> {
         match self.claims.view() {
             diport::VerifiedClaimsView::ProjectionOperator { tenant, .. } => Ok(tenant),
             _ => Err(AuthnError::PrincipalInvalid),
@@ -1327,9 +1329,9 @@ mod principal_facet_tests {
     //! facet 只暴露 vetted 非-PII（kind / 受控 subject 比较）；`app_ctx` 把已验证 Principal + 已认证
     //! tenant 装进 `runctx::AppCtx`，供验签桥经 `runctx::scope` 绑定 ambient。
     use super::{CANON_TENANT, Principal, PrincipalKind, app_ctx};
+    use rss_request_context::TenantId;
     use runctx::PrincipalFacet;
     use std::sync::Arc;
-    use vocab::tenant::TenantId;
 
     #[allow(clippy::expect_used)]
     fn tenant() -> TenantId {
@@ -1480,8 +1482,9 @@ mod row_visibility_tests {
     //! user→self / device→device / admin→tenant / super-admin→**fail-closed**（All 须经 audited funnel，
     //! 见 `cross_tenant_audit_grant_tests`）/ service·anonymous→fail-closed。
     use super::{CANON_TENANT, Principal, PrincipalKind};
+    use rss_request_context::RowScope;
+    use rss_request_context::TenantId;
     use rstest::rstest;
-    use vocab::tenant::{RowScope, TenantId};
 
     #[allow(clippy::expect_used)]
     fn tenant() -> TenantId {
@@ -1562,8 +1565,8 @@ mod cross_tenant_audit_grant_tests {
         PrincipalKind,
     };
     use diport::{AuditOutcome, Clock};
+    use rss_request_context::TenantId;
     use std::time::SystemTime;
-    use vocab::tenant::TenantId;
 
     const CANON_T: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
@@ -1727,7 +1730,7 @@ mod principal_derive_tests {
         VerifiedMaintenanceServiceOperator, VerifiedServiceToken,
     };
     use diport::{VerifiedClaims, VerifiedFederatedPermissions};
-    use vocab::tenant::TenantId;
+    use rss_request_context::TenantId;
 
     const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
@@ -1942,7 +1945,7 @@ mod verified_token_seal {
         VerifiedProjectionOperatorToken, VerifiedServiceToken,
     };
     use diport::{VerifiedClaims, VerifiedFederatedPermissions};
-    use vocab::TenantId;
+    use rss_request_context::TenantId;
 
     fn permissions() -> VerifiedFederatedPermissions {
         VerifiedFederatedPermissions::new([vocab::GrantPermission::route(
@@ -2040,7 +2043,7 @@ mod verify_bridge_tests {
         VerifiedClaims, VerifiedFederatedPermissions,
     };
     use ids::UserId;
-    use vocab::tenant::TenantId;
+    use rss_request_context::TenantId;
 
     const CANON: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const USER: &str = "550e8400-e29b-41d4-a716-446655440000";
@@ -2404,7 +2407,7 @@ mod verify_bridge_tests {
 mod value_type_tests {
     //! token newtype / `Principal` 访问器 / Send / Debug 脱敏。
     use super::{AccessToken, CANON_TENANT, Principal, PrincipalKind, RefreshToken};
-    use vocab::tenant::TenantId;
+    use rss_request_context::TenantId;
 
     fn _assert_send<T: Send>() {}
 

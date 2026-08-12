@@ -28,13 +28,15 @@ workspace(见 §扁平 workspace 结构、§Rust 原生强制)。
 ### 公开发布命名
 
 上述 concat/no-dash/no-`rss-` 规则只约束仓内 workspace identity。进入正向 Release Surface 的公开 registry
-package 使用品牌 **RSS** 与 `rss-` 前缀；已接纳的 internal → public 映射固定为：
+package 使用品牌 **RSS** 与 `rss-` 前缀；当前 Release Surface 已接纳的 internal → public 映射固定为：
 
 | repository path / internal dependency key | public Cargo package | registry owner |
 |---|---|---|
 | `diagctx` | `rss-diag-context` | `github:shengming0817:rss-maintainers` |
 | `tracewire` | `rss-trace-context` | `github:shengming0817:rss-maintainers` |
 | `conformance` | `rss-conformance` | `github:shengming0817:rss-maintainers` |
+| `contract` | `rss-contract` | `github:shengming0817:rss-maintainers` |
+| `request-context` | `rss-request-context` | `github:shengming0817:rss-maintainers` |
 | `platform` | `rss-platform` | `github:shengming0817:rss-maintainers` |
 | `crates/devicesecuritycontracts` / `devicesecuritycontracts`（candidate，尚未物化） | `rss-device-security-contracts` | `github:shengming0817:rss-maintainers` |
 
@@ -58,7 +60,7 @@ RC、registry upload 或 published。
 | Contract 归属 | `owner` = 域 crate 名 / `_framework`(sentinel) | provider-agnostic 中立契约归框架 |
 | Assembly | `assemblies/{name}/` 的 `assembly.toml`(+ `bins/server` / bin crate) | 依赖闭包 = 物理打包；static assembly intent + DI provider 声明源 |
 | 一致性等级 L0–L4 | `contract.toml` 的 `consistencyLevel` 字段 + typed `[capabilities.*]` 证据块；L4 另需顶层 `[reconcile]` block；active HTTP 同源派生 `ROUTE: vocab::HttpRouteBinding<RouteMarker, ConsistencyMarker>`，`HttpSpec::route` 由 `ROUTE.evidence()` 擦除供元数据查询 | `ConsistencyMarker` 由 manifest codegen 单源选择，不可手写替换；非 L0 state 经 `.with_state`闭合，L0 只允许 stateless 或 `.with_classified_state` 的 Read/Auth + LocalPrivilege；`xtask` R22 强制等级、能力证据与 L4 reconcile 声明一致；endpoint 构造要求 binding marker 与 handler `ContractMarker` 相同，request extension 传播同一 evidence |
-| context 控制流值(tenant/principal) | `runctx::RequestCtx`/`AppCtx`(`task_local` 传播);tenant payload = `vocab::tenant::TenantId` | sealed 构造 + redacted Debug + fail-closed 取用(决策 #2 → ADR-002);base intra-base DAG `runctx → vocab` |
+| context 控制流值(tenant/principal) | `rss-request-context` canonical value/read view；仓内 ambient carrier 为 `runctx::RequestCtx`/`AppCtx` | Foundation 值不是 evidence；production trusted concrete 仅由 AuthZ 后的 assembly bridge 私有构造，`runctx → rss-request-context` |
 | 层 | 扁平 `crates/` 分组 + `deny.toml` 强制 | 见 §扁平 workspace 结构、§分层 |
 
 active HTTP L2 producer 的 route 绑定必须走 move-only typed 链：`HttpProducerBinding<RouteMarker>` →
@@ -81,7 +83,9 @@ rss/
 ├── .config/nextest.toml  # cargo-nextest（进程隔离 / 重试）
 ├── crates/               # 全部库 crate，扁平（Rust 惯例，非分层目录）
 │   ├── vocab/            # error(thiserror) / authz / tenant / query（基础词汇）
-│   ├── platform/         # PlatformPublic：发布的 provider-free typed application kernel（零 workspace 生产依赖）
+│   ├── contract/         # FoundationPublic：canonical contract identity/descriptor（std-only）
+│   ├── request-context/  # FoundationPublic：authority-free request values/read-only views
+│   ├── platform/         # PlatformPublic：typed async waist；精确依赖两个 Foundation package
 │   ├── assembly-schema/  # assembly / contract authoring schema；依赖 vocab canonical 类型
 │   ├── ids/              # sealed newtype（私有字段 = 硬封）
 │   ├── securederive/    # proc-macro：#[derive(Redact)] 字段级脱敏（intra-base DAG 低于 secure）
@@ -138,10 +142,14 @@ rss/
 
 ## 分层(crate 图 + deny.toml 编译期强制)
 
-- **PlatformPublic** `rss-platform`：全 workspace 最低位公开层；normal/build dependency 只允许外部 crates，
-   禁止任何 workspace 出边。它拥有 sealed generated contract、静态 federated ES256 authority、进程内 typed
-   dispatch 与 bounded drain；不拥有 listener/provider/assembly/profile readiness。Basis/Engine/DI-infra/Service/
-   Domain/Adapter/Generated/Tooling/Example/Root 可反向消费它，但不得把 internal 类型注入其公开签名。
+- **FoundationPublic** `rss-contract` / `rss-request-context`：全 workspace 最低位公开层；前者 std-only，后者
+  只依赖外部 `uuid` 且公共签名不泄漏该类型，二者均无 internal workspace 出边。它们分别唯一拥有 contract
+  identity/descriptor 与 authority-free request values/read-only views；不拥有 registry、generated catalog、crypto、
+  trusted mint、cancel authority 或跨租户 capability。
+- **PlatformPublic** `rss-platform`：位于 Foundation 之上，normal/build workspace 出边精确限定为两个 Foundation
+  package。它只拥有 typed async application/module/dispatch waist、闭合 dispatch 结果与只读 `HostView`；不拥有
+  JWT/JWKS/token verifier、listener/provider、进程 lifecycle、RuntimePlan、inventory publisher 或 drain authority。
+  RuntimeExec 经必填只读 bridge 投影 readiness/drain/live inventory，production assembly 是唯一接线点。
 
 - **基础** `vocab`/`assembly-schema`/`ids`/`securederive`/`secure`/`support`/`runctx`/`diagctx`/`authmint`/`sagaauthmint`/`dlqauthmint`/`requestidmint`/`runtimeinventorymint`:依赖 std + 外部 crate(serde/thiserror/uuid…),**不依赖引擎/DI-infra/服务/域/adapters**。基础层内部按 enumerated intra-base DAG 单向依赖:`diagctx（独立根）◁ runtimeinventorymint ◁ vocab ◁ assembly-schema ◁ ids ◁ securederive ◁ secure ◁ support ◁ runctx`(右可依赖左 = **DAG 前向边均 sanctioned**、反向 / 同 crate 禁止)；capability crate `diagctx`、`authmint`、`sagaauthmint`、`dlqauthmint` 与 `requestidmint` 为独立根，不依赖其它基础 crate，也不被其它基础 crate 依赖。`dlqauthmint` 的 exact wrapper 仅为 `diport`（proof owner）与 `runtime`（唯一生产 mint owner）；`eventexec`、adapter 与其它 assembly 均不能命名 token（DLQ-OPERATOR-MINT-01 Hard）。`diport::DlqOperatorAuthorization<A>` 以 sealed action marker、私有字段和 move-only proof 将 caller、已验证 operator subject、tenant、durable start audit ID 与五类 DLQ action 绑定；runtime 内部铸造时序另由 `rss_operator_authorization_callsite` 精确 funnel 守（Medium）。`requestidmint` 仅由 deny.toml wrappers `httpserve`（mint）与 `generated`（consume）持有（HTTP-REQUEST-ID-AUTHORITY-01 Hard），因此业务 crate 不能伪造 typed response 的 request ID。`runtimeinventorymint` 无出边，deny.toml wrapper exact-set 仅准 `assembly-schema` 在 receipt 签名中命名 token、`runtimeexec` 实际持有 token；assembly roots 不能依赖它（RUNTIME-INVENTORY-MINT-01 Hard）。`diagctx` 仅向上被服务/域/adapters/组合根消费（诊断信道 fail-open，ADR-002 §D1-bis）；`authmint` 仅由既有 deny.toml wrappers 持有（AUTH-EVIDENCE-MINT-01 Hard）；assembly 内 exact mint + proof-consuming 另由 `rss_authenticated_callsite` Medium 守。`assembly-schema::runtime_inventory` 拥有 wire-neutral parts、invariant 与私有 observation fields；`runtimeexec::inventory::InventoryReader` 独占 live source 和 mint，generated 只消费 observation，不存在 generated↔runtimeexec 编译边。现有 sanctioned 前向边:`assembly-schema → runtimeinventorymint|vocab`（runtime inventory receipt token 与 contract authoring 的 canonical `StepName` / `DomainName` 类型边界）、`runctx → vocab`(`AppCtx` 的 tenant payload 收敛为具体 `vocab::tenant::TenantId`,ADR-002 §D3,决策 #2)与`secure → securederive`(字段级脱敏 `#[derive(Redact)]` proc-macro；`securederive` 是编译期纯工具 crate,出边全外部,非 SemVer 库面 ⇒ public-api baseline 经 `layers::is_proc_macro` 排除)。`INVARIANT: BASE-INTRADAG-01`:无环由 cargo 天然守(反向 2-crate 边即成环被拒);前向 / 反向方向守由 `cargo xtask layer-deps` 的 `layers::basis_intra_dag_allows` 机器强制。
 - **引擎/原语** `consistency`/`primitives`/`conformance`/`tracewire`:依赖基础(或仅外部 crate);不依赖 DI-infra/服务/域/adapters。`conformance` 是公开的 provider-neutral LocalTx assertion primitive，零 workspace 出边；支持面不含 adapter/provider driver、fixture、scheduler、CI/T3 或产品成熟度。`tracewire`(W3C Trace Context capture/remote-parent restore 生产单源)出边全是外部 `opentelemetry`/`tracing-opentelemetry`、无内部边,被服务 `eventexec`(consume 还原)+ adapters `httpd`(HTTP ingress 还原)/`postgres`(emit 捕获)依赖。生产 OTel 桥只在此与 `adapters/otel` 收口；publish=false 的 `tracewiretest` 只提供 dev-dependency 测试装配。
@@ -152,8 +160,8 @@ rss/
   **provider-agnostic** DI port trait 单源(Clock/Signer/Publisher/Subscriber/AuditSink/DlxLifecycleRepository/DlxArchiveStore…,签名只引基础/wire/port-owned/associated types)。`ManagedResource` / `ManagedResourceLocal` 是为复用 async dyn 派发而同置于本层的 lifecycle seam，adapter resource、服务 worker 与 runtime wrapper 均可实现，不受 provider impl-site allowlist 限制。需要运行期动态消费的 async port 使用 dynosaur Dyn wrapper；默认 dyn wrapper 是 Send 非 Sync（`async_send`），跨 `Send + Sync` worker 多次调用且 provider 由组合根静态选择的 port 改用 ADR-003 静态泛型。共享 Sync 例外是 `classify_ports!` 的 `async_sync` 闭集四端口（`KeyProvider` / `Pdp` / `SecretResolver` / `ServiceTokenReplayStore`，base trait 显式 `Send + Sync`；INVARIANT DIPORT-DYN-CONCURRENCY-01：Hard = native `assert_send_sync_bound`，Medium = `ui_assert_*` trybuild），其中 PDP 由正向/负向 compile gate 锁定并供 HTTP serving 跨 await 共享。不为无消费方的动态能力生成 wrapper。**服务/域 互不依赖,但都可向下依赖 diport** ——
   服务层 crate(bootstrap/deviceloop/eventexec/authn…)消费 DI port 须经此层,故 diport 不能与它们同层(服务→服务禁)。
   注:**域形** repo/service port(签名引用域内实体)**不归 diport**,归所属域 crate `pub mod ports`(ADR-005 Option 2,见下「域」行 + category line ADR-005 §2.1)。
-- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。**服务→服务横向默认禁(同 diport 行所述),唯一受控例外 = ADR-009 sanctioned `bootstrap → httpserve` 单向路由类型边**(组合根 typed route funnel:`bootstrap::finalize_routes` 产 `httpserve::UnfinalizedRoutes` → 经 `httpserve::finalize_auth` 换可 bind 的 `AuthenticatedRoutes`;反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 边仍禁),由 `xtask layers::route_funnel_allows` 机器守(INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01,见下「静态强制」表 + ADR-009)。跨层另有且仅有两个 **Service → Generated** sealed bridge owner：`eventexec → generated` 实现 command/event authoring与 workflow seam，`bootstrap → generated` 实现 typed subscription registry seam；由 `generated_seam_allows` 精确守这两个有向 crate pair，且 `LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01` 进一步把 bootstrap production item surface 收窄到 exact registrar vocabulary，不能推广成一般 Service→Generated 或 generated authoring/catalog 消费。`testkit` 与 `tracewiretest` 是同层 **test-support 库**，且只经 `[dev-dependencies]` 消费。LAYER-DEPS-08 守任一 shipped 入边指向 test-support 均失败；LAYER-DEPS-10 守 test-support shipped 出边，唯一精确例外为 `testkit → rss-conformance`，使内部 harness 复用同一公开分类 owner，其余内部出边仍失败。`eventexec/test-support` 还可从中性 Projection identity 铸造 source/operator authority，因此与其它 scoped-construction feature 一样由 LAYER-DEPS-09 禁止进入任一 shipped feature closure。
-- **RuntimeExec** `runtimeexec`:provider-independent 的 runtime 启动、信号等待与逆序关闭内核，并拥有 runtime inventory 的 live reader/source sampling 与唯一 production mint；只可依赖基础/引擎/DI-infra/服务。shipped direct dependency 的实际集合以 `crates/runtimeexec/Cargo.toml` 为源，并由 `cargo xtask layer-deps` 的 RUNTIMEEXEC-DEPS-01 executable allowlist 收敛；本文不复制该集合。它不拥有 HTTP transport、wire DTO、域模型或具体 provider。分层矩阵只允许 Root 入边，`deny.toml` target wrapper 再收窄为 `assemblies/runtime|settingsonly|identityaudit` 三个 assembly 的集合相等白名单，禁止 bins/composition/journeys/xtask 直接消费（RUNTIMEEXEC-LAYER-01）。
+- **服务** `httpserve`/`authn`/`bootstrap`/`eventexec`/`observ`/`distributed`/`deviceloop`:依赖基础+引擎+DI-infra;不依赖域/adapters。**服务→服务横向默认禁(同 diport 行所述),唯一受控例外 = ADR-009 sanctioned `bootstrap → httpserve` 单向路由类型边**(组合根 typed route funnel:`bootstrap::finalize_routes` 产 `httpserve::UnfinalizedRoutes` → 经 `httpserve::finalize_auth` 换可 bind 的 `AuthenticatedRoutes`;反向 `httpserve → bootstrap` 及其它任意 `服务→服务` 边仍禁),由 `xtask layers::route_funnel_allows` 机器守(INVARIANT LAYER-DEPS-ROUTE-FUNNEL-01,见下「静态强制」表 + ADR-009)。跨层另有且仅有两个 **Service → Generated** sealed bridge owner：`eventexec → generated` 实现 command/event authoring与 workflow seam，`bootstrap → generated` 实现 typed subscription registry seam；由 `generated_seam_allows` 精确守这两个有向 crate pair，且 `LAYER-DEPS-GENERATED-BOOTSTRAP-REGISTRAR-01` 进一步把 bootstrap production item surface 收窄到 exact registrar vocabulary，不能推广成一般 Service→Generated 或 generated authoring/catalog 消费。`testkit` 与 `tracewiretest` 是同层 **test-support 库**：前者提供 HTTP 契约/容器 fixture，后者只提供 OTel subscriber/exporter 脚手架；两者只经 `[dev-dependencies]` 消费。机器边界拆为正交两面：LAYER-DEPS-08 `check_test_support_confinement` 守任一 shipped 入边指向 test-support 均失败；LAYER-DEPS-10 `check_test_support_internal_dependencies` 守 test-support shipped 出边，唯一精确例外为 `testkit → rss-conformance`，使内部 harness 复用同一公开分类 owner，其余内部出边仍失败。`eventexec/test-support` 还可从中性 Projection identity 铸造 source/operator authority，因此与其它 scoped-construction feature 一样由 LAYER-DEPS-09 禁止进入任一 shipped feature closure。
+- **RuntimeExec** `runtimeexec`:provider-independent 的 runtime 启动、信号等待与逆序关闭内核，并拥有 runtime inventory 的 live reader/source sampling、唯一 production mint 与 `Starting → Ready → Draining → Stopped` 的只读 Platform 投影；只可依赖公开 Foundation/Platform 与基础/引擎/DI-infra/服务。shipped direct dependency 的实际集合以 `crates/runtimeexec/Cargo.toml` 为源，并由 `cargo xtask layer-deps` 的 RUNTIMEEXEC-DEPS-01 executable allowlist 收敛；本文不复制该集合。它不拥有 HTTP transport、wire DTO、域模型或具体 provider。分层矩阵只允许 Root 入边，`deny.toml` target wrapper 再收窄为 `assemblies/runtime|settingsonly|identityaudit` 三个 assembly 的集合相等白名单，禁止 bins/composition/journeys/xtask 直接消费（RUNTIMEEXEC-LAYER-01）。
 - **Tooling/Verification** `workspacefacts`:非发布 Cargo workspace facts owner；合法链路精确为
   `xtask → workspacefacts → guppy`。xtask 只经 command-scoped `CommandWorkspaceFacts` 注入（同命令
   metadata 成功/失败至多一次），不得绕过 façade 直依赖 guppy，也不得自读成员 `Cargo.toml` 判定

@@ -7,7 +7,7 @@ use generated::event::identity_v1::device_command_acked;
 fn append_raw_coordinates(
     emitter: &GeneratedEventEncoder,
     payload: device_command_acked::IdentityDeviceCommandAckedPayload,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     subject_id: EnvelopeSubjectId,
     actor: OutboxActor,
     idempotency_key: IdemKey,

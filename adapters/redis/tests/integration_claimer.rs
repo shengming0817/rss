@@ -82,7 +82,7 @@ fn make_deps(url: &str) -> Result<RedisRuntimeDeps, FixtureError> {
 // reason: 测试 fixture 使用固定合法 receipt metadata，构造失败即测试配置错误。
 fn receipt_ctx_for(tenant: &str, group: &str) -> Result<InboxReceiptContext, FixtureError> {
     Ok(InboxReceiptContext::new(
-        vocab::TenantId::parse(tenant)?,
+        rss_request_context::TenantId::parse(tenant)?,
         ConsumerGroup::parse(group)?,
         "identity",
         "identity.session-created",

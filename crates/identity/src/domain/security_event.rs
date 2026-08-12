@@ -11,7 +11,7 @@
 use std::time::SystemTime;
 
 use ids::UserId;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 use authn::{
     AccountSecurityEventKind, AuthGrant, AuthGrantCloseMutation, AuthGrantId, AuthGrantStateError,
@@ -108,14 +108,14 @@ impl std::fmt::Debug for CredentialSecurityTargetRef {
 #[derive(Clone, PartialEq, Eq)]
 pub struct CredentialSecurityInitiator {
     tenant: TenantId,
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
     subject: String,
 }
 
 impl CredentialSecurityInitiator {
     pub(crate) fn authenticated(
         tenant: TenantId,
-        kind: vocab::PrincipalKind,
+        kind: rss_request_context::PrincipalKind,
         subject: impl Into<String>,
     ) -> Self {
         Self {
@@ -128,7 +128,7 @@ impl CredentialSecurityInitiator {
     pub(crate) fn refresh_reuse_detector(tenant: TenantId) -> Self {
         Self {
             tenant,
-            kind: vocab::PrincipalKind::Service,
+            kind: rss_request_context::PrincipalKind::Service,
             subject: REFRESH_REUSE_DETECTOR_SUBJECT.to_owned(),
         }
     }
@@ -137,7 +137,7 @@ impl CredentialSecurityInitiator {
         self.tenant
     }
 
-    pub fn kind(&self) -> vocab::PrincipalKind {
+    pub fn kind(&self) -> rss_request_context::PrincipalKind {
         self.kind
     }
 
@@ -149,13 +149,16 @@ impl CredentialSecurityInitiator {
         keys: &secure::PseudonymKeyRing,
     ) -> Result<secure::PseudonymRef, secure::PseudonymError> {
         let domain = match self.kind {
-            vocab::PrincipalKind::User => "identity.security-event/actor/user",
-            vocab::PrincipalKind::Device => "identity.security-event/actor/device",
-            vocab::PrincipalKind::Admin => "identity.security-event/actor/admin",
-            vocab::PrincipalKind::SuperAdmin => "identity.security-event/actor/super-admin",
-            vocab::PrincipalKind::Service => "identity.security-event/actor/service",
-            vocab::PrincipalKind::Anonymous => "identity.security-event/actor/anonymous",
-            _ => "identity.security-event/actor/unsupported",
+            rss_request_context::PrincipalKind::User => "identity.security-event/actor/user",
+            rss_request_context::PrincipalKind::Device => "identity.security-event/actor/device",
+            rss_request_context::PrincipalKind::Admin => "identity.security-event/actor/admin",
+            rss_request_context::PrincipalKind::SuperAdmin => {
+                "identity.security-event/actor/super-admin"
+            }
+            rss_request_context::PrincipalKind::Service => "identity.security-event/actor/service",
+            rss_request_context::PrincipalKind::Anonymous => {
+                "identity.security-event/actor/anonymous"
+            }
         };
         keys.current(self.tenant, domain, self.subject.as_bytes())
     }
@@ -760,7 +763,7 @@ mod tests {
                 kind,
                 CredentialSecurityInitiator::authenticated(
                     tenant(),
-                    vocab::PrincipalKind::User,
+                    rss_request_context::PrincipalKind::User,
                     user().as_uuid().hyphenated().to_string(),
                 ),
                 at(20),
@@ -825,7 +828,7 @@ mod tests {
                 kind,
                 CredentialSecurityInitiator::authenticated(
                     tenant(),
-                    vocab::PrincipalKind::User,
+                    rss_request_context::PrincipalKind::User,
                     user().as_uuid().hyphenated().to_string(),
                 ),
                 at(20),
@@ -865,7 +868,7 @@ mod tests {
             GrantSecurityEventKind::LogoutCurrent,
             CredentialSecurityInitiator::authenticated(
                 other,
-                vocab::PrincipalKind::User,
+                rss_request_context::PrincipalKind::User,
                 "opaque-user",
             ),
             at(20),

@@ -139,12 +139,15 @@ pub struct SettingsConfigGetResponse {
 pub const CONTRACT_ID: &str = "settings.config-get";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "settings",
-    "settings.config-get",
-    "v4",
-    "sha256:dd46a9c76151adee9f09b1a9ae2068f3acf3c245ce94a2e05185ed0c6123b99c",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "settings.config-get",
+        "v4",
+        "sha256:dd46a9c76151adee9f09b1a9ae2068f3acf3c245ce94a2e05185ed0c6123b99c",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("settings", DESCRIPTOR, "v4");
 
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/settings/configs/{key}";

@@ -6,12 +6,12 @@ use std::time::Duration;
 use anyhow::Context as _;
 use base64::Engine as _;
 use diport::KeyName;
+use rss_request_context::TenantId;
 use serde::Deserialize;
 use vault::{
     StoreBinding, TenantStoreAllowlist, TenantStoreAllowlistError, VaultKeyProvider,
     VaultRuntimeDeps, VaultSecretResolver, VaultSigner,
 };
-use vocab::TenantId;
 
 use crate::EnvSecret;
 use crate::config::SnapshotConfig;

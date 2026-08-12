@@ -16,6 +16,7 @@ impl Finalized<'_> {
             listeners,
             probe_receipt,
             inventory_publisher,
+            platform_host,
         } = self;
 
         // Validate every fallible launch input while the completed provider transaction still owns
@@ -46,7 +47,8 @@ impl Finalized<'_> {
                     trace_exporter,
                     lifecycle_batches,
                     crate::launch::total_drain_budget()?,
-                );
+                )
+                .with_platform_host(platform_host);
                 runtimeexec::launch(launch_plan).await
             }
         };

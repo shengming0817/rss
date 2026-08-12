@@ -13,9 +13,9 @@ use deviceloop::{
     ObservedGeneration,
 };
 use ids::DeviceId;
+use rss_request_context::TenantId;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
-use vocab::TenantId;
 
 const DIGEST_PREFIX: &str = "sha256:";
 const DIGEST_BYTES: usize = 32;
@@ -79,7 +79,7 @@ pub enum DeviceCertificateError {
 /// ```compile_fail
 /// use identity::ports::device_certificate::DeviceCertificateScope;
 /// use ids::DeviceId;
-/// use vocab::TenantId;
+/// use rss_request_context::TenantId;
 /// fn forge(tenant: TenantId, device: DeviceId) {
 ///     let _ = DeviceCertificateScope { tenant, device, seal: () };
 /// }

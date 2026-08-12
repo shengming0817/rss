@@ -48,9 +48,10 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::Response;
 use diport::{AuditEvent, AuditOutcome, AuditSink, AuditSinkError};
 use primitives::{AuthRequirement, RequiredScheme, RouteAuthOptOut, resolve_requirement};
+use rss_request_context::{PrincipalKind, TenantId};
 use tower::Layer;
 use tower::Service;
-use vocab::{PrincipalKind, ProjectionField, RoutePermissionId, TenantId};
+use vocab::{ProjectionField, RoutePermissionId};
 
 use crate::auth_audit::record_auth_audit;
 use crate::middleware::VerifiedRequestId;

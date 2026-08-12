@@ -4,18 +4,18 @@ use super::*;
 /// boundary, and the private carrier cannot be imported by production adapters.
 #[derive(Clone, Copy)]
 pub(in super::super) struct IntegrationTenantScope {
-    pub(in super::super) tenant: vocab::TenantId,
+    pub(in super::super) tenant: rss_request_context::TenantId,
     pub(in super::super) _seal: (),
 }
 
 impl crate::cotx::TenantScopeHandle for IntegrationTenantScope {
-    fn tenant(self) -> vocab::TenantId {
+    fn tenant(self) -> rss_request_context::TenantId {
         self.tenant
     }
 }
 
 pub(in super::super) fn integration_tenant_scope(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> IntegrationTenantScope {
     IntegrationTenantScope { tenant, _seal: () }
 }
@@ -49,7 +49,7 @@ impl PgStore {
     /// serving-write transaction surface, matching production construction and tenant scoping.
     pub(in super::super) async fn serving_write_fixture<F, T, E>(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         operation: F,
     ) -> Result<T, E>
     where
@@ -115,8 +115,8 @@ pub(in super::super) use crate::test_pg::{
 };
 
 #[allow(clippy::unwrap_used)]
-pub(in super::super) fn test_tenant() -> vocab::TenantId {
-    vocab::TenantId::parse(COTX_TENANT_A).unwrap()
+pub(in super::super) fn test_tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse(COTX_TENANT_A).unwrap()
 }
 
 #[allow(clippy::unwrap_used)]
@@ -151,17 +151,17 @@ pub(in super::super) fn subject_id(raw: &str) -> diport::EnvelopeSubjectId {
 }
 
 #[allow(clippy::unwrap_used)]
-pub(in super::super) fn actor_for(tenant: vocab::TenantId) -> diport::OutboxActor {
+pub(in super::super) fn actor_for(tenant: rss_request_context::TenantId) -> diport::OutboxActor {
     diport::OutboxActor::scoped(
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         diport::OpaqueActorId::from_opaque("pg-integration-actor").unwrap(),
         tenant,
-        vocab::ScopedTenant::Tenant,
+        rss_request_context::RowScope::Tenant,
     )
 }
 
 pub(in super::super) fn identity_scope(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> identity::ports::TenantRepoScope {
     identity::ports::TenantRepoScope::for_test(tenant)
 }
@@ -176,7 +176,7 @@ pub(in super::super) fn device_certificate_status_query(
         generated::http::identity_v2::device_certificate_status_get::CONTRACT_ID,
         vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead,
         scope.tenant(),
-        vocab::PrincipalKind::Admin,
+        rss_request_context::PrincipalKind::Admin,
         "status-test-operator",
         httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string()),
     );
@@ -218,7 +218,7 @@ pub(in super::super) fn account_status_set_producer_receipt()
 
 pub(in super::super) async fn execute_logout_current_route(
     lifecycle: &crate::PgIdentitySecurityLifecycle,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     command: identity::ports::LogoutCurrentCommand,
 ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
     lifecycle
@@ -232,7 +232,7 @@ pub(in super::super) async fn execute_logout_current_route(
 
 pub(in super::super) async fn execute_logout_all_route(
     lifecycle: &crate::PgIdentitySecurityLifecycle,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     command: identity::ports::LogoutAllCommand,
 ) -> Result<identity::ports::CredentialSecurityReceipt, identity::ports::IdentityError> {
     lifecycle
@@ -275,12 +275,14 @@ pub(in super::super) fn roles_revoke_producer_receipt()
 }
 
 pub(in super::super) fn settings_scope(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> settings::ports::TenantRepoScope {
     settings::ports::TenantRepoScope::for_test(tenant)
 }
 
-pub(in super::super) fn audit_scope(tenant: vocab::TenantId) -> audit::ports::TenantRepoScope {
+pub(in super::super) fn audit_scope(
+    tenant: rss_request_context::TenantId,
+) -> audit::ports::TenantRepoScope {
     audit::ports::TenantRepoScope::for_test(tenant)
 }
 
@@ -490,7 +492,7 @@ pub(in super::super) async fn reviewed_bound_certificate_command_with_deadline(
 
 pub(in super::super) async fn rss_app_write_device_certificate_condition_vector(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: &str,
     fence: &CertificateAttemptFence,
     vector: [(&str, &str, &str); 6],
@@ -549,7 +551,7 @@ pub(in super::super) async fn rss_app_write_device_certificate_condition_vector(
 
 pub(in super::super) async fn device_certificate_condition_rows(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: &str,
 ) -> Result<Vec<(String, String, String, Option<i64>)>, sqlx::Error> {
     sqlx::query_as(
@@ -565,7 +567,7 @@ pub(in super::super) async fn device_certificate_condition_rows(
 
 pub(in super::super) async fn insert_device_desired(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device_id: &str,
 ) -> Result<(), sqlx::Error> {
     sqlx::query(
@@ -611,7 +613,7 @@ pub(in super::super) fn config_contract() -> vocab::ContractBinding {
 #[allow(clippy::unwrap_used)]
 pub(in super::super) fn projection_maintenance_receipt(
     action: authn::ProjectionMaintenanceAction,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     projection: &str,
 ) -> authn::ProjectionMaintenanceReceipt {
     let principal =
@@ -961,7 +963,7 @@ pub(in super::super) async fn assert_serving_ledger_rejected(
 #[allow(clippy::unwrap_used)]
 // reason: UUID v4 is canonical and generated inside the integration fixture.
 pub(in super::super) fn unique_revocation_scope() -> diport::CertScope {
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let device = ids::DeviceId::new(uuid::Uuid::new_v4());
     diport::CertScope::new(tenant, device)
 }
@@ -1143,7 +1145,7 @@ pub(in super::super) fn assert_database_constraint<T>(
 
 pub(in super::super) fn l2_dr_recovery_plan(
     epoch_id: uuid::Uuid,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     database_restore_point: i64,
     broker_restore_point: i64,
     event_ids: &[String],
@@ -1317,7 +1319,7 @@ pub(in super::super) async fn forge_l2_dr_start_audit_as_rss_app(
          )",
     )
     .bind(operator_subject)
-    .bind(plan.tenant().as_uuid().to_string())
+    .bind(plan.tenant().to_string())
     .bind(plan.epoch_id().as_uuid().to_string())
     .bind(start_audit_id.to_string())
     .bind(correlation_id)
@@ -1328,7 +1330,7 @@ pub(in super::super) async fn forge_l2_dr_start_audit_as_rss_app(
 
 pub(in super::super) async fn insert_l2_dr_published_fact(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &str,
     deadline_offset_seconds: i64,
 ) -> TestResult {
@@ -1353,7 +1355,7 @@ pub(in super::super) async fn insert_l2_dr_published_fact(
         "#,
     )
     .bind(event_id)
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(TEST_SCHEMA_HASH)
     .bind(metadata)
     .bind(deadline_offset_seconds)
@@ -1515,7 +1517,7 @@ pub(in super::super) fn audit_profile_classified(
 }
 
 pub(in super::super) fn audit_list_tenant_command(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> audit::ports::AuditListTenantAppend {
     audit::ports::AuditListTenantAppend::for_test(
         tenant,
@@ -1523,10 +1525,10 @@ pub(in super::super) fn audit_list_tenant_command(
             occurred_at: std::time::SystemTime::UNIX_EPOCH
                 + std::time::Duration::from_secs(TEST_OCCURRED_SECS),
             principal_id: "localtx-audit-super-admin".to_string(),
-            principal_kind: vocab::PrincipalKind::SuperAdmin,
+            principal_kind: rss_request_context::PrincipalKind::SuperAdmin,
             tenant_id: None,
             resource_kind: "audit_entries",
-            resource_id: tenant.as_uuid().to_string(),
+            resource_id: tenant.to_string(),
             action: "audit:list-cross-tenant",
             outcome: diport::AuditOutcome::Success,
             request_id: Some("localtx-audit-request".to_string()),
@@ -1537,11 +1539,11 @@ pub(in super::super) fn audit_list_tenant_command(
 
 pub(in super::super) async fn auth_audit_snapshot(
     owner: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> Result<usize, AuditLocalTxProfileError> {
     let (count,): (i64,) =
         sqlx::query_as("SELECT count(*) FROM auth_audit_events WHERE tenant_context = $1::uuid")
-            .bind(tenant.as_uuid().to_string())
+            .bind(tenant.to_string())
             .fetch_one(&owner.pool)
             .await
             .map_err(AuditLocalTxProfileError::storage)?;
@@ -1560,7 +1562,7 @@ where
 pub(in super::super) async fn insert_outbox_log_with_metadata(
     store: &PgStore,
     event_id: &str,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     metadata: serde_json::Value,
 ) -> Result<(), sqlx::Error> {
     let mut tx = store.pool.begin().await?;
@@ -1588,7 +1590,7 @@ pub(in super::super) async fn insert_outbox_log_with_metadata(
 
 pub(in super::super) async fn claim_device_certificate_attempt(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: &str,
     holder: &str,
 ) -> Result<ReconcileAttempt, TestError> {
@@ -1691,7 +1693,7 @@ pub(in super::super) async fn artifact_append_fixture(
     ),
     TestError,
 > {
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let device = uuid::Uuid::new_v4().to_string();
     insert_device_desired(store, tenant, &device).await?;
     let policy_hash = sqlx::query_scalar(

@@ -51,7 +51,7 @@ pub use crate::projection::{
     settings_projection_apply_from_validated,
 };
 pub use generated::event::settings_v1::SettingsConfigChangeKind;
-pub use vocab::TenantId;
+use rss_request_context::TenantId;
 
 /// Generated route marker retained by the HTTP secret-publish LocalTx command.
 pub type SecretPublishRouteMarker = generated::http::settings_v2::RouteMarker;
@@ -87,7 +87,7 @@ impl TenantRepoScope {
 
 /// Non-cross-tenant row-scoped repo capability for settings rows.
 ///
-/// It only wraps [`vocab::ScopedTenant`]-derived visibility, so `RowScope::All` cannot enter normal
+/// It only wraps [`rss_request_context::RowScope`]-derived visibility, so `RowScope::All` cannot enter normal
 /// row-scoped repo signatures.
 pub struct RowRepoScope {
     visibility: vocab::RowVisibility,
@@ -97,7 +97,7 @@ pub struct RowRepoScope {
 impl RowRepoScope {
     #[allow(dead_code)]
     pub(crate) fn from_scoped_visibility(
-        scope: vocab::ScopedTenant,
+        scope: rss_request_context::RowScope,
         tenant: TenantRepoScope,
     ) -> Self {
         Self {
@@ -111,7 +111,7 @@ impl RowRepoScope {
     }
 
     #[cfg(any(test, feature = "test-support"))]
-    pub fn for_test(scope: vocab::ScopedTenant, tenant: TenantRepoScope) -> Self {
+    pub fn for_test(scope: rss_request_context::RowScope, tenant: TenantRepoScope) -> Self {
         Self::from_scoped_visibility(scope, tenant)
     }
 }

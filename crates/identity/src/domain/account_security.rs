@@ -80,7 +80,7 @@ impl AccountSecurityVersion {
 /// Persisted account-security aggregate.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AccountSecurityState {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     user_id: ids::UserId,
     status: AccountStatus,
     authn_epoch: AuthnEpoch,
@@ -95,7 +95,7 @@ pub struct AccountSecurityState {
 /// timestamps impossible to swap accidentally at call sites while still compiling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountSecuritySnapshot {
-    pub tenant: vocab::TenantId,
+    pub tenant: rss_request_context::TenantId,
     pub user_id: ids::UserId,
     pub status: AccountStatus,
     pub authn_epoch: u64,
@@ -124,7 +124,11 @@ impl AccountSecurityState {
         dead_code,
         reason = "in-memory seed adapter is feature-gated; production initialization is transactional SQL"
     )]
-    pub(crate) fn initial(tenant: vocab::TenantId, user_id: ids::UserId, now: SystemTime) -> Self {
+    pub(crate) fn initial(
+        tenant: rss_request_context::TenantId,
+        user_id: ids::UserId,
+        now: SystemTime,
+    ) -> Self {
         Self {
             tenant,
             user_id,
@@ -137,7 +141,7 @@ impl AccountSecurityState {
     }
 
     /// Tenant that owns the account.
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -297,13 +301,13 @@ impl AccountSecurityMutation {
 /// Active account proof consumed by the token issuance funnel.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct ActiveAccountSecurity {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     user_id: ids::UserId,
     authn_epoch: AuthnEpoch,
 }
 
 impl ActiveAccountSecurity {
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub(crate) fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -369,8 +373,8 @@ mod tests {
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const USER: &str = "11111111-2222-4333-8444-555555555555";
 
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).expect("canonical tenant")
     }
 
     fn user() -> ids::UserId {

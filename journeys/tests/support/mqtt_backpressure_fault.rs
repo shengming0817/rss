@@ -212,7 +212,7 @@ fn pilot_config() -> anyhow::Result<identity_composition::DeviceIdentityPilotCon
             Arc::new(ProcessClock),
             command_keyring()?,
             DeviceCertificateSystemProducer::install(),
-            vocab::TenantId::parse(TENANT)?,
+            rss_request_context::TenantId::parse(TENANT)?,
             "mqtt-backpressure-fault-journey",
             Tenancy::tenant_scoped(),
             identity_composition::DeviceIdentitySchedulerTiming::new(

@@ -187,40 +187,40 @@ fn parse_opaque_id(raw: String) -> Result<String, EnvelopeIdentityError> {
 /// 最小化 outbox actor view。
 #[derive(Clone, PartialEq, Eq)]
 pub struct OutboxActor {
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
     actor_id: OpaqueActorId,
-    tenant: Option<vocab::TenantId>,
-    scope: vocab::RowScope,
+    tenant: Option<rss_request_context::TenantId>,
+    scope: vocab::VisibilityScope,
 }
 
 impl OutboxActor {
-    /// 租户内 actor。`ScopedTenant` 位置参从类型层排除跨租户 `All` 误用。
+    /// 租户内 actor。`RowScope` 位置参从类型层排除跨租户 `All` 误用。
     pub fn scoped(
-        kind: vocab::PrincipalKind,
+        kind: rss_request_context::PrincipalKind,
         actor_id: OpaqueActorId,
-        tenant: vocab::TenantId,
-        scope: vocab::ScopedTenant,
+        tenant: rss_request_context::TenantId,
+        scope: rss_request_context::RowScope,
     ) -> Self {
         Self {
             kind,
             actor_id,
             tenant: Some(tenant),
-            scope: scope.as_row_scope(),
+            scope: scope.into(),
         }
     }
 
     /// 系统/service actor。用于没有 human principal 的内部 producer。
     pub fn service(actor_id: OpaqueActorId) -> Self {
         Self {
-            kind: vocab::PrincipalKind::Service,
+            kind: rss_request_context::PrincipalKind::Service,
             actor_id,
             tenant: None,
-            scope: vocab::RowScope::All,
+            scope: vocab::VisibilityScope::All,
         }
     }
 
     /// actor kind。
-    pub fn kind(&self) -> vocab::PrincipalKind {
+    pub fn kind(&self) -> rss_request_context::PrincipalKind {
         self.kind
     }
 
@@ -230,12 +230,12 @@ impl OutboxActor {
     }
 
     /// actor tenant constraint。
-    pub fn tenant(&self) -> Option<vocab::TenantId> {
+    pub fn tenant(&self) -> Option<rss_request_context::TenantId> {
         self.tenant
     }
 
     /// actor row scope。
-    pub fn scope(&self) -> vocab::RowScope {
+    pub fn scope(&self) -> vocab::VisibilityScope {
         self.scope
     }
 }
@@ -277,7 +277,7 @@ pub struct OutboxEnvelopeParts {
     /// 契约绑定（domain + contract_id + version + schema_hash 同源；`generated::…::CONTRACT`）。
     contract: vocab::ContractBinding,
     /// 租户标识（canonical UUID；adapter 将其盖章进 reserved `tenantId` envelope）。
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     /// opaque 主体标识（无 PII）。
     subject_id: EnvelopeSubjectId,
     /// 最小化 actor view（persisted-only；不进 broker header）。
@@ -294,7 +294,7 @@ impl OutboxEnvelopeParts {
     /// `partition_key` 默认 `None`（无序并行）；需有序投递时经 [`OutboxEnvelopeParts::with_partition_key`] 设置。
     pub fn new(
         contract: vocab::ContractBinding,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         subject_id: EnvelopeSubjectId,
         actor: OutboxActor,
     ) -> Self {
@@ -323,7 +323,7 @@ impl OutboxEnvelopeParts {
     /// 设置后同 `(tenant_id, domain, partition_key)` 的 outbox 行严格按 `seq` 顺序投递（head-of-partition gating）；
     /// 未设（`None`）时与现有行为完全兼容——无序并行投递。
     ///
-    /// `partition_key` 是不透明聚合根路由键；tenant scope 由必填的 [`vocab::TenantId`] 落入 outbox
+    /// `partition_key` 是不透明聚合根路由键；tenant scope 由必填的 [`rss_request_context::TenantId`] 落入 outbox
     /// `tenant_id` 列承载，跨租同 business key 不共享 gate。推荐直接使用稳定 aggregate id；
     /// 语义见 `docs/rules/tenancy.md` + `eventbus.md §投递顺序保证`。
     ///
@@ -341,7 +341,7 @@ impl OutboxEnvelopeParts {
     }
 
     /// 借出租户标识。
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -367,7 +367,7 @@ impl OutboxEnvelopeParts {
         self,
     ) -> (
         vocab::ContractBinding,
-        vocab::TenantId,
+        rss_request_context::TenantId,
         EnvelopeSubjectId,
         OutboxActor,
         Option<consistency::PartitionKey>,
@@ -430,8 +430,8 @@ mod pii_debug {
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).expect("canonical tenant")
     }
 
     #[allow(clippy::expect_used)]
@@ -442,10 +442,10 @@ mod pii_debug {
     #[allow(clippy::expect_used)]
     fn actor() -> OutboxActor {
         OutboxActor::scoped(
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             OpaqueActorId::from_opaque("actor-opaque").expect("opaque actor"),
             tenant(),
-            vocab::ScopedTenant::SelfOnly,
+            rss_request_context::RowScope::SelfOnly,
         )
     }
 
@@ -567,8 +567,8 @@ mod partition_key_tests {
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).expect("canonical tenant")
     }
 
     #[allow(clippy::expect_used)]
@@ -579,10 +579,10 @@ mod partition_key_tests {
     #[allow(clippy::expect_used)]
     fn actor() -> OutboxActor {
         OutboxActor::scoped(
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             OpaqueActorId::from_opaque("actor-admin").expect("opaque actor"),
             tenant(),
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         )
     }
 
@@ -601,9 +601,9 @@ mod partition_key_tests {
         let (_contract, got_tenant, got_subject, got_actor, pk, causation_id) = parts.into_parts();
         assert_eq!(got_tenant.to_string(), TENANT);
         assert_eq!(got_subject.as_str(), "subj");
-        assert_eq!(got_actor.kind(), vocab::PrincipalKind::Admin);
+        assert_eq!(got_actor.kind(), rss_request_context::PrincipalKind::Admin);
         assert_eq!(got_actor.actor_id().as_str(), "actor-admin");
-        assert_eq!(got_actor.scope(), vocab::RowScope::Tenant);
+        assert_eq!(got_actor.scope(), rss_request_context::RowScope::Tenant);
         assert!(pk.is_some(), "with_partition_key 后 into_parts 应透出 Some");
         assert_eq!(pk.unwrap().as_str(), "aggregate-123");
         assert!(causation_id.is_none(), "未设 causation_id 时应透出 None");
@@ -676,8 +676,8 @@ mod smoke {
     const HASH: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse(TENANT).expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse(TENANT).expect("canonical tenant")
     }
 
     #[allow(clippy::expect_used)]

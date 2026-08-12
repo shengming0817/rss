@@ -110,8 +110,8 @@ mod nested_runtime_module {
     }
 }
 
-fn tenant() -> vocab::TenantId {
-    vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap()
+fn tenant() -> rss_request_context::TenantId {
+    rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap()
 }
 
 fn audit_id() -> diport::DlqOperatorStartAuditId {

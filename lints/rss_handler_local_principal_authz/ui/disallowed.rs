@@ -1,7 +1,7 @@
 #![allow(unused, unknown_lints)]
 
 use httpserve::Authenticated;
-use vocab::{PrincipalKind, TenantId};
+use rss_request_context::{PrincipalKind, TenantId};
 
 struct LocalContext;
 

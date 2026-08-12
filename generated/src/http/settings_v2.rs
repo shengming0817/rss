@@ -169,12 +169,15 @@ pub struct SettingsSecretPublishResponse {
 pub const CONTRACT_ID: &str = "settings.secret-publish";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "settings",
-    "settings.secret-publish",
-    "v2",
-    "sha256:32ef4220f943e7b98176a5684d3e26f2fbc780bf16121fa4463c5c1ba80c9b99",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "settings.secret-publish",
+        "v2",
+        "sha256:32ef4220f943e7b98176a5684d3e26f2fbc780bf16121fa4463c5c1ba80c9b99",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("settings", DESCRIPTOR, "v2");
 
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/settings/secrets";

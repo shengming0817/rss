@@ -602,7 +602,7 @@ pub(in super::super) async fn secret_ref_row_count(
     let (count,): (i64,) = sqlx::query_as(
         "SELECT count(*) FROM secret_refs WHERE tenant_id = $1::uuid AND secret_key = $2",
     )
-    .bind(tenant.as_uuid().to_string())
+    .bind(tenant.to_string())
     .bind(key.as_str())
     .fetch_one(&store.pool)
     .await

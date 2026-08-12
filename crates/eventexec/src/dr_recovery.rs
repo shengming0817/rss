@@ -247,7 +247,7 @@ impl L2DrRecoveryPlanDigest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct L2DrRecoveryPlan {
     epoch_id: RecoveryEpochId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     database_restore_point: UtcEpochMicros,
     broker_restore_point: UtcEpochMicros,
     direction: RecoveryDirection,
@@ -260,7 +260,7 @@ impl L2DrRecoveryPlan {
     /// Build a plan and derive its direction and digest from complete canonical input.
     pub fn new(
         epoch_id: RecoveryEpochId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         database_restore_point: UtcEpochMicros,
         broker_restore_point: UtcEpochMicros,
         events: RecoveryEventSet,
@@ -294,7 +294,7 @@ impl L2DrRecoveryPlan {
     }
 
     /// Return the tenant scope bound into this plan.
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -331,7 +331,7 @@ impl L2DrRecoveryPlan {
 
 fn derive_plan_digest(
     epoch_id: RecoveryEpochId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     database_restore_point: UtcEpochMicros,
     broker_restore_point: UtcEpochMicros,
     direction: RecoveryDirection,
@@ -339,7 +339,7 @@ fn derive_plan_digest(
     change_ticket: &RecoveryChangeTicket,
 ) -> Result<L2DrRecoveryPlanDigest, L2DrRecoveryError> {
     let epoch_uuid = epoch_id.as_uuid();
-    let tenant_uuid = tenant.as_uuid();
+    let tenant_octets = tenant.octets();
     let database_micros = database_restore_point.get().to_be_bytes();
     let broker_micros = broker_restore_point.get().to_be_bytes();
     let event_count = u64::try_from(events.len())
@@ -350,7 +350,7 @@ fn derive_plan_digest(
         PLAN_DIGEST_DOMAIN,
         DELIVERY_POLICY_REVISION.as_bytes(),
         epoch_uuid.as_bytes(),
-        tenant_uuid.as_bytes(),
+        &tenant_octets,
         direction.as_label().as_bytes(),
         &database_micros,
         &broker_micros,
@@ -408,7 +408,7 @@ impl L2DrRecoveryOperatorSubject {
 pub struct L2DrRecoveryDurableStartProof {
     caller: vocab::ServiceCallerDomain,
     operator_subject: L2DrRecoveryOperatorSubject,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     epoch_id: RecoveryEpochId,
     plan_digest: L2DrRecoveryPlanDigest,
     start_audit_id: uuid::Uuid,
@@ -419,7 +419,7 @@ impl L2DrRecoveryDurableStartProof {
     pub fn from_store(
         caller: vocab::ServiceCallerDomain,
         operator_subject: L2DrRecoveryOperatorSubject,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         epoch_id: RecoveryEpochId,
         plan_digest: L2DrRecoveryPlanDigest,
         start_audit_id: uuid::Uuid,
@@ -572,7 +572,7 @@ impl L2DrRecoveryOutcome {
 #[derive(Debug, PartialEq, Eq)]
 pub struct L2DrRecoveryDurableReceipt {
     epoch_id: RecoveryEpochId,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     database_restore_point: UtcEpochMicros,
     broker_restore_point: UtcEpochMicros,
     plan_digest: L2DrRecoveryPlanDigest,
@@ -591,7 +591,7 @@ impl L2DrRecoveryDurableReceipt {
     // reason: this constructor mirrors the fixed SQL receipt projection; grouping would permit omitted evidence.
     pub fn from_store(
         epoch_id: RecoveryEpochId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         database_restore_point: UtcEpochMicros,
         broker_restore_point: UtcEpochMicros,
         plan_digest: L2DrRecoveryPlanDigest,
@@ -664,7 +664,7 @@ impl L2DrRecoveryReceipt {
     }
 
     /// Return the tenant scope recorded on the receipt.
-    pub const fn tenant(&self) -> vocab::TenantId {
+    pub const fn tenant(&self) -> rss_request_context::TenantId {
         self.0.tenant
     }
 
@@ -884,7 +884,7 @@ mod tests {
     fn plan(values: &[&str]) -> L2DrRecoveryPlan {
         L2DrRecoveryPlan::new(
             RecoveryEpochId::parse(EPOCH).expect("valid epoch id"),
-            vocab::TenantId::parse(TENANT).expect("valid tenant"),
+            rss_request_context::TenantId::parse(TENANT).expect("valid tenant"),
             point(1_700_000_000_000_200),
             point(1_700_000_000_000_100),
             events(values),
@@ -1171,7 +1171,7 @@ mod tests {
                     vocab::ServiceCallerDomain::MaintenanceOperator,
                     L2DrRecoveryOperatorSubject::parse("service:l2-dr-primary")
                         .expect("valid subject"),
-                    vocab::TenantId::parse(OTHER_TENANT).expect("other tenant"),
+                    rss_request_context::TenantId::parse(OTHER_TENANT).expect("other tenant"),
                     recovery_plan.epoch_id(),
                     *recovery_plan.digest(),
                     uuid::Uuid::parse_str(START_AUDIT).expect("start audit uuid"),

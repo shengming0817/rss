@@ -28,7 +28,7 @@ use generated::event::identity_v1::security_event::{
 use generated::event::identity_v1::session_created::{
     self as session_created, IdentitySessionCreatedPayload,
 };
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 /// Login / session-created：envelope subject + actor = canonical [`ids::UserId`].
 pub(crate) async fn emit_session_created(
@@ -43,10 +43,10 @@ pub(crate) async fn emit_session_created(
         tenant,
         EnvelopeSubjectId::from_user_id(user_id),
         OutboxActor::scoped(
-            vocab::PrincipalKind::User,
+            rss_request_context::PrincipalKind::User,
             OpaqueActorId::from_user_id(user_id),
             tenant,
-            vocab::ScopedTenant::SelfOnly,
+            rss_request_context::RowScope::SelfOnly,
         ),
         idempotency_key,
     )
@@ -58,7 +58,7 @@ pub(crate) async fn emit_role_assigned(
     payload: IdentityRoleAssignedPayload,
     tenant: TenantId,
     actor: ids::UserId,
-    actor_kind: vocab::PrincipalKind,
+    actor_kind: rss_request_context::PrincipalKind,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     role_assigned::emit(
@@ -70,7 +70,7 @@ pub(crate) async fn emit_role_assigned(
             actor_kind,
             OpaqueActorId::from_user_id(actor),
             tenant,
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         ),
         idempotency_key,
     )
@@ -82,7 +82,7 @@ pub(crate) async fn emit_role_revoked(
     payload: IdentityRoleRevokedPayload,
     tenant: TenantId,
     actor: ids::UserId,
-    actor_kind: vocab::PrincipalKind,
+    actor_kind: rss_request_context::PrincipalKind,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     role_revoked::emit(
@@ -94,7 +94,7 @@ pub(crate) async fn emit_role_revoked(
             actor_kind,
             OpaqueActorId::from_user_id(actor),
             tenant,
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         ),
         idempotency_key,
     )
@@ -106,7 +106,7 @@ pub(crate) async fn emit_policy_updated(
     payload: IdentityPolicyUpdatedPayload,
     tenant: TenantId,
     actor: ids::UserId,
-    actor_kind: vocab::PrincipalKind,
+    actor_kind: rss_request_context::PrincipalKind,
     idempotency_key: IdemKey,
 ) -> Result<ReviewedEvent, EventEncodeError> {
     policy_updated::emit(
@@ -118,7 +118,7 @@ pub(crate) async fn emit_policy_updated(
             actor_kind,
             OpaqueActorId::from_user_id(actor),
             tenant,
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         ),
         idempotency_key,
     )
@@ -129,7 +129,7 @@ pub(crate) async fn emit_policy_updated(
 pub(crate) async fn emit_security_event(
     payload: IdentitySecurityEventPayload,
     tenant: TenantId,
-    initiator_kind: vocab::PrincipalKind,
+    initiator_kind: rss_request_context::PrincipalKind,
     target_pseudonym: uuid::Uuid,
     actor_pseudonym: uuid::Uuid,
     idempotency_key: IdemKey,
@@ -143,7 +143,7 @@ pub(crate) async fn emit_security_event(
             initiator_kind,
             OpaqueActorId::from_uuid(actor_pseudonym),
             tenant,
-            vocab::ScopedTenant::SelfOnly,
+            rss_request_context::RowScope::SelfOnly,
         ),
         idempotency_key,
     )
@@ -163,10 +163,10 @@ pub(crate) async fn emit_device_ingress_receipted(
         tenant,
         EnvelopeSubjectId::from_uuid(device.as_uuid()),
         OutboxActor::scoped(
-            vocab::PrincipalKind::Device,
+            rss_request_context::PrincipalKind::Device,
             OpaqueActorId::from_uuid(device.as_uuid()),
             tenant,
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         ),
         idempotency_key,
     )

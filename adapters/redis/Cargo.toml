@@ -17,6 +17,7 @@ workspace = true
 # adapter 真身（#1009 inbox claimer）：impl diport::ManagedResource + consistency::InboxStore。
 # 后端 deadpool-redis 经 `backend` feature 门控（default build 轻量、仍保 freeze smoke）。
 [dependencies]
+rss-request-context.workspace = true
 diport = { path = "../../crates/diport" }
 consistency = { path = "../../crates/consistency" }
 vocab = { path = "../../crates/vocab", optional = true }

@@ -484,7 +484,7 @@ fn record(seq: u64) -> ProjectionEventRecord {
         EventTopic::parse("proj.test").expect("valid topic"),
         vec![],
         ProjectionEventMetadata::new(
-            vocab::TenantId::parse(TENANT).expect("canonical tenant"),
+            rss_request_context::TenantId::parse(TENANT).expect("canonical tenant"),
             format!("projection-test-event-{seq}"),
             "test",
             "test.projection-event",

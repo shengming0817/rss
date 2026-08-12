@@ -125,12 +125,15 @@ pub struct BillingReserveFundsReceipt {
 pub const CONTRACT_ID: &str = "billing.checkout";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "billing",
-    "billing.checkout",
-    "v1",
-    "sha256:8a8e76b9e08da0ef26fc30cf3a2577dea607b3024396c66afdaf5f65b3bfe7ae",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "billing.checkout",
+        "v1",
+        "sha256:8a8e76b9e08da0ef26fc30cf3a2577dea607b3024396c66afdaf5f65b3bfe7ae",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("billing", DESCRIPTOR, "v1");
 
 /// Ordered action semantics generation, domain-separated and length-prefixed before SHA-256.
 pub const ACTION_REGISTRY_GENERATION: &str =

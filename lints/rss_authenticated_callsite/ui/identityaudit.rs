@@ -4,7 +4,7 @@
 use authn::Principal;
 use httpserve::Authenticated;
 use identity::ValidatedAuthGrant;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 mod auth_bridge {
     use super::*;

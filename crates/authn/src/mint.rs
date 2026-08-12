@@ -299,7 +299,7 @@ impl<S: diport::Signer + Send + Sync + 'static> JwtIssuer<ServiceTokenProfile, S
     pub async fn issue_service_token(
         &self,
         caller: ServiceCallerDomain,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Result<MintedJwt, JwtIssueError> {
         let subject = caller.as_str();
         let (iat, exp) = self.time_claims()?;
@@ -396,9 +396,9 @@ mod tests {
     use crate::{AuthGrant, AuthnEpoch, GrantSecurityEventKind};
     use diport::{KeyId, SignRequest, Signature, Signer, SignerError};
     use ids::UserId;
+    use rss_request_context::TenantId;
     use std::sync::{Arc, Mutex};
     use std::time::SystemTime;
-    use vocab::TenantId;
 
     const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const NOW_SECS: u64 = 1_700_000_000;

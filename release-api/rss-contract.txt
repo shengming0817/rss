@@ -1,0 +1,250 @@
+== release-api profile: default ==
+pub mod rss_contract
+#[non_exhaustive] pub enum rss_contract::IdentityError
+pub rss_contract::IdentityError::Empty
+pub rss_contract::IdentityError::InvalidFormat
+pub rss_contract::IdentityError::TooLong
+pub rss_contract::IdentityError::ZeroVersion
+impl core::clone::Clone for rss_contract::IdentityError
+pub fn rss_contract::IdentityError::clone(&self) -> rss_contract::IdentityError
+impl core::cmp::Eq for rss_contract::IdentityError
+impl core::cmp::PartialEq for rss_contract::IdentityError
+pub fn rss_contract::IdentityError::eq(&self, &rss_contract::IdentityError) -> bool
+impl core::error::Error for rss_contract::IdentityError
+impl core::fmt::Debug for rss_contract::IdentityError
+pub fn rss_contract::IdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::IdentityError
+pub fn rss_contract::IdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_contract::IdentityError
+impl core::marker::StructuralPartialEq for rss_contract::IdentityError
+impl core::marker::Freeze for rss_contract::IdentityError
+impl core::marker::Send for rss_contract::IdentityError
+impl core::marker::Sync for rss_contract::IdentityError
+impl core::marker::Unpin for rss_contract::IdentityError
+impl core::marker::UnsafeUnpin for rss_contract::IdentityError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::IdentityError
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::IdentityError
+pub struct rss_contract::ContractDescriptor
+impl rss_contract::ContractDescriptor
+pub const fn rss_contract::ContractDescriptor::from_static(&'static str, u32, &'static str) -> Self
+pub const fn rss_contract::ContractDescriptor::from_static_version(&'static str, &'static str, &'static str) -> Self
+pub const fn rss_contract::ContractDescriptor::id(&self) -> &'static str
+pub const fn rss_contract::ContractDescriptor::schema_digest(&self) -> &'static str
+pub const fn rss_contract::ContractDescriptor::version(&self) -> rss_contract::ContractVersion
+impl core::clone::Clone for rss_contract::ContractDescriptor
+pub fn rss_contract::ContractDescriptor::clone(&self) -> rss_contract::ContractDescriptor
+impl core::cmp::Eq for rss_contract::ContractDescriptor
+impl core::cmp::PartialEq for rss_contract::ContractDescriptor
+pub fn rss_contract::ContractDescriptor::eq(&self, &rss_contract::ContractDescriptor) -> bool
+impl core::fmt::Debug for rss_contract::ContractDescriptor
+pub fn rss_contract::ContractDescriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_contract::ContractDescriptor
+pub fn rss_contract::ContractDescriptor::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_contract::ContractDescriptor
+impl core::marker::StructuralPartialEq for rss_contract::ContractDescriptor
+impl core::marker::Freeze for rss_contract::ContractDescriptor
+impl core::marker::Send for rss_contract::ContractDescriptor
+impl core::marker::Sync for rss_contract::ContractDescriptor
+impl core::marker::Unpin for rss_contract::ContractDescriptor
+impl core::marker::UnsafeUnpin for rss_contract::ContractDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::ContractDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::ContractDescriptor
+pub struct rss_contract::ContractId(_)
+impl rss_contract::ContractId
+pub const fn rss_contract::ContractId::as_str(&self) -> &str
+pub const fn rss_contract::ContractId::from_static(&'static str) -> Self
+pub fn rss_contract::ContractId::parse(&str) -> core::result::Result<Self, rss_contract::IdentityError>
+impl core::clone::Clone for rss_contract::ContractId
+pub fn rss_contract::ContractId::clone(&self) -> rss_contract::ContractId
+impl core::cmp::Eq for rss_contract::ContractId
+impl core::cmp::PartialEq for rss_contract::ContractId
+pub fn rss_contract::ContractId::eq(&self, &rss_contract::ContractId) -> bool
+impl core::fmt::Debug for rss_contract::ContractId
+pub fn rss_contract::ContractId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::ContractId
+pub fn rss_contract::ContractId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_contract::ContractId
+pub fn rss_contract::ContractId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_contract::ContractId
+impl core::marker::Freeze for rss_contract::ContractId
+impl core::marker::Send for rss_contract::ContractId
+impl core::marker::Sync for rss_contract::ContractId
+impl core::marker::Unpin for rss_contract::ContractId
+impl core::marker::UnsafeUnpin for rss_contract::ContractId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::ContractId
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::ContractId
+pub struct rss_contract::ContractVersion(_)
+impl rss_contract::ContractVersion
+pub const fn rss_contract::ContractVersion::from_major(u32) -> core::result::Result<Self, rss_contract::IdentityError>
+pub const fn rss_contract::ContractVersion::from_static_major(u32) -> Self
+pub const fn rss_contract::ContractVersion::major(self) -> u32
+pub fn rss_contract::ContractVersion::parse(&str) -> core::result::Result<Self, rss_contract::IdentityError>
+impl core::clone::Clone for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::clone(&self) -> rss_contract::ContractVersion
+impl core::cmp::Eq for rss_contract::ContractVersion
+impl core::cmp::PartialEq for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::eq(&self, &rss_contract::ContractVersion) -> bool
+impl core::fmt::Debug for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_contract::ContractVersion
+impl core::marker::StructuralPartialEq for rss_contract::ContractVersion
+impl core::marker::Freeze for rss_contract::ContractVersion
+impl core::marker::Send for rss_contract::ContractVersion
+impl core::marker::Sync for rss_contract::ContractVersion
+impl core::marker::Unpin for rss_contract::ContractVersion
+impl core::marker::UnsafeUnpin for rss_contract::ContractVersion
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::ContractVersion
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::ContractVersion
+pub struct rss_contract::SchemaDigest(_)
+impl rss_contract::SchemaDigest
+pub const fn rss_contract::SchemaDigest::as_str(&self) -> &str
+pub const fn rss_contract::SchemaDigest::from_static(&'static str) -> Self
+pub fn rss_contract::SchemaDigest::parse(&str) -> core::result::Result<Self, rss_contract::IdentityError>
+impl core::clone::Clone for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::clone(&self) -> rss_contract::SchemaDigest
+impl core::cmp::Eq for rss_contract::SchemaDigest
+impl core::cmp::PartialEq for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::eq(&self, &rss_contract::SchemaDigest) -> bool
+impl core::fmt::Debug for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_contract::SchemaDigest
+impl core::marker::Freeze for rss_contract::SchemaDigest
+impl core::marker::Send for rss_contract::SchemaDigest
+impl core::marker::Sync for rss_contract::SchemaDigest
+impl core::marker::Unpin for rss_contract::SchemaDigest
+impl core::marker::UnsafeUnpin for rss_contract::SchemaDigest
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::SchemaDigest
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::SchemaDigest
+== release-api profile: all-features ==
+pub mod rss_contract
+#[non_exhaustive] pub enum rss_contract::IdentityError
+pub rss_contract::IdentityError::Empty
+pub rss_contract::IdentityError::InvalidFormat
+pub rss_contract::IdentityError::TooLong
+pub rss_contract::IdentityError::ZeroVersion
+impl core::clone::Clone for rss_contract::IdentityError
+pub fn rss_contract::IdentityError::clone(&self) -> rss_contract::IdentityError
+impl core::cmp::Eq for rss_contract::IdentityError
+impl core::cmp::PartialEq for rss_contract::IdentityError
+pub fn rss_contract::IdentityError::eq(&self, &rss_contract::IdentityError) -> bool
+impl core::error::Error for rss_contract::IdentityError
+impl core::fmt::Debug for rss_contract::IdentityError
+pub fn rss_contract::IdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::IdentityError
+pub fn rss_contract::IdentityError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_contract::IdentityError
+impl core::marker::StructuralPartialEq for rss_contract::IdentityError
+impl core::marker::Freeze for rss_contract::IdentityError
+impl core::marker::Send for rss_contract::IdentityError
+impl core::marker::Sync for rss_contract::IdentityError
+impl core::marker::Unpin for rss_contract::IdentityError
+impl core::marker::UnsafeUnpin for rss_contract::IdentityError
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::IdentityError
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::IdentityError
+pub struct rss_contract::ContractDescriptor
+impl rss_contract::ContractDescriptor
+pub const fn rss_contract::ContractDescriptor::from_static(&'static str, u32, &'static str) -> Self
+pub const fn rss_contract::ContractDescriptor::from_static_version(&'static str, &'static str, &'static str) -> Self
+pub const fn rss_contract::ContractDescriptor::id(&self) -> &'static str
+pub const fn rss_contract::ContractDescriptor::schema_digest(&self) -> &'static str
+pub const fn rss_contract::ContractDescriptor::version(&self) -> rss_contract::ContractVersion
+impl core::clone::Clone for rss_contract::ContractDescriptor
+pub fn rss_contract::ContractDescriptor::clone(&self) -> rss_contract::ContractDescriptor
+impl core::cmp::Eq for rss_contract::ContractDescriptor
+impl core::cmp::PartialEq for rss_contract::ContractDescriptor
+pub fn rss_contract::ContractDescriptor::eq(&self, &rss_contract::ContractDescriptor) -> bool
+impl core::fmt::Debug for rss_contract::ContractDescriptor
+pub fn rss_contract::ContractDescriptor::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_contract::ContractDescriptor
+pub fn rss_contract::ContractDescriptor::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_contract::ContractDescriptor
+impl core::marker::StructuralPartialEq for rss_contract::ContractDescriptor
+impl core::marker::Freeze for rss_contract::ContractDescriptor
+impl core::marker::Send for rss_contract::ContractDescriptor
+impl core::marker::Sync for rss_contract::ContractDescriptor
+impl core::marker::Unpin for rss_contract::ContractDescriptor
+impl core::marker::UnsafeUnpin for rss_contract::ContractDescriptor
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::ContractDescriptor
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::ContractDescriptor
+pub struct rss_contract::ContractId(_)
+impl rss_contract::ContractId
+pub const fn rss_contract::ContractId::as_str(&self) -> &str
+pub const fn rss_contract::ContractId::from_static(&'static str) -> Self
+pub fn rss_contract::ContractId::parse(&str) -> core::result::Result<Self, rss_contract::IdentityError>
+impl core::clone::Clone for rss_contract::ContractId
+pub fn rss_contract::ContractId::clone(&self) -> rss_contract::ContractId
+impl core::cmp::Eq for rss_contract::ContractId
+impl core::cmp::PartialEq for rss_contract::ContractId
+pub fn rss_contract::ContractId::eq(&self, &rss_contract::ContractId) -> bool
+impl core::fmt::Debug for rss_contract::ContractId
+pub fn rss_contract::ContractId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::ContractId
+pub fn rss_contract::ContractId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_contract::ContractId
+pub fn rss_contract::ContractId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_contract::ContractId
+impl core::marker::Freeze for rss_contract::ContractId
+impl core::marker::Send for rss_contract::ContractId
+impl core::marker::Sync for rss_contract::ContractId
+impl core::marker::Unpin for rss_contract::ContractId
+impl core::marker::UnsafeUnpin for rss_contract::ContractId
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::ContractId
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::ContractId
+pub struct rss_contract::ContractVersion(_)
+impl rss_contract::ContractVersion
+pub const fn rss_contract::ContractVersion::from_major(u32) -> core::result::Result<Self, rss_contract::IdentityError>
+pub const fn rss_contract::ContractVersion::from_static_major(u32) -> Self
+pub const fn rss_contract::ContractVersion::major(self) -> u32
+pub fn rss_contract::ContractVersion::parse(&str) -> core::result::Result<Self, rss_contract::IdentityError>
+impl core::clone::Clone for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::clone(&self) -> rss_contract::ContractVersion
+impl core::cmp::Eq for rss_contract::ContractVersion
+impl core::cmp::PartialEq for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::eq(&self, &rss_contract::ContractVersion) -> bool
+impl core::fmt::Debug for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_contract::ContractVersion
+pub fn rss_contract::ContractVersion::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for rss_contract::ContractVersion
+impl core::marker::StructuralPartialEq for rss_contract::ContractVersion
+impl core::marker::Freeze for rss_contract::ContractVersion
+impl core::marker::Send for rss_contract::ContractVersion
+impl core::marker::Sync for rss_contract::ContractVersion
+impl core::marker::Unpin for rss_contract::ContractVersion
+impl core::marker::UnsafeUnpin for rss_contract::ContractVersion
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::ContractVersion
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::ContractVersion
+pub struct rss_contract::SchemaDigest(_)
+impl rss_contract::SchemaDigest
+pub const fn rss_contract::SchemaDigest::as_str(&self) -> &str
+pub const fn rss_contract::SchemaDigest::from_static(&'static str) -> Self
+pub fn rss_contract::SchemaDigest::parse(&str) -> core::result::Result<Self, rss_contract::IdentityError>
+impl core::clone::Clone for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::clone(&self) -> rss_contract::SchemaDigest
+impl core::cmp::Eq for rss_contract::SchemaDigest
+impl core::cmp::PartialEq for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::eq(&self, &rss_contract::SchemaDigest) -> bool
+impl core::fmt::Debug for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for rss_contract::SchemaDigest
+pub fn rss_contract::SchemaDigest::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::StructuralPartialEq for rss_contract::SchemaDigest
+impl core::marker::Freeze for rss_contract::SchemaDigest
+impl core::marker::Send for rss_contract::SchemaDigest
+impl core::marker::Sync for rss_contract::SchemaDigest
+impl core::marker::Unpin for rss_contract::SchemaDigest
+impl core::marker::UnsafeUnpin for rss_contract::SchemaDigest
+impl core::panic::unwind_safe::RefUnwindSafe for rss_contract::SchemaDigest
+impl core::panic::unwind_safe::UnwindSafe for rss_contract::SchemaDigest

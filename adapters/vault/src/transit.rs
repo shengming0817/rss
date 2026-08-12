@@ -690,8 +690,8 @@ mod tests {
     use base64::Engine as _;
     use diport::KeyName;
     use diport::key_provider::KeyProviderErrorKind;
+    use rss_request_context::TenantId;
     use secure::{Plaintext, ProtectionContext};
-    use vocab::tenant::TenantId;
 
     use super::{
         BASE64, BASE64_URL, build_decrypt_body, build_encrypt_body, build_rewrap_body,
@@ -1151,12 +1151,12 @@ mod key_provider_impl_tests {
     use base64::Engine as _;
     use diport::key_provider::KeyProviderErrorKind;
     use diport::{KeyName, KeyRef, KeyVersion, RedactedBytes};
+    use rss_request_context::TenantId;
     use secure::{DerivedAad, Plaintext, ProtectionContext};
     use tracing::field::{Field, Visit};
     use tracing::span::Attributes;
     use tracing_subscriber::layer::{Context as LayerContext, Layer};
     use tracing_subscriber::prelude::*;
-    use vocab::tenant::TenantId;
     use wiremock::matchers::method;
     use wiremock::{Mock, MockServer, ResponseTemplate};
 

@@ -4,7 +4,7 @@ use identity::ports::PasswordChangeProducerReceipt;
 async fn string_cannot_cross_as_the_new_password(
     service: &CredentialSecurityService,
     receipt: PasswordChangeProducerReceipt,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     user_id: ids::UserId,
     current_password: secure::RawPassword,
     new_password: String,
@@ -17,7 +17,7 @@ async fn string_cannot_cross_as_the_new_password(
 async fn raw_password_cannot_cross_as_the_new_password(
     service: &CredentialSecurityService,
     receipt: PasswordChangeProducerReceipt,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     user_id: ids::UserId,
     current_password: secure::RawPassword,
     new_password: secure::RawPassword,

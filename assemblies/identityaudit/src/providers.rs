@@ -691,7 +691,7 @@ async fn verify_vault_key_provider(
     key_name: &str,
 ) -> anyhow::Result<()> {
     use diport::KeyProvider as _;
-    let tenant = vocab::TenantId::parse(VAULT_READINESS_CANARY_TENANT)
+    let tenant = rss_request_context::TenantId::parse(VAULT_READINESS_CANARY_TENANT)
         .context("parse identityaudit Vault readiness tenant")?;
     let aad = secure::ProtectionContext::authorized_maintenance(
         tenant,
@@ -1720,7 +1720,7 @@ mod tests {
             primitives::HealthStatus::Healthy
         );
 
-        let tenant = vocab::TenantId::parse(VAULT_READINESS_CANARY_TENANT)?;
+        let tenant = rss_request_context::TenantId::parse(VAULT_READINESS_CANARY_TENANT)?;
         let aad = secure::ProtectionContext::authorized_maintenance(
             tenant,
             "identityaudit/dlx",

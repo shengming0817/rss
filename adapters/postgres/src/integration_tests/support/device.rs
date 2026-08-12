@@ -87,7 +87,7 @@ pub(in super::super) fn operator_repair_authorization(
 }
 
 pub(in super::super) fn settings_operator_execution(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> eventexec::ProjectionExecutionContext {
     let projection = eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)
         .expect("generated Settings projection id");

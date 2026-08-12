@@ -766,7 +766,7 @@ async fn tenant_reader_role_is_exact_and_forced_read_write_is_denied() -> TestRe
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let tenant_a = test_tenant();
-    let tenant_b = vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc")?;
+    let tenant_b = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000abc")?;
     let tenant_a_id = tenant_a.to_string();
     let role_id = unique_event_id("tenant-reader-role");
     owner_record_role_revision(&owner, &tenant_a_id, &role_id, ORIGINAL_NAME).await?;
@@ -1689,7 +1689,7 @@ async fn tenant_reader_gate_rejects_same_text_custom_operator_policy() -> TestRe
         let mut read_tx = reader.pool.begin_with("BEGIN READ ONLY").await?;
         crate::cotx::set_local_tenant(
             &mut read_tx,
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")?,
         )
         .await?;
         let visible: i64 =
@@ -2722,10 +2722,10 @@ async fn t20_rls_auth_grants_enforces_tenant_isolation_and_acl() -> TestResult {
         .execute(&store.pool)
         .await?;
 
-    let tenant_a_id = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let tenant_b_id = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let tenant_a = tenant_a_id.as_uuid().to_string();
-    let tenant_b = tenant_b_id.as_uuid().to_string();
+    let tenant_a_id = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b_id = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_a = tenant_a_id.to_string();
+    let tenant_b = tenant_b_id.to_string();
     let user_a = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     let user_b = ids::UserId::parse(&uuid::Uuid::new_v4().to_string())?;
     seed_auth_grant_account(&store, tenant_a_id, user_a).await?;
@@ -3388,7 +3388,7 @@ async fn ta5_audit_rls_cross_tenant_read_denied() -> TestResult {
     store.run_migrations().await?;
 
     let tenant_a_str = uuid::Uuid::new_v4().to_string();
-    let tenant_a = vocab::TenantId::parse(&tenant_a_str).unwrap();
+    let tenant_a = rss_request_context::TenantId::parse(&tenant_a_str).unwrap();
     let tenant_b_str = uuid::Uuid::new_v4().to_string();
 
     sqlx::query("GRANT rss_app TO CURRENT_USER")
@@ -3437,7 +3437,7 @@ async fn ta11_audit_rls_null_tenant_fail_closed() -> TestResult {
         .await?;
 
     let tenant_str = uuid::Uuid::new_v4().to_string();
-    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
     repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
         .await?;

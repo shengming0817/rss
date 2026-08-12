@@ -118,7 +118,7 @@ impl InboxOperationConcern for ConsumerConcern {}
 #[doc(hidden)]
 pub struct EventingTx<'tx, L: TenantLane, C: EventingConcern> {
     pub(in crate::cotx) conn: &'tx mut PgConnection,
-    pub(in crate::cotx) tenant: vocab::TenantId,
+    pub(in crate::cotx) tenant: rss_request_context::TenantId,
     _lane: std::marker::PhantomData<fn() -> L>,
     _concern: std::marker::PhantomData<fn() -> C>,
 }
@@ -145,7 +145,7 @@ impl<'tx, L: TenantLane, C: EventingConcern> EventingTx<'tx, L, C> {
 
     pub(in crate::cotx) fn from_parts(
         conn: &'tx mut PgConnection,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Self {
         Self {
             conn,
@@ -156,11 +156,11 @@ impl<'tx, L: TenantLane, C: EventingConcern> EventingTx<'tx, L, C> {
     }
 
     #[cfg(any(feature = "domain-settings", feature = "domain-audit"))]
-    pub(in crate::cotx) fn parts(&mut self) -> (&mut PgConnection, vocab::TenantId) {
+    pub(in crate::cotx) fn parts(&mut self) -> (&mut PgConnection, rss_request_context::TenantId) {
         (&mut *self.conn, self.tenant)
     }
 
-    pub(crate) fn tenant(&self) -> vocab::TenantId {
+    pub(crate) fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 }
@@ -321,8 +321,8 @@ struct EmbeddedTenantMismatch {
 }
 
 fn ensure_embedded_tenant(
-    authoritative: vocab::TenantId,
-    embedded: vocab::TenantId,
+    authoritative: rss_request_context::TenantId,
+    embedded: rss_request_context::TenantId,
     carrier: &'static str,
 ) -> Result<(), sqlx::Error> {
     if authoritative == embedded {

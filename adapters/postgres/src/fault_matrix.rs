@@ -93,7 +93,7 @@ pub type FaultMatrixResult<T> = anyhow::Result<T>;
 
 /// Closed generated `identity.session-created` fixture accepted by the real-backend matrix.
 pub struct FaultMatrixSessionCreatedInput {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     session_id: uuid::Uuid,
     payload: FaultMatrixSessionCreatedPayload,
     idem_key: IdemKey,
@@ -118,7 +118,7 @@ impl FaultMatrixSessionCreatedInput {
         payload: FaultMatrixSessionCreatedPayload,
         idem_key: IdemKey,
     ) -> FaultMatrixResult<Self> {
-        let tenant = vocab::TenantId::try_from(payload.tenant_id)?;
+        let tenant = rss_request_context::TenantId::parse(&payload.tenant_id.to_string())?;
         let session_id = ids::SessionId::new(payload.session_id).as_uuid();
         Ok(Self {
             tenant,
@@ -1038,7 +1038,7 @@ impl PgFaultMatrixHarness {
     /// Make the exact pending session-created retry immediately claimable.
     pub async fn make_session_created_retry_due(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> FaultMatrixResult<()> {
         let affected = sqlx::query(
@@ -1063,7 +1063,7 @@ impl PgFaultMatrixHarness {
     #[cfg(feature = "domain-audit")]
     pub async fn consume_session_created_delivery(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         group: &str,
         message: diport::Message,
     ) -> FaultMatrixResult<FaultMatrixConsumerDelivery> {
@@ -1103,7 +1103,7 @@ impl PgFaultMatrixHarness {
     /// Observe the exact audit business effect and Inbox Done row for one delivery identity.
     pub async fn session_created_effect_observation(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
         group: &str,
     ) -> FaultMatrixResult<FaultMatrixSessionCreatedEffectObservation> {
@@ -1137,7 +1137,7 @@ impl PgFaultMatrixHarness {
     /// Exercise stale-holder fencing and current-holder settlement through the production funnel.
     pub async fn stale_outbox_settlement(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> FaultMatrixResult<FaultMatrixStaleSettlementObservation> {
         seed_outbox(
@@ -1182,7 +1182,7 @@ impl PgFaultMatrixHarness {
     /// Exercise an expired current exact deadline through the production settlement funnel.
     pub async fn expired_outbox_settlement(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> FaultMatrixResult<FaultMatrixExpiredSettlementObservation> {
         seed_outbox(
@@ -1241,7 +1241,7 @@ impl PgFaultMatrixHarness {
     /// Seed a pending outbox row as fixture input, then claim and drive `PgOutbox::relay`.
     pub async fn run_outbox_publish(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
         domain: &str,
         topic: &str,
@@ -1273,7 +1273,7 @@ impl PgFaultMatrixHarness {
     /// pending; only the budget-exhausting attempt may settle to DLX.
     pub async fn run_outbox_publish_to_budget(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
         domain: &str,
         topic: &str,
@@ -1389,7 +1389,7 @@ impl PgFaultMatrixHarness {
     /// Run the publish-succeeded / settle-not-yet-run phase.
     pub async fn publish_outbox_before_settle(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
         topic: &str,
         publisher: Box<DynPublisher<'static>>,
@@ -1420,7 +1420,7 @@ impl PgFaultMatrixHarness {
     /// Age the publishing lease, then recover through `PgOutbox::claim_batch` and `PgOutbox::relay`.
     pub async fn recover_stale_outbox_publish(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
         domain: &str,
         publisher: Box<DynPublisher<'static>>,
@@ -1460,7 +1460,7 @@ impl PgFaultMatrixHarness {
     /// Count outbox rows by closed status.
     pub async fn outbox_count(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
         status: FaultMatrixOutboxStatus,
     ) -> FaultMatrixResult<i64> {
@@ -1477,7 +1477,7 @@ impl PgFaultMatrixHarness {
 
     async fn outbox_status(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> FaultMatrixResult<FaultMatrixOutboxStatus> {
         let status: String = sqlx::query_scalar(
@@ -1498,7 +1498,7 @@ impl PgFaultMatrixHarness {
     /// the owner pool or a general-purpose SQL surface.
     pub async fn l2_dr_outbox_observation(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> FaultMatrixResult<FaultMatrixL2DrOutboxObservation> {
         let query_event_id = event_id.to_owned();
@@ -1538,7 +1538,7 @@ impl PgFaultMatrixHarness {
     /// Observe whether one exact tenant/epoch receipt committed atomically.
     pub async fn l2_dr_recovery_receipt_exists(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         epoch_id: eventexec::RecoveryEpochId,
     ) -> FaultMatrixResult<bool> {
         Ok(
@@ -1557,7 +1557,7 @@ impl PgFaultMatrixHarness {
     /// Read the authoritative retry state for one tenant-scoped outbox event.
     pub async fn outbox_retry_observation(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> FaultMatrixResult<FaultMatrixOutboxRetryObservation> {
         let row: Option<(String, i32, bool, bool)> = sqlx::query_as(
@@ -1576,7 +1576,7 @@ impl PgFaultMatrixHarness {
     /// Read the authoritative unified dead-letter row written by outbox relay DLX.
     pub async fn outbox_dead_letter(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> FaultMatrixResult<FaultMatrixDeadLetterObservation> {
         let row = sqlx::query(
@@ -1599,7 +1599,7 @@ impl PgFaultMatrixHarness {
     /// Drive `PgInboxStore::try_claim` with an expired claim.
     pub async fn reclaim_stale_inbox_claim(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
         group: &str,
     ) -> FaultMatrixResult<SeenState> {
@@ -1616,7 +1616,7 @@ impl PgFaultMatrixHarness {
     /// Drive stale lease commit through `PgInboxStore::commit`.
     pub async fn stale_inbox_lease_commit(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
         group: &str,
     ) -> FaultMatrixResult<LeaseOutcome> {
@@ -1634,7 +1634,7 @@ impl PgFaultMatrixHarness {
         &self,
         owner: &str,
         checkpoint_id: &str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> FaultMatrixResult<FaultMatrixProjectionProbe> {
         let checkpoint = Arc::new(self.deps.handle().infra().checkpoint());
         let failing_checkpoint = Arc::new(FailOnceCheckpoint::new(checkpoint.clone()));
@@ -1714,7 +1714,7 @@ impl PgFaultMatrixHarness {
     /// Drive reconcile schedule store attempt/action recording and verify stable dispatch idempotence.
     pub async fn reconcile_dispatch_key_stable(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         dispatch_key: &str,
         commands: [ApplyDeviceCertificateReconcileCommand; 2],
     ) -> FaultMatrixResult<i64> {
@@ -1810,7 +1810,7 @@ impl PgFaultMatrixHarness {
     /// Drive reconcile lease CAS with a stale token.
     pub async fn stale_reconcile_lease_is_rejected(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_suffix: &str,
     ) -> FaultMatrixResult<bool> {
         let store = self.deps.handle().infra().reconcile();
@@ -1959,7 +1959,7 @@ struct OutboxTerminalObservation {
 
 async fn outbox_terminal_observation(
     pool: &PgPool,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &str,
 ) -> FaultMatrixResult<OutboxTerminalObservation> {
     let row: (String, bool) = sqlx::query_as(
@@ -1994,7 +1994,7 @@ fn non_negative_count(value: i64, label: &str) -> FaultMatrixResult<u64> {
 
 async fn seed_outbox(
     pool: &PgPool,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &str,
     domain: &str,
     topic: &str,
@@ -2029,7 +2029,7 @@ async fn seed_outbox(
 
 async fn age_outbox_publishing(
     pool: &PgPool,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &str,
     relay_budget: RelayBudget,
 ) -> FaultMatrixResult<()> {
@@ -2050,7 +2050,7 @@ async fn age_outbox_publishing(
 
 async fn age_inbox_claim(
     pool: &PgPool,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     event_id: &str,
     group: &str,
 ) -> FaultMatrixResult<()> {
@@ -2067,7 +2067,7 @@ async fn age_inbox_claim(
 }
 
 fn session_created_inbox_ctx(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     group: &str,
 ) -> FaultMatrixResult<InboxReceiptContext> {
     Ok(InboxReceiptContext::new(
@@ -2172,7 +2172,7 @@ where
 }
 
 fn fault_matrix_projection_event(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     lsn: Lsn,
 ) -> FaultMatrixResult<ProjectionEventRecord> {
     let metadata = ProjectionEventMetadata::new(
@@ -2198,7 +2198,7 @@ fn fault_matrix_projection_event(
     ))
 }
 
-fn metadata_json(tenant: vocab::TenantId) -> String {
+fn metadata_json(tenant: rss_request_context::TenantId) -> String {
     serde_json::json!({
         "tenantId": tenant.to_string(),
         "schemaVersion": "v1",
@@ -2386,7 +2386,7 @@ mod tests {
     }
 
     fn certificate_command(
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         idempotency_key: &str,
     ) -> FaultMatrixResult<FaultMatrixCertificateCommand> {
         let semantic_suffix = format!("{:x}", Sha256::digest(idempotency_key.as_bytes()));
@@ -2403,7 +2403,9 @@ mod tests {
         )?)
     }
 
-    fn certificate_attempt(tenant: vocab::TenantId) -> eventexec::reconcile::ReconcileAttempt {
+    fn certificate_attempt(
+        tenant: rss_request_context::TenantId,
+    ) -> eventexec::reconcile::ReconcileAttempt {
         let target = eventexec::reconcile::ClaimedTarget::restore(
             eventexec::reconcile::ClaimedTargetRestore {
                 tenant,
@@ -2422,7 +2424,7 @@ mod tests {
     }
 
     fn generated_session_payload(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         session_id: uuid::Uuid,
     ) -> FaultMatrixSessionCreatedPayload {
         FaultMatrixSessionCreatedPayload {
@@ -2436,7 +2438,7 @@ mod tests {
     #[test]
     fn session_created_input_derives_identity_from_exact_generated_payload() -> FaultMatrixResult<()>
     {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
         let session_id = uuid::Uuid::from_u128(9);
         let input = FaultMatrixSessionCreatedInput::new(
             generated_session_payload(tenant, session_id),
@@ -2485,7 +2487,7 @@ mod tests {
     #[tokio::test]
     async fn certificate_reconcile_commands_are_reviewed_with_stable_sealed_aliases()
     -> FaultMatrixResult<()> {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
         let raw_key = "fault-matrix-certificate-dispatch";
         let attempt = certificate_attempt(tenant);
         let [first, retry] = review_certificate_reconcile_commands(

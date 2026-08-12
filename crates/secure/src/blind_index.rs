@@ -15,8 +15,8 @@
 use hmac::Hmac;
 // `hmac::Mac` trait 提供 new_from_slice/update/finalize；`as _` 引入方法不绑定名（避免与命名冲突）。
 use hmac::Mac as _;
+use rss_request_context::TenantId;
 use sha2::Sha256;
-use vocab::tenant::TenantId;
 
 // ── 域分隔常量 ─────────────────────────────────────────────────────────────────
 

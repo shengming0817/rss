@@ -508,8 +508,8 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxStatusErr
 pub struct consistency::inbox::InboxBacklogScope
 impl consistency::inbox::InboxBacklogScope
 pub fn consistency::inbox::InboxBacklogScope::consumer_group(&self) -> &consistency::idempotency::ConsumerGroup
-pub fn consistency::inbox::InboxBacklogScope::new(vocab::tenant::TenantId, consistency::idempotency::ConsumerGroup) -> Self
-pub fn consistency::inbox::InboxBacklogScope::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn consistency::inbox::InboxBacklogScope::new(rss_request_context::TenantId, consistency::idempotency::ConsumerGroup) -> Self
+pub fn consistency::inbox::InboxBacklogScope::tenant_id(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for consistency::inbox::InboxBacklogScope
 pub fn consistency::inbox::InboxBacklogScope::clone(&self) -> consistency::inbox::InboxBacklogScope
 impl core::cmp::Eq for consistency::inbox::InboxBacklogScope
@@ -553,9 +553,9 @@ pub fn consistency::inbox::InboxReceiptContext::contract_id(&self) -> &str
 pub fn consistency::inbox::InboxReceiptContext::contract_version(&self) -> &str
 pub fn consistency::inbox::InboxReceiptContext::correlation_id(&self) -> core::option::Option<&str>
 pub fn consistency::inbox::InboxReceiptContext::domain(&self) -> &str
-pub fn consistency::inbox::InboxReceiptContext::new(vocab::tenant::TenantId, consistency::idempotency::ConsumerGroup, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> core::result::Result<Self, consistency::inbox::InboxReceiptContextError>
+pub fn consistency::inbox::InboxReceiptContext::new(rss_request_context::TenantId, consistency::idempotency::ConsumerGroup, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> core::result::Result<Self, consistency::inbox::InboxReceiptContextError>
 pub fn consistency::inbox::InboxReceiptContext::schema_hash(&self) -> &str
-pub fn consistency::inbox::InboxReceiptContext::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn consistency::inbox::InboxReceiptContext::tenant_id(&self) -> rss_request_context::TenantId
 pub fn consistency::inbox::InboxReceiptContext::topic(&self) -> &str
 pub fn consistency::inbox::InboxReceiptContext::trace(&self) -> core::option::Option<&str>
 impl core::clone::Clone for consistency::inbox::InboxReceiptContext
@@ -1039,8 +1039,8 @@ impl<'a> core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxFac
 pub struct consistency::outbox::OutboxMetricSubject
 impl consistency::outbox::OutboxMetricSubject
 pub fn consistency::outbox::OutboxMetricSubject::contract_id(&self) -> &consistency::outbox::OutboxContractId
-pub fn consistency::outbox::OutboxMetricSubject::new(vocab::tenant::TenantId, consistency::outbox::OutboxContractId) -> Self
-pub fn consistency::outbox::OutboxMetricSubject::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn consistency::outbox::OutboxMetricSubject::new(rss_request_context::TenantId, consistency::outbox::OutboxContractId) -> Self
+pub fn consistency::outbox::OutboxMetricSubject::tenant_id(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for consistency::outbox::OutboxMetricSubject
 pub fn consistency::outbox::OutboxMetricSubject::clone(&self) -> consistency::outbox::OutboxMetricSubject
 impl core::cmp::Eq for consistency::outbox::OutboxMetricSubject
@@ -1430,10 +1430,10 @@ pub fn consistency::projection::ProjectionEventMetadata::contract_version(&self)
 pub fn consistency::projection::ProjectionEventMetadata::domain(&self) -> &str
 pub fn consistency::projection::ProjectionEventMetadata::event_id(&self) -> &str
 pub fn consistency::projection::ProjectionEventMetadata::metadata_json(&self) -> &serde_json::value::Value
-pub fn consistency::projection::ProjectionEventMetadata::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, serde_json::value::Value, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn consistency::projection::ProjectionEventMetadata::new(rss_request_context::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, serde_json::value::Value, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn consistency::projection::ProjectionEventMetadata::partition_key(&self) -> core::option::Option<&str>
 pub fn consistency::projection::ProjectionEventMetadata::schema_hash(&self) -> &str
-pub fn consistency::projection::ProjectionEventMetadata::tenant(&self) -> vocab::tenant::TenantId
+pub fn consistency::projection::ProjectionEventMetadata::tenant(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventMetadata::clone(&self) -> consistency::projection::ProjectionEventMetadata
 impl core::cmp::Eq for consistency::projection::ProjectionEventMetadata
@@ -2426,9 +2426,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaInstance
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaInstanceRecord
 pub struct consistency::saga::SagaInstanceRef
 impl consistency::saga::SagaInstanceRef
-pub fn consistency::saga::SagaInstanceRef::new(vocab::tenant::TenantId, consistency::saga::SagaId) -> core::result::Result<Self, consistency::saga::SagaInstanceRefError>
+pub fn consistency::saga::SagaInstanceRef::new(rss_request_context::TenantId, consistency::saga::SagaId) -> core::result::Result<Self, consistency::saga::SagaInstanceRefError>
 pub fn consistency::saga::SagaInstanceRef::saga_id(&self) -> consistency::saga::SagaId
-pub fn consistency::saga::SagaInstanceRef::tenant(&self) -> vocab::tenant::TenantId
+pub fn consistency::saga::SagaInstanceRef::tenant(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for consistency::saga::SagaInstanceRef
 pub fn consistency::saga::SagaInstanceRef::clone(&self) -> consistency::saga::SagaInstanceRef
 impl core::cmp::Eq for consistency::saga::SagaInstanceRef
@@ -4381,8 +4381,8 @@ impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::IdemKey
 pub struct consistency::InboxBacklogScope
 impl consistency::inbox::InboxBacklogScope
 pub fn consistency::inbox::InboxBacklogScope::consumer_group(&self) -> &consistency::idempotency::ConsumerGroup
-pub fn consistency::inbox::InboxBacklogScope::new(vocab::tenant::TenantId, consistency::idempotency::ConsumerGroup) -> Self
-pub fn consistency::inbox::InboxBacklogScope::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn consistency::inbox::InboxBacklogScope::new(rss_request_context::TenantId, consistency::idempotency::ConsumerGroup) -> Self
+pub fn consistency::inbox::InboxBacklogScope::tenant_id(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for consistency::inbox::InboxBacklogScope
 pub fn consistency::inbox::InboxBacklogScope::clone(&self) -> consistency::inbox::InboxBacklogScope
 impl core::cmp::Eq for consistency::inbox::InboxBacklogScope
@@ -4426,9 +4426,9 @@ pub fn consistency::inbox::InboxReceiptContext::contract_id(&self) -> &str
 pub fn consistency::inbox::InboxReceiptContext::contract_version(&self) -> &str
 pub fn consistency::inbox::InboxReceiptContext::correlation_id(&self) -> core::option::Option<&str>
 pub fn consistency::inbox::InboxReceiptContext::domain(&self) -> &str
-pub fn consistency::inbox::InboxReceiptContext::new(vocab::tenant::TenantId, consistency::idempotency::ConsumerGroup, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> core::result::Result<Self, consistency::inbox::InboxReceiptContextError>
+pub fn consistency::inbox::InboxReceiptContext::new(rss_request_context::TenantId, consistency::idempotency::ConsumerGroup, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> core::result::Result<Self, consistency::inbox::InboxReceiptContextError>
 pub fn consistency::inbox::InboxReceiptContext::schema_hash(&self) -> &str
-pub fn consistency::inbox::InboxReceiptContext::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn consistency::inbox::InboxReceiptContext::tenant_id(&self) -> rss_request_context::TenantId
 pub fn consistency::inbox::InboxReceiptContext::topic(&self) -> &str
 pub fn consistency::inbox::InboxReceiptContext::trace(&self) -> core::option::Option<&str>
 impl core::clone::Clone for consistency::inbox::InboxReceiptContext
@@ -4596,8 +4596,8 @@ impl<'a> core::panic::unwind_safe::UnwindSafe for consistency::outbox::OutboxFac
 pub struct consistency::OutboxMetricSubject
 impl consistency::outbox::OutboxMetricSubject
 pub fn consistency::outbox::OutboxMetricSubject::contract_id(&self) -> &consistency::outbox::OutboxContractId
-pub fn consistency::outbox::OutboxMetricSubject::new(vocab::tenant::TenantId, consistency::outbox::OutboxContractId) -> Self
-pub fn consistency::outbox::OutboxMetricSubject::tenant_id(&self) -> vocab::tenant::TenantId
+pub fn consistency::outbox::OutboxMetricSubject::new(rss_request_context::TenantId, consistency::outbox::OutboxContractId) -> Self
+pub fn consistency::outbox::OutboxMetricSubject::tenant_id(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for consistency::outbox::OutboxMetricSubject
 pub fn consistency::outbox::OutboxMetricSubject::clone(&self) -> consistency::outbox::OutboxMetricSubject
 impl core::cmp::Eq for consistency::outbox::OutboxMetricSubject
@@ -4810,10 +4810,10 @@ pub fn consistency::projection::ProjectionEventMetadata::contract_version(&self)
 pub fn consistency::projection::ProjectionEventMetadata::domain(&self) -> &str
 pub fn consistency::projection::ProjectionEventMetadata::event_id(&self) -> &str
 pub fn consistency::projection::ProjectionEventMetadata::metadata_json(&self) -> &serde_json::value::Value
-pub fn consistency::projection::ProjectionEventMetadata::new(vocab::tenant::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, serde_json::value::Value, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
+pub fn consistency::projection::ProjectionEventMetadata::new(rss_request_context::TenantId, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, impl core::convert::Into<alloc::string::String>, serde_json::value::Value, core::option::Option<alloc::string::String>, core::option::Option<alloc::string::String>) -> Self
 pub fn consistency::projection::ProjectionEventMetadata::partition_key(&self) -> core::option::Option<&str>
 pub fn consistency::projection::ProjectionEventMetadata::schema_hash(&self) -> &str
-pub fn consistency::projection::ProjectionEventMetadata::tenant(&self) -> vocab::tenant::TenantId
+pub fn consistency::projection::ProjectionEventMetadata::tenant(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for consistency::projection::ProjectionEventMetadata
 pub fn consistency::projection::ProjectionEventMetadata::clone(&self) -> consistency::projection::ProjectionEventMetadata
 impl core::cmp::Eq for consistency::projection::ProjectionEventMetadata
@@ -5099,9 +5099,9 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::saga::SagaInstance
 impl core::panic::unwind_safe::UnwindSafe for consistency::saga::SagaInstanceRecord
 pub struct consistency::SagaInstanceRef
 impl consistency::saga::SagaInstanceRef
-pub fn consistency::saga::SagaInstanceRef::new(vocab::tenant::TenantId, consistency::saga::SagaId) -> core::result::Result<Self, consistency::saga::SagaInstanceRefError>
+pub fn consistency::saga::SagaInstanceRef::new(rss_request_context::TenantId, consistency::saga::SagaId) -> core::result::Result<Self, consistency::saga::SagaInstanceRefError>
 pub fn consistency::saga::SagaInstanceRef::saga_id(&self) -> consistency::saga::SagaId
-pub fn consistency::saga::SagaInstanceRef::tenant(&self) -> vocab::tenant::TenantId
+pub fn consistency::saga::SagaInstanceRef::tenant(&self) -> rss_request_context::TenantId
 impl core::clone::Clone for consistency::saga::SagaInstanceRef
 pub fn consistency::saga::SagaInstanceRef::clone(&self) -> consistency::saga::SagaInstanceRef
 impl core::cmp::Eq for consistency::saga::SagaInstanceRef

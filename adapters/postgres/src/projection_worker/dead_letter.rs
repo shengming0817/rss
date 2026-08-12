@@ -8,7 +8,7 @@ use crate::dead_letter_payload::{DlxPayloadContext, DlxPayloadProtector};
 pub(crate) struct PgProjectionWorkerDeadLetterStore {
     store: VerifiedPgProjectionWorkerStore,
     target: ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     owner: Box<str>,
     checkpoint_id: Box<str>,
     payload_protector: DlxPayloadProtector,
@@ -18,7 +18,7 @@ impl PgProjectionWorkerDeadLetterStore {
     pub(super) fn new(
         store: &VerifiedPgProjectionWorkerStore,
         target: &ProjectionWorkerTarget,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         payload_protector: DlxPayloadProtector,
     ) -> Self {
         let selector = target.selector(tenant);

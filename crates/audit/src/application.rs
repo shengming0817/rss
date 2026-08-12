@@ -114,16 +114,16 @@ const AUDIT_FORBIDDEN_REASON: &str = "forbidden";
 /// constructor remain private to this application module. No other audit module or adapter can
 /// mint a successful durable append receipt.
 pub(crate) struct AuditListTenantAppendReceipt {
-    target: vocab::TenantId,
+    target: rss_request_context::TenantId,
     _seal: (),
 }
 
 impl AuditListTenantAppendReceipt {
-    fn after_success(target: vocab::TenantId) -> Self {
+    fn after_success(target: rss_request_context::TenantId) -> Self {
         Self { target, _seal: () }
     }
 
-    pub(crate) fn target(&self) -> vocab::TenantId {
+    pub(crate) fn target(&self) -> rss_request_context::TenantId {
         self.target
     }
 }
@@ -158,7 +158,7 @@ impl std::fmt::Debug for SecurityAuditCommand {
 }
 
 impl SecurityAuditCommand {
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.record.tenant
     }
 
@@ -172,7 +172,7 @@ pub enum AuditEventRecordError {
     #[error("audit event payload decode failed")]
     Decode(#[source] serde_json::Error),
     #[error("audit event tenant parse failed")]
-    Tenant(#[source] vocab::TenantIdError),
+    Tenant(#[source] rss_request_context::TenantIdError),
     #[error("audit event action parse failed")]
     Action(#[source] vocab::ActionError),
     #[error("audit event id parse failed")]
@@ -210,8 +210,8 @@ pub fn security_audit_command_from_message(
     let payload: IdentitySecurityEventPayload =
         serde_json::from_slice(message.payload().as_bytes())
             .map_err(AuditEventRecordError::Decode)?;
-    let tenant =
-        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let tenant = rss_request_context::TenantId::parse(&payload.tenant_id)
+        .map_err(AuditEventRecordError::Tenant)?;
     let action_raw = match (payload.kind, payload.target.kind) {
         (
             IdentitySecurityEventPayloadKind::PasswordChanged,
@@ -258,11 +258,15 @@ pub fn security_audit_command_from_message(
     let action = vocab::Action::parse(action_raw).map_err(AuditEventRecordError::Action)?;
     let target_ref = payload.target.ref_;
     let actor_kind = match payload.actor.kind {
-        IdentitySecurityEventPayloadActorKind::User => vocab::PrincipalKind::User,
-        IdentitySecurityEventPayloadActorKind::Device => vocab::PrincipalKind::Device,
-        IdentitySecurityEventPayloadActorKind::Admin => vocab::PrincipalKind::Admin,
-        IdentitySecurityEventPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
-        IdentitySecurityEventPayloadActorKind::Service => vocab::PrincipalKind::Service,
+        IdentitySecurityEventPayloadActorKind::User => rss_request_context::PrincipalKind::User,
+        IdentitySecurityEventPayloadActorKind::Device => rss_request_context::PrincipalKind::Device,
+        IdentitySecurityEventPayloadActorKind::Admin => rss_request_context::PrincipalKind::Admin,
+        IdentitySecurityEventPayloadActorKind::SuperAdmin => {
+            rss_request_context::PrincipalKind::SuperAdmin
+        }
+        IdentitySecurityEventPayloadActorKind::Service => {
+            rss_request_context::PrincipalKind::Service
+        }
     };
     Ok(SecurityAuditCommand {
         record: AuditRecord {
@@ -338,15 +342,15 @@ fn session_created_record_from_message(
     let payload: IdentitySessionCreatedPayload =
         serde_json::from_slice(message.payload().as_bytes())
             .map_err(AuditEventRecordError::Decode)?;
-    let tenant =
-        vocab::TenantId::try_from(payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let tenant = rss_request_context::TenantId::parse(&payload.tenant_id.to_string())
+        .map_err(AuditEventRecordError::Tenant)?;
     let action = vocab::Action::parse(ACTION_LOGIN).map_err(AuditEventRecordError::Action)?;
     let session = ids::SessionId::new(payload.session_id);
     let resource_id = SessionAuditResourceId::from_message(message.id(), &session)?;
     Ok(AuditRecord {
         tenant,
         actor: ids::UserId::new(payload.subject),
-        actor_kind: vocab::PrincipalKind::User,
+        actor_kind: rss_request_context::PrincipalKind::User,
         action,
         resource: ResourceRef::new(RESOURCE_KIND_SESSION, resource_id.into_string()),
         outcome: AuditOutcome::Success,
@@ -388,8 +392,8 @@ fn role_assigned_record_from_message(
 ) -> Result<AuditRecord, AuditEventRecordError> {
     let payload: IdentityRoleAssignedPayload = serde_json::from_slice(message.payload().as_bytes())
         .map_err(AuditEventRecordError::Decode)?;
-    let tenant =
-        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let tenant = rss_request_context::TenantId::parse(&payload.tenant_id)
+        .map_err(AuditEventRecordError::Tenant)?;
     let action = vocab::Action::parse(ACTION_ROLE_ASSIGN).map_err(AuditEventRecordError::Action)?;
     let resource_id = role_binding_resource_id(tenant, &payload.role_id, &payload.subject);
     Ok(AuditRecord {
@@ -408,8 +412,8 @@ fn role_revoked_record_from_message(
 ) -> Result<AuditRecord, AuditEventRecordError> {
     let payload: IdentityRoleRevokedPayload = serde_json::from_slice(message.payload().as_bytes())
         .map_err(AuditEventRecordError::Decode)?;
-    let tenant =
-        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let tenant = rss_request_context::TenantId::parse(&payload.tenant_id)
+        .map_err(AuditEventRecordError::Tenant)?;
     let action = vocab::Action::parse(ACTION_ROLE_REVOKE).map_err(AuditEventRecordError::Action)?;
     let resource_id = role_binding_resource_id(tenant, &payload.role_id, &payload.subject);
     Ok(AuditRecord {
@@ -429,8 +433,8 @@ fn policy_updated_record_from_message(
     let payload: IdentityPolicyUpdatedPayload =
         serde_json::from_slice(message.payload().as_bytes())
             .map_err(AuditEventRecordError::Decode)?;
-    let tenant =
-        vocab::TenantId::parse(&payload.tenant_id).map_err(AuditEventRecordError::Tenant)?;
+    let tenant = rss_request_context::TenantId::parse(&payload.tenant_id)
+        .map_err(AuditEventRecordError::Tenant)?;
     let action = vocab::Action::parse(policy_updated_action(payload.change_kind))
         .map_err(AuditEventRecordError::Action)?;
     Ok(AuditRecord {
@@ -459,17 +463,15 @@ fn to_unix_secs(time: SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
-/// `vocab::PrincipalKind` → wire 字符串（camelCase）。
-fn principal_kind_wire(kind: vocab::PrincipalKind) -> &'static str {
+/// `rss_request_context::PrincipalKind` → wire 字符串（camelCase）。
+fn principal_kind_wire(kind: rss_request_context::PrincipalKind) -> &'static str {
     match kind {
-        vocab::PrincipalKind::User => "user",
-        vocab::PrincipalKind::Device => "device",
-        vocab::PrincipalKind::Admin => "admin",
-        vocab::PrincipalKind::SuperAdmin => "superAdmin",
-        vocab::PrincipalKind::Service => "service",
-        vocab::PrincipalKind::Anonymous => "anonymous",
-        // reason: 跨 crate non_exhaustive，未知 kind fail-safe 落 "unknown"（不泄、不 panic）。
-        _ => "unknown",
+        rss_request_context::PrincipalKind::User => "user",
+        rss_request_context::PrincipalKind::Device => "device",
+        rss_request_context::PrincipalKind::Admin => "admin",
+        rss_request_context::PrincipalKind::SuperAdmin => "superAdmin",
+        rss_request_context::PrincipalKind::Service => "service",
+        rss_request_context::PrincipalKind::Anonymous => "anonymous",
     }
 }
 
@@ -576,7 +578,7 @@ fn to_response(
 }
 
 fn to_target_response(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     result: AuditListResult,
     projection: ResourceProjection,
 ) -> Result<AuditListTenantEntriesResponse, TargetCursorError> {
@@ -600,7 +602,7 @@ fn to_target_view(entry: &AuditEntry, projection: ResourceProjection) -> AuditTe
 }
 
 fn encode_target_cursor(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     inner: &vocab::Cursor,
 ) -> Result<vocab::Cursor, TargetCursorError> {
     let raw = format!("{tenant}:{}", inner.as_str());
@@ -609,7 +611,7 @@ fn encode_target_cursor(
 }
 
 fn decode_target_cursor(
-    expected_tenant: vocab::TenantId,
+    expected_tenant: rss_request_context::TenantId,
     cursor: &vocab::Cursor,
 ) -> Result<vocab::Cursor, TargetCursorError> {
     let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -619,7 +621,8 @@ fn decode_target_cursor(
     let Some((tenant_raw, inner_raw)) = raw.split_once(':') else {
         return Err(TargetCursorError::Invalid);
     };
-    let tenant = vocab::TenantId::parse(tenant_raw).map_err(|_| TargetCursorError::Invalid)?;
+    let tenant =
+        rss_request_context::TenantId::parse(tenant_raw).map_err(|_| TargetCursorError::Invalid)?;
     if tenant != expected_tenant {
         return Err(TargetCursorError::TenantMismatch);
     }
@@ -668,7 +671,7 @@ fn page_from_parts(
 
 fn target_page_from_request(
     request: &AuditListTenantEntriesRequest,
-    target: vocab::TenantId,
+    target: rss_request_context::TenantId,
 ) -> Result<AuditPage, TargetPageRequestError> {
     let mut page = page_from_parts(request.limit, request.cursor.as_deref())
         .map_err(TargetPageRequestError::Page)?;
@@ -761,7 +764,7 @@ async fn list_entries_handler(
 }
 
 fn log_cross_tenant_audit_append_failure(
-    target: vocab::TenantId,
+    target: rss_request_context::TenantId,
     request: &TargetReadRequest,
     error: &dyn std::error::Error,
 ) {
@@ -787,7 +790,7 @@ fn log_cross_tenant_audit_append_failure(
 async fn record_cross_tenant_denial<S>(
     deps: &TargetAuditReadDeps<S>,
     authenticated: &httpserve::Authenticated,
-    target: vocab::TenantId,
+    target: rss_request_context::TenantId,
     request: &TargetReadRequest,
 ) -> Result<(), diport::AuditSinkError>
 where
@@ -820,7 +823,7 @@ where
 async fn audited_forbidden_response<S>(
     deps: &TargetAuditReadDeps<S>,
     authenticated: Option<&httpserve::Authenticated>,
-    target: vocab::TenantId,
+    target: rss_request_context::TenantId,
     request: &TargetReadRequest,
 ) -> Response
 where
@@ -845,7 +848,7 @@ where
 async fn audited_cross_tenant_scope<S>(
     deps: &TargetAuditReadDeps<S>,
     principal: &Arc<authn::Principal>,
-    target: vocab::TenantId,
+    target: rss_request_context::TenantId,
     request: &TargetReadRequest,
 ) -> Result<CrossTenantReadScope, Response>
 where
@@ -891,7 +894,7 @@ async fn list_target_page(
     admin_repo: Arc<DynAuditAdminRepo<'static>>,
     scope: CrossTenantReadScope,
     page: AuditPage,
-    target: vocab::TenantId,
+    target: rss_request_context::TenantId,
     projection: ResourceProjection,
     request_id: &str,
 ) -> Response {
@@ -931,14 +934,14 @@ async fn list_entries_target_tenant<S>(
 where
     S: AuditListTenantAppender + Send + Sync + 'static,
 {
-    let target = match vocab::TenantId::parse(&request.target_raw) {
+    let target = match rss_request_context::TenantId::parse(&request.target_raw) {
         Ok(tenant) => tenant,
         Err(_) => return httpserve::error::validation_bad_request(&request.request_id),
     };
     let Some(principal) = principal else {
         return httpserve::error::forbidden(&request.request_id);
     };
-    if principal.kind() != vocab::PrincipalKind::SuperAdmin {
+    if principal.kind() != rss_request_context::PrincipalKind::SuperAdmin {
         return audited_forbidden_response(&deps, authenticated.as_ref(), target, &request).await;
     }
     let projection = match authorize_read_projection(
@@ -980,7 +983,7 @@ where
 async fn authorize_read_projection(
     authorizer: Option<Arc<dyn RouteAuthorizer>>,
     authenticated: Option<&httpserve::Authenticated>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     spec: &'static ::generated::http::HttpSpec,
 ) -> Result<ResourceProjection, AuditReadAuthError> {
     let vocab::HttpRouteAuth::Permission(permission) = spec.route.auth() else {
@@ -1038,12 +1041,16 @@ async fn authorize_and_list_entries_for_test(
     .into_response()
 }
 
-fn role_binding_resource_id(tenant: vocab::TenantId, role_id: &str, subject: &str) -> String {
+fn role_binding_resource_id(
+    tenant: rss_request_context::TenantId,
+    role_id: &str,
+    subject: &str,
+) -> String {
     format!("tenant/{tenant}/role/{role_id}/subject/{subject}")
 }
 
 fn policy_resource_id(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     policy_id: &str,
     contract_id: &str,
     permission: &str,
@@ -1059,36 +1066,58 @@ fn policy_updated_action(kind: IdentityPolicyUpdatedPayloadChangeKind) -> &'stat
     }
 }
 
-fn assigned_actor_kind(kind: IdentityRoleAssignedPayloadActorKind) -> vocab::PrincipalKind {
+fn assigned_actor_kind(
+    kind: IdentityRoleAssignedPayloadActorKind,
+) -> rss_request_context::PrincipalKind {
     match kind {
-        IdentityRoleAssignedPayloadActorKind::User => vocab::PrincipalKind::User,
-        IdentityRoleAssignedPayloadActorKind::Device => vocab::PrincipalKind::Device,
-        IdentityRoleAssignedPayloadActorKind::Admin => vocab::PrincipalKind::Admin,
-        IdentityRoleAssignedPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
-        IdentityRoleAssignedPayloadActorKind::Service => vocab::PrincipalKind::Service,
-        IdentityRoleAssignedPayloadActorKind::Anonymous => vocab::PrincipalKind::Anonymous,
+        IdentityRoleAssignedPayloadActorKind::User => rss_request_context::PrincipalKind::User,
+        IdentityRoleAssignedPayloadActorKind::Device => rss_request_context::PrincipalKind::Device,
+        IdentityRoleAssignedPayloadActorKind::Admin => rss_request_context::PrincipalKind::Admin,
+        IdentityRoleAssignedPayloadActorKind::SuperAdmin => {
+            rss_request_context::PrincipalKind::SuperAdmin
+        }
+        IdentityRoleAssignedPayloadActorKind::Service => {
+            rss_request_context::PrincipalKind::Service
+        }
+        IdentityRoleAssignedPayloadActorKind::Anonymous => {
+            rss_request_context::PrincipalKind::Anonymous
+        }
     }
 }
 
-fn revoked_actor_kind(kind: IdentityRoleRevokedPayloadActorKind) -> vocab::PrincipalKind {
+fn revoked_actor_kind(
+    kind: IdentityRoleRevokedPayloadActorKind,
+) -> rss_request_context::PrincipalKind {
     match kind {
-        IdentityRoleRevokedPayloadActorKind::User => vocab::PrincipalKind::User,
-        IdentityRoleRevokedPayloadActorKind::Device => vocab::PrincipalKind::Device,
-        IdentityRoleRevokedPayloadActorKind::Admin => vocab::PrincipalKind::Admin,
-        IdentityRoleRevokedPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
-        IdentityRoleRevokedPayloadActorKind::Service => vocab::PrincipalKind::Service,
-        IdentityRoleRevokedPayloadActorKind::Anonymous => vocab::PrincipalKind::Anonymous,
+        IdentityRoleRevokedPayloadActorKind::User => rss_request_context::PrincipalKind::User,
+        IdentityRoleRevokedPayloadActorKind::Device => rss_request_context::PrincipalKind::Device,
+        IdentityRoleRevokedPayloadActorKind::Admin => rss_request_context::PrincipalKind::Admin,
+        IdentityRoleRevokedPayloadActorKind::SuperAdmin => {
+            rss_request_context::PrincipalKind::SuperAdmin
+        }
+        IdentityRoleRevokedPayloadActorKind::Service => rss_request_context::PrincipalKind::Service,
+        IdentityRoleRevokedPayloadActorKind::Anonymous => {
+            rss_request_context::PrincipalKind::Anonymous
+        }
     }
 }
 
-fn policy_updated_actor_kind(kind: IdentityPolicyUpdatedPayloadActorKind) -> vocab::PrincipalKind {
+fn policy_updated_actor_kind(
+    kind: IdentityPolicyUpdatedPayloadActorKind,
+) -> rss_request_context::PrincipalKind {
     match kind {
-        IdentityPolicyUpdatedPayloadActorKind::User => vocab::PrincipalKind::User,
-        IdentityPolicyUpdatedPayloadActorKind::Device => vocab::PrincipalKind::Device,
-        IdentityPolicyUpdatedPayloadActorKind::Admin => vocab::PrincipalKind::Admin,
-        IdentityPolicyUpdatedPayloadActorKind::SuperAdmin => vocab::PrincipalKind::SuperAdmin,
-        IdentityPolicyUpdatedPayloadActorKind::Service => vocab::PrincipalKind::Service,
-        IdentityPolicyUpdatedPayloadActorKind::Anonymous => vocab::PrincipalKind::Anonymous,
+        IdentityPolicyUpdatedPayloadActorKind::User => rss_request_context::PrincipalKind::User,
+        IdentityPolicyUpdatedPayloadActorKind::Device => rss_request_context::PrincipalKind::Device,
+        IdentityPolicyUpdatedPayloadActorKind::Admin => rss_request_context::PrincipalKind::Admin,
+        IdentityPolicyUpdatedPayloadActorKind::SuperAdmin => {
+            rss_request_context::PrincipalKind::SuperAdmin
+        }
+        IdentityPolicyUpdatedPayloadActorKind::Service => {
+            rss_request_context::PrincipalKind::Service
+        }
+        IdentityPolicyUpdatedPayloadActorKind::Anonymous => {
+            rss_request_context::PrincipalKind::Anonymous
+        }
     }
 }
 
@@ -1401,7 +1430,7 @@ mod tests {
 
         async fn verify_tenant(
             &self,
-            tenant: vocab::TenantId,
+            tenant: rss_request_context::TenantId,
             batch: vocab::Limit,
         ) -> Result<AuditLedgerVerifyReport, AuditError> {
             let mut cursor = None;
@@ -1470,7 +1499,7 @@ mod tests {
 
         async fn verify_tenant(
             &self,
-            tenant: vocab::TenantId,
+            tenant: rss_request_context::TenantId,
             _batch: vocab::Limit,
         ) -> Result<AuditLedgerVerifyReport, AuditError> {
             self.verify_calls
@@ -1487,7 +1516,7 @@ mod tests {
         list_calls: Arc<std::sync::atomic::AtomicUsize>,
         business_write_effects:
             testkit::local_only::ProviderCounter<testkit::local_only::BusinessWrite>,
-        scopes: Arc<std::sync::Mutex<Vec<vocab::TenantId>>>,
+        scopes: Arc<std::sync::Mutex<Vec<rss_request_context::TenantId>>>,
         fail: bool,
         inject_forbidden_write: bool,
     }
@@ -1523,7 +1552,7 @@ mod tests {
             self.list_calls.load(std::sync::atomic::Ordering::SeqCst)
         }
 
-        fn scopes(&self) -> Vec<vocab::TenantId> {
+        fn scopes(&self) -> Vec<rss_request_context::TenantId> {
             self.scopes
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
@@ -1703,12 +1732,12 @@ mod tests {
 
     #[derive(Clone)]
     struct StrictTargetAuthorizer {
-        expected_tenant: vocab::TenantId,
+        expected_tenant: rss_request_context::TenantId,
         requests: Arc<std::sync::Mutex<Vec<httpserve::RouteAuthorizationRequest>>>,
     }
 
     impl StrictTargetAuthorizer {
-        fn new(expected_tenant: vocab::TenantId) -> Self {
+        fn new(expected_tenant: rss_request_context::TenantId) -> Self {
             Self {
                 expected_tenant,
                 requests: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1749,14 +1778,14 @@ mod tests {
     #[allow(clippy::expect_used)]
     fn default_admin_principal() -> Arc<authn::Principal> {
         principal(
-            vocab::PrincipalKind::Admin,
-            Some(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
+            rss_request_context::PrincipalKind::Admin,
+            Some(rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant")),
         )
     }
 
     fn principal(
-        kind: vocab::PrincipalKind,
-        tenant: Option<vocab::TenantId>,
+        kind: rss_request_context::PrincipalKind,
+        tenant: Option<rss_request_context::TenantId>,
     ) -> Arc<authn::Principal> {
         Arc::new(authn::test_support::principal(kind, CANON_SUBJECT, tenant))
     }
@@ -1880,7 +1909,7 @@ mod tests {
             assert_eq!(format!("{command:?}"), "SecurityAuditCommand(<redacted>)");
             let record = command.into_record();
             assert_eq!(record.actor.as_uuid().to_string(), actor_ref);
-            assert_eq!(record.actor_kind, vocab::PrincipalKind::Admin);
+            assert_eq!(record.actor_kind, rss_request_context::PrincipalKind::Admin);
             assert_eq!(record.resource.id(), target);
             assert_eq!(record.action.as_str(), action);
         }
@@ -1921,9 +1950,9 @@ mod tests {
         assert!(matches!(error, AuditEventRecordError::Decode(_)));
 
         for (actor_kind, expected) in [
-            ("user", vocab::PrincipalKind::User),
-            ("admin", vocab::PrincipalKind::Admin),
-            ("service", vocab::PrincipalKind::Service),
+            ("user", rss_request_context::PrincipalKind::User),
+            ("admin", rss_request_context::PrincipalKind::Admin),
+            ("service", rss_request_context::PrincipalKind::Service),
         ] {
             let payload = format!(
                 r#"{{"actor":{{"keyId":1,"kind":"{actor_kind}","ref":"{actor_ref}"}},"kind":"accountReactivated","occurredAt":1,"target":{{"keyId":1,"kind":"subject","ref":"{target}"}},"tenantId":"{CANON_TENANT}"}}"#
@@ -1961,7 +1990,7 @@ mod tests {
         .await
         .expect("handle ok");
 
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
         let page = AuditPage {
             limit: vocab::Limit::new(10).expect("limit"),
             cursor: None,
@@ -2062,7 +2091,9 @@ mod tests {
 
         let listed = repo
             .list(
-                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
+                TenantRepoScope::for_test(
+                    rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"),
+                ),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -2079,7 +2110,10 @@ mod tests {
             expected_role_binding_resource_id("target-subject")
         );
         assert_eq!(entry.actor().as_uuid().to_string(), CANON_SUBJECT);
-        assert_eq!(entry.actor_kind(), vocab::PrincipalKind::Admin);
+        assert_eq!(
+            entry.actor_kind(),
+            rss_request_context::PrincipalKind::Admin
+        );
     }
 
     #[tokio::test]
@@ -2096,7 +2130,9 @@ mod tests {
 
         let listed = repo
             .list(
-                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
+                TenantRepoScope::for_test(
+                    rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"),
+                ),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -2113,7 +2149,10 @@ mod tests {
             expected_role_binding_resource_id("target-subject")
         );
         assert_eq!(entry.actor().as_uuid().to_string(), CANON_SUBJECT);
-        assert_eq!(entry.actor_kind(), vocab::PrincipalKind::Admin);
+        assert_eq!(
+            entry.actor_kind(),
+            rss_request_context::PrincipalKind::Admin
+        );
     }
 
     #[tokio::test]
@@ -2133,7 +2172,9 @@ mod tests {
 
         let listed = repo
             .list(
-                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
+                TenantRepoScope::for_test(
+                    rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"),
+                ),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -2152,7 +2193,10 @@ mod tests {
             )
         );
         assert_eq!(entry.actor().as_uuid().to_string(), CANON_SUBJECT);
-        assert_eq!(entry.actor_kind(), vocab::PrincipalKind::Admin);
+        assert_eq!(
+            entry.actor_kind(),
+            rss_request_context::PrincipalKind::Admin
+        );
     }
 
     #[tokio::test]
@@ -2175,7 +2219,9 @@ mod tests {
 
         let listed = repo
             .list(
-                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
+                TenantRepoScope::for_test(
+                    rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"),
+                ),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -2186,7 +2232,7 @@ mod tests {
         assert_eq!(listed.entries.len(), 1);
         assert_eq!(
             listed.entries[0].actor_kind(),
-            vocab::PrincipalKind::Service
+            rss_request_context::PrincipalKind::Service
         );
     }
 
@@ -2217,7 +2263,9 @@ mod tests {
 
         let listed = repo
             .list(
-                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
+                TenantRepoScope::for_test(
+                    rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"),
+                ),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -2244,7 +2292,7 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
         let listed = repo
             .list(
                 TenantRepoScope::for_test(tenant),
@@ -2329,7 +2377,9 @@ mod tests {
         // anti-vacuity：未 append（链空）。
         let listed = repo
             .list(
-                TenantRepoScope::for_test(vocab::TenantId::parse(CANON_TENANT).expect("tenant")),
+                TenantRepoScope::for_test(
+                    rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"),
+                ),
                 AuditPage {
                     limit: vocab::Limit::new(10).expect("limit"),
                     cursor: None,
@@ -2557,7 +2607,7 @@ mod tests {
             audit_clock: audit_clock(),
         };
         let authenticated = principal.as_ref().map(|principal| match principal.kind() {
-            vocab::PrincipalKind::User => match principal.tenant() {
+            rss_request_context::PrincipalKind::User => match principal.tenant() {
                 Some(tenant) => {
                     httpserve::Authenticated::new_rss_user_for_test(CANON_SUBJECT, tenant)
                 }
@@ -2652,7 +2702,7 @@ mod tests {
             .body(axum::body::Body::empty())
             .expect("request");
         let ctx = runctx::test_support::app_ctx(
-            vocab::TenantId::parse(CANON_TENANT).expect("tenant"),
+            rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"),
             "admin-subject",
         );
         let response = runctx::scope(ctx, async move { app.oneshot(request).await })
@@ -2672,8 +2722,8 @@ mod tests {
         admin_repo: Arc<DynAuditAdminRepo<'static>>,
         domain_sink: RecordingAuditSink,
         auth_sink: RecordingAuditSink,
-        evidence_tenant: Option<vocab::TenantId>,
-        ambient_principal_kind: vocab::PrincipalKind,
+        evidence_tenant: Option<rss_request_context::TenantId>,
+        ambient_principal_kind: rss_request_context::PrincipalKind,
         ambient_subject: &'static str,
         authorizer: Arc<dyn httpserve::RouteAuthorizer>,
     ) -> (
@@ -2705,11 +2755,12 @@ mod tests {
             primitives::AuthScheme::FederatedAccessToken,
         )
         .expect("admin jwt plan");
-        let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
-        let bridge_principal = principal(vocab::PrincipalKind::Admin, evidence_tenant);
+        let ambient = rss_request_context::TenantId::parse(CANON_TENANT).expect("ambient tenant");
+        let bridge_principal =
+            principal(rss_request_context::PrincipalKind::Admin, evidence_tenant);
         let authenticated = httpserve::Authenticated::new(
             httpserve::NonRssTestScheme::FederatedAccessToken,
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_SUBJECT,
             evidence_tenant,
         );
@@ -2878,8 +2929,8 @@ mod tests {
         )
         .await
         .expect("append");
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let admin = principal(vocab::PrincipalKind::Admin, Some(tenant));
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
+        let admin = principal(rss_request_context::PrincipalKind::Admin, Some(tenant));
 
         let (status, body) = get_entries_with_sink_and_authorizer(
             repo,
@@ -2970,8 +3021,8 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn local_only_scoped_read_rejects_unbound_tenant_evidence_before_repo() {
-        let other =
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc").expect("other tenant");
+        let other = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000abc")
+            .expect("other tenant");
 
         for (label, evidence_tenant) in [
             ("mismatched tenant", Some(other)),
@@ -2981,7 +3032,10 @@ mod tests {
             let (status, body) = get_entries_with_sink_and_authorizer(
                 probe.test_repo(),
                 None,
-                Some(principal(vocab::PrincipalKind::Admin, evidence_tenant)),
+                Some(principal(
+                    rss_request_context::PrincipalKind::Admin,
+                    evidence_tenant,
+                )),
                 audit_sink(),
                 Some(projection_authorizer(&[])),
                 None,
@@ -3002,8 +3056,8 @@ mod tests {
     async fn local_only_scoped_read_conforms_via_finalized_admin_router() {
         struct Case {
             label: &'static str,
-            evidence_tenant: Option<vocab::TenantId>,
-            ambient_kind: vocab::PrincipalKind,
+            evidence_tenant: Option<rss_request_context::TenantId>,
+            ambient_kind: rss_request_context::PrincipalKind,
             ambient_subject: &'static str,
             allow: bool,
             fail_read: bool,
@@ -3017,14 +3071,14 @@ mod tests {
         impl Case {
             fn new(
                 label: &'static str,
-                evidence_tenant: Option<vocab::TenantId>,
+                evidence_tenant: Option<rss_request_context::TenantId>,
                 expected_status: StatusCode,
                 expected_reads: usize,
             ) -> Self {
                 Self {
                     label,
                     evidence_tenant,
-                    ambient_kind: vocab::PrincipalKind::Admin,
+                    ambient_kind: rss_request_context::PrincipalKind::Admin,
                     ambient_subject: CANON_SUBJECT,
                     allow: true,
                     fail_read: false,
@@ -3037,9 +3091,9 @@ mod tests {
             }
         }
 
-        let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
-        let other =
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc").expect("other tenant");
+        let ambient = rss_request_context::TenantId::parse(CANON_TENANT).expect("ambient tenant");
+        let other = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000abc")
+            .expect("other tenant");
         let cases = [
             Case::new("success", Some(ambient), StatusCode::OK, 1),
             Case {
@@ -3083,7 +3137,7 @@ mod tests {
                 )
             },
             Case {
-                ambient_kind: vocab::PrincipalKind::User,
+                ambient_kind: rss_request_context::PrincipalKind::User,
                 expected_pdp_calls: 0,
                 expected_denial: true,
                 ..Case::new(
@@ -3197,7 +3251,7 @@ mod tests {
             assert_eq!(auth_event.principal_id, CANON_SUBJECT, "{}", case.label);
             assert_eq!(
                 auth_event.principal_kind,
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 "{}",
                 case.label
             );
@@ -3253,7 +3307,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn local_only_scoped_read_registers_top_level_source_receipt() {
-        let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
+        let ambient = rss_request_context::TenantId::parse(CANON_TENANT).expect("ambient tenant");
         let repo_probe = CountingScopedReadRepo::default();
         let domain_sink = RecordingAuditSink::ok();
         let (router, proof) = self::finalized_scoped_router(
@@ -3262,7 +3316,7 @@ mod tests {
             domain_sink.clone(),
             RecordingAuditSink::ok(),
             Some(ambient),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_SUBJECT,
             Arc::new(ProjectionAuthorizer::new(&[], true)),
         );
@@ -3307,7 +3361,7 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn local_only_real_route_provider_business_write_effect_trips_typed_probe() {
-        let ambient = vocab::TenantId::parse(CANON_TENANT).expect("ambient tenant");
+        let ambient = rss_request_context::TenantId::parse(CANON_TENANT).expect("ambient tenant");
         let repo_probe = CountingScopedReadRepo::with_forbidden_write();
         let domain_sink = RecordingAuditSink::ok();
         let (router, proof) = finalized_scoped_router(
@@ -3316,7 +3370,7 @@ mod tests {
             domain_sink.clone(),
             RecordingAuditSink::ok(),
             Some(ambient),
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             CANON_SUBJECT,
             Arc::new(ProjectionAuthorizer::new(&[], true)),
         );
@@ -3364,7 +3418,7 @@ mod tests {
         .await
         .expect("append");
         let sink = RecordingAuditSink::ok();
-        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
 
         let (status, body) = get_target_entries_with_sink(
             repo.clone(),
@@ -3389,10 +3443,13 @@ mod tests {
             "target-tenant read must be durably audited first"
         );
         let event = &events[0];
-        assert_eq!(event.principal_kind, vocab::PrincipalKind::SuperAdmin);
+        assert_eq!(
+            event.principal_kind,
+            rss_request_context::PrincipalKind::SuperAdmin
+        );
         assert_eq!(
             event.tenant_id,
-            Some(vocab::TenantId::parse(CANON_TENANT).expect("tenant"))
+            Some(rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"))
         );
         assert_eq!(event.resource_kind, RESOURCE_KIND_AUDIT_ENTRIES);
         assert_eq!(event.resource_id, CANON_TENANT);
@@ -3419,7 +3476,7 @@ mod tests {
             .await
             .expect("append");
             let sink = RecordingAuditSink::ok();
-            let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+            let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
             let domain = AuditDomain::new(
                 repo.read.clone(),
                 Some(admin_repo(repo)),
@@ -3452,7 +3509,7 @@ mod tests {
                     async move {
                         req.extensions_mut().insert(httpserve::Authenticated::new(
                             httpserve::NonRssTestScheme::FederatedAccessToken,
-                            vocab::PrincipalKind::SuperAdmin,
+                            rss_request_context::PrincipalKind::SuperAdmin,
                             CANON_SUBJECT,
                             None,
                         ));
@@ -3525,13 +3582,29 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_rejects_non_super_admin_even_same_tenant() {
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
         for (label, kind, principal_tenant) in [
-            ("user", vocab::PrincipalKind::User, Some(tenant)),
-            ("device", vocab::PrincipalKind::Device, Some(tenant)),
-            ("admin", vocab::PrincipalKind::Admin, Some(tenant)),
-            ("service", vocab::PrincipalKind::Service, None),
-            ("anonymous", vocab::PrincipalKind::Anonymous, None),
+            (
+                "user",
+                rss_request_context::PrincipalKind::User,
+                Some(tenant),
+            ),
+            (
+                "device",
+                rss_request_context::PrincipalKind::Device,
+                Some(tenant),
+            ),
+            (
+                "admin",
+                rss_request_context::PrincipalKind::Admin,
+                Some(tenant),
+            ),
+            ("service", rss_request_context::PrincipalKind::Service, None),
+            (
+                "anonymous",
+                rss_request_context::PrincipalKind::Anonymous,
+                None,
+            ),
         ] {
             let repo = repo();
             let admin = CountingAdminRepo::default();
@@ -3562,8 +3635,8 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_rejects_non_super_admin_before_admin_repo_check() {
         let repo = repo();
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let admin = principal(vocab::PrincipalKind::Admin, Some(tenant));
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
+        let admin = principal(rss_request_context::PrincipalKind::Admin, Some(tenant));
 
         let (status, body) =
             get_target_entries_with(repo, None, Some(admin), CANON_TENANT, "").await;
@@ -3577,7 +3650,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_authorizes_before_admin_repo_check() {
         let repo = repo();
-        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
 
         let (status, body) = get_target_entries_with_sink_and_authorizer(
             repo,
@@ -3599,8 +3672,8 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_authorizes_with_target_contract_permission_and_tenant() {
         let repo = repo();
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
+        let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
         let authorizer = Arc::new(StrictTargetAuthorizer::new(tenant));
         let dyn_authorizer: Arc<dyn httpserve::RouteAuthorizer> = authorizer.clone();
 
@@ -3630,7 +3703,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_without_admin_repo_is_501() {
         let repo = repo();
-        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
 
         let (status, body) =
             get_target_entries_with(repo, None, Some(principal), CANON_TENANT, "").await;
@@ -3649,7 +3722,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_permission_deny_before_grant_writes_durable_failure() {
         let repo = repo();
-        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
         let sink = RecordingAuditSink::ok();
         let admin = CountingAdminRepo::default();
         let list_calls = admin.list_calls();
@@ -3679,10 +3752,13 @@ mod tests {
         );
         let event = &events[0];
         assert_eq!(event.principal_id, CANON_SUBJECT);
-        assert_eq!(event.principal_kind, vocab::PrincipalKind::SuperAdmin);
+        assert_eq!(
+            event.principal_kind,
+            rss_request_context::PrincipalKind::SuperAdmin
+        );
         assert_eq!(
             event.tenant_id,
-            Some(vocab::TenantId::parse(CANON_TENANT).expect("tenant"))
+            Some(rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant"))
         );
         assert_eq!(event.resource_kind, RESOURCE_KIND_AUDIT_ENTRIES);
         assert_eq!(event.resource_id, CANON_TENANT);
@@ -3708,8 +3784,8 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_non_super_admin_deny_before_grant_writes_durable_failure() {
         let repo = repo();
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
-        let principal = principal(vocab::PrincipalKind::Admin, Some(tenant));
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
+        let principal = principal(rss_request_context::PrincipalKind::Admin, Some(tenant));
         let sink = RecordingAuditSink::ok();
         let admin = CountingAdminRepo::default();
         let list_calls = admin.list_calls();
@@ -3737,7 +3813,10 @@ mod tests {
             "non-SuperAdmin deny must write exactly one durable Failure before grant"
         );
         assert_eq!(events[0].principal_id, CANON_SUBJECT);
-        assert_eq!(events[0].principal_kind, vocab::PrincipalKind::Admin);
+        assert_eq!(
+            events[0].principal_kind,
+            rss_request_context::PrincipalKind::Admin
+        );
         assert_eq!(events[0].tenant_id, Some(tenant));
         assert_eq!(events[0].resource_kind, RESOURCE_KIND_AUDIT_ENTRIES);
         assert_eq!(events[0].resource_id, CANON_TENANT);
@@ -3791,16 +3870,16 @@ mod tests {
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn target_tenant_denial_audit_failure_returns_500_without_admin_read() {
-        let tenant = vocab::TenantId::parse(CANON_TENANT).expect("tenant");
+        let tenant = rss_request_context::TenantId::parse(CANON_TENANT).expect("tenant");
         for (label, principal, authorizer) in [
             (
                 "kind denial",
-                principal(vocab::PrincipalKind::Admin, Some(tenant)),
+                principal(rss_request_context::PrincipalKind::Admin, Some(tenant)),
                 Some(projection_authorizer(&[])),
             ),
             (
                 "permission denial",
-                principal(vocab::PrincipalKind::SuperAdmin, None),
+                principal(rss_request_context::PrincipalKind::SuperAdmin, None),
                 Some(denying_authorizer()),
             ),
         ] {
@@ -3830,7 +3909,7 @@ mod tests {
     #[allow(clippy::expect_used)]
     async fn target_tenant_read_fails_closed_when_audit_fails() {
         let repo = repo();
-        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
         let admin = CountingAdminRepo::default();
         let list_calls = admin.list_calls();
 
@@ -3867,7 +3946,7 @@ mod tests {
             .await
             .expect("append");
         }
-        let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+        let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
         let (status, body) = get_target_entries_with(
             repo.clone(),
             Some(admin_repo(repo.clone())),
@@ -3928,7 +4007,7 @@ mod tests {
 
         for (label, target, query) in cases {
             let repo = repo();
-            let principal = principal(vocab::PrincipalKind::SuperAdmin, None);
+            let principal = principal(rss_request_context::PrincipalKind::SuperAdmin, None);
             let (status, body) = get_target_entries_with(
                 repo.clone(),
                 Some(admin_repo(repo)),
@@ -3987,7 +4066,10 @@ mod tests {
         let (status, _) = get_target_entries_with(
             target_repo.clone(),
             Some(admin_repo(target_repo)),
-            Some(principal(vocab::PrincipalKind::SuperAdmin, None)),
+            Some(principal(
+                rss_request_context::PrincipalKind::SuperAdmin,
+                None,
+            )),
             CANON_TENANT,
             "?limit=500",
         )
@@ -4003,7 +4085,10 @@ mod tests {
             let (status, _) = get_target_entries_with(
                 repo(),
                 None,
-                Some(principal(vocab::PrincipalKind::SuperAdmin, None)),
+                Some(principal(
+                    rss_request_context::PrincipalKind::SuperAdmin,
+                    None,
+                )),
                 CANON_TENANT,
                 query,
             )
@@ -4020,7 +4105,10 @@ mod tests {
             let (status, body) = get_target_entries_with_sink(
                 repo(),
                 Some(admin.boxed()),
-                Some(principal(vocab::PrincipalKind::SuperAdmin, None)),
+                Some(principal(
+                    rss_request_context::PrincipalKind::SuperAdmin,
+                    None,
+                )),
                 sink.clone(),
                 CANON_TENANT,
                 query,
@@ -4154,7 +4242,7 @@ mod tests {
                 limit: std::num::NonZeroU32::new(10).expect("nonzero"),
                 cursor: None,
             },
-            VerifiedRequestId::for_test(String::new()),
+            VerifiedRequestId::for_test("missing-context"),
         )
         .await
         .into_response();

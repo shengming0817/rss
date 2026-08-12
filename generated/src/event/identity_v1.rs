@@ -296,12 +296,15 @@ pub mod device_certificate_reported {
     /// domain / contract_id / topic。
     /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.device-certificate-reported",
-        "v1",
-        "sha256:d4c798267d837b88ab4e88094a612fb3cfd043b4ba8d29e7dc4607c5cc1ad637",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.device-certificate-reported",
+            "v1",
+            "sha256:d4c798267d837b88ab4e88094a612fb3cfd043b4ba8d29e7dc4607c5cc1ad637",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v1");
 
     /// Generated contract + topic identity carried by this event payload.
     pub const FACT: ::vocab::EventFactBinding =
@@ -322,7 +325,7 @@ pub mod device_certificate_reported {
     pub async fn emit<E: super::super::EventEmit>(
         emitter: &E,
         payload: IdentityDeviceCertificateReportedPayload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
@@ -1073,12 +1076,15 @@ pub mod device_command_acked {
     /// domain / contract_id / topic。
     /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.device-command-acked",
-        "v1",
-        "sha256:bb05c85aa143c6cde3a66ff61c97a58b59c95e51b24090c5800535dcd24828d2",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.device-command-acked",
+            "v1",
+            "sha256:bb05c85aa143c6cde3a66ff61c97a58b59c95e51b24090c5800535dcd24828d2",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v1");
 
     /// Generated contract + topic identity carried by this event payload.
     pub const FACT: ::vocab::EventFactBinding =
@@ -1099,7 +1105,7 @@ pub mod device_command_acked {
     pub async fn emit<E: super::super::EventEmit>(
         emitter: &E,
         payload: IdentityDeviceCommandAckedPayload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
@@ -2378,12 +2384,15 @@ pub mod device_ingress_receipted {
     /// domain / contract_id / topic。
     /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.device-ingress-receipted",
-        "v1",
-        "sha256:f07059aec22d50bef04571af06b1024ef4710400419224fb41097c782b460b2d",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.device-ingress-receipted",
+            "v1",
+            "sha256:f07059aec22d50bef04571af06b1024ef4710400419224fb41097c782b460b2d",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v1");
 
     /// Generated contract + topic identity carried by this event payload.
     pub const FACT: ::vocab::EventFactBinding =
@@ -2404,7 +2413,7 @@ pub mod device_ingress_receipted {
     pub async fn emit<E: super::super::EventEmit>(
         emitter: &E,
         payload: IdentityDeviceIngressReceiptedPayload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
@@ -2732,12 +2741,15 @@ pub mod policy_updated {
     /// domain / contract_id / topic。
     /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.policy-updated",
-        "v1",
-        "sha256:47b84018a53fa99bd8674f8b3344b11da69a9964e569b57de821483c8b2d0de2",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.policy-updated",
+            "v1",
+            "sha256:47b84018a53fa99bd8674f8b3344b11da69a9964e569b57de821483c8b2d0de2",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v1");
 
     /// Generated contract + topic identity carried by this event payload.
     pub const FACT: ::vocab::EventFactBinding =
@@ -2758,7 +2770,7 @@ pub mod policy_updated {
     pub async fn emit<E: super::super::EventEmit>(
         emitter: &E,
         payload: IdentityPolicyUpdatedPayload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
@@ -3013,12 +3025,15 @@ pub mod role_assigned {
     /// domain / contract_id / topic。
     /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.role-assigned",
-        "v1",
-        "sha256:fc6a7fae4a70adde19490fdc933f3aee257a3ea758902b4c834890922681171d",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.role-assigned",
+            "v1",
+            "sha256:fc6a7fae4a70adde19490fdc933f3aee257a3ea758902b4c834890922681171d",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v1");
 
     /// Generated contract + topic identity carried by this event payload.
     pub const FACT: ::vocab::EventFactBinding =
@@ -3039,7 +3054,7 @@ pub mod role_assigned {
     pub async fn emit<E: super::super::EventEmit>(
         emitter: &E,
         payload: IdentityRoleAssignedPayload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
@@ -3294,12 +3309,15 @@ pub mod role_revoked {
     /// domain / contract_id / topic。
     /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.role-revoked",
-        "v1",
-        "sha256:c590835ecdadb62478a2074dbce19d3e3729066ccaa2e8b6f6f811006fa78f66",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.role-revoked",
+            "v1",
+            "sha256:c590835ecdadb62478a2074dbce19d3e3729066ccaa2e8b6f6f811006fa78f66",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v1");
 
     /// Generated contract + topic identity carried by this event payload.
     pub const FACT: ::vocab::EventFactBinding =
@@ -3320,7 +3338,7 @@ pub mod role_revoked {
     pub async fn emit<E: super::super::EventEmit>(
         emitter: &E,
         payload: IdentityRoleRevokedPayload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
@@ -3906,12 +3924,15 @@ pub mod security_event {
     /// domain / contract_id / topic。
     /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.security-event",
-        "v1",
-        "sha256:784efd6dbfadafbf211248d86328df85cc476eb95d7aeda7ca0951e218ac5929",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.security-event",
+            "v1",
+            "sha256:784efd6dbfadafbf211248d86328df85cc476eb95d7aeda7ca0951e218ac5929",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v1");
 
     /// Generated contract + topic identity carried by this event payload.
     pub const FACT: ::vocab::EventFactBinding =
@@ -3932,7 +3953,7 @@ pub mod security_event {
     pub async fn emit<E: super::super::EventEmit>(
         emitter: &E,
         payload: IdentitySecurityEventPayload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,
@@ -4081,12 +4102,15 @@ pub mod session_created {
     /// domain / contract_id / topic。
     /// 由 `cargo xtask codegen` 从 manifest `domain` + `id` + `version` + declared schema 派生；勿手改（golden 字节锁，INVARIANT
     /// CONTRACT-BINDING-FUNNEL-01）。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "identity",
-        "identity.session-created",
-        "v1",
-        "sha256:d8b29c5d222d32205fe78b194bc370eef300c6660a33f68e2ae7d15bebfb7288",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "identity.session-created",
+            "v1",
+            "sha256:d8b29c5d222d32205fe78b194bc370eef300c6660a33f68e2ae7d15bebfb7288",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("identity", DESCRIPTOR, "v1");
 
     /// Generated contract + topic identity carried by this event payload.
     pub const FACT: ::vocab::EventFactBinding =
@@ -4107,7 +4131,7 @@ pub mod session_created {
     pub async fn emit<E: super::super::EventEmit>(
         emitter: &E,
         payload: IdentitySessionCreatedPayload,
-        tenant: ::vocab::TenantId,
+        tenant: ::rss_request_context::TenantId,
         subject_id: E::SubjectId,
         actor: E::Actor,
         idempotency_key: E::IdempotencyKey,

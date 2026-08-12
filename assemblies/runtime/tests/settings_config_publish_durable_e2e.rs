@@ -40,12 +40,13 @@ use postgres::{
 };
 use postgres::{PgSslMode, caps};
 use primitives::healthz::{HealthCheck, ProbeName};
+use rss_request_context::RowScope;
+use rss_request_context::{PrincipalKind, TenantId};
 use secure::{DerivedAad, Plaintext};
 use settings::SettingsService;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions, PgSslMode as SqlxPgSslMode};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceExt as _;
-use vocab::{PrincipalKind, ScopedTenant, TenantId};
 
 type TestResult = Result<()>;
 
@@ -409,7 +410,7 @@ fn test_actor(tenant: TenantId) -> Result<OutboxActor> {
         PrincipalKind::Admin,
         OpaqueActorId::from_opaque("settings-durable-e2e")?,
         tenant,
-        ScopedTenant::Tenant,
+        RowScope::Tenant,
     ))
 }
 

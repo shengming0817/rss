@@ -1078,8 +1078,8 @@ mod tests {
         }
     }
 
-    fn tenant() -> TestResult<vocab::TenantId> {
-        Ok(vocab::TenantId::parse(TENANT)?)
+    fn tenant() -> TestResult<rss_request_context::TenantId> {
+        Ok(rss_request_context::TenantId::parse(TENANT)?)
     }
 
     fn authority() -> TestResult<Arc<TenantAuthority>> {

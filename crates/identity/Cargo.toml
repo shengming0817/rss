@@ -21,6 +21,7 @@ test-support = ["httpserve/test-util"]
 fault-matrix-test-support = []
 
 [dependencies]
+rss-request-context.workspace = true
 vocab = { path = "../vocab" }
 ids = { path = "../ids" }
 secure = { path = "../secure" }

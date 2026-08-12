@@ -14,7 +14,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use diport::{
     Clock, PdpError, TokenProfile, TokenProfileMarker, VerifiedAccessGrantFacts, VerifiedClaims,
-    VerifiedClaimsView,
 };
 use serde::Deserialize;
 
@@ -71,63 +70,6 @@ pub(crate) fn validate_and_map<P: TokenProfileMarker>(
     payload: &[u8],
 ) -> Result<VerifiedClaims, PdpError> {
     validate_claims(config, clock, payload).map(|(claims, _jti, _expires_at)| claims)
-}
-
-/// Project an already-decided Platform federated authority into the legacy internal PDP carrier.
-///
-/// Platform owns the signature and standard access-claim decision. This adapter overlay preserves
-/// provider-specific claim names, the operator's principal-kind allowlist, and the configured
-/// permission universe, then proves that its projection is identical to the Platform authority.
-pub(crate) fn map_platform_federated<P: TokenProfileMarker>(
-    config: &VerifierConfig<P>,
-    payload: &[u8],
-    access: &rss_platform::VerifiedAccess,
-) -> Result<VerifiedClaims, PdpError> {
-    let claims: Claims = serde_json::from_slice(payload).map_err(|_| PdpError::InvalidSignature)?;
-    let mapped = validate_profile_claims::<P>(config, &claims)?;
-    let identical = match mapped.view() {
-        VerifiedClaimsView::FederatedAccess {
-            subject,
-            tenant,
-            kind,
-            ..
-        } => {
-            access.matches_subject(subject)
-                && platform_kind_matches(access.principal_kind(), kind)
-                && match (access.tenant(), tenant) {
-                    (Some(platform), Some(adapter)) => platform.as_str() == adapter.to_string(),
-                    (None, None) => true,
-                    _ => false,
-                }
-        }
-        _ => false,
-    };
-    if !identical {
-        return Err(PdpError::InvalidSignature);
-    }
-    Ok(mapped)
-}
-
-fn platform_kind_matches(
-    platform: rss_platform::PrincipalKind,
-    adapter: vocab::PrincipalKind,
-) -> bool {
-    matches!(
-        (platform, adapter),
-        (
-            rss_platform::PrincipalKind::User,
-            vocab::PrincipalKind::User
-        ) | (
-            rss_platform::PrincipalKind::Device,
-            vocab::PrincipalKind::Device
-        ) | (
-            rss_platform::PrincipalKind::Admin,
-            vocab::PrincipalKind::Admin
-        ) | (
-            rss_platform::PrincipalKind::SuperAdmin,
-            vocab::PrincipalKind::SuperAdmin
-        )
-    )
 }
 
 /// Service-token claim validation additionally requires a non-empty `jti` nonce.
@@ -213,14 +155,16 @@ fn validate_profile_claims<P: TokenProfileMarker>(
                 "user" | "device" | "admin" => {
                     let tenant = canonical_tenant(tenant)?;
                     let kind = match kind.as_str() {
-                        "user" => vocab::PrincipalKind::User,
-                        "device" => vocab::PrincipalKind::Device,
-                        "admin" => vocab::PrincipalKind::Admin,
+                        "user" => rss_request_context::PrincipalKind::User,
+                        "device" => rss_request_context::PrincipalKind::Device,
+                        "admin" => rss_request_context::PrincipalKind::Admin,
                         _ => unreachable!(),
                     };
                     (Some(tenant), kind)
                 }
-                "superAdmin" if !tenant_present => (None, vocab::PrincipalKind::SuperAdmin),
+                "superAdmin" if !tenant_present => {
+                    (None, rss_request_context::PrincipalKind::SuperAdmin)
+                }
                 "superAdmin" => {
                     log_claim_fail(TelemetryReason::SuperAdminHasTenant);
                     return Err(PdpError::InvalidSignature);
@@ -372,12 +316,12 @@ fn validate_rss_time_window(claims: &Claims) -> Result<(), PdpError> {
     Ok(())
 }
 
-fn canonical_tenant(raw: Option<String>) -> Result<vocab::TenantId, PdpError> {
+fn canonical_tenant(raw: Option<String>) -> Result<rss_request_context::TenantId, PdpError> {
     let Some(raw) = raw else {
         log_claim_fail(TelemetryReason::ScopedPrincipalMissingTenant);
         return Err(PdpError::InvalidSignature);
     };
-    let tenant = vocab::TenantId::parse(&raw).map_err(|_| {
+    let tenant = rss_request_context::TenantId::parse(&raw).map_err(|_| {
         log_claim_fail(TelemetryReason::TenantNotCanonical);
         PdpError::InvalidSignature
     })?;
@@ -556,7 +500,11 @@ mod tests {
     #[allow(clippy::panic)]
     fn expect_rss_user(
         claims: &VerifiedClaims,
-    ) -> (ids::UserId, vocab::TenantId, &VerifiedAccessGrantFacts) {
+    ) -> (
+        ids::UserId,
+        rss_request_context::TenantId,
+        &VerifiedAccessGrantFacts,
+    ) {
         match claims.view() {
             VerifiedClaimsView::RssUser {
                 user_id,
@@ -578,7 +526,11 @@ mod tests {
     #[allow(clippy::panic)]
     fn expect_federated(
         claims: &VerifiedClaims,
-    ) -> (&str, Option<vocab::TenantId>, vocab::PrincipalKind) {
+    ) -> (
+        &str,
+        Option<rss_request_context::TenantId>,
+        rss_request_context::PrincipalKind,
+    ) {
         match claims.view() {
             VerifiedClaimsView::FederatedAccess {
                 subject,
@@ -881,10 +833,14 @@ mod tests {
     fn federated_kinds_accept_native_and_rss_extension_shapes_without_local_grant_evidence() {
         let config = minimal_federated_config();
         let cases = [
-            ("user", vocab::PrincipalKind::User, true),
-            ("device", vocab::PrincipalKind::Device, true),
-            ("admin", vocab::PrincipalKind::Admin, true),
-            ("superAdmin", vocab::PrincipalKind::SuperAdmin, false),
+            ("user", rss_request_context::PrincipalKind::User, true),
+            ("device", rss_request_context::PrincipalKind::Device, true),
+            ("admin", rss_request_context::PrincipalKind::Admin, true),
+            (
+                "superAdmin",
+                rss_request_context::PrincipalKind::SuperAdmin,
+                false,
+            ),
         ];
 
         for (kind_claim, expected_kind, scoped) in cases {

@@ -75,7 +75,7 @@ lane_has_tool() {
     check:cargo-audit | check:cargo-public-api | check:cargo-semver-checks | \
     test-affected:cargo-nextest | test-affected:cargo-llvm-cov | \
     integration-critical:cargo-nextest | \
-    audit:cargo-deny | audit:cargo-audit) return 0 ;;
+    audit:cargo-deny | audit:cargo-audit | audit:ripgrep) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -89,18 +89,24 @@ validate_catalog() {
     valid_semver "$version" || die 'invalid catalog SemVer'
     case "$backend" in install-action|binstall|docker) ;; *) die 'invalid catalog backend' ;; esac
     case "$backend:$relative" in
-      "install-action:.install-action/bin/$name"|"binstall:bin/$name") ;;
+      "install-action:.install-action/bin/$name"|"binstall:bin/$name"|"binstall:bin/rg") ;;
       docker:prom/prometheus@sha256:*)
         digest=${relative#prom/prometheus@sha256:}
         [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || die 'invalid digest-pinned docker image'
         ;;
       *) die 'catalog backend and binary path disagree' ;;
     esac
+    if [ "$relative" = bin/rg ] && [ "$name" != ripgrep ]; then
+      die 'catalog binary alias is not owned by ripgrep'
+    fi
+    if [ "$name" = ripgrep ] && { [ "$backend" != binstall ] || [ "$relative" != bin/rg ] || [ "$probe" != ripgrep ]; }; then
+      die 'ripgrep catalog policy must use the pinned rg binary probe'
+    fi
     if [ "$backend" != docker ]; then
       case "$relative" in *//*|*/./*|*/../*|*/..|/*) die 'invalid catalog binary path' ;; esac
     fi
     case "$backend:$probe" in
-      install-action:nextest|install-action:llvm-cov|install-action:direct|install-action:sccache|binstall:dylint|binstall:direct|binstall:receipt|docker:promtool) ;;
+      install-action:nextest|install-action:llvm-cov|install-action:direct|install-action:sccache|binstall:dylint|binstall:direct|binstall:receipt|binstall:ripgrep|docker:promtool) ;;
       *) die 'invalid catalog probe/backend combination' ;;
     esac
     case "$seen" in *"|$name|"*) die 'duplicate catalog tool' ;; esac
@@ -300,6 +306,17 @@ verify_direct_output() {
   [ "$output" = "$name $version" ] || [ "$output" = "$name v$version" ]
 }
 
+verify_ripgrep_output() {
+  version=$1 output=$2
+  first=$(printf '%s\n' "$output" | sed -n '1p')
+  [ "$first" = "ripgrep $version" ] && return 0
+  prefix="ripgrep $version (rev "
+  case "$first" in "$prefix"*) ;; *) return 1 ;; esac
+  revision=${first#"$prefix"}
+  revision=${revision%)}
+  [ "$first" = "$prefix$revision)" ] && [[ "$revision" =~ ^[0-9a-f]+$ ]]
+}
+
 verify_receipt() {
   root=$1 name=$2 version=$3
   receipt=$root/.crates.toml
@@ -340,6 +357,10 @@ fresh_probe() {
       ;;
     receipt)
       verify_receipt "$root" "$name" "$version" || die "tool install receipt mismatch: $spec"
+      ;;
+    ripgrep)
+      output=$(capture_probe "$binary" "$spec" --version)
+      verify_ripgrep_output "$version" "$output" || die "tool version mismatch: $spec"
       ;;
   esac
 }
@@ -421,7 +442,6 @@ verify_set() {
 $(selected_rows "$lane" all)
 EOF
   fi
-
   temporary=$(mktemp "$root/.rss-tool-seal-v1.tmp.XXXXXX") || die 'cannot create tool seal'
   chmod 600 "$temporary" || { rm -f "$temporary"; die 'cannot secure tool seal'; }
   write_expected_seal "$temporary" "$root" "$lane" || {
@@ -437,6 +457,14 @@ EOF
     die_seal_mismatch "$temporary" "$seal" "$lane"
   else
     rm -f "$temporary"
+  fi
+  if [ "$mode" = cache ]; then
+    while IFS='|' read -r name version backend relative probe; do
+      [ "$probe" = ripgrep ] || continue
+      fresh_probe "$root" "$name" "$version" "$relative" "$probe"
+    done <<EOF
+$(selected_rows "$lane" all)
+EOF
   fi
 }
 

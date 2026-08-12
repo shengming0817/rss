@@ -130,7 +130,7 @@ impl generated::event::EventEmit for GeneratedEventEncoder {
     async fn emit<C>(
         &self,
         payload: &C::Payload,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         subject_id: Self::SubjectId,
         actor: Self::Actor,
         idempotency_key: Self::IdempotencyKey,
@@ -178,15 +178,15 @@ mod tests {
 
     #[tokio::test]
     async fn generated_event_rejects_scoped_actor_from_another_tenant() {
-        let tenant =
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
-        let other =
-            vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc").expect("other tenant");
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("tenant");
+        let other = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000abc")
+            .expect("other tenant");
         let actor = diport::OutboxActor::scoped(
-            vocab::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::Admin,
             diport::OpaqueActorId::from_opaque("other-tenant-actor").expect("actor"),
             other,
-            vocab::ScopedTenant::Tenant,
+            rss_request_context::RowScope::Tenant,
         );
         let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
             change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
@@ -212,8 +212,8 @@ mod tests {
 
     #[tokio::test]
     async fn generated_root_event_has_no_causation() {
-        let tenant =
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("tenant");
         let payload = generated::event::settings_v1::SettingsConfigVersionChangedPayload {
             change_kind: generated::event::settings_v1::SettingsConfigChangeKind::Published,
             key: "root.event".to_owned(),
@@ -228,10 +228,10 @@ mod tests {
             tenant,
             diport::EnvelopeSubjectId::from_opaque("root.event").expect("subject"),
             diport::OutboxActor::scoped(
-                vocab::PrincipalKind::Service,
+                rss_request_context::PrincipalKind::Service,
                 diport::OpaqueActorId::from_opaque("root-service").expect("actor"),
                 tenant,
-                vocab::ScopedTenant::Tenant,
+                rss_request_context::RowScope::Tenant,
             ),
             IdemKey::parse("root-event-1").expect("idempotency key"),
         )

@@ -28,11 +28,12 @@ use diport::{
 };
 use eventexec::event::ReviewedEvent;
 use httpserve::ProducerAuthorization;
+use rss_request_context::TenantId;
 use secure::{DerivedAad, Plaintext, ProtectionContext};
 use settings::ports::{
     CONFIG_VERSION_CHANGED_CONTRACT, ConfigDeleteReceipt, ConfigEntry, ConfigHead, ConfigMutation,
     ConfigPublishReceipt, ConfigRepo, ConfigRepoError, ConfigRollbackReceipt, ConfigUnitOfWork,
-    SettingKey, TenantId, TenantRepoScope,
+    SettingKey, TenantRepoScope,
 };
 use sqlx::Row;
 
@@ -463,7 +464,7 @@ fn producer_authorization_storage_error(path: &'static str) -> ConfigRepoError {
 /// `TenantId` → SQL bind 参数（stringify UUID，绑 `$N::uuid` server-side cast；不给 sqlx 加 uuid feature，
 /// 同 `auth_grant_lifecycle` / outbox.event_id 范式）。收口此处避免 `as_uuid().to_string()` 在各查询点漂移。
 fn tenant_param(tenant: TenantId) -> String {
-    tenant.as_uuid().to_string()
+    tenant.to_string()
 }
 
 fn config_value_aad(tenant: TenantId, key: &SettingKey) -> Result<DerivedAad, ConfigRepoError> {

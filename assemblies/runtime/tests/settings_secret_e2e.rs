@@ -64,7 +64,7 @@ impl InlineMemResolver {
     fn insert(&self, tenant: TenantId, store_id: &str, ref_key: &str, bytes: Vec<u8>) {
         self.store.lock().unwrap_or_else(|e| e.into_inner()).insert(
             (
-                tenant.as_uuid().to_string(),
+                tenant.to_string(),
                 store_id.to_string(),
                 ref_key.to_string(),
             ),
@@ -81,7 +81,7 @@ impl diport::SecretResolver for InlineMemResolver {
     ) -> Result<SecretMaterial, SecretResolverError> {
         let g = self.store.lock().unwrap_or_else(|e| e.into_inner());
         let k = (
-            tenant.as_uuid().to_string(),
+            tenant.to_string(),
             coord.store_id().to_string(),
             coord.key().to_string(),
         );

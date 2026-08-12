@@ -23,9 +23,10 @@ use generated::http::identity_v1::{
     policies_update::{IdentityPoliciesUpdateRequest, IdentityPoliciesUpdateResponse},
 };
 use generated::http::{HttpSpec, SPECS as HTTP_SPECS};
+use rss_request_context::TenantId;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use vocab::{HttpRouteAuth, TenantId, http::HttpResourceSharing as HttpResourceSharingMode};
+use vocab::{HttpRouteAuth, http::HttpResourceSharing as HttpResourceSharingMode};
 
 use super::{EventWireProjectionError, unix_secs};
 use crate::domain::{
@@ -263,7 +264,7 @@ impl httpserve::ClassifiedRouteState for PolicyQueryService {
 struct PolicyEventDraft<'a> {
     tenant: TenantId,
     actor: ids::UserId,
-    actor_kind: vocab::PrincipalKind,
+    actor_kind: rss_request_context::PrincipalKind,
     policy_id: &'a PolicyId,
     scope: &'a PolicyRouteScope,
     change_kind: IdentityPolicyUpdatedPayloadChangeKind,
@@ -322,7 +323,7 @@ impl PolicyManageService {
         receipt: PoliciesCreateProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
-        actor_kind: vocab::PrincipalKind,
+        actor_kind: rss_request_context::PrincipalKind,
         draft: PolicyCreateDraft,
     ) -> Result<Policy, PolicyManageError> {
         let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
@@ -363,7 +364,7 @@ impl PolicyManageService {
         receipt: PoliciesUpdateProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
-        actor_kind: vocab::PrincipalKind,
+        actor_kind: rss_request_context::PrincipalKind,
         draft: PolicyUpdateDraft,
     ) -> Result<Policy, PolicyManageError> {
         let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
@@ -409,7 +410,7 @@ impl PolicyManageService {
         receipt: PoliciesDeactivateProducerReceipt,
         tenant: TenantId,
         actor: ids::UserId,
-        actor_kind: vocab::PrincipalKind,
+        actor_kind: rss_request_context::PrincipalKind,
         draft: PolicyDeactivateDraft,
     ) -> Result<PolicyVersion, PolicyManageError> {
         let tenant_scope = TenantRepoScope::from_authenticated_tenant(tenant);
@@ -556,18 +557,25 @@ fn map_identity_error(err: IdentityError) -> PolicyManageError {
 }
 
 fn actor_kind_wire(
-    kind: vocab::PrincipalKind,
+    kind: rss_request_context::PrincipalKind,
 ) -> Result<IdentityPolicyUpdatedPayloadActorKind, PolicyManageError> {
     match kind {
-        vocab::PrincipalKind::User => Ok(IdentityPolicyUpdatedPayloadActorKind::User),
-        vocab::PrincipalKind::Device => Ok(IdentityPolicyUpdatedPayloadActorKind::Device),
-        vocab::PrincipalKind::Admin => Ok(IdentityPolicyUpdatedPayloadActorKind::Admin),
-        vocab::PrincipalKind::SuperAdmin => Ok(IdentityPolicyUpdatedPayloadActorKind::SuperAdmin),
-        vocab::PrincipalKind::Service => Ok(IdentityPolicyUpdatedPayloadActorKind::Service),
-        vocab::PrincipalKind::Anonymous => Ok(IdentityPolicyUpdatedPayloadActorKind::Anonymous),
-        _ => Err(PolicyManageError::WireProjection(
-            EventWireProjectionError::PrincipalKind,
-        )),
+        rss_request_context::PrincipalKind::User => Ok(IdentityPolicyUpdatedPayloadActorKind::User),
+        rss_request_context::PrincipalKind::Device => {
+            Ok(IdentityPolicyUpdatedPayloadActorKind::Device)
+        }
+        rss_request_context::PrincipalKind::Admin => {
+            Ok(IdentityPolicyUpdatedPayloadActorKind::Admin)
+        }
+        rss_request_context::PrincipalKind::SuperAdmin => {
+            Ok(IdentityPolicyUpdatedPayloadActorKind::SuperAdmin)
+        }
+        rss_request_context::PrincipalKind::Service => {
+            Ok(IdentityPolicyUpdatedPayloadActorKind::Service)
+        }
+        rss_request_context::PrincipalKind::Anonymous => {
+            Ok(IdentityPolicyUpdatedPayloadActorKind::Anonymous)
+        }
     }
 }
 
@@ -1307,20 +1315,19 @@ impl WireObligations {
 }
 
 impl WireRowScope {
-    fn into_scoped(self) -> Result<vocab::ScopedTenant, PolicyManageError> {
+    fn into_scoped(self) -> Result<rss_request_context::RowScope, PolicyManageError> {
         Ok(match self {
-            Self::SelfOnly => vocab::ScopedTenant::SelfOnly,
-            Self::Device => vocab::ScopedTenant::Device,
-            Self::Tenant => vocab::ScopedTenant::Tenant,
+            Self::SelfOnly => rss_request_context::RowScope::SelfOnly,
+            Self::Device => rss_request_context::RowScope::Device,
+            Self::Tenant => rss_request_context::RowScope::Tenant,
         })
     }
 
-    fn from_scoped(scope: vocab::ScopedTenant) -> Result<Self, PolicyManageError> {
+    fn from_scoped(scope: rss_request_context::RowScope) -> Result<Self, PolicyManageError> {
         match scope {
-            vocab::ScopedTenant::SelfOnly => Ok(Self::SelfOnly),
-            vocab::ScopedTenant::Device => Ok(Self::Device),
-            vocab::ScopedTenant::Tenant => Ok(Self::Tenant),
-            _ => Err(PolicyManageError::InvalidPolicy),
+            rss_request_context::RowScope::SelfOnly => Ok(Self::SelfOnly),
+            rss_request_context::RowScope::Device => Ok(Self::Device),
+            rss_request_context::RowScope::Tenant => Ok(Self::Tenant),
         }
     }
 }
@@ -2501,7 +2508,7 @@ mod tests {
                 create_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 PolicyCreateDraft::try_from(global_dynamic_create_request("policy-global-dyn"))
                     .expect("create draft"),
             )
@@ -2534,7 +2541,7 @@ mod tests {
                 create_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 PolicyCreateDraft::try_from(global_static_create_request(policy_id.as_str()))
                     .expect("create draft"),
             )
@@ -2548,7 +2555,7 @@ mod tests {
                 update_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 PolicyUpdateDraft::try_from_wire(
                     policy_id.clone(),
                     global_dynamic_update_request(created.version().get()),
@@ -2576,7 +2583,7 @@ mod tests {
                 create_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 PolicyCreateDraft::try_from(create_request("policy-a")).expect("create draft"),
             )
             .await
@@ -2588,7 +2595,7 @@ mod tests {
                 update_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 PolicyUpdateDraft::try_from_wire(
                     PolicyId::parse("policy-a").expect("policy id"),
                     update_request(1),
@@ -2604,7 +2611,7 @@ mod tests {
                 deactivate_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 PolicyDeactivateDraft::try_from_wire(
                     PolicyId::parse("policy-a").expect("policy id"),
                     deactivate_request(2),
@@ -2647,7 +2654,7 @@ mod tests {
                 create_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 PolicyCreateDraft::try_from(create_request("policy-read")).expect("create draft"),
             )
             .await
@@ -2684,7 +2691,7 @@ mod tests {
                 create_receipt(),
                 t,
                 actor(),
-                vocab::PrincipalKind::Admin,
+                rss_request_context::PrincipalKind::Admin,
                 PolicyCreateDraft::try_from(create_request("policy-fail")).expect("create draft"),
             )
             .await

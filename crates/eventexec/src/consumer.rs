@@ -140,7 +140,7 @@ impl ConsumerMeta {
     pub fn verify_tenant_authority(
         &self,
         msg: &Message,
-    ) -> Result<vocab::TenantId, TenantAuthorityError> {
+    ) -> Result<rss_request_context::TenantId, TenantAuthorityError> {
         let tenant = msg
             .metadata()
             .tenant_id()
@@ -183,7 +183,7 @@ impl ConsumerMeta {
     #[doc(hidden)]
     pub fn receipt_context(
         &self,
-        tenant_id: vocab::TenantId,
+        tenant_id: rss_request_context::TenantId,
         header: &EnvelopeHeader,
     ) -> Result<InboxReceiptContext, ReceiptContextBuildError> {
         let consumer_group = ConsumerGroup::parse(self.consumer_group())
@@ -1320,8 +1320,9 @@ mod tests {
     }
 
     #[allow(clippy::expect_used)]
-    fn tenant() -> vocab::TenantId {
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant")
+    fn tenant() -> rss_request_context::TenantId {
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("canonical tenant")
     }
 
     #[allow(clippy::expect_used)]
@@ -3660,10 +3661,10 @@ mod tests {
                     tenant,
                     diport::EnvelopeSubjectId::from_opaque("consumer.child").expect("subject"),
                     diport::OutboxActor::scoped(
-                        vocab::PrincipalKind::Service,
+                        rss_request_context::PrincipalKind::Service,
                         diport::OpaqueActorId::from_opaque("consumer-service").expect("actor"),
                         tenant,
-                        vocab::ScopedTenant::Tenant,
+                        rss_request_context::RowScope::Tenant,
                     ),
                     IdemKey::parse("child-event-1").expect("idempotency key"),
                 )

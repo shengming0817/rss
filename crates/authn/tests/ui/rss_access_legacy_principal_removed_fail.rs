@@ -1,7 +1,7 @@
 enum JwtAccessPrincipal<'a> {
     User {
         subject: &'a str,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     },
 }
 

@@ -1,7 +1,7 @@
 use std::num::NonZeroU64;
 
 use ids::DeviceId;
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 const TOPIC_PREFIX: &str = "rss/v1";
 const UPLINK: &str = "uplink";

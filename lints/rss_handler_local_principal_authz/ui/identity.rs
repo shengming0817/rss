@@ -1,6 +1,6 @@
 #![allow(unused)]
 
-use vocab::PrincipalKind;
+use rss_request_context::PrincipalKind;
 
 fn privacy_ref(kind: PrincipalKind) -> &'static str {
     match kind {

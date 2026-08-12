@@ -121,7 +121,7 @@ impl SagaForwardContext {
     }
 
     /// Tenant owning the saga instance.
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.instance.tenant()
     }
 
@@ -148,7 +148,7 @@ impl SagaCompensationContext {
     }
 
     /// Tenant owning the saga instance.
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.instance.tenant()
     }
 
@@ -310,7 +310,7 @@ impl SagaActionCtx {
 
     /// 所属租户。
     #[allow(dead_code)] // reason: retained for internal erased-action tests while public entry is typed
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.instance.tenant()
     }
 

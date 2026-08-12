@@ -21,12 +21,13 @@
 //! ref: crates/audit/src/internal/mem.rs（cursor encode/decode + verify_window 调用语义；postgres 改用 seq 键，
 //!   非 Vec 下标）
 
+use rss_request_context::TenantId;
 use std::sync::Arc;
 
 use audit::ports::{
     AuditAdminRepo, AuditChainHasher, AuditError, AuditLedgerVerifyReport, AuditListResult,
-    AuditPage, AuditReadRepo, AuditRecord, AuditWriteRepo, CrossTenantReadScope, TenantId,
-    TenantRepoScope, decode_sequence_cursor,
+    AuditPage, AuditReadRepo, AuditRecord, AuditWriteRepo, CrossTenantReadScope, TenantRepoScope,
+    decode_sequence_cursor,
 };
 use primitives::MacVerifier;
 
@@ -265,12 +266,14 @@ mod unit_tests {
     #[allow(clippy::unwrap_used)]
     // reason: unit test, canonical UUID parse does not fail.
     fn advisory_lock_key_is_deterministic() {
-        let tid = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let tid =
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
         let k1 = advisory_lock_key(tid);
         let k2 = advisory_lock_key(tid);
         assert_eq!(k1, k2, "同 TenantId 须产生相同 advisory lock key（确定性）");
         // collision-resistance smoke：不同 TenantId 须产生不同 key，防止两租户共用同一串行化锁。
-        let tid2 = vocab::TenantId::parse("00000000-0000-4000-8000-000000000abc").unwrap();
+        let tid2 =
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000abc").unwrap();
         let k3 = advisory_lock_key(tid2);
         assert_ne!(
             k1, k3,

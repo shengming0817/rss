@@ -780,13 +780,13 @@ impl StoredOutboxEntry {
 /// Outbox metric subject：tenant + contract 的低基数路由维度。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutboxMetricSubject {
-    tenant_id: vocab::TenantId,
+    tenant_id: rss_request_context::TenantId,
     contract_id: OutboxContractId,
 }
 
 impl OutboxMetricSubject {
     /// 由已解析的 tenant / contract 构造 metric subject。
-    pub fn new(tenant_id: vocab::TenantId, contract_id: OutboxContractId) -> Self {
+    pub fn new(tenant_id: rss_request_context::TenantId, contract_id: OutboxContractId) -> Self {
         Self {
             tenant_id,
             contract_id,
@@ -794,7 +794,7 @@ impl OutboxMetricSubject {
     }
 
     /// 借出租户 id。
-    pub fn tenant_id(&self) -> vocab::TenantId {
+    pub fn tenant_id(&self) -> rss_request_context::TenantId {
         self.tenant_id
     }
 
@@ -1279,7 +1279,8 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     // reason: happy-path 构造值均为已知合法常量。
     fn metric_samples_expose_scope() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let tenant =
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
         let contract_id = OutboxContractId::parse("identity.session-created").unwrap();
         let subject = OutboxMetricSubject::new(tenant, contract_id.clone());
         assert_eq!(subject.tenant_id(), tenant);

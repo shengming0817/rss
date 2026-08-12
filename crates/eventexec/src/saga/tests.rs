@@ -560,7 +560,7 @@ impl SagaDurableStore for FakeDurableStore {
     async fn list_runnable(
         &self,
         _identity: &SagaWorkerIdentity,
-        _tenant: vocab::TenantId,
+        _tenant: rss_request_context::TenantId,
         _limit: NonZeroUsize,
     ) -> Result<Vec<SagaRunnableInstance>, SagaDurableStoreError> {
         Ok(Vec::new())
@@ -2122,7 +2122,7 @@ fn row(status: SagaInstanceStatus) -> SagaInstanceRecord {
 
 fn instance() -> SagaInstanceRef {
     SagaInstanceRef::new(
-        vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
             .unwrap_or_else(|error| panic!("tenant: {error}")),
         SagaId::new(uuid::Uuid::from_u128(42)),
     )

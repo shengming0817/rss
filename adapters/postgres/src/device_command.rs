@@ -112,14 +112,14 @@ impl<'tx> DeviceIngressReadbackTx<'tx> {
 
     async fn outbox_fingerprint(
         &mut self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         event_id: &str,
     ) -> Result<Option<Vec<u8>>, StoreError> {
         sqlx::query_scalar(
             "SELECT fact_fingerprint FROM outbox \
              WHERE tenant_id=$1::uuid AND event_id=$2",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(event_id)
         .fetch_optional(&mut *self.conn)
         .await
@@ -834,7 +834,7 @@ fn finish_write_attempt<T>(
 
 fn scope_params(scope: DeviceCertificateScope) -> (String, String) {
     (
-        scope.tenant().as_uuid().to_string(),
+        scope.tenant().to_string(),
         scope.device().as_uuid().to_string(),
     )
 }
@@ -1039,7 +1039,7 @@ fn command_progress(row: &CommandRow) -> Result<CommandProgressRestore, StoreErr
 }
 
 fn restore_command<E: ArtifactEligibility>(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     row: CommandRow,
 ) -> Result<DeviceCommandState, StoreError> {
     if row.artifact_eligibility != E::PERSISTENCE_LABEL {
@@ -1725,7 +1725,8 @@ mod tests {
 
     #[test]
     fn write_projection_keeps_domain_state_vocabulary() {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let tenant =
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap();
         let state = restore_command::<identity::ports::device_certificate::DraftEligibility>(
             tenant,
             valid_command_row(),
@@ -1744,7 +1745,8 @@ mod tests {
 
     #[test]
     fn command_row_codec_restores_state_specific_snapshot() {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let tenant =
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap();
         let state = restore_command::<identity::ports::device_certificate::DraftEligibility>(
             tenant,
             valid_command_row(),
@@ -1757,7 +1759,8 @@ mod tests {
 
     #[test]
     fn command_row_codec_reports_every_closed_corruption_reason() {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap();
+        let tenant =
+            rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001").unwrap();
         let mut row = valid_command_row();
         row.device_id = "not-a-uuid".to_owned();
         assert!(matches!(
@@ -1999,7 +2002,7 @@ mod integration_tests {
     }
 
     impl identity::ports::device_certificate::DeviceIngressDelivery for IngressDelivery {
-        fn tenant(&self) -> vocab::TenantId {
+        fn tenant(&self) -> rss_request_context::TenantId {
             self.target.scope.tenant()
         }
 
@@ -2093,11 +2096,12 @@ mod integration_tests {
     }
 
     fn new_target() -> Target {
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+        let tenant =
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
         new_target_for_tenant(tenant)
     }
 
-    fn new_target_for_tenant(tenant: vocab::TenantId) -> Target {
+    fn new_target_for_tenant(tenant: rss_request_context::TenantId) -> Target {
         let device = ids::DeviceId::new(uuid::Uuid::new_v4());
         Target {
             scope: DeviceCertificateScope::for_test(tenant, device),
@@ -2251,7 +2255,7 @@ mod integration_tests {
               client_auth, server_auth, sans) \
              VALUES ($1::uuid, $2::uuid, $3, 3600, 600, true, false, ARRAY[]::text[])",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .bind(i64::try_from(generation)?)
         .execute(&store.pool)
@@ -2262,7 +2266,7 @@ mod integration_tests {
              VALUES ($1::uuid, $2, $3, $4) \
              RETURNING target_id::text",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(super::DEVICE_CERTIFICATE_RECONCILER_ID)
         .bind(super::DEVICE_CERTIFICATE_RESOURCE_KIND)
         .bind(target.scope.device().as_uuid().to_string())
@@ -2272,7 +2276,7 @@ mod integration_tests {
             "INSERT INTO reconcile_leases (tenant_id, target_id, epoch) \
              VALUES ($1::uuid, $2::uuid, 7)",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target_id)
         .execute(&store.pool)
         .await?;
@@ -2569,7 +2573,7 @@ mod integration_tests {
         let command_state: String = sqlx::query_scalar(
             "SELECT state FROM device_commands WHERE tenant_id=$1::uuid AND command_id=$2",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind("ingress-command")
         .fetch_one(&owner.pool)
         .await?;
@@ -2580,7 +2584,7 @@ mod integration_tests {
                 (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid
                     AND contract_id='identity.device-ingress-receipted')",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind("ack-ingress-1")
         .fetch_one(&owner.pool)
         .await?;
@@ -2591,7 +2595,7 @@ mod integration_tests {
                AND condition_type IN ('Ready','Reconciling','PendingDevice')
              ORDER BY condition_type",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .fetch_all(&owner.pool)
         .await?;
@@ -2611,7 +2615,7 @@ mod integration_tests {
             "SELECT disposition FROM device_ingress_receipts
              WHERE tenant_id=$1::uuid AND event_id='ack-ingress-semantic-duplicate'",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .fetch_one(&owner.pool)
         .await?;
         assert_eq!(duplicate_ack, "duplicate");
@@ -2640,7 +2644,7 @@ mod integration_tests {
                ON reported.tenant_id=command.tenant_id AND reported.device_id=command.device_id
              WHERE command.tenant_id=$1::uuid AND command.command_id=$2",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind("ingress-command")
         .fetch_one(&owner.pool)
         .await?;
@@ -2650,7 +2654,7 @@ mod integration_tests {
              WHERE tenant_id=$1::uuid AND device_id=$2::uuid
                AND condition_type IN ('Ready','Reconciling','PendingDevice')",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .fetch_all(&owner.pool)
         .await?;
@@ -2672,7 +2676,7 @@ mod integration_tests {
              FROM device_ingress_receipts
              WHERE tenant_id=$1::uuid AND event_id='report-ingress-semantic-duplicate'",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .fetch_one(&owner.pool)
         .await?;
         assert_eq!(duplicate_report, ("duplicate".to_owned(), 4));
@@ -2725,7 +2729,7 @@ mod integration_tests {
              FROM device_ingress_receipts
              WHERE tenant_id=$1::uuid AND event_id='stable-malformed-ingress'",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .fetch_one(&owner.pool)
         .await?;
         assert_eq!(
@@ -2745,7 +2749,7 @@ mod integration_tests {
             "SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid
                AND contract_id='identity.device-ingress-receipted'",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .fetch_one(&owner.pool)
         .await?;
         assert_eq!(outbox_after_post_poison, 6);
@@ -2804,7 +2808,7 @@ mod integration_tests {
              WHERE tenant_id=$1::uuid AND event_id=$2",
             super::INGRESS_COLUMNS
         ))
-        .bind(committed_target.scope.tenant().as_uuid().to_string())
+        .bind(committed_target.scope.tenant().to_string())
         .bind("commit-unknown-ingress")
         .fetch_one(&owner.pool)
         .await?;
@@ -2827,7 +2831,7 @@ mod integration_tests {
             "UPDATE outbox SET payload=payload || decode('00','hex')
              WHERE tenant_id=$1::uuid AND event_id=$2 RETURNING substring(payload FROM 1 FOR octet_length(payload)-1)",
         )
-        .bind(committed_target.scope.tenant().as_uuid().to_string())
+        .bind(committed_target.scope.tenant().to_string())
         .bind(&receipt_event_id)
         .fetch_one(&owner.pool)
         .await?;
@@ -2846,13 +2850,13 @@ mod integration_tests {
             "UPDATE outbox SET payload=$3
              WHERE tenant_id=$1::uuid AND event_id=$2",
         )
-        .bind(committed_target.scope.tenant().as_uuid().to_string())
+        .bind(committed_target.scope.tenant().to_string())
         .bind(&receipt_event_id)
         .bind(original_payload)
         .execute(&owner.pool)
         .await?;
         sqlx::query("DELETE FROM outbox WHERE tenant_id=$1::uuid AND event_id=$2")
-            .bind(committed_target.scope.tenant().as_uuid().to_string())
+            .bind(committed_target.scope.tenant().to_string())
             .bind(&receipt_event_id)
             .execute(&owner.pool)
             .await?;
@@ -2887,7 +2891,7 @@ mod integration_tests {
              FROM device_commands command
              WHERE command.tenant_id=$1::uuid AND command.command_id='rollback-command'",
         )
-        .bind(rolled_back_target.scope.tenant().as_uuid().to_string())
+        .bind(rolled_back_target.scope.tenant().to_string())
         .bind(rolled_back_target.scope.device().as_uuid().to_string())
         .bind("rollback-ingress")
         .fetch_one(&owner.pool)
@@ -3000,7 +3004,7 @@ mod integration_tests {
                      OR (condition_type='Degraded' AND status='True' AND reason='CommandRejected')))
              FROM device_commands WHERE tenant_id=$1::uuid AND command_id='rejected-command'",
         )
-        .bind(rejected_target.scope.tenant().as_uuid().to_string())
+        .bind(rejected_target.scope.tenant().to_string())
         .bind(rejected_target.scope.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -3059,7 +3063,7 @@ mod integration_tests {
                SELECT target_id FROM reconcile_targets
                WHERE tenant_id=$1::uuid AND resource_id=$2)",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .execute(&owner.pool)
         .await?;
@@ -3138,7 +3142,7 @@ mod integration_tests {
             "UPDATE device_certificate_desired_states SET generation=2
              WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .execute(&owner.pool)
         .await?;
@@ -3153,7 +3157,7 @@ mod integration_tests {
             "SELECT event_id,disposition FROM device_ingress_receipts
              WHERE tenant_id=$1::uuid AND event_id = ANY($2::text[]) ORDER BY event_id",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(vec![
             "report-before-ack",
             "matrix-ack",
@@ -3201,7 +3205,7 @@ mod integration_tests {
                  WHERE tenant_id=$1::uuid AND command_id='ack-old-fence-unreceived-command')
              FROM device_commands WHERE tenant_id=$1::uuid AND command_id='matrix-command'",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -3222,7 +3226,7 @@ mod integration_tests {
                  IN ('unknown-command','payload-device-mismatch')
              ORDER BY convert_from(payload,'UTF8')::jsonb->>'ingressEnvelopeId'",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .fetch_all(&owner.pool)
         .await?;
         assert_eq!(public_reasons, vec!["NotAccepted", "NotAccepted"]);
@@ -3239,7 +3243,7 @@ mod integration_tests {
     -> TestResult {
         let (fixture, owner) = crate::test_pg::connect_pg().await?;
         owner.run_migrations().await?;
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let ack_target = new_target_for_tenant(tenant);
         let report_target = new_target_for_tenant(tenant);
         for target in [ack_target, report_target] {
@@ -3249,7 +3253,7 @@ mod integration_tests {
             "UPDATE device_certificate_desired_states SET generation=2
              WHERE tenant_id=$1::uuid AND device_id::text=ANY($2::text[])",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(vec![
             ack_target.scope.device().as_uuid().to_string(),
             report_target.scope.device().as_uuid().to_string(),
@@ -3322,7 +3326,7 @@ mod integration_tests {
             "SELECT event_id,disposition FROM device_ingress_receipts
              WHERE tenant_id=$1::uuid AND event_id=ANY($2::text[]) ORDER BY event_id",
         )
-        .bind(ack_target.scope.tenant().as_uuid().to_string())
+        .bind(ack_target.scope.tenant().to_string())
         .bind(vec![
             "independent-credential-ack",
             "independent-credential-report",
@@ -3346,7 +3350,7 @@ mod integration_tests {
             "SELECT command_id,state FROM device_commands
              WHERE tenant_id=$1::uuid AND command_id=ANY($2::text[]) ORDER BY command_id",
         )
-        .bind(ack_target.scope.tenant().as_uuid().to_string())
+        .bind(ack_target.scope.tenant().to_string())
         .bind(vec![
             "independent-credential-ack-command",
             "independent-credential-report-command",
@@ -3370,7 +3374,7 @@ mod integration_tests {
             "SELECT count(*) FROM device_certificate_reported_states
              WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
         )
-        .bind(report_target.scope.tenant().as_uuid().to_string())
+        .bind(report_target.scope.tenant().to_string())
         .bind(report_target.scope.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -3414,7 +3418,7 @@ mod integration_tests {
                SELECT target_id FROM reconcile_targets
                WHERE tenant_id=$1::uuid AND resource_id=$2)",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .execute(&owner.pool)
         .await?;
@@ -3436,7 +3440,7 @@ mod integration_tests {
             "SELECT disposition FROM device_ingress_receipts
              WHERE tenant_id=$1::uuid AND event_id='ack-old-fence'",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .fetch_one(&owner.pool)
         .await?;
         assert_eq!(disposition, "stale_fence");
@@ -3445,7 +3449,7 @@ mod integration_tests {
             "SELECT state FROM device_commands
              WHERE tenant_id=$1::uuid AND command_id='ack-old-fence-command'",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .fetch_one(&owner.pool)
         .await?;
         assert_eq!(command_state, "published");
@@ -3462,7 +3466,7 @@ mod integration_tests {
     -> TestResult {
         let (fixture, owner) = crate::test_pg::connect_pg().await?;
         owner.run_migrations().await?;
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let ack_target = new_target_for_tenant(tenant);
         let report_target = new_target_for_tenant(tenant);
         for target in [ack_target, report_target] {
@@ -3511,14 +3515,14 @@ mod integration_tests {
             "SELECT fingerprint FROM device_ingress_receipts
              WHERE tenant_id=$1::uuid AND event_id='null-scope-ack'",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .fetch_one(&owner.pool)
         .await?;
         let report_fingerprint: Vec<u8> = sqlx::query_scalar(
             "SELECT fingerprint FROM device_ingress_receipts
              WHERE tenant_id=$1::uuid AND event_id='null-scope-report'",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .fetch_one(&owner.pool)
         .await?;
         let before_counts: (i64, i64, i64) = sqlx::query_as(
@@ -3527,7 +3531,7 @@ mod integration_tests {
                (SELECT count(*) FROM device_certificate_reported_states WHERE tenant_id=$1::uuid),
                (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid)",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .fetch_one(&owner.pool)
         .await?;
 
@@ -3544,7 +3548,7 @@ mod integration_tests {
                 "SELECT disposition FROM public.rss_commit_device_command_ack_ingress(
                  $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11)",
             )
-            .bind(tenant.as_uuid().to_string())
+            .bind(tenant.to_string())
             .bind(ack_target.scope.device().as_uuid().to_string())
             .bind("null-scope-ack")
             .bind("null-scope-ack-command")
@@ -3574,7 +3578,7 @@ mod integration_tests {
                 "SELECT disposition FROM public.rss_commit_device_certificate_report_ingress(
                  $1::uuid,$2::uuid,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
             )
-            .bind(tenant.as_uuid().to_string())
+            .bind(tenant.to_string())
             .bind(report_target.scope.device().as_uuid().to_string())
             .bind("null-scope-report")
             .bind(1_i64)
@@ -3605,7 +3609,7 @@ mod integration_tests {
             "SELECT command_id,state FROM device_commands
              WHERE tenant_id=$1::uuid AND command_id=ANY($2::text[]) ORDER BY command_id",
         )
-        .bind(ack_target.scope.tenant().as_uuid().to_string())
+        .bind(ack_target.scope.tenant().to_string())
         .bind(vec!["null-scope-ack-command", "null-scope-report-command"])
         .fetch_all(&owner.pool)
         .await?;
@@ -3620,7 +3624,7 @@ mod integration_tests {
             "SELECT count(*) FROM device_certificate_reported_states
              WHERE tenant_id=$1::uuid AND device_id=$2::uuid",
         )
-        .bind(report_target.scope.tenant().as_uuid().to_string())
+        .bind(report_target.scope.tenant().to_string())
         .bind(report_target.scope.device().as_uuid().to_string())
         .fetch_one(&owner.pool)
         .await?;
@@ -3631,7 +3635,7 @@ mod integration_tests {
                (SELECT count(*) FROM device_certificate_reported_states WHERE tenant_id=$1::uuid),
                (SELECT count(*) FROM outbox WHERE tenant_id=$1::uuid)",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .fetch_one(&owner.pool)
         .await?;
         assert_eq!(after_counts, before_counts);
@@ -3648,7 +3652,7 @@ mod integration_tests {
     -> TestResult {
         let (fixture, owner) = crate::test_pg::connect_pg().await?;
         owner.run_migrations().await?;
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let ack_target = new_target_for_tenant(tenant);
         let report_target = new_target_for_tenant(tenant);
         for target in [ack_target, report_target] {
@@ -3734,7 +3738,7 @@ mod integration_tests {
                 (SELECT count(*) FROM device_certificate_reported_states WHERE tenant_id=$1::uuid AND device_id=$2::uuid),
                 (SELECT count(*) FROM device_ingress_receipts WHERE tenant_id=$1::uuid AND event_id=ANY($3::text[]))",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(report_target.scope.device().as_uuid().to_string())
         .bind(vec![
             "high-rejected-ack",
@@ -3758,7 +3762,7 @@ mod integration_tests {
                AND generation=$3 AND fence_epoch=$4
                AND disposition IN ('advanced','device_rejected')",
         )
-        .bind(tenant.as_uuid().to_string())
+        .bind(tenant.to_string())
         .bind(report_target.scope.device().as_uuid().to_string())
         .bind(1_i64)
         .bind(7_i64)
@@ -4273,7 +4277,7 @@ mod integration_tests {
              VALUES ($1::uuid, 'unscoped-event', $2::uuid, 'report', NULL, 1, 7, 1, $3, \
              'advanced')",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .bind(vec![3_u8; 32])
         .execute(&writer.pool)
@@ -4300,7 +4304,7 @@ mod integration_tests {
              ($1::uuid, 'unscoped-command', $2::uuid, 1, 7, 'draft', $3, \
               TIMESTAMPTZ '2100-01-01 00:00:00+00', 'queued', 1)",
         )
-        .bind(target.scope.tenant().as_uuid().to_string())
+        .bind(target.scope.tenant().to_string())
         .bind(target.scope.device().as_uuid().to_string())
         .bind(vec![4_u8; 32])
         .execute(&writer.pool)

@@ -9,7 +9,7 @@ async fn revocation_facade_rejects_scope_mismatch_before_querying_revocation_tab
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let transaction_scope = unique_revocation_scope();
     let mismatched_scope = diport::CertScope::new(
-        vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
+        rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
         transaction_scope.device(),
     );
     let serial = revocation_serial(&[0x18, 0x82, 0x01]);
@@ -94,7 +94,7 @@ async fn revocation_store_satisfies_provider_neutral_conformance() -> TestResult
     let evidence_pool = runtime_assertion_pool(fixture.owner_params()).await?;
     let primary_scope = unique_revocation_scope();
     let other_tenant_scope = diport::CertScope::new(
-        vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
+        rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?,
         primary_scope.device(),
     );
     let other_device_scope = diport::CertScope::new(
@@ -1133,7 +1133,7 @@ impl PgRevocationConformanceHarness {
               AND serial = $3
             "#,
         )
-        .bind(scope.tenant().as_uuid().to_string())
+        .bind(scope.tenant().to_string())
         .bind(scope.device().as_uuid().to_string())
         .bind(serial.as_bytes())
         .fetch_one(&self.evidence_pool)

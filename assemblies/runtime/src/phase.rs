@@ -338,13 +338,6 @@ impl<'a> DomainPhaseContext<'a> {
         }
     }
 
-    fn set_expected_workers(
-        &mut self,
-        expected: bootstrap::ExpectedWorkerInventory,
-    ) -> anyhow::Result<()> {
-        self.context.runtime_inputs.set_expected_workers(expected)
-    }
-
     fn into_parts(
         self,
     ) -> (
@@ -371,6 +364,13 @@ impl<'a> std::ops::Deref for DomainPhaseContext<'a> {
 impl PhaseContext<'_> {
     fn config(&self) -> SnapshotConfig<'_> {
         self.runtime_inputs.config()
+    }
+
+    fn set_expected_workers(
+        &mut self,
+        expected: bootstrap::ExpectedWorkerInventory,
+    ) -> anyhow::Result<()> {
+        self.runtime_inputs.set_expected_workers(expected)
     }
 
     fn take_trace_export(&mut self) -> Option<otel::OtelExporter> {
@@ -477,6 +477,7 @@ pub(crate) struct Finalized<'a> {
     listeners: crate::routes::FinalizedListenerSet,
     probe_receipt: crate::routes::FinalizedProbeReceipt,
     inventory_publisher: runtimeexec::inventory::InventoryPublisher,
+    platform_host: runtimeexec::RuntimeHostView,
 }
 
 impl sealed::Sealed for Planned<'_> {}

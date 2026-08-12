@@ -230,7 +230,9 @@ impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRetr
 pub struct vocab::contract::binding::ContractBinding
 impl vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::descriptor(&self) -> &rss_contract::ContractDescriptor
 pub const fn vocab::contract::binding::ContractBinding::domain(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::from_descriptor(&'static str, rss_contract::ContractDescriptor, &'static str) -> Self
 pub const fn vocab::contract::binding::ContractBinding::from_static(&'static str, &'static str, &'static str, &'static str) -> Self
 pub const fn vocab::contract::binding::ContractBinding::schema_hash(&self) -> &'static str
 pub const fn vocab::contract::binding::ContractBinding::version(&self) -> &'static str
@@ -1071,32 +1073,6 @@ impl vocab::http::NonProducerHttpConsistency for vocab::http::LocalOnly
 impl vocab::http::NonProducerHttpConsistency for vocab::http::LocalTx
 impl vocab::http::NonProducerHttpConsistency for vocab::http::WorkflowEventual
 pub trait vocab::http::OpenHttpResponseMarker
-pub mod vocab::principal
-#[non_exhaustive] pub enum vocab::principal::PrincipalKind
-pub vocab::principal::PrincipalKind::Admin
-pub vocab::principal::PrincipalKind::Anonymous
-pub vocab::principal::PrincipalKind::Device
-pub vocab::principal::PrincipalKind::Service
-pub vocab::principal::PrincipalKind::SuperAdmin
-pub vocab::principal::PrincipalKind::User
-impl vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::as_actor_metadata_label(self) -> &'static str
-impl core::clone::Clone for vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::clone(&self) -> vocab::principal::PrincipalKind
-impl core::cmp::Eq for vocab::principal::PrincipalKind
-impl core::cmp::PartialEq for vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::eq(&self, &vocab::principal::PrincipalKind) -> bool
-impl core::fmt::Debug for vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::principal::PrincipalKind
-impl core::marker::StructuralPartialEq for vocab::principal::PrincipalKind
-impl core::marker::Freeze for vocab::principal::PrincipalKind
-impl core::marker::Send for vocab::principal::PrincipalKind
-impl core::marker::Sync for vocab::principal::PrincipalKind
-impl core::marker::Unpin for vocab::principal::PrincipalKind
-impl core::marker::UnsafeUnpin for vocab::principal::PrincipalKind
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::principal::PrincipalKind
-impl core::panic::unwind_safe::UnwindSafe for vocab::principal::PrincipalKind
 pub mod vocab::projection
 #[non_exhaustive] pub enum vocab::projection::ProjectionField
 pub vocab::projection::ProjectionField::AuditActor
@@ -1228,73 +1204,31 @@ impl core::marker::UnsafeUnpin for vocab::service::ServiceCallerDomain
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::service::ServiceCallerDomain
 impl core::panic::unwind_safe::UnwindSafe for vocab::service::ServiceCallerDomain
 pub mod vocab::tenant
-#[non_exhaustive] pub enum vocab::tenant::RowScope
-pub vocab::tenant::RowScope::All
-pub vocab::tenant::RowScope::Device
-pub vocab::tenant::RowScope::SelfOnly
-pub vocab::tenant::RowScope::Tenant
-impl vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::as_label(self) -> &'static str
-impl core::clone::Clone for vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::clone(&self) -> vocab::tenant::RowScope
-impl core::cmp::Eq for vocab::tenant::RowScope
-impl core::cmp::PartialEq for vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::eq(&self, &vocab::tenant::RowScope) -> bool
-impl core::fmt::Debug for vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::tenant::RowScope
-impl core::marker::StructuralPartialEq for vocab::tenant::RowScope
-impl core::marker::Freeze for vocab::tenant::RowScope
-impl core::marker::Send for vocab::tenant::RowScope
-impl core::marker::Sync for vocab::tenant::RowScope
-impl core::marker::Unpin for vocab::tenant::RowScope
-impl core::marker::UnsafeUnpin for vocab::tenant::RowScope
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowScope
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowScope
-#[non_exhaustive] pub enum vocab::tenant::ScopedTenant
-pub vocab::tenant::ScopedTenant::Device
-pub vocab::tenant::ScopedTenant::SelfOnly
-pub vocab::tenant::ScopedTenant::Tenant
-impl vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::as_row_scope(self) -> vocab::tenant::RowScope
-impl core::clone::Clone for vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::clone(&self) -> vocab::tenant::ScopedTenant
-impl core::cmp::Eq for vocab::tenant::ScopedTenant
-impl core::cmp::PartialEq for vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::eq(&self, &vocab::tenant::ScopedTenant) -> bool
-impl core::fmt::Debug for vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::tenant::ScopedTenant
-impl core::marker::StructuralPartialEq for vocab::tenant::ScopedTenant
-impl core::marker::Freeze for vocab::tenant::ScopedTenant
-impl core::marker::Send for vocab::tenant::ScopedTenant
-impl core::marker::Sync for vocab::tenant::ScopedTenant
-impl core::marker::Unpin for vocab::tenant::ScopedTenant
-impl core::marker::UnsafeUnpin for vocab::tenant::ScopedTenant
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::ScopedTenant
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::ScopedTenant
-#[non_exhaustive] pub enum vocab::tenant::TenantIdError
-pub vocab::tenant::TenantIdError::Empty
-pub vocab::tenant::TenantIdError::Format
-pub vocab::tenant::TenantIdError::Nil
-impl core::clone::Clone for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::clone(&self) -> vocab::tenant::TenantIdError
-impl core::cmp::Eq for vocab::tenant::TenantIdError
-impl core::cmp::PartialEq for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::eq(&self, &vocab::tenant::TenantIdError) -> bool
-impl core::error::Error for vocab::tenant::TenantIdError
-impl core::fmt::Debug for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for vocab::tenant::TenantIdError
-impl core::marker::Freeze for vocab::tenant::TenantIdError
-impl core::marker::Send for vocab::tenant::TenantIdError
-impl core::marker::Sync for vocab::tenant::TenantIdError
-impl core::marker::Unpin for vocab::tenant::TenantIdError
-impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
+#[non_exhaustive] pub enum vocab::tenant::VisibilityScope
+pub vocab::tenant::VisibilityScope::All
+pub vocab::tenant::VisibilityScope::Device
+pub vocab::tenant::VisibilityScope::SelfOnly
+pub vocab::tenant::VisibilityScope::Tenant
+impl vocab::tenant::VisibilityScope
+pub const fn vocab::tenant::VisibilityScope::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::tenant::VisibilityScope
+pub fn vocab::tenant::VisibilityScope::clone(&self) -> vocab::tenant::VisibilityScope
+impl core::cmp::Eq for vocab::tenant::VisibilityScope
+impl core::cmp::PartialEq for vocab::tenant::VisibilityScope
+pub fn vocab::tenant::VisibilityScope::eq(&self, &vocab::tenant::VisibilityScope) -> bool
+impl core::convert::From<rss_request_context::RowScope> for vocab::tenant::VisibilityScope
+pub fn vocab::tenant::VisibilityScope::from(rss_request_context::RowScope) -> Self
+impl core::fmt::Debug for vocab::tenant::VisibilityScope
+pub fn vocab::tenant::VisibilityScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::tenant::VisibilityScope
+impl core::marker::StructuralPartialEq for vocab::tenant::VisibilityScope
+impl core::marker::Freeze for vocab::tenant::VisibilityScope
+impl core::marker::Send for vocab::tenant::VisibilityScope
+impl core::marker::Sync for vocab::tenant::VisibilityScope
+impl core::marker::Unpin for vocab::tenant::VisibilityScope
+impl core::marker::UnsafeUnpin for vocab::tenant::VisibilityScope
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::VisibilityScope
+impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::VisibilityScope
 pub struct vocab::tenant::CrossTenantCapability
 impl vocab::tenant::CrossTenantCapability
 pub fn vocab::tenant::CrossTenantCapability::issue_for_verified_super_admin() -> Self
@@ -1317,10 +1251,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::CrossTenantVisib
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::CrossTenantVisibility
 pub struct vocab::tenant::RowVisibility
 impl vocab::tenant::RowVisibility
-pub fn vocab::tenant::RowVisibility::new(vocab::tenant::ScopedTenant, vocab::tenant::TenantId) -> Self
+pub fn vocab::tenant::RowVisibility::new(rss_request_context::RowScope, rss_request_context::TenantId) -> Self
 pub fn vocab::tenant::RowVisibility::new_cross_tenant(vocab::tenant::CrossTenantVisibility) -> Self
-pub fn vocab::tenant::RowVisibility::scope(&self) -> vocab::tenant::RowScope
-pub fn vocab::tenant::RowVisibility::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+pub const fn vocab::tenant::RowVisibility::scope(&self) -> vocab::tenant::VisibilityScope
+pub const fn vocab::tenant::RowVisibility::tenant(&self) -> core::option::Option<rss_request_context::TenantId>
 impl core::marker::Freeze for vocab::tenant::RowVisibility
 impl core::marker::Send for vocab::tenant::RowVisibility
 impl core::marker::Sync for vocab::tenant::RowVisibility
@@ -1328,30 +1262,6 @@ impl core::marker::Unpin for vocab::tenant::RowVisibility
 impl core::marker::UnsafeUnpin for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowVisibility
 impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowVisibility
-pub struct vocab::tenant::TenantId(_)
-impl vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
-pub fn vocab::tenant::TenantId::parse(&str) -> core::result::Result<Self, vocab::tenant::TenantIdError>
-impl core::clone::Clone for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::clone(&self) -> vocab::tenant::TenantId
-impl core::cmp::Eq for vocab::tenant::TenantId
-impl core::cmp::PartialEq for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::eq(&self, &vocab::tenant::TenantId) -> bool
-impl core::fmt::Debug for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for vocab::tenant::TenantId
-impl core::marker::StructuralPartialEq for vocab::tenant::TenantId
-impl core::marker::Freeze for vocab::tenant::TenantId
-impl core::marker::Send for vocab::tenant::TenantId
-impl core::marker::Sync for vocab::tenant::TenantId
-impl core::marker::Unpin for vocab::tenant::TenantId
-impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
 pub mod vocab::time
 pub enum vocab::time::UnixEpochSecondsError
 pub vocab::time::UnixEpochSecondsError::BeforeEpoch
@@ -1784,31 +1694,6 @@ impl core::marker::Unpin for vocab::authz::PermissionParseError
 impl core::marker::UnsafeUnpin for vocab::authz::PermissionParseError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::PermissionParseError
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::PermissionParseError
-#[non_exhaustive] pub enum vocab::PrincipalKind
-pub vocab::PrincipalKind::Admin
-pub vocab::PrincipalKind::Anonymous
-pub vocab::PrincipalKind::Device
-pub vocab::PrincipalKind::Service
-pub vocab::PrincipalKind::SuperAdmin
-pub vocab::PrincipalKind::User
-impl vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::as_actor_metadata_label(self) -> &'static str
-impl core::clone::Clone for vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::clone(&self) -> vocab::principal::PrincipalKind
-impl core::cmp::Eq for vocab::principal::PrincipalKind
-impl core::cmp::PartialEq for vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::eq(&self, &vocab::principal::PrincipalKind) -> bool
-impl core::fmt::Debug for vocab::principal::PrincipalKind
-pub fn vocab::principal::PrincipalKind::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::principal::PrincipalKind
-impl core::marker::StructuralPartialEq for vocab::principal::PrincipalKind
-impl core::marker::Freeze for vocab::principal::PrincipalKind
-impl core::marker::Send for vocab::principal::PrincipalKind
-impl core::marker::Sync for vocab::principal::PrincipalKind
-impl core::marker::Unpin for vocab::principal::PrincipalKind
-impl core::marker::UnsafeUnpin for vocab::principal::PrincipalKind
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::principal::PrincipalKind
-impl core::panic::unwind_safe::UnwindSafe for vocab::principal::PrincipalKind
 #[non_exhaustive] pub enum vocab::ProjectionField
 pub vocab::ProjectionField::AuditActor
 pub vocab::ProjectionField::AuditResourceId
@@ -1912,29 +1797,6 @@ impl core::marker::Unpin for vocab::authz::RoutePermissionId
 impl core::marker::UnsafeUnpin for vocab::authz::RoutePermissionId
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::authz::RoutePermissionId
 impl core::panic::unwind_safe::UnwindSafe for vocab::authz::RoutePermissionId
-#[non_exhaustive] pub enum vocab::RowScope
-pub vocab::RowScope::All
-pub vocab::RowScope::Device
-pub vocab::RowScope::SelfOnly
-pub vocab::RowScope::Tenant
-impl vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::as_label(self) -> &'static str
-impl core::clone::Clone for vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::clone(&self) -> vocab::tenant::RowScope
-impl core::cmp::Eq for vocab::tenant::RowScope
-impl core::cmp::PartialEq for vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::eq(&self, &vocab::tenant::RowScope) -> bool
-impl core::fmt::Debug for vocab::tenant::RowScope
-pub fn vocab::tenant::RowScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::tenant::RowScope
-impl core::marker::StructuralPartialEq for vocab::tenant::RowScope
-impl core::marker::Freeze for vocab::tenant::RowScope
-impl core::marker::Send for vocab::tenant::RowScope
-impl core::marker::Sync for vocab::tenant::RowScope
-impl core::marker::Unpin for vocab::tenant::RowScope
-impl core::marker::UnsafeUnpin for vocab::tenant::RowScope
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::RowScope
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::RowScope
 pub enum vocab::SagaBackoff
 pub vocab::SagaBackoff::Exponential
 pub vocab::SagaBackoff::Fixed
@@ -1998,28 +1860,6 @@ impl core::marker::Unpin for vocab::contract::binding::SagaRetryClass
 impl core::marker::UnsafeUnpin for vocab::contract::binding::SagaRetryClass
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::SagaRetryClass
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::SagaRetryClass
-#[non_exhaustive] pub enum vocab::ScopedTenant
-pub vocab::ScopedTenant::Device
-pub vocab::ScopedTenant::SelfOnly
-pub vocab::ScopedTenant::Tenant
-impl vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::as_row_scope(self) -> vocab::tenant::RowScope
-impl core::clone::Clone for vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::clone(&self) -> vocab::tenant::ScopedTenant
-impl core::cmp::Eq for vocab::tenant::ScopedTenant
-impl core::cmp::PartialEq for vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::eq(&self, &vocab::tenant::ScopedTenant) -> bool
-impl core::fmt::Debug for vocab::tenant::ScopedTenant
-pub fn vocab::tenant::ScopedTenant::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::Copy for vocab::tenant::ScopedTenant
-impl core::marker::StructuralPartialEq for vocab::tenant::ScopedTenant
-impl core::marker::Freeze for vocab::tenant::ScopedTenant
-impl core::marker::Send for vocab::tenant::ScopedTenant
-impl core::marker::Sync for vocab::tenant::ScopedTenant
-impl core::marker::Unpin for vocab::tenant::ScopedTenant
-impl core::marker::UnsafeUnpin for vocab::tenant::ScopedTenant
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::ScopedTenant
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::ScopedTenant
 pub enum vocab::ServiceCallerDomain
 pub vocab::ServiceCallerDomain::MaintenanceOperator
 impl vocab::service::ServiceCallerDomain
@@ -2056,28 +1896,6 @@ impl core::marker::Unpin for vocab::contract::step::StepNameError
 impl core::marker::UnsafeUnpin for vocab::contract::step::StepNameError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::step::StepNameError
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepNameError
-#[non_exhaustive] pub enum vocab::TenantIdError
-pub vocab::TenantIdError::Empty
-pub vocab::TenantIdError::Format
-pub vocab::TenantIdError::Nil
-impl core::clone::Clone for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::clone(&self) -> vocab::tenant::TenantIdError
-impl core::cmp::Eq for vocab::tenant::TenantIdError
-impl core::cmp::PartialEq for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::eq(&self, &vocab::tenant::TenantIdError) -> bool
-impl core::error::Error for vocab::tenant::TenantIdError
-impl core::fmt::Debug for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::tenant::TenantIdError
-pub fn vocab::tenant::TenantIdError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for vocab::tenant::TenantIdError
-impl core::marker::Freeze for vocab::tenant::TenantIdError
-impl core::marker::Send for vocab::tenant::TenantIdError
-impl core::marker::Sync for vocab::tenant::TenantIdError
-impl core::marker::Unpin for vocab::tenant::TenantIdError
-impl core::marker::UnsafeUnpin for vocab::tenant::TenantIdError
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantIdError
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantIdError
 pub enum vocab::UnixEpochSecondsError
 pub vocab::UnixEpochSecondsError::BeforeEpoch
 pub vocab::UnixEpochSecondsError::Overflow
@@ -2100,6 +1918,31 @@ impl core::marker::Unpin for vocab::time::UnixEpochSecondsError
 impl core::marker::UnsafeUnpin for vocab::time::UnixEpochSecondsError
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::time::UnixEpochSecondsError
 impl core::panic::unwind_safe::UnwindSafe for vocab::time::UnixEpochSecondsError
+#[non_exhaustive] pub enum vocab::VisibilityScope
+pub vocab::VisibilityScope::All
+pub vocab::VisibilityScope::Device
+pub vocab::VisibilityScope::SelfOnly
+pub vocab::VisibilityScope::Tenant
+impl vocab::tenant::VisibilityScope
+pub const fn vocab::tenant::VisibilityScope::as_label(self) -> &'static str
+impl core::clone::Clone for vocab::tenant::VisibilityScope
+pub fn vocab::tenant::VisibilityScope::clone(&self) -> vocab::tenant::VisibilityScope
+impl core::cmp::Eq for vocab::tenant::VisibilityScope
+impl core::cmp::PartialEq for vocab::tenant::VisibilityScope
+pub fn vocab::tenant::VisibilityScope::eq(&self, &vocab::tenant::VisibilityScope) -> bool
+impl core::convert::From<rss_request_context::RowScope> for vocab::tenant::VisibilityScope
+pub fn vocab::tenant::VisibilityScope::from(rss_request_context::RowScope) -> Self
+impl core::fmt::Debug for vocab::tenant::VisibilityScope
+pub fn vocab::tenant::VisibilityScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for vocab::tenant::VisibilityScope
+impl core::marker::StructuralPartialEq for vocab::tenant::VisibilityScope
+impl core::marker::Freeze for vocab::tenant::VisibilityScope
+impl core::marker::Send for vocab::tenant::VisibilityScope
+impl core::marker::Sync for vocab::tenant::VisibilityScope
+impl core::marker::Unpin for vocab::tenant::VisibilityScope
+impl core::marker::UnsafeUnpin for vocab::tenant::VisibilityScope
+impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::VisibilityScope
+impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::VisibilityScope
 pub struct vocab::Action(_)
 impl vocab::authz::Action
 pub fn vocab::authz::Action::as_str(&self) -> &str
@@ -2184,7 +2027,9 @@ impl core::panic::unwind_safe::UnwindSafe for vocab::CanonicalSha256DigestError
 pub struct vocab::ContractBinding
 impl vocab::contract::binding::ContractBinding
 pub const fn vocab::contract::binding::ContractBinding::contract_id(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::descriptor(&self) -> &rss_contract::ContractDescriptor
 pub const fn vocab::contract::binding::ContractBinding::domain(&self) -> &'static str
+pub const fn vocab::contract::binding::ContractBinding::from_descriptor(&'static str, rss_contract::ContractDescriptor, &'static str) -> Self
 pub const fn vocab::contract::binding::ContractBinding::from_static(&'static str, &'static str, &'static str, &'static str) -> Self
 pub const fn vocab::contract::binding::ContractBinding::schema_hash(&self) -> &'static str
 pub const fn vocab::contract::binding::ContractBinding::version(&self) -> &'static str
@@ -2477,10 +2322,10 @@ impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::binding::Proje
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::binding::ProjectionInputBinding
 pub struct vocab::RowVisibility
 impl vocab::tenant::RowVisibility
-pub fn vocab::tenant::RowVisibility::new(vocab::tenant::ScopedTenant, vocab::tenant::TenantId) -> Self
+pub fn vocab::tenant::RowVisibility::new(rss_request_context::RowScope, rss_request_context::TenantId) -> Self
 pub fn vocab::tenant::RowVisibility::new_cross_tenant(vocab::tenant::CrossTenantVisibility) -> Self
-pub fn vocab::tenant::RowVisibility::scope(&self) -> vocab::tenant::RowScope
-pub fn vocab::tenant::RowVisibility::tenant(&self) -> core::option::Option<vocab::tenant::TenantId>
+pub const fn vocab::tenant::RowVisibility::scope(&self) -> vocab::tenant::VisibilityScope
+pub const fn vocab::tenant::RowVisibility::tenant(&self) -> core::option::Option<rss_request_context::TenantId>
 impl core::marker::Freeze for vocab::tenant::RowVisibility
 impl core::marker::Send for vocab::tenant::RowVisibility
 impl core::marker::Sync for vocab::tenant::RowVisibility
@@ -2602,30 +2447,6 @@ impl core::marker::Unpin for vocab::contract::step::StepName
 impl core::marker::UnsafeUnpin for vocab::contract::step::StepName
 impl core::panic::unwind_safe::RefUnwindSafe for vocab::contract::step::StepName
 impl core::panic::unwind_safe::UnwindSafe for vocab::contract::step::StepName
-pub struct vocab::TenantId(_)
-impl vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::as_uuid(&self) -> uuid::Uuid
-pub fn vocab::tenant::TenantId::parse(&str) -> core::result::Result<Self, vocab::tenant::TenantIdError>
-impl core::clone::Clone for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::clone(&self) -> vocab::tenant::TenantId
-impl core::cmp::Eq for vocab::tenant::TenantId
-impl core::cmp::PartialEq for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::eq(&self, &vocab::tenant::TenantId) -> bool
-impl core::fmt::Debug for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::fmt::Display for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::hash::Hash for vocab::tenant::TenantId
-pub fn vocab::tenant::TenantId::hash<__H: core::hash::Hasher>(&self, &mut __H)
-impl core::marker::Copy for vocab::tenant::TenantId
-impl core::marker::StructuralPartialEq for vocab::tenant::TenantId
-impl core::marker::Freeze for vocab::tenant::TenantId
-impl core::marker::Send for vocab::tenant::TenantId
-impl core::marker::Sync for vocab::tenant::TenantId
-impl core::marker::Unpin for vocab::tenant::TenantId
-impl core::marker::UnsafeUnpin for vocab::tenant::TenantId
-impl core::panic::unwind_safe::RefUnwindSafe for vocab::tenant::TenantId
-impl core::panic::unwind_safe::UnwindSafe for vocab::tenant::TenantId
 pub struct vocab::UnixEpochSeconds(_)
 impl vocab::time::UnixEpochSeconds
 pub const fn vocab::time::UnixEpochSeconds::get(self) -> i64

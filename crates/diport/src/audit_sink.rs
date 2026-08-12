@@ -53,7 +53,7 @@ pub enum AuditOutcome {
 /// `occurred_at` 由 [`crate::Clock`] DI port 注入结果填入（caller 取注入时钟，本类型不直接取系统时钟）。
 /// `action` / `resource_kind` 使用 `&'static str` const literal，遵循 error-handling const-literal 规范。
 ///
-/// `tenant_id` 使用 [`vocab::TenantId`] 强类型；跨租户主体（service / super-admin）可能无单一租户归属，
+/// `tenant_id` 使用 [`rss_request_context::TenantId`] 强类型；跨租户主体（service / super-admin）可能无单一租户归属，
 /// 因而允许 `None` 作为已认证主体快照的一部分。
 /// `principal_id` / `resource_id` 待 typed id（W 阶段）。
 /// `correlation_id` 为跨服务关联 ID（由 outbox envelope correlation 注入），与 `request_id`（单次 HTTP
@@ -70,10 +70,10 @@ pub struct AuditEvent {
     pub principal_id: String,
     /// 操作主体类别（脱敏闭值集，供审计按主体类型分层）。
     #[redact(sensitivity = public)]
-    pub principal_kind: vocab::PrincipalKind,
+    pub principal_kind: rss_request_context::PrincipalKind,
     /// 主体租户快照；跨租户主体（service / super-admin）可能为 `None`。
     #[redact(sensitivity = public)]
-    pub tenant_id: Option<vocab::TenantId>,
+    pub tenant_id: Option<rss_request_context::TenantId>,
     /// 资源类别（const literal）。
     #[redact(sensitivity = public)]
     pub resource_kind: &'static str,
@@ -135,7 +135,7 @@ mod smoke {
     }
 
     // multi_thread + spawn：验证 boxed future Send（trait_variant Send 变体），与真实 spawn 场景对齐。
-    // `record` 入参 `AuditEvent` 含 `vocab::TenantId`（fail-closed，无 infallible 构造、`parse` 仍冻结），
+    // `record` 入参 `AuditEvent` 含 `rss_request_context::TenantId`（fail-closed，无 infallible 构造、`parse` 仍冻结），
     // 当前不可构造，故注入路径经无参 `shutdown()` 验证；`record` 的签名/可达性由上方 native AFIT impl
     // 编译期保证（impl 必须匹配 trait）。
     #[tokio::test(flavor = "multi_thread")]
@@ -153,7 +153,7 @@ mod smoke {
             let _ = &e.occurred_at;
             let _ = &e.principal_id;
             let _ = &e.principal_kind;
-            let _ = &e.tenant_id; // Option<vocab::TenantId>
+            let _ = &e.tenant_id; // Option<rss_request_context::TenantId>
             let _ = &e.resource_kind;
             let _ = &e.resource_id;
             let _ = &e.action;
@@ -218,9 +218,10 @@ mod pii_debug {
         AuditEvent {
             occurred_at: std::time::SystemTime::UNIX_EPOCH,
             principal_id: "alice@corp.example".to_string(),
-            principal_kind: vocab::PrincipalKind::User,
+            principal_kind: rss_request_context::PrincipalKind::User,
             tenant_id: Some(
-                vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap(),
+                rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                    .unwrap(),
             ),
             resource_kind: "session",
             resource_id: "device-7f3a".to_string(),

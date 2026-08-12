@@ -119,12 +119,15 @@ pub struct SettingsSecretResolveResponse {
 pub const CONTRACT_ID: &str = "settings.secret-resolve";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "settings",
-    "settings.secret-resolve",
-    "v7",
-    "sha256:fd99b78d61b2639c02a53061df5607b1af0b3e302046f22fd1758a8bd7a7d346",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "settings.secret-resolve",
+        "v7",
+        "sha256:fd99b78d61b2639c02a53061df5607b1af0b3e302046f22fd1758a8bd7a7d346",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("settings", DESCRIPTOR, "v7");
 
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/settings/secrets/{key}/material";

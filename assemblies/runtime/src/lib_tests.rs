@@ -573,11 +573,11 @@ impl identity::ports::RoleReadRepo for StaticRoleRepo {
 
 #[derive(Clone)]
 struct StaticRoleBindings {
-    bindings: Arc<Vec<(vocab::TenantId, String, String)>>,
+    bindings: Arc<Vec<(rss_request_context::TenantId, String, String)>>,
 }
 
 impl StaticRoleBindings {
-    fn new(bindings: Vec<(vocab::TenantId, String, String)>) -> Self {
+    fn new(bindings: Vec<(rss_request_context::TenantId, String, String)>) -> Self {
         Self {
             bindings: Arc::new(bindings),
         }
@@ -958,7 +958,7 @@ impl audit::ports::AuditAdminRepo for DelegatingAuditAdminRepo {
 
     async fn verify_tenant(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         batch: vocab::Limit,
     ) -> Result<audit::ports::AuditLedgerVerifyReport, audit::ports::AuditError> {
         use audit::ports::AuditReadRepo as _;
@@ -999,7 +999,7 @@ impl audit::ports::AuditAdminRepo for DelegatingAuditAdminRepo {
 
 #[allow(clippy::expect_used)]
 fn test_identity_domain_with_audit_role(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) -> (
     identity::IdentityDomain<TestSigner>,
     Arc<dyn httpserve::RouteAuthorizer>,
@@ -1156,7 +1156,7 @@ fn test_audit_admin_repo(
 #[allow(clippy::expect_used)]
 async fn append_sensitive_audit_record(
     repo: &Arc<audit::ports::DynAuditWriteRepo<'static>>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 ) {
     use audit::ports::AuditWriteRepo as _;
 
@@ -1165,7 +1165,7 @@ async fn append_sensitive_audit_record(
         audit::ports::AuditRecord {
             tenant,
             actor: ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("actor"),
-            actor_kind: vocab::PrincipalKind::Admin,
+            actor_kind: rss_request_context::PrincipalKind::Admin,
             action: vocab::Action::parse("audit:read").expect("action"),
             resource: audit::ports::ResourceRef::new(
                 "session",
@@ -1218,7 +1218,7 @@ fn runtime_test_provider() -> Arc<OidcProvider<diport::FederatedAccessProfile>> 
 }
 
 #[allow(clippy::expect_used)]
-fn runtime_test_jwt(kind: &str, tenant: Option<vocab::TenantId>) -> String {
+fn runtime_test_jwt(kind: &str, tenant: Option<rss_request_context::TenantId>) -> String {
     use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
 
     let key = SigningKey::from_slice(&[7u8; 32]).expect("signing key");
@@ -1253,7 +1253,8 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
 -> anyhow::Result<()> {
     use tower::ServiceExt as _;
 
-    let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+    let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+        .expect("tenant");
     let audit_repo = test_audit_repo();
     append_sensitive_audit_record(&audit_repo.write, tenant).await;
     let (identity_domain, authorizer) = test_identity_domain_with_audit_role(tenant);
@@ -1352,7 +1353,7 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
 #[allow(clippy::expect_used)]
 async fn runtime_inventory_admin_uses_rss_user_and_identity_durable_grant_policy()
 -> anyhow::Result<()> {
-    let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+    let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
     let bound_subject = "11111111-2222-4333-8444-555555555555";
     let (identity_domain, authorizer) = test_identity_domain_with_audit_role(tenant);
     let mut registry = bootstrap::compose(&[&identity_domain])?;
@@ -1377,7 +1378,7 @@ async fn runtime_inventory_admin_uses_rss_user_and_identity_durable_grant_policy
             .contract_id(),
         permission: vocab::RoutePermissionId::RuntimeInventoryRead,
         tenant_id: Some(tenant),
-        principal_kind: vocab::PrincipalKind::User,
+        principal_kind: rss_request_context::PrincipalKind::User,
         principal_id: subject.to_string(),
         federated_permissions: None,
         resource: None,

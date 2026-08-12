@@ -38,6 +38,7 @@ use live_vault_support::{
 
 const FIELD_PLAINTEXT: &[u8] = b"vault-field-secret";
 const KEY_PROVIDER_ERROR_DISPLAY: &str = "key provider operation failed";
+use rss_request_context::TenantId;
 use secure::{Plaintext, ProtectionContext};
 use tracing::field::{Field, Visit};
 use tracing::span::Attributes;
@@ -45,7 +46,6 @@ use tracing::{Event, Subscriber};
 use tracing_subscriber::layer::{Context as LayerContext, Layer};
 use tracing_subscriber::prelude::*;
 use vault::{VaultKeyProvider, VaultSigner};
-use vocab::tenant::TenantId;
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 

@@ -140,7 +140,8 @@ fn parse_principal(raw: &str) -> Result<DeviceScope, BrokerAssertionError> {
     if parts.next().is_some() {
         return Err(BrokerAssertionError);
     }
-    let tenant = vocab::TenantId::parse(tenant_raw).map_err(|_| BrokerAssertionError)?;
+    let tenant =
+        rss_request_context::TenantId::parse(tenant_raw).map_err(|_| BrokerAssertionError)?;
     let device = ids::DeviceId::parse(device_raw).map_err(|_| BrokerAssertionError)?;
     if device.as_uuid().hyphenated().to_string() != device_raw {
         return Err(BrokerAssertionError);
@@ -185,7 +186,7 @@ impl std::fmt::Debug for VerifiedBrokerAssertion {
 }
 
 impl VerifiedBrokerAssertion {
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.principal.tenant()
     }
 

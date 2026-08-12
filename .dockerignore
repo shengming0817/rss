@@ -8,10 +8,18 @@
 .gitignore
 worktrees/
 
+# ── 嵌套前端仓与 Node 构建产物（后端镜像不消费；避免本地依赖进入 context）──────────────────────
+rss-web/
+**/node_modules/
+**/.next/
+**/dist/
+**/coverage/
+
 # ── 构建产物（最大头：务必排除，否则上下文暴涨 + 缓存失效）──────────────────────────────────────
 target/
 **/target/
 .cache/
+target-plan/
 **/*.profraw
 
 # ── 独立 workspace（根 Cargo.toml `exclude = ["lints"]`，自带 Cargo.lock，非 server 依赖）──────────

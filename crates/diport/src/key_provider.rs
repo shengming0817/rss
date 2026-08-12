@@ -321,8 +321,8 @@ mod tests {
         KeyProviderErrorKind, KeyRef, KeyVersion,
     };
     use crate::RedactedBytes;
+    use rss_request_context::TenantId;
     use secure::{DerivedAad, Plaintext, ProtectionContext};
-    use vocab::tenant::TenantId;
 
     const TENANT_A: &str = "11111111-2222-4333-8444-555555555555";
 

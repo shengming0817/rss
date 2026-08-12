@@ -284,7 +284,7 @@ async fn start_pilot(
             Arc::new(ProcessClock),
             command_keyring()?,
             DeviceCertificateSystemProducer::install(),
-            vocab::TenantId::parse(TENANT)?,
+            rss_request_context::TenantId::parse(TENANT)?,
             "device-certificate-convergence-journey",
             Tenancy::tenant_scoped(),
             identity_composition::DeviceIdentitySchedulerTiming::new(

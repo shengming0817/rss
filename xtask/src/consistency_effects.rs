@@ -2684,8 +2684,13 @@ fn canonical_identity_router_layer(local: &syn::Local, router: &str) -> bool {
         &["primitives", "RequiredScheme", "FederatedAccessToken"],
     );
     let identity = authenticated.args.iter().nth(1).is_some_and(|principal| {
-        expression_path_is(Some(principal), &["vocab", "PrincipalKind", "User"])
-            || expression_path_is(Some(principal), &["vocab", "PrincipalKind", "Admin"])
+        expression_path_is(
+            Some(principal),
+            &["rss_request_context", "PrincipalKind", "User"],
+        ) || expression_path_is(
+            Some(principal),
+            &["rss_request_context", "PrincipalKind", "Admin"],
+        )
     }) && authenticated
         .args
         .iter()

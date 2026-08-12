@@ -5,7 +5,10 @@
 //! there is no unbounded compatibility path.
 
 use std::num::NonZeroU64;
-use std::time::Duration;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+
+use tokio_util::sync::CancellationToken;
 
 /// Non-zero wall-clock budget for one complete inbound HTTP request.
 ///
@@ -37,5 +40,70 @@ impl ServerRequestBudget {
             Some(millis) => Self(millis),
             None => unreachable!(),
         }
+    }
+}
+
+/// Read-only projection of the one transport-owned request budget and cancellation source.
+///
+/// Only the sealed server middleware constructs this carrier. Downstream authorization and
+/// Platform bridges may observe it, but cannot cancel a request or extend its deadline.
+#[derive(Debug)]
+pub struct RequestControl {
+    deadline: Instant,
+    cancellation: CancellationToken,
+}
+
+impl RequestControl {
+    pub(crate) fn start(budget: ServerRequestBudget) -> Arc<Self> {
+        Arc::new(Self {
+            deadline: Instant::now() + budget.duration(),
+            cancellation: CancellationToken::new(),
+        })
+    }
+
+    #[must_use]
+    pub fn deadline(&self) -> rss_request_context::Deadline {
+        rss_request_context::Deadline::at(self.deadline)
+    }
+
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    #[must_use]
+    pub fn for_test() -> Arc<Self> {
+        Self::start(ServerRequestBudget::for_test())
+    }
+}
+
+impl rss_request_context::CancellationObserver for RequestControl {
+    fn is_cancelled(&self) -> bool {
+        self.cancellation.is_cancelled()
+    }
+
+    fn cancelled(
+        &self,
+        deadline: rss_request_context::Deadline,
+    ) -> rss_request_context::CancellationFuture<'_> {
+        let deadline = self.deadline.min(deadline.instant());
+        Box::pin(async move {
+            tokio::select! {
+                () = self.cancellation.cancelled() => {
+                    rss_request_context::CancellationReason::Cancelled
+                }
+                () = tokio::time::sleep_until(deadline.into()) => {
+                    rss_request_context::CancellationReason::DeadlineExceeded
+                }
+            }
+        })
+    }
+}
+
+pub(crate) struct CancelRequestOnDrop(pub(crate) Arc<RequestControl>);
+
+impl Drop for CancelRequestOnDrop {
+    fn drop(&mut self) {
+        self.0.cancel();
     }
 }

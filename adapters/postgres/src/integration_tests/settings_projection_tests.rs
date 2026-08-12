@@ -184,7 +184,7 @@ impl SettingsTargetHarness {
 
 fn settings_conformance_selector() -> eventexec::ProjectionSelector {
     eventexec::ProjectionSelector::new(
-        vocab::TenantId::parse(COTX_TENANT_A).expect("canonical tenant"),
+        rss_request_context::TenantId::parse(COTX_TENANT_A).expect("canonical tenant"),
         eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID).expect("canonical projection"),
         eventexec::ProjectionVersion::parse("settings-conformance").expect("canonical generation"),
     )
@@ -197,7 +197,7 @@ fn settings_conformance_record(
     version: i64,
     schema_hash: &str,
 ) -> consistency::ProjectionEventRecord {
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A).expect("canonical tenant");
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A).expect("canonical tenant");
     let binding = generated::event::PROJECTION_INPUTS
         .iter()
         .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
@@ -642,7 +642,7 @@ const SETTINGS_PROJECTION_DEFINITION_SCHEMA_DIGEST: &str =
 const SETTINGS_PROJECTION_INPUT_GENERATION: &str = generated::event::PROJECTION_INPUT_GENERATION;
 
 fn settings_projection_apply_scope(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     generation: &str,
 ) -> Result<settings::ports::SettingsProjectionApplyScope, TestError> {
     Ok(settings::ports::SettingsProjectionApplyScope::for_test(
@@ -656,7 +656,7 @@ fn settings_projection_apply_scope(
 }
 
 fn settings_projection_read_scope(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     generation: &str,
 ) -> Result<settings::ports::SettingsProjectionReadScope, TestError> {
     Ok(settings::ports::SettingsProjectionReadScope::for_test(
@@ -667,7 +667,7 @@ fn settings_projection_read_scope(
 
 fn settings_projection_mutation(
     scope: &settings::ports::SettingsProjectionApplyScope,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     key: &str,
     version: u64,
     change_kind: generated::event::settings_v1::SettingsConfigChangeKind,
@@ -694,7 +694,7 @@ fn settings_projection_mutation(
 
 async fn invoke_settings_funnel_for_tenant_precondition(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     generation: String,
 ) -> Result<String, sqlx::Error> {
     sqlx::query_scalar::<_, String>(
@@ -717,8 +717,8 @@ async fn invoke_settings_funnel_for_tenant_precondition(
 
 async fn assert_settings_funnel_requires_bound_tenant(
     pool: &sqlx::PgPool,
-    tenant: vocab::TenantId,
-    other_tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
+    other_tenant: rss_request_context::TenantId,
     role_label: &str,
 ) -> TestResult {
     let mut unset = pool.begin().await?;
@@ -876,7 +876,7 @@ fn assert_settings_dual_worker_stops(
 fn settings_dual_worker_harness(
     worker: &crate::projection_worker::VerifiedPgProjectionWorkerStore,
     target_scope: &crate::projection_worker::ProjectionWorkerTarget,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     projection_target: std::sync::Arc<dyn eventexec::ProjectionTarget>,
     execution: eventexec::ProjectionExecutionContext,
     source: &SettingsDualWorkerBarrierSource,
@@ -917,7 +917,7 @@ fn settings_dual_worker_harness(
 
 async fn settings_projection_generation_state(
     owner: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     generation: &str,
 ) -> Result<
     (
@@ -985,7 +985,7 @@ async fn settings_projection_dlx_count(
 }
 
 fn settings_projection_record_for_tenant(
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     lsn: u64,
     event_id: &str,
     key: &str,
@@ -1073,7 +1073,8 @@ async fn settings_projection_operator_replay_failure_case(
     )?;
 
     if matches!(case, SettingsReplayFailureCase::CommitUnknown) {
-        let commit_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let commit_tenant =
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let commit_generation =
             format!("settings-commit-unknown-{}", uuid::Uuid::new_v4().simple());
         let commit_selector = eventexec::ProjectionSelector::new(
@@ -1163,7 +1164,8 @@ async fn settings_projection_operator_replay_failure_case(
     }
 
     if matches!(case, SettingsReplayFailureCase::RollbackFailed) {
-        let rollback_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let rollback_tenant =
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let rollback_generation =
             format!("settings-rollback-failed-{}", uuid::Uuid::new_v4().simple());
         let rollback_selector = eventexec::ProjectionSelector::new(
@@ -1233,8 +1235,9 @@ async fn settings_projection_operator_replay_failure_case(
     }
 
     if matches!(case, SettingsReplayFailureCase::TenantDrift) {
-        let drift_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-        let payload_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let drift_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let payload_tenant =
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let drift_generation = format!("settings-tenant-drift-{}", uuid::Uuid::new_v4().simple());
         let drift_selector = eventexec::ProjectionSelector::new(
             drift_tenant,
@@ -1296,7 +1299,7 @@ async fn settings_projection_operator_replay_failure_case(
     }
 
     if matches!(case, SettingsReplayFailureCase::PersistentOrder) {
-        let order_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let order_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let order_generation = format!("settings-order-{}", uuid::Uuid::new_v4().simple());
         let order_selector = eventexec::ProjectionSelector::new(
             order_tenant,
@@ -1373,7 +1376,8 @@ async fn settings_projection_operator_replay_failure_case(
     }
 
     if matches!(case, SettingsReplayFailureCase::SchemaDrift) {
-        let schema_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let schema_tenant =
+            rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let schema_generation = format!("settings-schema-drift-{}", uuid::Uuid::new_v4().simple());
         let schema_selector = eventexec::ProjectionSelector::new(
             schema_tenant,
@@ -1495,7 +1499,7 @@ async fn settings_active_generation_swap_requires_exact_precondition_and_support
         );
     }
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let binding = *generated::event::PROJECTION_INPUTS
         .iter()
         .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
@@ -1786,7 +1790,7 @@ async fn settings_active_swap_rejections_preserve_pointer_and_candidate_state() 
     let definition = generated::projection::settings_v3::CONTRACT;
 
     for fixture in SwapRejectionFixture::ALL {
-        let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+        let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
         let projection = eventexec::ProjectionId::parse(definition.contract_id())?;
         let baseline = eventexec::ProjectionSelector::new(
             tenant,
@@ -2038,7 +2042,7 @@ async fn settings_projection_query_request_pins_one_active_generation_across_swa
         ),
     );
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let binding = *generated::event::PROJECTION_INPUTS
         .iter()
         .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
@@ -2213,7 +2217,7 @@ async fn settings_active_swap_serializes_concurrent_generation_changes() -> Test
     )
     .await?;
     let pool = operator.store_arc().pool.clone();
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let binding = *generated::event::PROJECTION_INPUTS
         .iter()
         .find(|binding| binding.projection_id() == generated::projection::settings_v3::CONTRACT_ID)
@@ -2348,8 +2352,8 @@ async fn settings_projection_first_apply_read_update_tombstone_and_scope_isolati
 
     let (fixture, owner) = connect_pg().await?;
     let (_app, reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
-    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A)?;
-    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let tenant_a = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
+    let tenant_b = rss_request_context::TenantId::parse(COTX_TENANT_B)?;
     let generation = format!("settings-red-{}", uuid::Uuid::new_v4().simple());
     let other_generation = format!("settings-red-{}", uuid::Uuid::new_v4().simple());
     let key = settings::ports::SettingKey::parse("projection.metadata")?;
@@ -2506,8 +2510,8 @@ async fn settings_projection_real_roles_enforce_rls_and_exact_acl_negatives() ->
     let (fixture, owner) = connect_pg().await?;
     let (app, _repo_reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
     let reader = connect_pg_rss_app_read_role(&fixture, &owner).await?;
-    let tenant_a = vocab::TenantId::parse(COTX_TENANT_A)?;
-    let tenant_b = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let tenant_a = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
+    let tenant_b = rss_request_context::TenantId::parse(COTX_TENANT_B)?;
     let generation = format!("settings-rls-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant_a, &generation)?;
     assert_eq!(
@@ -2789,7 +2793,7 @@ async fn settings_projection_operator_lane_reuses_the_only_apply_function() -> T
     let writer = SettingsTargetHarness::new(std::sync::Arc::new(
         crate::PgSettingsProjectionApplyStore::new_projection_operator(&operator),
     ));
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
     let generation = format!("settings-operator-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant, &generation)?;
     assert_eq!(
@@ -2857,7 +2861,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         )),
     )
     .await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let generation = "v3".to_owned();
     let event_id = unique_event_id("settings-worker-purpose");
     sqlx::query(
@@ -3236,7 +3240,7 @@ async fn projection_worker_role_is_function_only_and_purpose_bound() -> TestResu
         observed.3 >= 1,
         "projection-origin DLQ backlog must be visible"
     );
-    let foreign = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let foreign = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let cross_tenant = sqlx::query_as::<_, (Option<i64>, Option<i64>, Option<i64>, i64)>(
         crate::projection_worker::PROJECTION_WORKER_OBSERVE_TENANT_SQL,
     )
@@ -3340,8 +3344,8 @@ async fn projection_worker_quarantine_survives_restart_and_operator_recovery() -
         .copied()
         .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)
         .ok_or_else(|| std::io::Error::other("Settings projection binding is missing"))?;
-    let quarantined = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let healthy = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let quarantined = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let healthy = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let quarantined_generation = "quarantine-blue";
     let healthy_generation = "healthy-green";
     append_projection_source_event_for_tenant(
@@ -3825,7 +3829,7 @@ async fn settings_projection_receipt_precedes_ordering_and_persists_across_recon
 
     let (fixture, owner) = connect_pg().await?;
     let (app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
     let generation = format!("settings-order-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant, &generation)?;
     let old_event = unique_event_id("settings-projection-old-receipt");
@@ -3996,7 +4000,7 @@ async fn settings_projection_concurrent_duplicate_is_single_effect() -> TestResu
 
     let (fixture, owner) = connect_pg().await?;
     let (_app, _reader, writer) = settings_projection_runtime_parts(&owner, &fixture).await?;
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
     let generation = format!("settings-race-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant, &generation)?;
     let event_id = unique_event_id("settings-projection-concurrent");
@@ -4068,7 +4072,7 @@ async fn settings_projection_dual_worker_same_generation_checkpoint_fences_stale
     provision_runtime_logins(&fixture).await?;
     register_generated_projection_input_catalog(&owner).await?;
 
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let generation = format!("fencing-{}", uuid::Uuid::new_v4().simple());
     let projection = eventexec::ProjectionId::parse(SETTINGS_PROJECTION_ID)?;
     let target_generation = eventexec::ProjectionVersion::parse(&generation)?;
@@ -4273,7 +4277,7 @@ async fn settings_projection_rollback_failed_leaves_zero_generations() -> TestRe
     store
         .inject_test_fault(crate::settings_projection::SettingsProjectionTestFault::RollbackFailed);
     let writer = SettingsTargetHarness::new(store);
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
     let generation = format!("settings-rollback-failed-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant, &generation)?;
     let _failure = writer
@@ -4340,7 +4344,7 @@ async fn settings_projection_receipt_failure_rolls_back_row_and_high_water() -> 
     .execute(&owner.pool)
     .await?;
 
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
     let generation = format!("settings-atomic-{}", uuid::Uuid::new_v4().simple());
     let scope = settings_projection_apply_scope(tenant, &generation)?;
     let event_id = format!(
@@ -4404,8 +4408,8 @@ async fn settings_projection_shadow_replay_a_b_c_converges_after_restart_and_che
         )),
     )
     .await?;
-    let tenant = vocab::TenantId::parse(COTX_TENANT_A)?;
-    let other_tenant = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let tenant = rss_request_context::TenantId::parse(COTX_TENANT_A)?;
+    let other_tenant = rss_request_context::TenantId::parse(COTX_TENANT_B)?;
     let binding = *generated::event::PROJECTION_INPUTS
         .iter()
         .find(|binding| binding.projection_id() == SETTINGS_PROJECTION_ID)

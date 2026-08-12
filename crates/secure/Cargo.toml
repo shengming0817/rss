@@ -10,6 +10,7 @@ default = []
 test-support = []
 
 [dependencies]
+rss-request-context.workspace = true
 thiserror = { workspace = true }
 vocab = { path = "../vocab" }
 # 密码哈希原语（secure::password，#1188）：argon2id PHC 哈希 + constant-time digest 比较 + 有界 KDF 验签 + 随机盐（OsRng）。

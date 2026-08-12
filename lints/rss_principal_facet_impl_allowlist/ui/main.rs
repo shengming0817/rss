@@ -8,7 +8,7 @@
 #![allow(unused, unknown_lints)]
 
 use runctx::PrincipalFacet;
-use vocab::PrincipalKind;
+use rss_request_context::PrincipalKind;
 
 // R：非 allowlist crate impl runctx::PrincipalFacet → 触发。
 struct Mine;

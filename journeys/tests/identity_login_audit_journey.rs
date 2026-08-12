@@ -69,9 +69,9 @@ use identity::{LoginService, RefreshService, SeedSigner};
 use memory::{FixedClock, InMemClaimer, MemAuthGrantStore, MemBus, MemDeadLetterStore, MemEmitter};
 use primitives::ListenerKind;
 use primitives::healthz::HealthStatus;
+use rss_request_context::TenantId;
 use testkit::{await_delay, await_map};
 use tokio_util::sync::CancellationToken;
-use vocab::TenantId;
 
 /// 手造 relay payload 的 session_id——它是 bearer，只用于证明审计链不会持久化该值。
 const CANON_SESSION: &str = "22222222-3333-4444-8555-666666666666";
@@ -159,6 +159,9 @@ where
     let name = format!("{EVENT_CONSUMER_PROBE}:audit:{topic}");
     // reason: demo InMemClaimer 无后端 TTL；占位续租间隔（生产 wiring 用 store.lease_ttl() 派生，#1213 review #3）。
     let lease_cfg = LeaseConfig::from_ttl(std::time::Duration::from_secs(60));
+    let (admission_control, _, consumer_admission, _) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    admission_control.start_running()?;
     let worker = spawn_consumer(
         name,
         stream,
@@ -169,6 +172,7 @@ where
         lease_cfg,
         token,
         health.clone(),
+        consumer_admission,
     );
     stack.register_detached(DynManagedResource::new_box(worker));
     Ok(health)
@@ -389,10 +393,10 @@ async fn relay_redelivery_audits_once() -> Result<()> {
     let emitter = MemEmitter::with_tenant_metadata_signer(bus.clone(), memory_tenant_signer());
     let subject = EnvelopeSubjectId::from_opaque(CANON_USER)?;
     let actor = OutboxActor::scoped(
-        vocab::PrincipalKind::User,
+        rss_request_context::PrincipalKind::User,
         OpaqueActorId::from_opaque(CANON_USER)?,
         TenantId::parse(CANON_TENANT)?,
-        vocab::ScopedTenant::SelfOnly,
+        rss_request_context::RowScope::SelfOnly,
     );
     for _ in 0..2 {
         let entry = EventEntry::new(

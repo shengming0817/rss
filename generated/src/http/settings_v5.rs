@@ -72,12 +72,15 @@ impl ::std::default::Default for SettingsConfigDeleteResponse {
 pub const CONTRACT_ID: &str = "settings.config-delete";
 
 /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-    "settings",
-    "settings.config-delete",
-    "v5",
-    "sha256:3a8b51d59b3d7498c48dad0e581dda2b19e8bc50fad003d7fb7f197cf6ae5970",
-);
+pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+    ::rss_contract::ContractDescriptor::from_static_version(
+        "settings.config-delete",
+        "v5",
+        "sha256:3a8b51d59b3d7498c48dad0e581dda2b19e8bc50fad003d7fb7f197cf6ae5970",
+    );
+
+pub const CONTRACT: ::vocab::ContractBinding =
+    ::vocab::ContractBinding::from_descriptor("settings", DESCRIPTOR, "v5");
 
 /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
 pub const PATH: &str = "/api/v1/settings/configs/{key}";

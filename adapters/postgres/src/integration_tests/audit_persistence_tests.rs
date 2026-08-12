@@ -7,8 +7,9 @@ async fn auth_audit_facade_rejects_embedded_tenant_mismatch_without_writing() ->
     let (pg, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
-    let transaction_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let embedded_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let transaction_tenant =
+        rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let embedded_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let (scope, _, _) = audit_list_tenant_command(transaction_tenant).into_parts();
     let principal_id = format!("auth-audit-mismatch-{}", uuid::Uuid::new_v4());
     let event = crate::cotx::settings_audit::EncodedAuditEvent {
@@ -16,9 +17,9 @@ async fn auth_audit_facade_rejects_embedded_tenant_mismatch_without_writing() ->
         occurred_at_nanos: 0,
         principal_id: principal_id.clone(),
         principal_kind: "super_admin",
-        tenant_context: Some(embedded_tenant.as_uuid().to_string()),
+        tenant_context: Some(embedded_tenant.to_string()),
         resource_kind: "audit_entries",
-        resource_id: embedded_tenant.as_uuid().to_string(),
+        resource_id: embedded_tenant.to_string(),
         action: "audit:list-cross-tenant",
         outcome: "success",
         failure_reason: None,
@@ -83,7 +84,7 @@ async fn localtx_audit_backend_profile_commit_and_rollback() -> TestResult {
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let commit_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app);
     let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
 
     let commit_writes = AtomicUsize::new(0);
     ::rss_conformance::localtx::assert_commit(::rss_conformance::localtx::CommitCase::new(
@@ -111,7 +112,7 @@ async fn localtx_audit_backend_profile_commit_and_rollback() -> TestResult {
     ))
     .await?;
 
-    let rollback_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let rollback_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let rollback_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app).with_append_fault(
         rollback_tenant,
         crate::auth_audit_sink::AuthAuditAppendFault::Permanent,
@@ -162,8 +163,8 @@ async fn localtx_audit_backend_profile_tenant_isolation() -> TestResult {
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let sink = crate::PgAuthAuditSink::from_unverified_for_test(&app);
     let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
 
     ::testkit::tenant_conformance::assert_tenant_isolation(
         tenant_a,
@@ -215,9 +216,10 @@ async fn localtx_audit_backend_profile_retry_policy() -> TestResult {
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
 
-    let success_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let permanent_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
-    let exhaustion_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let success_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let permanent_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let exhaustion_tenant =
+        rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let success_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app).with_append_fault(
         success_tenant,
         crate::auth_audit_sink::AuthAuditAppendFault::Transient,
@@ -316,14 +318,15 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
     let app = connect_pg_rss_app_role(&pg, &owner).await?;
     let _typed_provider = LOCALTX_BACKEND_PROVIDER_AUDIT_LIST_TENANT_ENTRIES;
 
-    let unknown_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let unknown_tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let unknown_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app).with_append_fault(
         unknown_tenant,
         crate::auth_audit_sink::AuthAuditAppendFault::CommitUnknown,
         1,
     );
     let unknown_probe = unknown_sink.append_attempt_probe();
-    let rollback_failed_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let rollback_failed_tenant =
+        rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let rollback_failed_sink = crate::PgAuthAuditSink::from_unverified_for_test(&app)
         .with_append_fault(
             rollback_failed_tenant,
@@ -433,7 +436,7 @@ async fn audit_dyn_read_write_wrappers_share_postgres_provider() -> TestResult {
 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let provider = Arc::new(make_audit_repo(&store));
     let write: Arc<audit::ports::DynAuditWriteRepo<'static>> = Arc::from(
         audit::ports::DynAuditWriteRepo::new_box(Arc::clone(&provider)),
@@ -466,7 +469,7 @@ async fn audit_dyn_read_write_wrappers_share_postgres_provider() -> TestResult {
 async fn ta1_audit_append_genesis_and_monotonic_seq() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
     repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
@@ -497,7 +500,7 @@ async fn ta1_audit_append_genesis_and_monotonic_seq() -> TestResult {
 async fn ta2_audit_prev_links_to_predecessor_entry_hash() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
     for _ in 0..3 {
@@ -538,7 +541,7 @@ async fn ta3_audit_concurrent_appends_no_seq_gap() -> TestResult {
     use std::sync::Arc;
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = Arc::new(make_audit_repo(&store));
 
     const N: usize = 5;
@@ -577,8 +580,8 @@ async fn ta3_audit_concurrent_appends_no_seq_gap() -> TestResult {
 async fn ta4_audit_tenants_have_independent_genesis_seq_zero() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
     // Minimal seed so each tenant's first append is a real genesis (seq assigned by store).
@@ -625,8 +628,8 @@ async fn ta4_audit_tenants_have_independent_genesis_seq_zero() -> TestResult {
 async fn ta4b_audit_tenant_conformance() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
     testkit::tenant_conformance::assert_tenant_isolation(
@@ -667,8 +670,10 @@ async fn ta4b_audit_tenant_conformance() -> TestResult {
 async fn ta4c_audit_rejects_scope_record_tenant_mismatch() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let scope_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let record_tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let scope_tenant =
+        rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let record_tenant =
+        rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
     let result = repo
@@ -700,7 +705,7 @@ async fn ta4c_audit_rejects_scope_record_tenant_mismatch() -> TestResult {
 async fn ta6_audit_list_pagination_cursor_and_has_more() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
     for _ in 0..5 {
@@ -742,7 +747,7 @@ async fn ta6_audit_list_pagination_cursor_and_has_more() -> TestResult {
 async fn ta7_audit_list_invalid_cursor_fail_closed() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
     repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
         .await?;
@@ -769,7 +774,7 @@ async fn ta8_audit_verify_tail_incremental_and_tamper_detection() -> TestResult 
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tenant_str = uuid::Uuid::new_v4().to_string();
-    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
 
     for _ in 0..5 {
@@ -816,7 +821,7 @@ async fn ta8_audit_verify_tail_incremental_and_tamper_detection() -> TestResult 
 async fn ta9_audit_recorded_at_nanos_roundtrip_and_chain_verifies() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
     let nanos_input: u32 = 123_456_789;
@@ -857,7 +862,7 @@ async fn ta10_audit_append_only_delete_update_rejected_for_rss_app() -> TestResu
         .await?;
 
     let tenant_str = uuid::Uuid::new_v4().to_string();
-    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
     repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
         .await?;
@@ -917,7 +922,7 @@ async fn ta10_audit_append_only_delete_update_rejected_for_rss_app() -> TestResu
 async fn ta12_audit_empty_tenant_list_and_verify_tail_ok() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
 
     let result = repo.list(audit_scope(tenant), audit_page(10, None)).await?;
@@ -937,7 +942,7 @@ async fn ta12_audit_empty_tenant_list_and_verify_tail_ok() -> TestResult {
 async fn ta15_audit_admin_verify_tenant_clean_chain_success() -> TestResult {
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
     for _ in 0..5 {
         repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
@@ -964,8 +969,8 @@ async fn ta15_audit_admin_verify_tenant_clean_chain_success() -> TestResult {
 async fn ta16_audit_admin_verify_tenant_ab_isolation() -> TestResult {
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant_a = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
-    let tenant_b = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
+    let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string()).unwrap();
     let repo = make_audit_repo(&store);
     repo.append(audit_scope(tenant_a), make_audit_record(tenant_a, 0))
         .await?;
@@ -998,9 +1003,9 @@ async fn ta17_audit_admin_verify_tenant_tamper_and_seq_gap_fail() -> TestResult 
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tampered_tenant_str = uuid::Uuid::new_v4().to_string();
-    let tampered_tenant = vocab::TenantId::parse(&tampered_tenant_str).unwrap();
+    let tampered_tenant = rss_request_context::TenantId::parse(&tampered_tenant_str).unwrap();
     let gap_tenant_str = uuid::Uuid::new_v4().to_string();
-    let gap_tenant = vocab::TenantId::parse(&gap_tenant_str).unwrap();
+    let gap_tenant = rss_request_context::TenantId::parse(&gap_tenant_str).unwrap();
     let repo = make_audit_repo(&store);
     for _ in 0..5 {
         repo.append(
@@ -1051,7 +1056,7 @@ async fn ta18_audit_admin_role_dml_is_rejected() -> TestResult {
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tenant_str = uuid::Uuid::new_v4().to_string();
-    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
     repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
         .await?;
@@ -1129,7 +1134,7 @@ async fn ta13_audit_hydrate_row_wrong_length_entry_hash_returns_storage() -> Tes
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tenant_str = uuid::Uuid::new_v4().to_string();
-    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
 
     repo.append(audit_scope(tenant), make_audit_record(tenant, 0))
@@ -1168,7 +1173,7 @@ async fn ta14_audit_hydrate_row_unknown_actor_kind_returns_storage() -> TestResu
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let tenant_str = uuid::Uuid::new_v4().to_string();
-    let tenant = vocab::TenantId::parse(&tenant_str).unwrap();
+    let tenant = rss_request_context::TenantId::parse(&tenant_str).unwrap();
     let repo = make_audit_repo(&store);
 
     repo.append(audit_scope(tenant), make_audit_record(tenant, 0))

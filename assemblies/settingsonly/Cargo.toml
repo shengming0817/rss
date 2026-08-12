@@ -30,6 +30,7 @@ test-support = [
 ]
 
 [dependencies]
+rss-request-context.workspace = true
 anyhow = { workspace = true }
 amqp = { path = "../../adapters/amqp", features = ["backend"] }
 authn = { path = "../../crates/authn" }

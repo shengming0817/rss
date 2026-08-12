@@ -15,14 +15,14 @@ use testkit::{MqttCredential, MqttMtlsFixture, PgConnParams};
 use tokio_util::sync::CancellationToken;
 
 pub(super) struct DeviceJourneyCoordinate {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: ids::DeviceId,
 }
 
 impl DeviceJourneyCoordinate {
     pub(super) fn parse(tenant: &str, device: &str) -> anyhow::Result<Self> {
         Ok(Self {
-            tenant: vocab::TenantId::parse(tenant)?,
+            tenant: rss_request_context::TenantId::parse(tenant)?,
             device: ids::DeviceId::parse(device)?,
         })
     }

@@ -10,10 +10,11 @@
 //! ref: oxidecomputer/steno src/saga_log.rs@main（durable journal event → load status replay；RSS
 //! 偏离其 serde output 持久化，journal record 不承载 generated receipt；durable receipt 另有专属边界）。
 
+use rss_request_context::TenantId;
 use sha2::{Digest as _, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::num::NonZeroU32;
-use vocab::{StepName, TenantId};
+use vocab::StepName;
 
 /// saga 实例标识（uuid newtype funnel）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1517,7 +1518,8 @@ mod tests {
         SagaInstanceRefError, SagaInstanceStatus, SagaJournalRecord, SagaJournalStatus, SagaLease,
         SagaLeaseError, SagaModelError, SagaOperatorReason, SagaReplayDecision, SagaWorkerIdentity,
     };
-    use vocab::{StepName, TenantId};
+    use rss_request_context::TenantId;
+    use vocab::StepName;
 
     #[allow(clippy::unwrap_used)]
     fn step(raw: &str) -> StepName {
@@ -2188,7 +2190,8 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     // reason: 测试 canonical tenant literal 与 non-nil uuid happy path，item-level carve-out。
     fn saga_instance_ref_is_tenant_scoped_and_rejects_nil_saga_id() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let tenant =
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
         let id = SagaId::new(uuid::Uuid::from_u128(42));
 
         let instance = SagaInstanceRef::new(tenant, id).unwrap();
@@ -2205,7 +2208,8 @@ mod tests {
     #[allow(clippy::unwrap_used)]
     // reason: 测试 canonical literals，item-level carve-out。
     fn saga_lease_rejects_empty_holder_nil_token_and_zero_epoch() {
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
+        let tenant =
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").unwrap();
         let instance =
             SagaInstanceRef::new(tenant, SagaId::new(uuid::Uuid::from_u128(42))).unwrap();
         let token = uuid::Uuid::from_u128(7);

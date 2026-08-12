@@ -136,7 +136,7 @@ impl SecretMaterial {
 /// **fail-closed 契约**：`resolve` 遇 store 不可达 / 超时须返 `Err`，**绝不**返回 stale 或空材料
 /// 充数——零信任边界要求 secret 读取须 fresh 且授权，静默降级即破 fail-closed。
 ///
-/// **tenant 显式参**：每次解析须带 [`vocab::TenantId`] 做 store allowlist / RLS 校验——多租环境下
+/// **tenant 显式参**：每次解析须带 [`rss_request_context::TenantId`] 做 store allowlist / RLS 校验——多租环境下
 /// 同一 provider 实例服务多租，tenant 分隔在 port 签名层 Hard 约束（不经 ambient ctx 隐式传播）。
 ///
 /// dyn-safe 约束（ADR-003 §4.6）：方法 `&self`、参数 / 返回为具体类型（owned / ref）、provider
@@ -151,7 +151,7 @@ pub trait SecretResolverLocal {
     /// `tenant` 做 store allowlist / RLS 分隔）。
     async fn resolve(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         coord: &SecretCoordinate,
     ) -> Result<SecretMaterial, SecretResolverError>;
 }
@@ -162,7 +162,7 @@ mod smoke {
     use super::{
         DynSecretResolver, SecretCoordinate, SecretMaterial, SecretResolver, SecretResolverError,
     };
-    use vocab::TenantId;
+    use rss_request_context::TenantId;
 
     #[allow(clippy::expect_used)]
     fn tenant() -> TenantId {

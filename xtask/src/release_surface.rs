@@ -56,6 +56,7 @@ impl ReleaseSurface {
             };
             let owner = match package.public_api_owner() {
                 PublicApiOwner::StandaloneComponent => "standalone-component",
+                PublicApiOwner::FoundationPublic => "foundation-public",
                 PublicApiOwner::PlatformPublic => "platform-public",
             };
             let stability = match package.api_stability() {
@@ -449,6 +450,7 @@ fn validate_publish_metadata(
 pub(crate) struct ReleasePackage {
     package: String,
     version: Version,
+    version_line: String,
     minimum_rust_version: Version,
     publish_policy: PublishPolicy,
     public_api_owner: PublicApiOwner,
@@ -463,6 +465,9 @@ impl ReleasePackage {
 
     pub(crate) fn version(&self) -> &Version {
         &self.version
+    }
+    pub(crate) fn version_line(&self) -> &str {
+        &self.version_line
     }
 
     pub(crate) fn minimum_rust_version(&self) -> &Version {
@@ -602,6 +607,7 @@ pub(crate) fn validate(
     facts: &WorkspaceFacts,
     artifacts: &[ArtifactProjection],
 ) -> (Option<ReleaseSurface>, Vec<Finding>) {
+    // INVARIANT: PREPUBLICATION-PATCH-LINE-01 { level = "Medium", exec = "release-surface", synthetic_red = "tests::release_version_line_rejects_major_or_minor_changes" }.
     let mut surface = ReleaseSurface {
         packages: Vec::new(),
         profile_artifacts: Vec::new(),
@@ -768,6 +774,25 @@ pub(crate) fn validate(
             ));
             continue;
         };
+        let Some(version_line) = selected_package.version_line() else {
+            findings.push(finding(
+                Rule::ReleaseSurfacePackage,
+                subject.clone(),
+                "selected package must declare a frozen `version-line` as `major.minor`",
+            ));
+            continue;
+        };
+        if !version_line_matches(version_line, package.version()) {
+            findings.push(finding(
+                Rule::ReleaseSurfacePackage,
+                subject.clone(),
+                format!(
+                    "version-line `{version_line}` does not match package version `{}`; before first publication only the patch component may change",
+                    package.version()
+                ),
+            ));
+            continue;
+        }
         let mut package_profiles = BTreeSet::new();
         let mut profiles_valid = true;
         for profile in selected_package.profiles() {
@@ -798,6 +823,7 @@ pub(crate) fn validate(
             surface.packages.push(ReleasePackage {
                 package: package.key().as_str().to_owned(),
                 version: package.version().clone(),
+                version_line: version_line.to_owned(),
                 minimum_rust_version: minimum_rust_version.clone(),
                 publish_policy: package.publish_policy().clone(),
                 public_api_owner: selected_package.public_api_owner(),
@@ -821,6 +847,16 @@ pub(crate) fn validate(
     } else {
         (None, findings)
     }
+}
+
+fn version_line_matches(line: &str, version: &Version) -> bool {
+    let Some((major, minor)) = line.split_once('.') else {
+        return false;
+    };
+    !minor.contains('.')
+        && major.parse::<u64>().ok() == Some(version.major)
+        && minor.parse::<u64>().ok() == Some(version.minor)
+        && line == format!("{}.{}", version.major, version.minor)
 }
 
 fn project_publish_order(
@@ -1221,6 +1257,7 @@ mod tests {
             json!({
                 "packages": [{
                     "package": "alpha",
+                    "version-line": "0.1",
                     "public-api-owner": "standalone-component",
                     "api-stability": "experimental",
                     "profiles": []
@@ -1332,6 +1369,7 @@ mod tests {
             json!({
                 "packages": [{
                     "package": "alpha",
+                    "version-line": "0.1",
                     "public-api-owner": "standalone-component",
                     "api-stability": "experimental",
                     "profiles": []
@@ -1358,24 +1396,52 @@ mod tests {
     }
 
     #[test]
+    fn release_version_line_rejects_major_or_minor_changes() -> Result<()> {
+        let facts = facts_with_selection(
+            json!({
+                "packages": [{
+                    "package": "alpha",
+                    "version-line": "0.2",
+                    "public-api-owner": "standalone-component",
+                    "api-stability": "experimental",
+                    "profiles": []
+                }],
+                "profile-artifacts": []
+            }),
+            json!(["crates-io"]),
+            json!("1.86"),
+            json!([]),
+        )?;
+        let (surface, findings) = validate(&facts, &[]);
+        assert!(surface.is_none());
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::ReleaseSurfacePackage && finding.detail.contains("version-line")
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn exact_set_and_reference_conflicts_are_aggregated_and_sorted() -> Result<()> {
         let facts = facts_with_selection(
             json!({
                 "packages": [
                     {
                         "package": "alpha",
+                        "version-line": "0.1",
                         "public-api-owner": "platform-public",
                         "api-stability": "stable",
                         "profiles": ["eventing", "eventing"]
                     },
                     {
                         "package": "alpha",
+                        "version-line": "0.1",
                         "public-api-owner": "platform-public",
                         "api-stability": "stable",
                         "profiles": []
                     },
                     {
                         "package": "ghost",
+                        "version-line": "0.1",
                         "public-api-owner": "standalone-component",
                         "api-stability": "experimental",
                         "profiles": []

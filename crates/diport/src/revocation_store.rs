@@ -8,8 +8,8 @@
 
 use dynosaur::dynosaur;
 use ids::DeviceId;
+use rss_request_context::TenantId;
 use std::time::{Duration, SystemTime};
-use vocab::TenantId;
 
 use crate::redacted::RedactedSource;
 
@@ -206,8 +206,8 @@ mod smoke {
         DynRevocationStore, RevocationStore, RevocationStoreError,
     };
     use ids::DeviceId;
+    use rss_request_context::TenantId;
     use std::time::SystemTime;
-    use vocab::TenantId;
 
     const TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
     const DEVICE: &str = "11111111-2222-3333-4444-555555555555";

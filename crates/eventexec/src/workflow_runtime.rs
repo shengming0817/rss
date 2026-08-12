@@ -419,7 +419,10 @@ pub struct ProjectionBackgroundExecutionIssuer {
 }
 
 impl ProjectionBackgroundExecutionIssuer {
-    pub fn issue(&self, tenant: vocab::TenantId) -> crate::ProjectionExecutionContext {
+    pub fn issue(
+        &self,
+        tenant: rss_request_context::TenantId,
+    ) -> crate::ProjectionExecutionContext {
         crate::ProjectionExecutionContext::background_worker(tenant)
     }
 }
@@ -1027,7 +1030,7 @@ impl WorkflowRuntimePlan {
     #[doc(hidden)]
     pub fn generated_projection_source_scope_fixture(
         projection: &crate::ProjectionId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Option<ProjectionSourceScope> {
         let plan = Self::generated_projection_capture_fixture();
         crate::ProjectionTargetRegistry::capture_source_scope_fixture(
@@ -1045,7 +1048,7 @@ impl WorkflowRuntimePlan {
     #[doc(hidden)]
     pub fn generated_projection_operator_execution_fixture(
         projection: &crate::ProjectionId,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> Option<crate::ProjectionExecutionContext> {
         generated::event::PROJECTION_DEFINITIONS
             .iter()
@@ -1184,7 +1187,7 @@ impl ProjectionTargetEntry<'_> {
     /// metadata cannot influence this context.
     pub fn operator_execution_context(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
     ) -> crate::ProjectionExecutionContext {
         crate::ProjectionExecutionContext::operator_replay(tenant)
     }
@@ -1194,7 +1197,7 @@ impl ProjectionTargetEntry<'_> {
 /// [`crate::ProjectionTargetRegistry`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProjectionSourceScope {
-    pub(crate) tenant: vocab::TenantId,
+    pub(crate) tenant: rss_request_context::TenantId,
     pub(crate) projection: crate::ProjectionId,
     pub(crate) definition_version: Box<str>,
     pub(crate) definition_schema_digest: Box<str>,
@@ -1202,7 +1205,7 @@ pub struct ProjectionSourceScope {
 }
 
 impl ProjectionSourceScope {
-    pub fn tenant(&self) -> vocab::TenantId {
+    pub fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -1953,7 +1956,7 @@ mod tests {
         async fn list_runnable(
             &self,
             _identity: &SagaWorkerIdentity,
-            _tenant: vocab::TenantId,
+            _tenant: rss_request_context::TenantId,
             _limit: NonZeroUsize,
         ) -> Result<Vec<diport::SagaRunnableInstance>, SagaDurableStoreError> {
             Ok(Vec::new())
@@ -2326,7 +2329,7 @@ mod tests {
         let target = entry.operator_target();
         assert_eq!(target.identity(), &identity);
 
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001926")?;
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000001926")?;
         let instance = consistency::SagaInstanceRef::new(
             tenant,
             consistency::SagaId::new(uuid::Uuid::from_u128(1926)),
@@ -2398,7 +2401,7 @@ mod tests {
             write_admission,
         );
         assert!(worker_received_exact_target.load(Ordering::SeqCst));
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001920")?;
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000001920")?;
         let replay = entry.operator_execution_context(tenant);
         assert_eq!(replay.identity().actor(), "rss-projection-replay");
         assert_eq!(replay.identity().purpose().as_str(), "operator-replay");
@@ -2584,7 +2587,7 @@ mod tests {
     #[test]
     fn projection_operator_fixture_accepts_only_generated_identity()
     -> Result<(), Box<dyn std::error::Error>> {
-        let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001920")?;
+        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000001920")?;
         let generated =
             crate::ProjectionId::parse(generated::event::PROJECTION_DEFINITIONS[0].contract_id())?;
         let execution = WorkflowRuntimePlan::generated_projection_operator_execution_fixture(
@@ -2853,7 +2856,7 @@ mod tests {
             .collect::<Vec<_>>();
         let plan = compile_fixture(&activations, catalog)?;
         let registry = crate::ProjectionTargetRegistry::from_view(plan.projection_targets())?;
-        let tenant = vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")?;
 
         let first_id = crate::ProjectionId::parse(definitions[0].contract_id())?;
         let second_id = crate::ProjectionId::parse(definitions[1].contract_id())?;

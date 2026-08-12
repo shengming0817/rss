@@ -64,8 +64,8 @@ impl ReconcileMaintenanceAction {
 pub(super) struct ReconcileTargetCliArgs {
     action: ReconcileMaintenanceAction,
     operator_service_token: OperatorServiceToken,
-    operator_tenant: vocab::TenantId,
-    tenant: vocab::TenantId,
+    operator_tenant: rss_request_context::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: String,
 }
 
@@ -85,7 +85,7 @@ pub enum ReconcileTargetCommandPreparation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct ReconcileMaintenanceGrant {
     action: ReconcileMaintenanceAction,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
 }
 
 #[cfg(feature = "operator-cli")]
@@ -235,7 +235,7 @@ pub(super) fn parse_reconcile_operator_grants(
         };
         grants.push(ReconcileMaintenanceGrant {
             action: ReconcileMaintenanceAction::parse(action)?,
-            tenant: vocab::TenantId::parse(tenant).with_context(|| {
+            tenant: rss_request_context::TenantId::parse(tenant).with_context(|| {
                 format!("{RECONCILE_OPERATOR_GRANTS_ENV} tenant must be a UUID: {tenant}")
             })?,
         });

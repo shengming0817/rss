@@ -46,7 +46,7 @@ use identity::{
     ReactivateAccountCommand, RefreshService,
 };
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
-use vocab::TenantId;
+use rss_request_context::TenantId;
 
 /// canonical UUID 种子租户（TenantId::parse 接受形态）。
 pub const CANON_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";

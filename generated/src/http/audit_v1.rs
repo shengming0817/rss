@@ -817,12 +817,15 @@ pub mod list_entries {
     pub const CONTRACT_ID: &str = "audit.list-entries";
 
     /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "audit",
-        "audit.list-entries",
-        "v1",
-        "sha256:c11a70b0493a5f46a95b250c31800d0824fa9abfda48b55a3e35f3ff260ae1ef",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "audit.list-entries",
+            "v1",
+            "sha256:c11a70b0493a5f46a95b250c31800d0824fa9abfda48b55a3e35f3ff260ae1ef",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("audit", DESCRIPTOR, "v1");
 
     impl super::super::HttpResponseBinding for AuditListEntriesResponse {
         const CONTRACT: ::vocab::ContractBinding = CONTRACT;
@@ -1384,12 +1387,15 @@ pub mod list_tenant_entries {
     pub const CONTRACT_ID: &str = "audit.list-tenant-entries";
 
     /// 契约归属绑定（`domain` + `id` + `version` + `schema_hash` 同源派生）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
-    pub const CONTRACT: ::vocab::ContractBinding = ::vocab::ContractBinding::from_static(
-        "audit",
-        "audit.list-tenant-entries",
-        "v1",
-        "sha256:ff4c0c6f07d77407a909be50f9f231a74164d354c639363c6e418b632b6dca1d",
-    );
+    pub const DESCRIPTOR: ::rss_contract::ContractDescriptor =
+        ::rss_contract::ContractDescriptor::from_static_version(
+            "audit.list-tenant-entries",
+            "v1",
+            "sha256:ff4c0c6f07d77407a909be50f9f231a74164d354c639363c6e418b632b6dca1d",
+        );
+
+    pub const CONTRACT: ::vocab::ContractBinding =
+        ::vocab::ContractBinding::from_descriptor("audit", DESCRIPTOR, "v1");
 
     /// 业务绝对 HTTP path（来自 `contract.toml` `path`）。由 `cargo xtask codegen` 从 manifest 派生；勿手改。
     pub const PATH: &str = "/api/v1/audit/tenants/{tenantId}/entries";

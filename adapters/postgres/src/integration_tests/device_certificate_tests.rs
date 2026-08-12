@@ -40,14 +40,14 @@ use crate::device_certificate::PgDeviceCertificateRepository;
 use crate::reconcile::PgReconcileStore;
 
 struct ExpiryRejectedAck {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: ids::DeviceId,
     event_id: String,
     payload: Vec<u8>,
 }
 
 impl DeviceIngressDelivery for ExpiryRejectedAck {
-    fn tenant(&self) -> vocab::TenantId {
+    fn tenant(&self) -> rss_request_context::TenantId {
         self.tenant
     }
 
@@ -480,7 +480,7 @@ async fn current_command_expiry_is_durable_closed_and_fenced_for_every_active_st
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
     let app = connect_pg_rss_app_role(&pg, &store).await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let mut fixtures = Vec::new();
 
     for state in ["queued", "published", "received"] {
@@ -760,7 +760,7 @@ async fn current_command_expiry_is_durable_closed_and_fenced_for_every_active_st
 async fn ordinary_certificate_condition_funnel_accepts_only_closed_active_vectors() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let device = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &device).await?;
     let attempt =
@@ -1022,7 +1022,7 @@ async fn device_certificate_receipt_is_append_once_and_all_fence_coordinates_are
 {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let device = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &device).await?;
     let policy_hash: Vec<u8> = sqlx::query_scalar(
@@ -1792,7 +1792,7 @@ async fn device_certificate_rotation_and_deletion_request_commit_exact_atomic_st
 {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let repository = crate::device_certificate::PgDeviceCertificateRepository::<
         ProductionEligibility,
     >::from_unverified_for_test(&store);
@@ -2016,7 +2016,7 @@ async fn device_certificate_rotation_and_deletion_request_commit_exact_atomic_st
 async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> TestResult {
     let (pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let device = uuid::Uuid::new_v4().to_string();
     insert_device_desired(&store, tenant, &device).await?;
     // Migration-owner setup creates the already-deleting fixture. Runtime rss_app reaches this
@@ -2619,7 +2619,7 @@ async fn delete_finalize_requires_terminal_evidence_and_commits_atomically() -> 
 async fn delete_finalize_loses_to_new_desired_and_lease_takeover() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let reconcile = store.reconcile();
     let repository = crate::device_certificate::PgDeviceCertificateRepository::<
         ProductionEligibility,
@@ -3149,7 +3149,7 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
     store
         .reconcile()
         .upsert_target(
-            vocab::TenantId::parse(&tenant)?,
+            rss_request_context::TenantId::parse(&tenant)?,
             &ReconcileTargetKey::parse(
                 "identity.device-certificate",
                 "device-certificate",
@@ -3351,7 +3351,7 @@ async fn device_certificate_schema_rls_and_acl_are_closed() -> TestResult {
         ProductionEligibility,
     >::from_unverified_stores_for_test(&app, &app);
     let app_scope = DeviceCertificateScope::for_test(
-        vocab::TenantId::parse(&tenant)?,
+        rss_request_context::TenantId::parse(&tenant)?,
         ids::DeviceId::parse(&device)?,
     );
     let accepted_policy = deviceloop::CertificatePolicy::restore(
@@ -4184,7 +4184,7 @@ struct PostCommitPauseStore {
 impl ReconcileScheduleStore for PostCommitPauseStore {
     async fn claim_due_targets(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         holder_id: &str,
         limit: eventexec::ReconcileMaxInFlight,
@@ -4206,7 +4206,7 @@ impl ReconcileScheduleStore for PostCommitPauseStore {
 
     async fn claim_targeted(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         reconciler_id: &str,
         holder_id: &str,
         wake: &eventexec::reconcile::ReconcileWake,
@@ -4281,7 +4281,7 @@ impl ReconcileScheduleStore for PostCommitPauseStore {
 
     async fn pause_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
     ) -> Result<(), eventexec::reconcile::ReconcileScheduleError> {
         ReconcileScheduleStore::pause_target(&self.inner, tenant, target_id).await
@@ -4289,7 +4289,7 @@ impl ReconcileScheduleStore for PostCommitPauseStore {
 
     async fn resume_target(
         &self,
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         target_id: &str,
     ) -> Result<(), eventexec::reconcile::ReconcileScheduleError> {
         ReconcileScheduleStore::resume_target(&self.inner, tenant, target_id).await
@@ -4306,7 +4306,7 @@ fn build_worker<S, R>(
     store: S,
     reconciler: R,
     keyring: Arc<CommandIdempotencyKeyring>,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     holder_id: &str,
 ) -> Result<eventexec::reconcile::ReconcileWorker<S, R>, TestError>
 where
@@ -4331,7 +4331,11 @@ where
     .build())
 }
 
-async fn expire_lease(store: &PgStore, tenant: vocab::TenantId, target_id: &str) -> TestResult {
+async fn expire_lease(
+    store: &PgStore,
+    tenant: rss_request_context::TenantId,
+    target_id: &str,
+) -> TestResult {
     TenantDb::<ServingWriteLane>::from_unverified_for_test(store)
         .test_expire_reconcile_lease(integration_tenant_scope(tenant), target_id.to_owned())
         .await?;
@@ -4340,7 +4344,7 @@ async fn expire_lease(store: &PgStore, tenant: vocab::TenantId, target_id: &str)
 
 async fn lease_epoch(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: &str,
 ) -> Result<i64, TestError> {
     let target = target_id.to_owned();
@@ -4354,7 +4358,7 @@ async fn lease_epoch(
 
 async fn coordinate_snapshot(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: &str,
     target_id: &str,
     generation: i64,
@@ -4375,7 +4379,7 @@ async fn coordinate_snapshot(
 
 async fn wait_command_at_epoch(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: &str,
     generation: i64,
     epoch: i64,
@@ -4400,7 +4404,7 @@ async fn wait_command_at_epoch(
 
 async fn attempt_count_for_trigger(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: &str,
     trigger_kind: &str,
     epoch: i64,
@@ -4420,7 +4424,7 @@ async fn attempt_count_for_trigger(
 
 async fn command_count_at_epoch(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     device: &str,
     generation: i64,
     epoch: i64,
@@ -4439,7 +4443,7 @@ async fn command_count_at_epoch(
 
 async fn wait_lease_epoch_gt(
     store: &PgStore,
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     target_id: &str,
     previous: i64,
 ) -> Result<i64, TestError> {
@@ -4460,8 +4464,10 @@ async fn stop_worker(cancel: CancellationToken, join: JoinHandle<()>) -> TestRes
     Ok(())
 }
 
-async fn prepare_target(store: &PgStore) -> Result<(vocab::TenantId, String, String), TestError> {
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+async fn prepare_target(
+    store: &PgStore,
+) -> Result<(rss_request_context::TenantId, String, String), TestError> {
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let device = uuid::Uuid::new_v4().to_string();
     insert_device_desired(store, tenant, &device).await?;
     let key = ReconcileTargetKey::parse(RECONCILER_ID, RESOURCE_KIND, &device)?;
@@ -4601,7 +4607,7 @@ async fn authorized_artifact_return_loses_to_lease_takeover_without_stale_comman
 async fn expire_reconcile_lease_rejects_missing_row() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let tenant = vocab::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let missing_target = uuid::Uuid::new_v4().to_string();
 
     let expire = TenantDb::<ServingWriteLane>::from_unverified_for_test(&store)

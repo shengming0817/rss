@@ -223,7 +223,7 @@ fn wipe_sensitive_bytes(bytes: &mut [u8]) {
 
 #[derive(Clone, Copy)]
 pub(crate) struct DlxPayloadContext<'a> {
-    tenant: vocab::TenantId,
+    tenant: rss_request_context::TenantId,
     source_kind: &'a str,
     producer_domain: &'a str,
     consumer_domain: Option<&'a str>,
@@ -237,7 +237,7 @@ impl<'a> DlxPayloadContext<'a> {
     #[allow(clippy::too_many_arguments)]
     // reason: AAD v3 authenticates all eight coordinates as one complete security context.
     pub(crate) fn new(
-        tenant: vocab::TenantId,
+        tenant: rss_request_context::TenantId,
         source_kind: &'a str,
         producer_domain: &'a str,
         consumer_domain: Option<&'a str>,
@@ -554,7 +554,8 @@ pub(crate) mod tests {
     #[allow(clippy::expect_used)]
     fn test_context() -> DlxPayloadContext<'static> {
         DlxPayloadContext::new(
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant"),
+            rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+                .expect("tenant"),
             "consumer",
             "identity",
             Some("audit"),
@@ -625,8 +626,8 @@ pub(crate) mod tests {
     #[allow(clippy::expect_used)]
     async fn aad_v3_binds_provenance_and_capsule_roundtrips() {
         let protector = test_protector();
-        let tenant =
-            vocab::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("tenant");
+        let tenant = rss_request_context::TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479")
+            .expect("tenant");
         let ctx = test_context();
         let protected = protector
             .encrypt(
