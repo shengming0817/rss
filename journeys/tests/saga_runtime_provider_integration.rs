@@ -293,7 +293,11 @@ async fn neutral_saga_joins_postgres_worker_readiness_and_operator_fencing() -> 
         }
     };
     let pg_handle = deps.handle();
-    let (pg_resources, _readiness_sampler) = deps.into_runtime_parts(Duration::from_secs(1));
+    let monitor_config = postgres::PgRuntimeMonitorConfig::new(
+        postgres::PgReadinessInterval::try_new(Duration::from_secs(1)).expect("interval"),
+        postgres::PgRlsAttestationInterval::default(),
+    );
+    let (pg_resources, _readiness_sampler) = deps.into_runtime_parts(monitor_config);
     let operator_deps = postgres::PgSagaOperatorDeps::connect(
         &postgres::PgSagaOperatorConfig::new(pg_config(operator.params())),
     )

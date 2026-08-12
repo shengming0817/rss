@@ -170,7 +170,11 @@ async fn projection_writer_runtime_setup_mirrors_reviewed_generated_event() -> T
     assert_eq!(projection_count.0, 1);
 
     pool.close().await;
-    let (resources, _sampler_factory) = deps.into_runtime_parts(std::time::Duration::from_secs(1));
+    let config = crate::PgRuntimeMonitorConfig::new(
+        crate::PgReadinessInterval::try_new(std::time::Duration::from_secs(1)).expect("interval"),
+        crate::PgRlsAttestationInterval::default(),
+    );
+    let (resources, _sampler_factory) = deps.into_runtime_parts(config);
     for resource in resources.into_iter().rev() {
         resource.shutdown().await?;
     }

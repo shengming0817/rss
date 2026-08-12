@@ -590,7 +590,12 @@ impl SagaCommandRuntime for ProductionSagaCommandRuntime<'_> {
             .context("bind plan-selected Saga operator targets")?;
         let target =
             select_saga_operator_target(plan.workflow_runtime().sagas(), &parsed.identity)?;
-        let (resources, _sampler) = serving.into_runtime_parts(std::time::Duration::from_secs(30));
+        let config = postgres::PgRuntimeMonitorConfig::new(
+            postgres::PgReadinessInterval::try_new(std::time::Duration::from_secs(30))
+                .expect("test readiness interval"),
+            postgres::PgRlsAttestationInterval::default(),
+        );
+        let (resources, _sampler) = serving.into_runtime_parts(config);
         Ok(ProductionSagaTarget { target, resources })
     }
 

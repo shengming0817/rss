@@ -1,0 +1,9 @@
+error[E0382]: use of moved value: `factory`
+ --> tests/ui/pg_runtime_monitor_factory_consume_twice_fail.rs:6:19
+  |
+4 | fn factory_spawns_once(factory: PgRuntimeMonitorFactory, token: CancellationToken) {
+  |                        ------- move occurs because `factory` has type `PgRuntimeMonitorFactory`, which does not implement the `Copy` trait
+5 |     let _first = factory.spawn(token.clone());
+  |                  ------- value moved here
+6 |     let _second = factory.spawn(token);
+  |                   ^^^^^^^ value used here after move

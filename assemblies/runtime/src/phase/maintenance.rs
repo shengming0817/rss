@@ -40,23 +40,19 @@ const SAGA_TERMINAL_TARGET_TABLE: &str = "saga_instances";
 /// RLS 能力门 readyz 兜底探针稳定名（underscore_case，与 prometheus 约定一致）。
 pub(crate) const RLS_READY_PROBE_NAME: &str = "rls_ready";
 
-/// RLS 能力门 readyz 兜底探针——读 [`PgRuntimeHandle::rls_ready_handle`] 的启动核验镜像（非 pool）。
+/// RLS 能力门 readyz 探针——同步读取 writer+reader 周期 attestation 的 typed 状态。
 ///
-/// 启动期 `verify_rls_capability` 失败时 `setup` 直接 fail-fast（进程不进入服务态），故进程在跑 ⇒ 此探针
-/// 恒 `Healthy`；其价值是把「durable RLS 能力已就绪」这一不变式**显式暴露**到 readyz（运维可见），并为
-/// 后续周期性再核验留接线点（届时改为写采样状态即可，探针形态不变）。
-///
-/// `check`（sync，non-blocking）：读 `AtomicBool`（Acquire），`true → Healthy("ready")` /
-/// `false → Unhealthy("not-enforced")`（fail-closed）。`detail` 固定 `&'static str` const（禁夹带 PII）。
+/// `check`（sync，non-blocking）：读 typed atomic snapshot，`true → Healthy("ready")` /
+/// `false → Unhealthy("attestation-unverified")`（fail-closed）。`detail` 固定 `&'static str` const。
 pub(crate) struct RlsReadyProbe {
-    ready: Arc<std::sync::atomic::AtomicBool>,
+    ready: Arc<postgres::PgRlsReadiness>,
     name: ProbeName,
 }
 
 impl RlsReadyProbe {
     /// 构造 `RlsReadyProbe`（读 RLS 能力门镜像）。`name` 应使用 [`RLS_READY_PROBE_NAME`] 常量。
     #[allow(clippy::expect_used)]
-    pub fn new(ready: Arc<std::sync::atomic::AtomicBool>) -> Self {
+    pub fn new(ready: Arc<postgres::PgRlsReadiness>) -> Self {
         // reason: RLS_READY_PROBE_NAME 是 underscore_case const literal，ProbeName::parse 仅失败于非法
         // 字符；const 已手工验证，expect 是构造期 programmer error（不可恢复，同 ConfigsReadyProbe）。
         let name = ProbeName::parse(RLS_READY_PROBE_NAME).expect("valid probe name const");
@@ -66,10 +62,10 @@ impl RlsReadyProbe {
 
 impl bootstrap::HealthProbe for RlsReadyProbe {
     fn check(&self) -> HealthCheck {
-        let (status, detail) = if self.ready.load(std::sync::atomic::Ordering::Acquire) {
+        let (status, detail) = if self.ready.is_ready() {
             (HealthStatus::Healthy, "ready")
         } else {
-            (HealthStatus::Unhealthy, "not-enforced")
+            (HealthStatus::Unhealthy, "attestation-unverified")
         };
         HealthCheck::new(self.name.clone(), status, detail)
     }

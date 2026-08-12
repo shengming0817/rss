@@ -1004,7 +1004,7 @@ async fn tenant_reader_gate_rejects_partitioned_tenant_relation_without_rls() ->
     let verdict = reader.verify_tenant_read_capability().await;
 
     assert!(
-        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced { .. })),
         "partitioned tenant relation without FORCE RLS/policy must fail closed: {verdict:?}"
     );
     reader.shutdown().await?;
@@ -1529,7 +1529,7 @@ async fn verify_rls_capability_rejects_tenant_table_without_rls() -> TestResult 
         .execute(&store.pool)
         .await?;
     assert!(
-        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced { .. })),
         "含 tenant_id 列却无 FORCE RLS 的表应使能力门 fail-closed，实得: {verdict:?}"
     );
     app.shutdown().await?;
@@ -1557,7 +1557,7 @@ async fn verify_rls_capability_rejects_enable_without_force() -> TestResult {
         .execute(&store.pool)
         .await?;
     assert!(
-        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced { .. })),
         "ENABLE without FORCE must fail closed, got: {verdict:?}"
     );
     app.shutdown().await?;
@@ -1588,7 +1588,7 @@ async fn verify_rls_capability_rejects_permissive_policy() -> TestResult {
         .execute(&store.pool)
         .await?;
     assert!(
-        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced { .. })),
         "canonical policy 加第二条 allow-all permissive policy 应 fail-closed，实得: {verdict:?}"
     );
     app.shutdown().await?;
@@ -1630,7 +1630,7 @@ async fn tenant_reader_gate_rejects_semantically_inverted_canonical_policies() -
             .execute(&owner.pool)
             .await?;
         assert!(
-            matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+            matches!(verdict, Err(crate::PgError::RlsNotEnforced { .. })),
             "semantically inverted canonical predicate must fail closed: {predicate}; {verdict:?}"
         );
     }
@@ -1709,7 +1709,7 @@ async fn tenant_reader_gate_rejects_same_text_custom_operator_policy() -> TestRe
         .await?;
         let gate = reader.verify_tenant_read_capability().await;
         assert!(
-            matches!(gate, Err(crate::PgError::RlsNotEnforced)),
+            matches!(gate, Err(crate::PgError::RlsNotEnforced { .. })),
             "non-pinned policy dependencies must fail the RLS gate: {gate:?}"
         );
         reader.shutdown().await?;
@@ -1814,7 +1814,7 @@ async fn verify_rls_capability_rejects_missing_with_check() -> TestResult {
         .execute(&store.pool)
         .await?;
     assert!(
-        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced { .. })),
         "缺 WITH CHECK 应 fail-closed，实得: {verdict:?}"
     );
     app.shutdown().await?;
@@ -1841,7 +1841,7 @@ async fn verify_rls_capability_rejects_token_stuffing_without_tenant_equality() 
         .execute(&store.pool)
         .await?;
     assert!(
-        matches!(verdict, Err(crate::PgError::RlsNotEnforced)),
+        matches!(verdict, Err(crate::PgError::RlsNotEnforced { .. })),
         "token stuffing without tenant equality must fail closed, got: {verdict:?}"
     );
     app.shutdown().await?;

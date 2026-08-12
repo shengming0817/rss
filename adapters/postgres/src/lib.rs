@@ -197,7 +197,7 @@ pub use bundle::{
     MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
     PgL2DrAdmissionState, PgL2DrRecoveryDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
     PgProjectionOperatorCapability, PgProjectionOperatorDeps, PgProjectionReplayStores,
-    PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, PgSagaOperatorDeps,
+    PgRuntimeDeps, PgRuntimeHandle, PgRuntimeMonitorFactory, PgSagaOperatorDeps,
     ProjectionReplayAction, ProjectionStatusAction, ProjectionSwapAction, caps,
 };
 pub use cas_store::PgCasStore;
@@ -304,9 +304,11 @@ pub use pool::{
 pub use pool::{PgProjectionWorkerConfig, PgProjectionWorkerError};
 #[cfg(feature = "domain-settings")]
 pub use projection_worker::PgProjectionWorkerDeps;
-// `pg_readiness_sampling_loop` 保持 `pub(crate)`，仅经 consuming `PgReadinessSamplerFactory::spawn` 收口；
-// 类型 `PgDbReadiness`/`PgReadinessSampler` 仍公开（probe / runtime lifecycle output 返回类型）。
-pub use readiness::{PgDbReadiness, PgReadinessSampler};
+// 两条 monitor loop 保持 `pub(crate)`，仅经 consuming `PgRuntimeMonitorFactory::spawn` 收口。
+pub use readiness::{
+    PgDbReadiness, PgReadinessInterval, PgRlsAttestationInterval, PgRlsReadiness, PgRuntimeMonitor,
+    PgRuntimeMonitorConfig,
+};
 // re-export sqlx 的 TLS 模式枚举，组合根经 `PgConfig::with_ssl_mode` 配置时无需直接依赖 sqlx。
 pub use sqlx::postgres::PgSslMode;
 

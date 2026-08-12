@@ -57,8 +57,7 @@
 
 use std::marker::PhantomData;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use authn::{ProjectionMaintenanceAction, ProjectionMaintenanceReceipt};
 #[cfg(any(feature = "domain-settings", feature = "domain-identity"))]
@@ -105,10 +104,11 @@ use crate::{
     PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
     PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgMaintenanceReconcileStore,
     PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionOperatorConfig,
-    PgProjectionSourceReadConfig, PgReadinessSampler, PgReconcileStore, PgRevocationStore,
-    PgRevocationSweeper, PgSagaDurableStore, PgSagaOperatorConfig, PgSagaReceiptProtection,
-    PgSagaTerminalSweeper, PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore,
-    PgStoreGuard, PgTenantReadConfig,
+    PgProjectionSourceReadConfig, PgReconcileStore, PgRevocationStore, PgRevocationSweeper,
+    PgRlsReadiness, PgRuntimeMonitor, PgRuntimeMonitorConfig, PgSagaDurableStore,
+    PgSagaOperatorConfig, PgSagaReceiptProtection, PgSagaTerminalSweeper,
+    PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore, PgStoreGuard,
+    PgTenantReadConfig,
 };
 #[cfg(feature = "domain-audit")]
 use crate::{PgAuditAdminRepo, PgAuditRepo};
@@ -184,9 +184,9 @@ impl PgDomain for caps::Audit {
     const NAME: &'static str = "audit";
 }
 
-/// 组合根级 postgres 生命周期 owner：只连接已迁移 schema，并唯一拥有 pool 与 sampler 的关闭权。
+/// 组合根级 postgres 生命周期 owner：只连接已迁移 schema，并唯一拥有 pool 与 runtime monitor 的关闭权。
 ///
-/// INVARIANT: PG-RUNTIME-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "non-Clone owner and consuming into_runtime_parts self receiver; trybuild rejects clone and double consumption" }
+/// INVARIANT: PG-RUNTIME-OWNER-01 { level = "Hard", exec = "native-compile", source = "code", native = "non-Clone owner, mandatory typed liveness plus RLS schedule, and consuming into_runtime_parts self receiver; trybuild rejects clone, double consumption, and interval transposition" }
 ///
 /// 该类型刻意不实现 `Clone`。能力经 [`Self::handle`] 克隆为 [`PgRuntimeHandle`]；生命周期经
 /// [`Self::into_runtime_parts`] 按值消费，类型层禁止第二次交接。
@@ -196,10 +196,10 @@ pub struct PgRuntimeDeps {
 
 /// 可克隆的 postgres 运行期能力句柄。
 ///
-/// INVARIANT: PG-RUNTIME-HANDLE-02 { level = "Hard", exec = "native-compile", source = "code", native = "private capability-only fields and no lifecycle methods; trybuild rejects lifecycle projection" }
+/// INVARIANT: PG-RUNTIME-HANDLE-02 { level = "Hard", exec = "native-compile", source = "code", native = "private capability-only fields including read-only unforgeable RLS readiness and no lifecycle methods; trybuild rejects lifecycle projection, RLS construction, and mutation" }
 ///
 /// 仅持 capability 投影所需共享状态；owner 直接包这一份 handle，`handle()` 只克隆其中的 Arc，因而权限分离
-/// 不会形成第二份数据源。不提供 pool guard、sampler factory 或 lifecycle output API。
+/// 不会形成第二份数据源。不提供 pool guard、monitor factory 或 lifecycle output API。
 #[derive(Clone)]
 pub struct PgRuntimeHandle {
     stores: Arc<PgRuntimeStores>,
@@ -210,7 +210,7 @@ pub struct PgRuntimeHandle {
     projection_registry: ProjectionWriteRegistry,
     projection_capture: Option<ProjectionCaptureRegistration>,
     readiness: Arc<PgDbReadiness>,
-    rls_ready: Arc<AtomicBool>,
+    rls_readiness: Arc<PgRlsReadiness>,
 }
 
 /// Single-origin PostgreSQL capability receipt for the DeviceLatent draft pilot.
@@ -257,15 +257,16 @@ impl PgDeviceIdentityDraftRuntime {
     }
 }
 
-/// DB readiness sampler 的单次启动工厂。
+/// PostgreSQL runtime monitor 的单次启动工厂。
 ///
-/// `spawn(self, token)` 消费工厂；同一 owner 产生的 factory 无法启动第二个 sampler。
-pub struct PgReadinessSamplerFactory {
+/// `spawn(self, token)` 消费工厂；同一 owner 产生的 factory 无法启动第二个 monitor。
+pub struct PgRuntimeMonitorFactory {
     writer_store: Arc<PgStore>,
     reader_store: Arc<PgStore>,
     projection_capture: Option<ProjectionCaptureRegistration>,
     readiness: Arc<PgDbReadiness>,
-    period: Duration,
+    rls_readiness: Arc<PgRlsReadiness>,
+    config: PgRuntimeMonitorConfig,
 }
 
 /// Owns every pool created by one fallible setup segment until that segment either commits the
@@ -461,19 +462,43 @@ mod setup_transaction_tests {
     }
 }
 
-impl PgReadinessSamplerFactory {
-    /// 使用 `ShutdownStack` 注入的 token 启动 sampler，并消费本 factory。
+impl PgRuntimeMonitorFactory {
+    /// 使用 `ShutdownStack` 注入的 token 启动完整 runtime monitor，并消费本 factory。
     #[must_use]
-    pub fn spawn(self, token: CancellationToken) -> PgReadinessSampler {
-        let handle = tokio::spawn(crate::readiness::pg_readiness_sampling_loop(
+    pub fn spawn(self, token: CancellationToken) -> PgRuntimeMonitor {
+        self.readiness.mark(self.readiness.snapshot());
+        self.rls_readiness.mark(self.rls_readiness.is_ready());
+        let writer_for_readiness = Arc::clone(&self.writer_store);
+        let reader_for_readiness = Arc::clone(&self.reader_store);
+        let monitor_token = token.child_token();
+        let readiness_token = monitor_token.clone();
+        let rls_token = monitor_token.clone();
+        let readiness = Arc::clone(&self.readiness);
+        let rls_readiness = Arc::clone(&self.rls_readiness);
+        let readiness_task = tokio::spawn(crate::readiness::pg_readiness_sampling_loop(
+            writer_for_readiness,
+            reader_for_readiness,
+            self.projection_capture,
+            self.config.readiness().get(),
+            readiness_token,
+            Arc::clone(&readiness),
+        ));
+        let rls_task = tokio::spawn(crate::readiness::pg_rls_attestation_loop(
             self.writer_store,
             self.reader_store,
-            self.projection_capture,
-            self.period,
-            token.clone(),
-            Arc::clone(&self.readiness),
+            self.config.rls_attestation().get(),
+            rls_token,
+            Arc::clone(&rls_readiness),
         ));
-        PgReadinessSampler::adopt(handle, self.readiness, token)
+        let supervisor_token = monitor_token.clone();
+        let handle = tokio::spawn(crate::readiness::supervise_runtime_monitor(
+            readiness_task,
+            rls_task,
+            supervisor_token,
+            readiness,
+            rls_readiness,
+        ));
+        PgRuntimeMonitor::adopt(handle, self.readiness, self.rls_readiness, monitor_token)
     }
 }
 
@@ -1096,7 +1121,7 @@ impl PgRuntimeDeps {
                     .map_or_else(ProjectionWriteRegistry::empty, |capture| capture.registry()),
                 projection_capture,
                 readiness: Arc::new(PgDbReadiness::new()),
-                rls_ready: Arc::new(AtomicBool::new(true)),
+                rls_readiness: Arc::new(PgRlsReadiness::verified()),
             },
         };
         serving_transaction.commit();
@@ -1149,15 +1174,15 @@ impl PgRuntimeDeps {
 
     /// 按值交接全部 runtime 生命周期资源。
     ///
-    /// resource 注册顺序固定为 writer → reader → optional audit-admin pool；LIFO shutdown 时 sampler
+    /// resource 注册顺序固定为 writer → reader → optional audit-admin pool；LIFO shutdown 时 monitor
     /// 先停，随后 audit-admin、reader、writer 依次关池。
     #[must_use]
     pub fn into_runtime_parts(
         self,
-        period: Duration,
+        config: PgRuntimeMonitorConfig,
     ) -> (
         Vec<Box<DynManagedResource<'static>>>,
-        PgReadinessSamplerFactory,
+        PgRuntimeMonitorFactory,
     ) {
         let PgRuntimeHandle {
             stores,
@@ -1168,7 +1193,7 @@ impl PgRuntimeDeps {
             projection_registry: _,
             projection_capture,
             readiness,
-            rls_ready: _,
+            rls_readiness,
         } = self.handle;
         let writer_store = stores.writer_store_arc();
         let reader_store = stores.reader_store_arc();
@@ -1188,12 +1213,13 @@ impl PgRuntimeDeps {
         }
         (
             resources,
-            PgReadinessSamplerFactory {
+            PgRuntimeMonitorFactory {
                 writer_store,
                 reader_store,
                 projection_capture,
                 readiness,
-                period,
+                rls_readiness,
+                config,
             },
         )
     }
@@ -1371,8 +1397,8 @@ impl PgRuntimeHandle {
     /// 启动期 RLS 能力门结果句柄（**非** pool）：readyz 兜底探针读它（`rls_ready` probe）。
     /// 当前为 setup 期一次性核验的不变式镜像（`Self` 存在 ⇒ true）；周期性再核验为后续扩展点。
     #[must_use]
-    pub fn rls_ready_handle(&self) -> Arc<AtomicBool> {
-        Arc::clone(&self.rls_ready)
+    pub fn rls_readiness(&self) -> Arc<PgRlsReadiness> {
+        Arc::clone(&self.rls_readiness)
     }
 
     /// Construct a hermetic capability handle backed by a lazy pool.
@@ -1409,7 +1435,7 @@ impl PgRuntimeHandle {
             projection_registry: ProjectionWriteRegistry::empty(),
             projection_capture: None,
             readiness: Arc::new(PgDbReadiness::new()),
-            rls_ready: Arc::new(AtomicBool::new(true)),
+            rls_readiness: Arc::new(PgRlsReadiness::for_test(true)),
         }
     }
 
@@ -1459,7 +1485,7 @@ impl PgRuntimeDeps {
                 projection_registry: ProjectionWriteRegistry::empty(),
                 projection_capture: None,
                 readiness: Arc::new(PgDbReadiness::new()),
-                rls_ready: Arc::new(AtomicBool::new(true)),
+                rls_readiness: Arc::new(PgRlsReadiness::for_test(true)),
             },
         }
     }
@@ -1486,7 +1512,7 @@ impl PgRuntimeHandle {
             projection_registry: ProjectionWriteRegistry::empty(),
             projection_capture: None,
             readiness: Arc::new(PgDbReadiness::new()),
-            rls_ready: Arc::new(AtomicBool::new(true)),
+            rls_readiness: Arc::new(PgRlsReadiness::for_test(true)),
         }
     }
 }
@@ -3143,7 +3169,7 @@ mod tests {
             eventexec::L2DrRecoveryError::StoreUnavailable
         );
     }
-    use std::time::SystemTime;
+    use std::time::{Duration, SystemTime};
 
     use diport::{
         DynKeyProvider, EncryptOutput, KeyName, KeyProvider, KeyProviderError, KeyRef, KeyVersion,
@@ -3282,6 +3308,13 @@ mod tests {
         PgRuntimeDeps::from_stores_for_test(lazy_store(), None)
     }
 
+    fn monitor_config() -> PgRuntimeMonitorConfig {
+        PgRuntimeMonitorConfig::new(
+            crate::PgReadinessInterval::default(),
+            crate::PgRlsAttestationInterval::default(),
+        )
+    }
+
     // 这些测试经 lazy pool（`connect_lazy_with`）构造 store——sqlx 池需 Tokio context，故 `#[tokio::test]`
     // （body 不 await；与既有 `smoke::pg_store_guard_shutdown_lazy_pool_ok` 同范式）。
 
@@ -3333,21 +3366,21 @@ mod tests {
             "audit-admin capability must remain present and Arc-identical"
         );
         assert!(Arc::ptr_eq(&first.readiness, &second.readiness));
-        assert!(Arc::ptr_eq(&first.rls_ready, &second.rls_ready));
+        assert!(Arc::ptr_eq(&first.rls_readiness, &second.rls_readiness));
     }
 
     #[tokio::test]
-    async fn rls_ready_handle_returns_same_arc() {
+    async fn rls_readiness_returns_same_arc() {
         let d = deps();
         assert!(
-            Arc::ptr_eq(&d.handle().rls_ready_handle(), &d.handle.rls_ready),
-            "rls_ready_handle 返回内部同一 Arc"
+            Arc::ptr_eq(&d.handle().rls_readiness(), &d.handle.rls_readiness),
+            "rls_readiness 返回内部同一 Arc"
         );
     }
 
     #[tokio::test]
     async fn runtime_parts_without_audit_have_writer_and_reader_guards() {
-        let (resources, _factory) = deps().into_runtime_parts(Duration::from_secs(1));
+        let (resources, _factory) = deps().into_runtime_parts(monitor_config());
         let names: Vec<_> = resources.iter().map(|resource| resource.name()).collect();
         assert_eq!(names, ["postgres", "postgres-tenant-reader"]);
     }
@@ -3362,7 +3395,7 @@ mod tests {
             Arc::clone(&reader),
             Some(Arc::clone(&audit_admin)),
         );
-        let (resources, _factory) = owner.into_runtime_parts(Duration::from_secs(1));
+        let (resources, _factory) = owner.into_runtime_parts(monitor_config());
         let names: Vec<_> = resources.iter().map(|resource| resource.name()).collect();
         assert_eq!(
             names,
@@ -3604,16 +3637,26 @@ mod tests {
 
     /// consuming factory 立即 cancel → `shutdown` 两阶段收敛 Ok（覆盖 spawn/adopt 接线）。
     #[tokio::test]
-    async fn readiness_sampler_factory_clean_shutdown() {
+    async fn runtime_monitor_factory_clean_shutdown() {
         use diport::ManagedResource as _;
         let d = deps();
+        let db_readiness = d.handle().readiness_handle();
+        let rls_readiness = d.handle().rls_readiness();
         let token = CancellationToken::new();
-        let (_resources, factory) = d.into_runtime_parts(Duration::from_millis(50));
-        let sampler = factory.spawn(token.clone());
+        let (_resources, factory) = d.into_runtime_parts(monitor_config());
+        let monitor = factory.spawn(token.clone());
         token.cancel();
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while db_readiness.snapshot() != crate::PoolReadiness::Down || rls_readiness.is_ready()
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("root cancellation publishes fail-closed snapshots before resource shutdown");
         assert!(
-            sampler.shutdown().await.is_ok(),
-            "cancel 后 sampler 干净收敛"
+            monitor.shutdown().await.is_ok(),
+            "cancel 后 monitor 干净收敛"
         );
     }
 }

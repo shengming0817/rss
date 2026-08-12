@@ -124,6 +124,10 @@ fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留�
   GA-hardening trigger 的放行闭集，必须满足 `project-scope.md` 列明的有界例外并由该例外逐项明确授权。metric、既有
   consumer 或 hardening 阶段本身不产生新的运维产品实施授权。
 
+- PostgreSQL runtime monitor 固定导出两个无 label gauge：`pg_readiness_up`（Ready/Saturated=1，Down/停机=0）与
+  `pg_rls_attestation_up`（writer+reader 完整 capability proof=1，失败、未知或停机=0）。两者每次采样覆盖当前值；
+  禁止追加 probe、lane、role、table、error、SQL 或 duration label。
+
 已知的**有界例外**，不外推到其它 metric：
 
 - HTTP / gRPC 的 `domain` label 与 outbox relay 的 `domain` label 来自 assembly 或 provider 在声明期

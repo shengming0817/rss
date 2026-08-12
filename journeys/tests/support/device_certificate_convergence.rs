@@ -50,7 +50,7 @@ impl Clock for ProcessClock {
 struct RunningPilot {
     assembly: deviceidentity::DeviceIdentityAssembly,
     repository: postgres::PgDeviceCertificateRepository<DraftEligibility>,
-    sampler: postgres::PgReadinessSampler,
+    sampler: postgres::PgRuntimeMonitor,
     resources: Vec<Box<diport::DynManagedResource<'static>>>,
 }
 

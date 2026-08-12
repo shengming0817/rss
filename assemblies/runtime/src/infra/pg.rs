@@ -23,6 +23,7 @@ const PG_SSL_ROOT_CERT_PATH_ENV: &str = "RSS_PG_SSL_ROOT_CERT_PATH";
 const PG_WRITER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_MAX_CONNECTIONS";
 const PG_READER_MAX_CONNECTIONS_ENV: &str = "RSS_PG_READ_MAX_CONNECTIONS";
 const PG_READINESS_INTERVAL_ENV: &str = "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS";
+const PG_RLS_ATTESTATION_INTERVAL_ENV: &str = "RSS_PG_RLS_ATTESTATION_INTERVAL_SECS";
 const PG_USERNAME_ENV: &str = "RSS_PG_USERNAME";
 const PG_PASSWORD_FILE_ENV: &str = "RSS_PG_PASSWORD_FILE";
 const PG_REMOVED_PASSWORD_ENV: &str = "RSS_PG_PASSWORD";
@@ -162,7 +163,7 @@ pub(crate) struct PgRuntimeConfig {
     dlx_archiver: PgConfig,
     dlx_verifier: PgConfig,
     dlx_purger: PgConfig,
-    readiness_period: Duration,
+    monitor_config: postgres::PgRuntimeMonitorConfig,
 }
 
 /// Named consumed form; names keep PostgreSQL roles impossible to transpose by tuple position at
@@ -174,7 +175,7 @@ pub(crate) struct PgRuntimeConfigParts {
     pub(crate) dlx_archiver: PgConfig,
     pub(crate) dlx_verifier: PgConfig,
     pub(crate) dlx_purger: PgConfig,
-    pub(crate) readiness_period: Duration,
+    pub(crate) monitor_config: postgres::PgRuntimeMonitorConfig,
 }
 
 struct PgSharedValues {
@@ -323,8 +324,10 @@ impl PgRuntimeConfig {
         let dlx_archiver = shared.role_config(config, PG_DLX_ARCHIVER_ROLE_KEYS)?;
         let dlx_verifier = shared.role_config(config, PG_DLX_VERIFIER_ROLE_KEYS)?;
         let dlx_purger = shared.role_config(config, PG_DLX_PURGER_ROLE_KEYS)?;
-        let readiness_period =
-            pg_readiness_interval_from_value(config.value(PG_READINESS_INTERVAL_ENV));
+        let monitor_config = postgres::PgRuntimeMonitorConfig::new(
+            pg_readiness_interval_from_value(config.value(PG_READINESS_INTERVAL_ENV)),
+            pg_rls_attestation_interval_from_value(config.value(PG_RLS_ATTESTATION_INTERVAL_ENV))?,
+        );
         Ok(Self {
             serving,
             tenant_read,
@@ -332,7 +335,7 @@ impl PgRuntimeConfig {
             dlx_archiver,
             dlx_verifier,
             dlx_purger,
-            readiness_period,
+            monitor_config,
         })
     }
 
@@ -344,7 +347,7 @@ impl PgRuntimeConfig {
             dlx_archiver: self.dlx_archiver,
             dlx_verifier: self.dlx_verifier,
             dlx_purger: self.dlx_purger,
-            readiness_period: self.readiness_period,
+            monitor_config: self.monitor_config,
         }
     }
 }
@@ -520,11 +523,15 @@ const MAX_READINESS_INTERVAL_SECS: u64 = 300;
 /// - 显式配置但解析失败 / 为 0 / 超出上限（300s）→ `tracing::warn!` + 默认 5s。
 ///
 /// 间隔是探针新鲜度 hint 非强依赖，故显式误配 fail-soft（warn+默认）而非 fail-fast。
-fn pg_readiness_interval_from_value(raw: Option<&str>) -> Duration {
+fn pg_readiness_interval_from_value(raw: Option<&str>) -> postgres::PgReadinessInterval {
     match raw {
-        None => DEFAULT_READINESS_INTERVAL,
+        None => postgres::PgReadinessInterval::try_new(DEFAULT_READINESS_INTERVAL)
+            .expect("default postgres readiness interval is valid"),
         Some(raw) => match raw.parse::<u64>() {
-            Ok(n) if (1..=MAX_READINESS_INTERVAL_SECS).contains(&n) => Duration::from_secs(n),
+            Ok(n) if (1..=MAX_READINESS_INTERVAL_SECS).contains(&n) => {
+                postgres::PgReadinessInterval::try_new(Duration::from_secs(n))
+                    .expect("validated postgres readiness interval")
+            }
             _ => {
                 tracing::warn!(
                     env = PG_READINESS_INTERVAL_ENV,
@@ -532,10 +539,24 @@ fn pg_readiness_interval_from_value(raw: Option<&str>) -> Duration {
                     max_secs = MAX_READINESS_INTERVAL_SECS,
                     "invalid readiness sample interval (need 1..=300s); using default 5s"
                 );
-                DEFAULT_READINESS_INTERVAL
+                postgres::PgReadinessInterval::try_new(DEFAULT_READINESS_INTERVAL)
+                    .expect("default postgres readiness interval is valid")
             }
         },
     }
+}
+
+fn pg_rls_attestation_interval_from_value(
+    raw: Option<&str>,
+) -> anyhow::Result<postgres::PgRlsAttestationInterval> {
+    let seconds = match raw {
+        None => return Ok(postgres::PgRlsAttestationInterval::default()),
+        Some(raw) => raw.parse::<u64>().with_context(|| {
+            format!("{PG_RLS_ATTESTATION_INTERVAL_ENV} must be an integer in 10..=300")
+        })?,
+    };
+    postgres::PgRlsAttestationInterval::try_new(Duration::from_secs(seconds))
+        .map_err(|_| anyhow::anyhow!("{PG_RLS_ATTESTATION_INTERVAL_ENV} must be in 10..=300"))
 }
 
 #[cfg(test)]
@@ -639,7 +660,9 @@ mod tests {
     role_builder!(build_pg_dlx_purger_config_from, PG_DLX_PURGER_ROLE_KEYS);
 
     #[allow(clippy::expect_used)]
-    fn build_readiness_interval_from(get: impl Fn(&str) -> Option<String>) -> Duration {
+    fn build_readiness_interval_from(
+        get: impl Fn(&str) -> Option<String>,
+    ) -> postgres::PgReadinessInterval {
         let snapshot = snapshot_from_get(get).expect("closed test catalog");
         pg_readiness_interval_from_value(snapshot.view().value(PG_READINESS_INTERVAL_ENV))
     }
@@ -669,6 +692,7 @@ mod tests {
                 PG_DLX_PURGER_PASSWORD_FILE_ENV => TEST_PASSWORD_FILE,
                 PG_DLX_PURGER_MAX_CONNECTIONS_ENV => "9",
                 PG_READINESS_INTERVAL_ENV => "19",
+                PG_RLS_ATTESTATION_INTERVAL_ENV => "23",
                 _ => return None,
             }
             .to_owned(),
@@ -702,7 +726,14 @@ mod tests {
         let audit = format!("{:?}", parts.audit_admin.expect("audit role"));
         assert!(audit.contains("rss_audit_admin_snapshot"));
         assert!(!audit.contains("audit-admin-snapshot-secret"));
-        assert_eq!(parts.readiness_period, Duration::from_secs(19));
+        assert_eq!(
+            parts.monitor_config.readiness().get(),
+            Duration::from_secs(19)
+        );
+        assert_eq!(
+            parts.monitor_config.rls_attestation().get(),
+            Duration::from_secs(23)
+        );
     }
 
     #[test]
@@ -1567,7 +1598,7 @@ mod tests {
     #[test]
     fn build_readiness_interval_default_when_missing() {
         let d = build_readiness_interval_from(|_| None);
-        assert_eq!(d, DEFAULT_READINESS_INTERVAL, "缺省 → 5s");
+        assert_eq!(d.get(), DEFAULT_READINESS_INTERVAL, "缺省 → 5s");
     }
 
     /// 合法正整数（在 1..=300 范围内）→ 对应秒数。
@@ -1576,7 +1607,7 @@ mod tests {
         let d = build_readiness_interval_from(|n| {
             (n == PG_READINESS_INTERVAL_ENV).then(|| "10".to_string())
         });
-        assert_eq!(d, Duration::from_secs(10));
+        assert_eq!(d.get(), Duration::from_secs(10));
     }
 
     /// 显式非法（非数字 / 0）→ warn + 默认 5s（fail-soft；间隔是 hint 非强依赖）。
@@ -1585,11 +1616,11 @@ mod tests {
         let d1 = build_readiness_interval_from(|n| {
             (n == PG_READINESS_INTERVAL_ENV).then(|| "not-a-number".to_string())
         });
-        assert_eq!(d1, DEFAULT_READINESS_INTERVAL, "非数字 → warn + 默认");
+        assert_eq!(d1.get(), DEFAULT_READINESS_INTERVAL, "非数字 → warn + 默认");
         let d2 = build_readiness_interval_from(|n| {
             (n == PG_READINESS_INTERVAL_ENV).then(|| "0".to_string())
         });
-        assert_eq!(d2, DEFAULT_READINESS_INTERVAL, "0 → warn + 默认");
+        assert_eq!(d2.get(), DEFAULT_READINESS_INTERVAL, "0 → warn + 默认");
     }
 
     /// 越界（> MAX_READINESS_INTERVAL_SECS=300）→ warn + 默认 5s。
@@ -1598,7 +1629,11 @@ mod tests {
         let d = build_readiness_interval_from(|n| {
             (n == PG_READINESS_INTERVAL_ENV).then(|| "999".to_string())
         });
-        assert_eq!(d, DEFAULT_READINESS_INTERVAL, "999 > 300 → warn + 默认 5s");
+        assert_eq!(
+            d.get(),
+            DEFAULT_READINESS_INTERVAL,
+            "999 > 300 → warn + 默认 5s"
+        );
     }
 
     /// 下边界 1s → 对应（合法最小值）。
@@ -1607,7 +1642,7 @@ mod tests {
         let d = build_readiness_interval_from(|n| {
             (n == PG_READINESS_INTERVAL_ENV).then(|| "1".to_string())
         });
-        assert_eq!(d, Duration::from_secs(1), "1 → 1s（合法下边界）");
+        assert_eq!(d.get(), Duration::from_secs(1), "1 → 1s（合法下边界）");
     }
 
     /// 上边界 300s → 对应（合法最大值）。
@@ -1616,6 +1651,35 @@ mod tests {
         let d = build_readiness_interval_from(|n| {
             (n == PG_READINESS_INTERVAL_ENV).then(|| "300".to_string())
         });
-        assert_eq!(d, Duration::from_secs(300), "300 → 300s（合法上边界）");
+        assert_eq!(
+            d.get(),
+            Duration::from_secs(300),
+            "300 → 300s（合法上边界）"
+        );
+    }
+
+    #[test]
+    fn rls_attestation_interval_defaults_and_accepts_boundaries() {
+        assert_eq!(
+            pg_rls_attestation_interval_from_value(None)
+                .expect("default")
+                .get(),
+            Duration::from_secs(60)
+        );
+        for raw in ["10", "300"] {
+            assert!(pg_rls_attestation_interval_from_value(Some(raw)).is_ok());
+        }
+    }
+
+    #[test]
+    fn rls_attestation_interval_is_fail_fast_when_explicitly_invalid() {
+        for raw in ["0", "9", "301", "not-a-number"] {
+            let error = pg_rls_attestation_interval_from_value(Some(raw))
+                .expect_err("invalid RLS interval must fail closed");
+            assert!(
+                error.to_string().contains(PG_RLS_ATTESTATION_INTERVAL_ENV),
+                "{error:#}"
+            );
+        }
     }
 }

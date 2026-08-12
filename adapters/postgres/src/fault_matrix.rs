@@ -947,7 +947,12 @@ impl PgFaultMatrixHarness {
 
     /// Close private postgres resources.
     pub async fn shutdown(self) -> FaultMatrixResult<()> {
-        let (resources, _sampler_factory) = self.deps.into_runtime_parts(Duration::from_secs(1));
+        let config = crate::PgRuntimeMonitorConfig::new(
+            crate::PgReadinessInterval::try_new(Duration::from_secs(1))
+                .expect("fault matrix readiness interval"),
+            crate::PgRlsAttestationInterval::default(),
+        );
+        let (resources, _sampler_factory) = self.deps.into_runtime_parts(config);
         self.owner_pool.close().await;
         let mut first_error = None;
         for resource in resources.into_iter().rev() {

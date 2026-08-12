@@ -1863,7 +1863,11 @@ impl LocalTxJourneyRuntime {
         self.observer.close().await;
         let cleanup: Result<()> = async {
             let deps = self.deps;
-            let (resources, _sampler_factory) = deps.into_runtime_parts(Duration::from_secs(1));
+            let monitor_config = postgres::PgRuntimeMonitorConfig::new(
+                postgres::PgReadinessInterval::try_new(Duration::from_secs(1)).expect("interval"),
+                postgres::PgRlsAttestationInterval::default(),
+            );
+            let (resources, _sampler_factory) = deps.into_runtime_parts(monitor_config);
             for resource in resources.into_iter().rev() {
                 resource.shutdown().await?;
             }

@@ -64,11 +64,13 @@ hazard 为：
 carrier 固定构建 `settingsonly-runtime`，不接受 command/entrypoint override，并在运行期检查真实 OCI
 ENTRYPOINT、进程路径和 nonroot 用户。配置、JWKS、PostgreSQL/Vault/AMQP/Redis/S3 五份私有 CA、secret
 bundle 与 SPIFFE Workload API UDS 只经只读 mount/volume 提供；入口以真实 SPIFFE X.509 身份和精确
-allow-set 经 mTLS 访问 production listener。Input/ready case 要求聚合 readyz 为 Healthy，且下列 11 个
-provider join probe 全部为 Healthy：
+allow-set 经 mTLS 访问 production listener。Input/ready case 要求聚合 readyz 为 Healthy，且下列 12 个
+provider join probe 全部为 Healthy（其中 `configs_ready` 只表达 PG liveness，`rls_ready` 独占 RLS
+attestation hazard）：
 
 ```text
 configs_ready
+rls_ready
 keyprovider_ready
 vault_secret_resolver_ready
 federated_access_token_jwks_ready
@@ -171,7 +173,9 @@ Health listener 固定提供：
 - `/health/v1/healthz`：进程存活；
 - `/health/v1/readyz`：聚合下列 required probes；`Unhealthy` 返回 503，`Degraded` 保留 200
   并携带诊断，避免可重试 provider 故障或单租户隔离把整个服务摘流：
-  - `configs_ready`：Settings PG reader/writer；
+  - `configs_ready`：Settings PG reader/writer liveness；
+  - `rls_ready`：writer/reader RLS capability 周期证明；无法完成证明时以
+    `attestation-unverified` fail-closed 返回 503；
   - `keyprovider_ready`、`vault_secret_resolver_ready`：Settings Vault key/KV；
   - `federated_access_token_jwks_ready`：federated JWKS；
   - `settingsonly_redis_ready`：分布式 lock；

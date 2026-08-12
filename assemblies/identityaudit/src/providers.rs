@@ -158,10 +158,15 @@ pub(crate) async fn build(
         Box::new(PostgresProbe {
             name: pg_probe_name,
             readiness: pg.readiness_handle(),
-            rls_ready: pg.rls_ready_handle(),
+            rls_ready: pg.rls_readiness(),
         }) as Box<dyn bootstrap::HealthProbe>,
     );
-    let (mut pg_resources, pg_sampler) = pg_owner.into_runtime_parts(PG_READINESS_PERIOD);
+    let monitor_config = postgres::PgRuntimeMonitorConfig::new(
+        postgres::PgReadinessInterval::try_new(PG_READINESS_PERIOD)
+            .expect("identityaudit postgres readiness interval"),
+        postgres::PgRlsAttestationInterval::default(),
+    );
+    let (mut pg_resources, pg_sampler) = pg_owner.into_runtime_parts(monitor_config);
     let cas_resource = pg_resources
         .pop()
         .context("identityaudit Postgres omitted distributed CAS lifecycle resource")?;
@@ -1148,17 +1153,15 @@ impl AccessTokenJwksReadyProbe {
 struct PostgresProbe {
     name: primitives::ProbeName,
     readiness: Arc<postgres::PgDbReadiness>,
-    rls_ready: Arc<std::sync::atomic::AtomicBool>,
+    rls_ready: Arc<postgres::PgRlsReadiness>,
 }
 
 impl bootstrap::HealthProbe for PostgresProbe {
     fn check(&self) -> primitives::HealthCheck {
-        use std::sync::atomic::Ordering;
-
         let ready = matches!(
             self.readiness.snapshot(),
             postgres::PoolReadiness::Ready | postgres::PoolReadiness::Saturated
-        ) && self.rls_ready.load(Ordering::Acquire);
+        ) && self.rls_ready.is_ready();
         let (status, detail) = if ready {
             (primitives::HealthStatus::Healthy, "ready")
         } else {

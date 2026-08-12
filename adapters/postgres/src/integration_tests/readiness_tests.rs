@@ -3,6 +3,124 @@
 use super::support::*;
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rls_attestation_server_lock_deadline_releases_the_probe_transaction() -> TestResult {
+    use sqlx::Executor as _;
+    use std::time::Duration;
+
+    let (_fixture, owner) = connect_pg().await?;
+    owner
+        .pool
+        .execute("CREATE TABLE public.rls_attestation_lock_target (id bigint PRIMARY KEY)")
+        .await?;
+
+    let mut blocker = owner.pool.begin().await?;
+    blocker
+        .execute("LOCK TABLE public.rls_attestation_lock_target IN ACCESS EXCLUSIVE MODE")
+        .await?;
+
+    let mut probe = owner.pool.begin().await?;
+    #[allow(clippy::disallowed_methods)]
+    let deadline = crate::pool::PgCapabilityProbeDeadline::new(
+        tokio::time::Instant::now() + Duration::from_millis(500),
+    );
+    crate::pool::set_local_capability_probe_deadlines(
+        &mut probe,
+        deadline,
+        crate::PgError::RlsCapability,
+    )
+    .await?;
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(2),
+        probe.execute("SELECT * FROM public.rls_attestation_lock_target"),
+    )
+    .await
+    .map_err(|_| "server lock_timeout did not bound the blocked probe")?;
+    let error = outcome.expect_err("blocked probe must fail at the server-side lock deadline");
+    assert_eq!(
+        error.as_database_error().and_then(|error| error.code()),
+        Some(std::borrow::Cow::Borrowed("55P03")),
+        "probe must fail with PostgreSQL lock_not_available"
+    );
+
+    let _ = probe.rollback().await;
+    blocker.rollback().await?;
+    owner
+        .pool
+        .execute("DROP TABLE public.rls_attestation_lock_target")
+        .await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn periodic_rls_attestation_degrades_and_recovers_after_catalog_drift() -> TestResult {
+    use diport::ManagedResource as _;
+    use sqlx::Executor as _;
+    use std::time::Duration;
+
+    let (fixture, deps) = setup_runtime_deps_with_projection_inputs(
+        ProjectionConformanceFixture::primary().input_generation(),
+        PROJECTION_CONFORMANCE_INPUTS,
+    )
+    .await?;
+    let owner = runtime_assertion_pool(fixture.owner_params()).await?;
+    let rls = deps.handle().rls_readiness();
+    let config = crate::PgRuntimeMonitorConfig::new(
+        crate::PgReadinessInterval::for_test(Duration::from_millis(25)),
+        crate::PgRlsAttestationInterval::for_test(Duration::from_millis(25)),
+    );
+    let (resources, monitor_factory) = deps.into_runtime_parts(config);
+    let monitor = monitor_factory.spawn(tokio_util::sync::CancellationToken::new());
+
+    owner
+        .execute("ALTER TABLE public.config_entries NO FORCE ROW LEVEL SECURITY")
+        .await?;
+    await_map(Duration::from_secs(3), async || {
+        (!rls.is_ready()).then_some(())
+    })
+    .await
+    .map_err(|_| "writer catalog drift did not fail closed")?;
+
+    owner
+        .execute("ALTER TABLE public.config_entries FORCE ROW LEVEL SECURITY")
+        .await?;
+    await_map(Duration::from_secs(3), async || {
+        rls.is_ready().then_some(())
+    })
+    .await
+    .map_err(|_| "RLS readiness did not recover after FORCE RLS restoration")?;
+
+    owner
+        .execute("GRANT INSERT ON TABLE public.config_entries TO rss_app_read")
+        .await?;
+    await_map(Duration::from_secs(3), async || {
+        (!rls.is_ready()).then_some(())
+    })
+    .await
+    .map_err(|_| "reader-only privilege widening did not fail closed")?;
+
+    owner
+        .execute("REVOKE INSERT ON TABLE public.config_entries FROM rss_app_read")
+        .await?;
+    await_map(Duration::from_secs(3), async || {
+        rls.is_ready().then_some(())
+    })
+    .await
+    .map_err(|_| "RLS readiness did not recover after reader ACL restoration")?;
+
+    monitor.shutdown().await?;
+    assert!(
+        !rls.is_ready(),
+        "shutdown must publish fail-closed RLS readiness"
+    );
+    for resource in resources.into_iter().rev() {
+        resource.shutdown().await?;
+    }
+    owner.close().await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn readiness_degrades_when_active_projection_generation_drifts() -> TestResult {
     let (fixture, deps) = setup_runtime_deps_with_projection_inputs(
         ProjectionConformanceFixture::primary().input_generation(),
@@ -11,8 +129,11 @@ async fn readiness_degrades_when_active_projection_generation_drifts() -> TestRe
     .await?;
     let owner = runtime_assertion_pool(fixture.owner_params()).await?;
     let readiness = deps.handle().readiness_handle();
-    let (resources, sampler_factory) =
-        deps.into_runtime_parts(std::time::Duration::from_millis(20));
+    let config = crate::PgRuntimeMonitorConfig::new(
+        crate::PgReadinessInterval::for_test(std::time::Duration::from_millis(20)),
+        crate::PgRlsAttestationInterval::for_test(std::time::Duration::from_millis(20)),
+    );
+    let (resources, sampler_factory) = deps.into_runtime_parts(config);
     let sampler = sampler_factory.spawn(tokio_util::sync::CancellationToken::new());
 
     await_map(std::time::Duration::from_secs(2), async || {

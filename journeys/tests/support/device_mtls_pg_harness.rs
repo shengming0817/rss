@@ -241,7 +241,7 @@ pub(super) fn relay_budget() -> anyhow::Result<RelayBudget> {
 pub(super) struct ConnectedPgRuntime {
     handle: postgres::PgRuntimeHandle,
     resources: Vec<Box<diport::DynManagedResource<'static>>>,
-    sampler: postgres::PgReadinessSampler,
+    sampler: postgres::PgRuntimeMonitor,
 }
 
 impl ConnectedPgRuntime {
@@ -265,7 +265,11 @@ impl ConnectedPgRuntime {
         .await?;
         let handle = owner.handle();
         handle.validate_relay_budget(relay_budget()?)?;
-        let (resources, sampler_factory) = owner.into_runtime_parts(Duration::from_millis(100));
+        let monitor_config = postgres::PgRuntimeMonitorConfig::new(
+            postgres::PgReadinessInterval::for_test(Duration::from_millis(100)),
+            postgres::PgRlsAttestationInterval::for_test(Duration::from_millis(100)),
+        );
+        let (resources, sampler_factory) = owner.into_runtime_parts(monitor_config);
         let sampler = sampler_factory.spawn(CancellationToken::new());
         let readiness = handle.readiness_handle();
         testkit::await_map(Duration::from_secs(10), async || {
@@ -289,7 +293,7 @@ impl ConnectedPgRuntime {
     ) -> (
         postgres::PgRuntimeHandle,
         Vec<Box<diport::DynManagedResource<'static>>>,
-        postgres::PgReadinessSampler,
+        postgres::PgRuntimeMonitor,
     ) {
         (self.handle, self.resources, self.sampler)
     }

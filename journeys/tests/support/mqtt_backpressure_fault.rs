@@ -56,7 +56,7 @@ impl Clock for ProcessClock {
 
 struct RunningPilot {
     assembly: deviceidentity::DeviceIdentityAssembly,
-    sampler: postgres::PgReadinessSampler,
+    sampler: postgres::PgRuntimeMonitor,
     resources: Vec<Box<diport::DynManagedResource<'static>>>,
     /// Closed readiness observer only — never exposed as a raw MQTT client surface.
     mqtt: Arc<MqttSession>,

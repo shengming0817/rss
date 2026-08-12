@@ -55,8 +55,8 @@ postgres adapter 把「连接池 + 一组域形 repo/UoW provider impl」打包�
 - **`PgRuntimeDeps`**（运行时级生命周期 owner）：不实现 `Clone`，生产 `setup*()` 构造家族产出；内部只持一份
   `PgRuntimeHandle`，不再同时保存第二份 store/readiness 状态。`handle(&self)` 只克隆该 handle 内的 `Arc`，不会形成第二个
   生命周期 owner。
-- **`PgRuntimeHandle`**（可克隆能力句柄）：只提供 `for_domain`、`infra`、`readiness_handle`、`rls_ready_handle` 投影；不暴露
-  pool guard、sampler factory 或 lifecycle output API。`SharedRuntimeDeps` 与无 launch assembly 只保存此 handle。
+- **`PgRuntimeHandle`**（可克隆能力句柄）：只提供 `for_domain`、`infra`、`readiness_handle`、`rls_readiness` 投影；不暴露
+  pool guard、monitor factory 或 lifecycle output API。`SharedRuntimeDeps` 与无 launch assembly 只保存此 handle。
 - **`PgDomainDeps<D>`**（域级能力句柄）：由 `PgRuntimeHandle::for_domain` 按域投影所需 repo/UoW（如 settings 的
   `ConfigRepo` + `SecretRepo` + `ConfigUnitOfWork`），交该域 `module()` 构造器。
 - Identity 投影只提供一个 `PgIdentitySecurityLifecycle` capability，并由 composition 作为非可选依赖注入
@@ -64,9 +64,9 @@ postgres adapter 把「连接池 + 一组域形 repo/UoW provider impl」打包�
   concrete provider 和 producer transaction funnel；`CredentialRepo` 只负责 insert/find/authenticate，不再暴露
   password mutation，亦不存在平行 `AccountSecurityLifecycle`。reactivation 仍通过同一个 provider 的窄 CAS method，
   但无 producer receipt、无 OutboxFact、无 grant/family 复活语义。
-- 生命周期交接只能由 `PgRuntimeDeps::into_runtime_parts(self, period)` 按值完成：返回顺序固定为 primary → optional
-  audit-admin 的 pool guards，以及 non-`Clone` `PgReadinessSamplerFactory`；factory 的 `spawn(self, token)` 再按值消费，单个
-  owner/factory 均不能生成第二套关闭或 sampler 路径。
+- 生命周期交接只能由 `PgRuntimeDeps::into_runtime_parts(self, PgRuntimeMonitorConfig)` 按值完成：返回顺序固定为 primary → optional
+  audit-admin 的 pool guards，以及 non-`Clone` `PgRuntimeMonitorFactory`；typed config 必填且同时包含不可互换的 liveness/RLS
+  interval，factory 的 `spawn(self, token)` 再按值消费，单个 owner/factory 均不能生成第二套关闭或 monitor 路径。
 
 对标 GoCell `PGSet.ForCell`（per-cell 投影）/ `WithPGBundle`，及 omicron `DataStore`（一个 struct 持 `Arc<Pool>`、子模块聚合
 per-resource 方法、单 `new(log, pool, ..)` 构造——见 §对标证据）。**RSS 偏离**：omicron `DataStore` 是单体全聚合，RSS 按域形
@@ -147,7 +147,7 @@ pub struct PgRuntimeDeps { handle: PgRuntimeHandle } // non-Clone lifecycle owne
 pub struct PgRuntimeHandle { /* shared store/readiness capability state */ }
 impl PgRuntimeDeps {
     pub fn handle(&self) -> PgRuntimeHandle { /* Arc clone only */ }
-    pub fn into_runtime_parts(self, period: Duration) -> (Vec<Box<DynManagedResource>>, PgReadinessSamplerFactory) { /* single-use */ }
+    pub fn into_runtime_parts(self, config: PgRuntimeMonitorConfig) -> (Vec<Box<DynManagedResource>>, PgRuntimeMonitorFactory) { /* single-use */ }
 }
 impl PgRuntimeHandle {
     pub fn for_domain<D: PgDomain>(&self) -> PgDomainDeps<D> { /* typed capability projection */ }
@@ -159,7 +159,7 @@ impl PgRuntimeHandle {
 - **正**：横切接线压成少数 funnel；`DomainBinding` 私有字段 + `compose_bindings` 唯一 output 出口在类型/API 边界
   强制 compose 成功后才 drain，并守住 single owner、禁止重复消费；三出口保序由 bootstrap 测试锁定，runtime baseline
   检查三字段 merge 完整性；Redis / S3 / Vault 经 crate-private provider adapter 进入同一个 result merge，不引入 service locator，
-  PG 则由 non-`Clone` owner 直接生成既有 `DomainModuleResult` batch，并经公共注册 helper 保持 sampler/pool 依赖顺序；owner
+  PG 则由 non-`Clone` owner 直接生成既有 `DomainModuleResult` batch，并经公共注册 helper 保持 monitor/pool 依赖顺序；owner
   只包 handle，能力投影与生命周期权限分离但数据源及 output 类型仍唯一。**零新增 crate / 零新增分层**（沿用 ADR-005 域形 port + diport）。
 - **负 / 代价**：① binding/output 含单 owner worker/resource，不提供 `Clone` 或完整 `Sync`；确需并发共享时必须拆出窄只读视图；
   ② defer gate v1 标记集窄（精度取舍——自由词散文不触发，见 §6 + `xtask/src/defergate.rs` rustdoc 盲区）。
@@ -176,8 +176,8 @@ impl PgRuntimeHandle {
   泄漏与 service-locator 扩张面。
 - 所有权威胁收敛：外部调用方无法直接取得 domain/output；`compose_bindings` 在 compose 成功前不 drain，失败时 bindings
   与 outputs 原样保留；成功后 `FnOnce` worker 与 managed resource 只转移一次，避免提前启动、clone 后重复启动或重复关闭。
-- PG 生命周期复制威胁收敛：`PgRuntimeDeps` 与 `PgReadinessSamplerFactory` 均 non-`Clone` 且按值消费；cloneable
-  `PgRuntimeHandle` 没有生命周期 API，因此能力消费者无法取得 pool guard 或重复启动 sampler。owner 只能转换为既有
+- PG 生命周期复制威胁收敛：`PgRuntimeDeps` 与 `PgRuntimeMonitorFactory` 均 non-`Clone` 且按值消费；cloneable
+  `PgRuntimeHandle` 没有生命周期 API，因此能力消费者无法取得 pool guard 或重复启动 monitor。owner 只能转换为既有
   `DomainModuleResult`，不存在第二套 lifecycle output seam。
 - Provider 关闭顺序漂移收敛：PG owner 交出的 guards 固定 primary → optional audit-admin，所有 provider
   resources/workers 合并为 completed provider module；Launch 在 domain module 前注册它，LIFO 使
@@ -210,7 +210,7 @@ impl PgRuntimeHandle {
 ## 7. 备选（为何不取）
 
 - **把 `PgRuntimeDeps` / `PgRuntimeHandle` 合成一个类型**：若统一类型可 `Clone`，任何能力消费者也会复制 lifecycle 权限，无法阻止
-  重复 guards/sampler；若统一类型不可 `Clone`，则 session/event/domain/probe 等并行消费者无法持有共享能力，且无 launch assembly
+  重复 guards/monitor；若统一类型不可 `Clone`，则 session/event/domain/probe 等并行消费者无法持有共享能力，且无 launch assembly
   被迫保留不属于自己的生命周期 owner。两类型只分离权限角色，owner 直接包 handle，故没有引入第二数据源。
 - **散装在组合根逐 port `new`（现状）**：被 PERSIST epic 否决——横切复杂度随域数线性膨胀、易漏 `ManagedResource` / probe 接线、
   defer 无追踪。

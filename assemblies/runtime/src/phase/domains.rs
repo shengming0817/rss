@@ -216,7 +216,7 @@ impl<'a> InfraBuilt<'a> {
             registry
                 .probe(
                     rls_probe_name,
-                    Box::new(RlsReadyProbe::new(deps.pg.rls_ready_handle())),
+                    Box::new(RlsReadyProbe::new(deps.pg.rls_readiness())),
                 )
                 .context("register rls_ready probe")?;
             if let Some(probe) = signing_rotation_probe {

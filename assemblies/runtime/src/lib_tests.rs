@@ -1710,23 +1710,21 @@ fn maintenance_sweepers_share_one_control_loop() {
     );
 }
 
-/// RlsReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("not-enforced")`（fail-closed）。
+/// RlsReadyProbe：`true → Healthy("ready")` / `false → Unhealthy("attestation-unverified")`。
 #[test]
 fn rls_ready_probe_maps_flag_to_health() {
     use bootstrap::HealthProbe;
-    use std::sync::atomic::{AtomicBool, Ordering};
 
-    let flag = Arc::new(AtomicBool::new(true));
+    let flag = Arc::new(postgres::PgRlsReadiness::for_test(true));
     let probe = RlsReadyProbe::new(Arc::clone(&flag));
     let ready = probe.check();
     assert_eq!(ready.status(), HealthStatus::Healthy);
     assert_eq!(ready.detail(), "ready");
     assert_eq!(ready.name().as_str(), RLS_READY_PROBE_NAME);
 
-    flag.store(false, Ordering::Release);
-    let down = probe.check();
+    let down = RlsReadyProbe::new(Arc::new(postgres::PgRlsReadiness::for_test(false))).check();
     assert_eq!(down.status(), HealthStatus::Unhealthy);
-    assert_eq!(down.detail(), "not-enforced");
+    assert_eq!(down.detail(), "attestation-unverified");
 }
 
 #[test]
@@ -1889,14 +1887,13 @@ fn system_clock_now_is_after_epoch() {
 #[test]
 #[allow(clippy::expect_used)]
 fn rls_ready_registers_and_is_unique() {
-    use std::sync::atomic::AtomicBool;
     // reason: RLS_READY_PROBE_NAME 是 const literal，parse 只可能在字符非法时失败。
     let name_a =
         primitives::ProbeName::parse(RLS_READY_PROBE_NAME).expect("valid probe name const");
     let name_b =
         primitives::ProbeName::parse(RLS_READY_PROBE_NAME).expect("valid probe name const");
     let mut registry = bootstrap::compose(&[]).expect("empty compose");
-    let flag = Arc::new(AtomicBool::new(true));
+    let flag = Arc::new(postgres::PgRlsReadiness::for_test(true));
 
     registry
         .probe(name_a, Box::new(RlsReadyProbe::new(Arc::clone(&flag))))

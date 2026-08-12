@@ -7,7 +7,7 @@
 //!   被标记 Ready → readyz 返 200，JSON body 含 `"overall":"healthy"` + `"name":"configs_ready"`。
 //!
 //! 区别于 lib 单测的 `HealthyProbe` 替身——此处验真实 `ConfigsReadyProbe.check()` 读 `PgDbReadiness::snapshot()`。
-//! 采样驱动经 bundle 的 consuming sampler factory（spawn+adopt 收口，#1423）。
+//! 采样驱动经 bundle 的 consuming runtime monitor factory（spawn+adopt 收口，#1423）。
 //!
 //! `integration` feature 门控；该 migration/owner-SQL 测试只接受 fixture-owned PostgreSQL，
 //! external opt-in 会在任何 SQL 前 fail closed。
@@ -18,7 +18,7 @@ use std::time::Duration;
 
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
-// `ManagedResource` 提供 `PgReadinessSampler::shutdown`（trait 方法，须在 scope 内才可调）。
+// `ManagedResource` 提供 `PgRuntimeMonitor::shutdown`（trait 方法，须在 scope 内才可调）。
 use diport::ManagedResource as _;
 use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig};
 use primitives::ProbeName;
@@ -76,7 +76,7 @@ fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgCon
     .with_acquire_timeout(Duration::from_secs(5))
 }
 
-/// Ready 路径：consuming sampler factory（短 period，真实 DB）→ readyz 200。
+/// Ready 路径：consuming runtime monitor factory（短 period，真实 DB）→ readyz 200。
 ///
 /// 流程：`setup` 连真实 DB（readiness handle 初值 Down）→ owner 投影 handle 后按值交接 runtime parts
 /// → tokio sleep 200ms 等至少一轮采样 tick 完成 → readyz 200（采样已标 Ready）→ `shutdown` 收敛。
@@ -86,8 +86,12 @@ async fn configs_ready_sampling_loop_drives_to_ready_readyz_200() -> TestResult 
     let handle = owner.handle();
 
     let health = handle.readiness_handle();
-    let (resources, sampler_factory) = owner.into_runtime_parts(Duration::from_millis(50));
-    let sampler = sampler_factory.spawn(CancellationToken::new());
+    let monitor_config = postgres::PgRuntimeMonitorConfig::new(
+        postgres::PgReadinessInterval::try_new(Duration::from_secs(1)).expect("interval"),
+        postgres::PgRlsAttestationInterval::default(),
+    );
+    let (resources, monitor_factory) = owner.into_runtime_parts(monitor_config);
+    let monitor = monitor_factory.spawn(CancellationToken::new());
 
     // 等待至少一轮采样（200ms >> 50ms period）；固定墙钟走 testkit funnel。
     testkit::await_delay(Duration::from_millis(200)).await;
@@ -134,8 +138,8 @@ async fn configs_ready_sampling_loop_drives_to_ready_readyz_200() -> TestResult 
         "Ready → healthy: {body}"
     );
 
-    // 清理 sampler task。
-    sampler.shutdown().await?;
+    // 清理 runtime monitor task。
+    monitor.shutdown().await?;
     for resource in resources.into_iter().rev() {
         resource.shutdown().await?;
     }

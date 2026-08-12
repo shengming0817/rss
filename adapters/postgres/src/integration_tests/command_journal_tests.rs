@@ -163,7 +163,11 @@ async fn command_journal_runtime_deps_serving_role_records_and_replays() -> Test
     .await?;
     assert_eq!(count.0, 1, "serving role path must persist one journal row");
     owner_pool.close().await;
-    let (resources, _sampler_factory) = deps.into_runtime_parts(std::time::Duration::from_secs(1));
+    let config = crate::PgRuntimeMonitorConfig::new(
+        crate::PgReadinessInterval::try_new(std::time::Duration::from_secs(1)).expect("interval"),
+        crate::PgRlsAttestationInterval::default(),
+    );
+    let (resources, _sampler_factory) = deps.into_runtime_parts(config);
     for resource in resources.into_iter().rev() {
         resource.shutdown().await?;
     }

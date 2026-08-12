@@ -7,14 +7,14 @@
 //!
 //! - [`PgDbReadiness`]：`AtomicU8` 状态持有者，初值 Down（fail-closed：首次成功采样前不报 ready）。
 //! - [`pg_readiness_sampling_loop`]：裸 loop，**不 spawn**，spawn 在组合根 call-site。
-//! - [`PgReadinessSampler`]：adopt 式 worker，impl `diport::ManagedResource`；
+//! - [`PgRuntimeMonitor`]：同时托管 liveness 与 RLS attestation 的 adopt 式 worker；
 //!   `shutdown` 两阶段关闭：cancel token → await handle。
 //!
 //! `tokio::time::interval` 被允许——clippy 只禁 `Instant::now`/`elapsed`（Clock 注入约束），
 //! 周期定时器不属此约束（relay.rs:371 同款用法）。
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
@@ -29,8 +29,101 @@ const READINESS_SATURATED: u8 = 1;
 const READINESS_DOWN: u8 = 2;
 
 /// worker 名常量（`ManagedResource::name` 稳定标识；≥3 处同义使用抽 const）。
-const SAMPLER_WORKER_NAME: &str = "pg-readiness-sampler";
+const MONITOR_WORKER_NAME: &str = "pg-runtime-monitor";
 const PROJECTION_REGISTRY_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const RLS_ATTESTATION_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Validated PostgreSQL liveness sampling interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgReadinessInterval(Duration);
+
+impl PgReadinessInterval {
+    /// Validate a liveness interval in the supported `1..=300s` range.
+    pub fn try_new(value: Duration) -> Result<Self, &'static str> {
+        if (Duration::from_secs(1)..=Duration::from_secs(300)).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err("postgres readiness interval must be between 1s and 300s")
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> Duration {
+        self.0
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn for_test(value: Duration) -> Self {
+        Self(value)
+    }
+}
+
+impl Default for PgReadinessInterval {
+    fn default() -> Self {
+        Self(Duration::from_secs(5))
+    }
+}
+
+/// Validated periodic RLS attestation interval.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgRlsAttestationInterval(Duration);
+
+impl PgRlsAttestationInterval {
+    /// Validate a security attestation interval in the supported `10..=300s` range.
+    pub fn try_new(value: Duration) -> Result<Self, &'static str> {
+        if (Duration::from_secs(10)..=Duration::from_secs(300)).contains(&value) {
+            Ok(Self(value))
+        } else {
+            Err("postgres RLS attestation interval must be between 10s and 300s")
+        }
+    }
+
+    #[must_use]
+    pub const fn get(self) -> Duration {
+        self.0
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    pub const fn for_test(value: Duration) -> Self {
+        Self(value)
+    }
+}
+
+impl Default for PgRlsAttestationInterval {
+    fn default() -> Self {
+        Self(Duration::from_secs(60))
+    }
+}
+
+/// Complete, non-optional schedule for the PostgreSQL runtime monitor.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PgRuntimeMonitorConfig {
+    readiness: PgReadinessInterval,
+    rls_attestation: PgRlsAttestationInterval,
+}
+
+impl PgRuntimeMonitorConfig {
+    #[must_use]
+    pub const fn new(
+        readiness: PgReadinessInterval,
+        rls_attestation: PgRlsAttestationInterval,
+    ) -> Self {
+        Self {
+            readiness,
+            rls_attestation,
+        }
+    }
+
+    #[must_use]
+    pub const fn readiness(self) -> PgReadinessInterval {
+        self.readiness
+    }
+
+    #[must_use]
+    pub const fn rls_attestation(self) -> PgRlsAttestationInterval {
+        self.rls_attestation
+    }
+}
 
 // ── PgDbReadiness ──────────────────────────────────────────────────────────────
 
@@ -50,6 +143,7 @@ impl PgDbReadiness {
     /// 封闭其构造无 funnel 价值、且破坏 hermetic probe 单测（probe→503 路径不需真 DB）；生产编排路径仍是
     /// [`crate::PgRuntimeDeps::connect_serving`] 建 + [`crate::PgRuntimeHandle::readiness_handle`] 派发。
     pub fn new() -> Self {
+        metrics::gauge!("pg_readiness_up").set(0.0);
         Self(AtomicU8::new(READINESS_DOWN))
     }
 
@@ -75,6 +169,38 @@ impl PgDbReadiness {
             PoolReadiness::Down => READINESS_DOWN,
         };
         self.0.store(v, Ordering::Release);
+        metrics::gauge!("pg_readiness_up").set(if r == PoolReadiness::Down { 0.0 } else { 1.0 });
+    }
+}
+
+/// Read-only runtime RLS attestation state.
+///
+/// Production construction and mutation remain private to the verified PostgreSQL bundle and its
+/// single runtime monitor. Consumers can only take a synchronous snapshot for readyz.
+pub struct PgRlsReadiness(AtomicBool);
+
+impl PgRlsReadiness {
+    pub(crate) fn verified() -> Self {
+        metrics::gauge!("pg_rls_attestation_up").set(1.0);
+        Self(AtomicBool::new(true))
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    #[must_use]
+    pub fn for_test(ready: bool) -> Self {
+        metrics::gauge!("pg_rls_attestation_up").set(if ready { 1.0 } else { 0.0 });
+        Self(AtomicBool::new(ready))
+    }
+
+    #[must_use]
+    pub fn is_ready(&self) -> bool {
+        self.0.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn mark(&self, ready: bool) {
+        self.0.store(ready, Ordering::Release);
+        metrics::gauge!("pg_rls_attestation_up").set(if ready { 1.0 } else { 0.0 });
     }
 }
 
@@ -138,7 +264,7 @@ fn log_readiness_transition(
 /// **状态转移日志**：仅在状态转移时记日志（`Down`/`Saturated` → warn，`Ready` 恢复 → info；由 [`log_readiness_transition`] 负责）。
 ///
 /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：spawn 仪式收口进
-/// [`crate::PgReadinessSamplerFactory::spawn`]。
+/// [`crate::PgRuntimeMonitorFactory::spawn`]。
 pub(crate) async fn pg_readiness_sampling_loop(
     writer_store: Arc<PgStore>,
     reader_store: Arc<PgStore>,
@@ -148,12 +274,16 @@ pub(crate) async fn pg_readiness_sampling_loop(
     health: Arc<PgDbReadiness>,
 ) {
     let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut last: Option<(PoolReadiness, PoolReadiness)> = None;
     let mut last_registry: Option<PoolReadiness> = None;
     loop {
         tokio::select! {
             biased;
-            () = token.cancelled() => break,
+            () = token.cancelled() => {
+                health.mark(PoolReadiness::Down);
+                break;
+            },
             _ = ticker.tick() => {
                 let (writer, reader) = tokio::join!(
                     writer_store.probe_db_liveness(),
@@ -181,6 +311,233 @@ pub(crate) async fn pg_readiness_sampling_loop(
                 }
                 last = Some((writer, reader));
                 health.mark(cur);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RlsAttestationLane {
+    Writer,
+    Reader,
+}
+
+impl RlsAttestationLane {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Writer => "writer",
+            Self::Reader => "reader",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RlsAttestationReason {
+    Timeout,
+    ProbeError,
+    Role,
+    Privileges,
+    TenantCatalog,
+    Guc,
+}
+
+impl RlsAttestationReason {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::ProbeError => "probe-error",
+            Self::Role => "role",
+            Self::Privileges => "privileges",
+            Self::TenantCatalog => "tenant-catalog",
+            Self::Guc => "guc",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct RlsAttestationFailure {
+    lane: RlsAttestationLane,
+    reason: RlsAttestationReason,
+    offender_tables: Option<Vec<String>>,
+}
+
+impl RlsAttestationFailure {
+    const fn key(&self) -> (RlsAttestationLane, RlsAttestationReason) {
+        (self.lane, self.reason)
+    }
+}
+
+fn classify_rls_error(error: crate::PgError) -> RlsAttestationFailure {
+    use crate::PgError;
+    let (reason, offender_tables) = match error {
+        PgError::RlsCapability(_) | PgError::TenantReadCapability(_) => {
+            (RlsAttestationReason::ProbeError, None)
+        }
+        PgError::RlsUnexpectedServingRole
+        | PgError::WriterRoleAttributes
+        | PgError::WriterMembership
+        | PgError::WriterOwnership
+        | PgError::TenantReadUnexpectedRole
+        | PgError::TenantReadRoleAttributes
+        | PgError::TenantReadMembership
+        | PgError::TenantReadOwnership
+        | PgError::TenantReadDefaultTransaction
+        | PgError::TenantReadSearchPath => (RlsAttestationReason::Role, None),
+        PgError::WriterPrivileges { .. }
+        | PgError::WriterDefaultPrivileges { .. }
+        | PgError::TenantReadDatabasePrivileges
+        | PgError::TenantReadRelationPrivileges
+        | PgError::TenantReadDefaultPrivileges { .. }
+        | PgError::TenantReadSequencePrivileges
+        | PgError::TenantReadSchemaPrivileges
+        | PgError::TenantReadFunctionPrivileges { .. }
+        | PgError::TenantReadFunctionDefinition { .. }
+        | PgError::TenantReadLargeObjectMutatorPrivileges
+        | PgError::TenantReadLargeObjectPrivileges
+        | PgError::TenantReadLargeObjectCompatibility
+        | PgError::TenantReadParameterPrivileges => (RlsAttestationReason::Privileges, None),
+        PgError::RlsGucRoundtrip => (RlsAttestationReason::Guc, None),
+        PgError::RlsNoTenantTables => (RlsAttestationReason::TenantCatalog, None),
+        PgError::RlsNotEnforced { offenders } => {
+            (RlsAttestationReason::TenantCatalog, Some(offenders))
+        }
+        _ => (RlsAttestationReason::ProbeError, None),
+    };
+    RlsAttestationFailure {
+        lane: RlsAttestationLane::Writer,
+        reason,
+        offender_tables,
+    }
+}
+
+async fn attest_rls_lane(
+    lane: RlsAttestationLane,
+    store: &PgStore,
+    deadline: tokio::time::Instant,
+) -> Result<(), RlsAttestationFailure> {
+    let probe_deadline = crate::pool::PgCapabilityProbeDeadline::new(deadline);
+    let probe = quietly(async {
+        match lane {
+            RlsAttestationLane::Writer => store.verify_rls_capability_until(probe_deadline).await,
+            RlsAttestationLane::Reader => {
+                store
+                    .verify_tenant_read_capability_until(probe_deadline)
+                    .await
+            }
+        }
+    });
+    match tokio::time::timeout_at(deadline, probe).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => {
+            let mut failure = classify_rls_error(error);
+            failure.lane = lane;
+            Err(failure)
+        }
+        Err(_) => Err(RlsAttestationFailure {
+            lane,
+            reason: RlsAttestationReason::Timeout,
+            offender_tables: None,
+        }),
+    }
+}
+
+async fn quietly<F: std::future::Future>(future: F) -> F::Output {
+    let dispatch = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    tokio::pin!(future);
+    std::future::poll_fn(|context| {
+        tracing::dispatcher::with_default(&dispatch, || future.as_mut().poll(context))
+    })
+    .await
+}
+
+async fn attest_rls_capabilities(
+    writer_store: &PgStore,
+    reader_store: &PgStore,
+) -> Result<(), RlsAttestationFailure> {
+    // This deadline controls Tokio cancellation and the matching PostgreSQL
+    // transaction-local timeouts; it is not business time and has no Clock seam.
+    #[allow(clippy::disallowed_methods)]
+    let deadline = tokio::time::Instant::now() + RLS_ATTESTATION_TIMEOUT;
+    let writer = attest_rls_lane(RlsAttestationLane::Writer, writer_store, deadline);
+    let reader = attest_rls_lane(RlsAttestationLane::Reader, reader_store, deadline);
+    tokio::pin!(writer, reader);
+    tokio::select! {
+        writer_result = &mut writer => {
+            writer_result?;
+            reader.await
+        }
+        reader_result = &mut reader => {
+            reader_result?;
+            writer.await
+        }
+    }
+}
+
+fn apply_rls_attestation(
+    health: &PgRlsReadiness,
+    outcome: Result<(), RlsAttestationFailure>,
+    last_failure: &mut Option<(RlsAttestationLane, RlsAttestationReason)>,
+) {
+    match outcome {
+        Ok(()) => {
+            health.mark(true);
+            if last_failure.take().is_some() {
+                tracing::info!(target: "postgres", "postgres RLS attestation recovered");
+            }
+        }
+        Err(failure) => {
+            health.mark(false);
+            let key = failure.key();
+            if *last_failure != Some(key) {
+                if let Some(offenders) = failure.offender_tables {
+                    tracing::error!(
+                        target: "postgres",
+                        lane = failure.lane.as_label(),
+                        reason = failure.reason.as_label(),
+                        tables = %offenders.join(","),
+                        "postgres RLS attestation degraded"
+                    );
+                } else {
+                    tracing::error!(
+                        target: "postgres",
+                        lane = failure.lane.as_label(),
+                        reason = failure.reason.as_label(),
+                        "postgres RLS attestation degraded"
+                    );
+                }
+                *last_failure = Some(key);
+            }
+        }
+    }
+}
+
+pub(crate) async fn pg_rls_attestation_loop(
+    writer_store: Arc<PgStore>,
+    reader_store: Arc<PgStore>,
+    period: Duration,
+    token: CancellationToken,
+    health: Arc<PgRlsReadiness>,
+) {
+    let mut last_failure = None;
+    let mut ticker = tokio::time::interval(period);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => {
+                health.mark(false);
+                break;
+            },
+            _ = ticker.tick() => {
+                let outcome = tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        health.mark(false);
+                        break;
+                    },
+                    outcome = attest_rls_capabilities(&writer_store, &reader_store) => outcome,
+                };
+                apply_rls_attestation(&health, outcome, &mut last_failure);
             }
         }
     }
@@ -262,64 +619,129 @@ fn worst_readiness(writer: PoolReadiness, reader: PoolReadiness) -> PoolReadines
     }
 }
 
-// ── PgReadinessSampler ─────────────────────────────────────────────────────────
+// ── PgRuntimeMonitor ───────────────────────────────────────────────────────────
+
+#[derive(Debug, thiserror::Error)]
+#[error("postgres runtime monitor lane exited unexpectedly")]
+struct MonitorLaneExited;
+
+fn mark_monitor_down(readiness: &PgDbReadiness, rls_readiness: &PgRlsReadiness) {
+    readiness.mark(PoolReadiness::Down);
+    rls_readiness.mark(false);
+}
+
+fn monitor_join_error(error: tokio::task::JoinError) -> diport::ShutdownError {
+    let error = diport::ShutdownError::from_join_error(error);
+    tracing::error!(
+        target: "postgres",
+        reason = error.kind().as_str(),
+        "postgres runtime monitor lane terminated abnormally"
+    );
+    error
+}
+
+pub(crate) async fn supervise_runtime_monitor(
+    mut readiness_task: JoinHandle<()>,
+    mut rls_task: JoinHandle<()>,
+    token: CancellationToken,
+    readiness: Arc<PgDbReadiness>,
+    rls_readiness: Arc<PgRlsReadiness>,
+) -> Result<(), diport::ShutdownError> {
+    tokio::select! {
+        biased;
+        () = token.cancelled() => {
+            mark_monitor_down(&readiness, &rls_readiness);
+            let (readiness_result, rls_result) = tokio::join!(readiness_task, rls_task);
+            readiness_result.map_err(monitor_join_error)?;
+            rls_result.map_err(monitor_join_error)?;
+            Ok(())
+        }
+        readiness_result = &mut readiness_task => {
+            mark_monitor_down(&readiness, &rls_readiness);
+            token.cancel();
+            rls_task.abort();
+            let _ = rls_task.await;
+            if let Err(error) = readiness_result {
+                return Err(monitor_join_error(error));
+            }
+            tracing::error!(target: "postgres", lane = "readiness", reason = "task-exited", "postgres runtime monitor lane terminated abnormally");
+            Err(diport::ShutdownError::new(MonitorLaneExited))
+        }
+        rls_result = &mut rls_task => {
+            mark_monitor_down(&readiness, &rls_readiness);
+            token.cancel();
+            readiness_task.abort();
+            let _ = readiness_task.await;
+            if let Err(error) = rls_result {
+                return Err(monitor_join_error(error));
+            }
+            tracing::error!(target: "postgres", lane = "rls", reason = "task-exited", "postgres runtime monitor lane terminated abnormally");
+            Err(diport::ShutdownError::new(MonitorLaneExited))
+        }
+    }
+}
 
 /// DB liveness 采样 adopt 式 worker（impl `diport::ManagedResource`）。
 ///
-/// 持已 spawn 的 `JoinHandle<()>` + `Arc<PgDbReadiness>` + `CancellationToken`；
+/// 持已 spawn 的 typed supervisor + `Arc<PgDbReadiness>` + `CancellationToken`；
 /// `shutdown` 两阶段关闭：cancel token（幂等）→ await handle 收敛。
 ///
 /// adopt 式：先在具体类型处 `tokio::spawn(pg_readiness_sampling_loop(...))` 再调
-/// [`PgReadinessSampler::adopt`]，与 `relay.rs` 中 `RelayWorker::adopt` 同范式。
+/// [`PgRuntimeMonitor::adopt`]，与 `relay.rs` 中 `RelayWorker::adopt` 同范式。
 ///
 /// `PgStore` 在 `adapters/postgres` 下 impl `ManagedResource` 无需 `#[allow]`——
-/// `PgReadinessSampler` 同理：dylint `rss_diport_impl_allowlist` 按 manifest
+/// `PgRuntimeMonitor` 同理：dylint `rss_diport_impl_allowlist` 按 manifest
 /// 父目录 (`adapters/`) 自动放行。
-pub struct PgReadinessSampler {
-    inner: tokio::sync::Mutex<Option<diport::OwnedTask<()>>>,
-    health: Arc<PgDbReadiness>,
+pub struct PgRuntimeMonitor {
+    inner: tokio::sync::Mutex<Option<diport::OwnedTask<Result<(), diport::ShutdownError>>>>,
+    readiness: Arc<PgDbReadiness>,
+    rls_readiness: Arc<PgRlsReadiness>,
     token: CancellationToken,
 }
 
-impl PgReadinessSampler {
+impl PgRuntimeMonitor {
     /// 先 `tokio::spawn(pg_readiness_sampling_loop(具体 store, ...))` 再 adopt。
     ///
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：仅由
-    /// [`crate::PgReadinessSamplerFactory::spawn`] 收口调用。
+    /// [`crate::PgRuntimeMonitorFactory::spawn`] 收口调用。
     pub(crate) fn adopt(
-        handle: JoinHandle<()>,
-        health: Arc<PgDbReadiness>,
+        handle: JoinHandle<Result<(), diport::ShutdownError>>,
+        readiness: Arc<PgDbReadiness>,
+        rls_readiness: Arc<PgRlsReadiness>,
         token: CancellationToken,
     ) -> Self {
         Self {
             inner: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            health,
+            readiness,
+            rls_readiness,
             token,
         }
     }
 
     /// 返回 liveness 状态句柄。
     ///
-    /// 当外部已 adopt `PgReadinessSampler` 且需从 sampler 反取 `Arc<PgDbReadiness>` 时用；
+    /// 当外部已 adopt `PgRuntimeMonitor` 且需从 monitor 反取 `Arc<PgDbReadiness>` 时用；
     /// 组合根直接持有 `Arc<PgDbReadiness>` 时无需调此方法。
     pub fn readiness_handle(&self) -> Arc<PgDbReadiness> {
-        self.health.clone()
+        self.readiness.clone()
     }
 }
 
-impl diport::ManagedResource for PgReadinessSampler {
+impl diport::ManagedResource for PgRuntimeMonitor {
     fn name(&self) -> &str {
-        SAMPLER_WORKER_NAME
+        MONITOR_WORKER_NAME
     }
 
     async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+        self.readiness.mark(PoolReadiness::Down);
+        self.rls_readiness.mark(false);
         // 防御性 cancel（幂等；生产中 ShutdownStack 已先 cancel，此处兜底防 test/误用 hang）。
         self.token.cancel();
         // await loop 收敛——保证 worker 在 pool 之前停（LIFO 由组合根注册顺序保证）。
         if let Some(h) = self.inner.lock().await.take() {
             h.join()
                 .await
-                .map_err(diport::ShutdownError::from_join_error)?;
+                .map_err(diport::ShutdownError::from_join_error)??;
         }
         Ok(())
     }
@@ -339,7 +761,7 @@ mod tests {
     use crate::PgStore;
     use crate::pool::PoolReadiness;
 
-    use super::{PgDbReadiness, PgReadinessSampler, pg_readiness_sampling_loop};
+    use super::{PgDbReadiness, PgRlsReadiness, PgRuntimeMonitor, pg_readiness_sampling_loop};
 
     // ── 辅助：构造已关闭 lazy pool 的 PgStore（不连 DB）────────────────────────
 
@@ -534,30 +956,41 @@ mod tests {
         token.cancel();
         // biased cancel 优先——loop 应立即 break，task 正常完成。
         assert!(handle.await.is_ok(), "cancel 后 loop 应退出");
+        assert_eq!(health.snapshot(), PoolReadiness::Down);
     }
 
-    // ── PgReadinessSampler shutdown ──────────────────────────────────────────
+    // ── PgRuntimeMonitor shutdown ────────────────────────────────────────────
 
     #[tokio::test]
-    async fn sampler_shutdown_cancels_and_joins() {
+    async fn monitor_shutdown_cancels_and_joins() {
         let store = Arc::new(make_closed_store().await);
         let health = Arc::new(PgDbReadiness::new());
         let token = CancellationToken::new();
 
-        let handle = tokio::spawn(pg_readiness_sampling_loop(
-            Arc::clone(&store),
-            Arc::clone(&store),
-            None,
-            Duration::from_secs(3600),
-            token.clone(),
-            Arc::clone(&health),
-        ));
+        let task_store = Arc::clone(&store);
+        let task_health = Arc::clone(&health);
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            pg_readiness_sampling_loop(
+                Arc::clone(&task_store),
+                task_store,
+                None,
+                Duration::from_secs(3600),
+                task_token,
+                task_health,
+            )
+            .await;
+            Ok(())
+        });
 
-        let sampler = PgReadinessSampler::adopt(handle, Arc::clone(&health), token);
+        let rls = Arc::new(PgRlsReadiness::for_test(true));
+        let monitor = PgRuntimeMonitor::adopt(handle, Arc::clone(&health), Arc::clone(&rls), token);
         assert!(
-            sampler.shutdown().await.is_ok(),
-            "PgReadinessSampler::shutdown 应返回 Ok"
+            monitor.shutdown().await.is_ok(),
+            "PgRuntimeMonitor::shutdown 应返回 Ok"
         );
+        assert_eq!(health.snapshot(), PoolReadiness::Down);
+        assert!(!rls.is_ready());
     }
 
     #[tokio::test]
@@ -568,27 +1001,147 @@ mod tests {
         // 立即取消——loop biased 分支首先触发，task 不等 tick 就退出。
         token.cancel();
 
-        let handle = tokio::spawn(pg_readiness_sampling_loop(
-            Arc::clone(&store),
-            Arc::clone(&store),
-            None,
-            Duration::from_secs(3600),
-            token.clone(),
-            Arc::clone(&health),
-        ));
+        let task_store = Arc::clone(&store);
+        let task_health = Arc::clone(&health);
+        let task_token = token.clone();
+        let handle = tokio::spawn(async move {
+            pg_readiness_sampling_loop(
+                Arc::clone(&task_store),
+                task_store,
+                None,
+                Duration::from_secs(3600),
+                task_token,
+                task_health,
+            )
+            .await;
+            Ok(())
+        });
 
-        let sampler = PgReadinessSampler::adopt(handle, Arc::clone(&health), token);
-        let returned = sampler.readiness_handle();
+        let monitor = PgRuntimeMonitor::adopt(
+            handle,
+            Arc::clone(&health),
+            Arc::new(PgRlsReadiness::for_test(true)),
+            token,
+        );
+        let returned = monitor.readiness_handle();
         assert!(
             Arc::ptr_eq(&health, &returned),
             "readiness_handle 应返回同一 Arc<PgDbReadiness>"
         );
-        assert!(sampler.shutdown().await.is_ok());
+        assert!(monitor.shutdown().await.is_ok());
     }
 
     #[test]
-    fn sampler_name_is_stable() {
-        // INVARIANT: SAMPLER-NAME-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— name 常量用于 ShutdownStack 日志，不可随意改变。
-        assert_eq!(super::SAMPLER_WORKER_NAME, "pg-readiness-sampler");
+    fn monitor_name_is_stable() {
+        // INVARIANT: MONITOR-NAME-01 { level = "Medium", exec = "manual/opt-in", source = "code" }— name 常量用于 ShutdownStack 日志，不可随意改变。
+        assert_eq!(super::MONITOR_WORKER_NAME, "pg-runtime-monitor");
+    }
+
+    #[test]
+    fn typed_intervals_enforce_distinct_ranges() {
+        assert!(super::PgReadinessInterval::try_new(Duration::from_secs(1)).is_ok());
+        assert!(super::PgReadinessInterval::try_new(Duration::from_secs(301)).is_err());
+        assert!(super::PgRlsAttestationInterval::try_new(Duration::from_secs(10)).is_ok());
+        assert!(super::PgRlsAttestationInterval::try_new(Duration::from_secs(9)).is_err());
+    }
+
+    #[test]
+    fn rls_attestation_fails_closed_and_recovers_atomically() {
+        let health = PgRlsReadiness::for_test(true);
+        let mut last = None;
+        let failure = super::RlsAttestationFailure {
+            lane: super::RlsAttestationLane::Reader,
+            reason: super::RlsAttestationReason::Privileges,
+            offender_tables: None,
+        };
+        super::apply_rls_attestation(&health, Err(failure), &mut last);
+        assert!(!health.is_ready());
+        let key = (
+            super::RlsAttestationLane::Reader,
+            super::RlsAttestationReason::Privileges,
+        );
+        assert_eq!(last, Some(key));
+        super::apply_rls_attestation(
+            &health,
+            Err(super::RlsAttestationFailure {
+                lane: key.0,
+                reason: key.1,
+                offender_tables: None,
+            }),
+            &mut last,
+        );
+        assert_eq!(last, Some(key));
+        super::apply_rls_attestation(&health, Ok(()), &mut last);
+        assert!(health.is_ready());
+        assert_eq!(last, None);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::panic)]
+    async fn monitor_supervisor_fails_closed_when_a_lane_panics() {
+        let readiness = Arc::new(PgDbReadiness::new());
+        readiness.mark(PoolReadiness::Ready);
+        let rls = Arc::new(PgRlsReadiness::for_test(true));
+        let token = CancellationToken::new();
+        let readiness_task = tokio::spawn(async { panic!("synthetic monitor lane panic") });
+        let rls_task = tokio::spawn(std::future::pending());
+
+        let result = super::supervise_runtime_monitor(
+            readiness_task,
+            rls_task,
+            token,
+            Arc::clone(&readiness),
+            Arc::clone(&rls),
+        )
+        .await;
+
+        assert!(matches!(
+            result,
+            Err(ref error) if error.kind() == diport::ShutdownErrorKind::TaskPanicked
+        ));
+        assert_eq!(readiness.snapshot(), PoolReadiness::Down);
+        assert!(!rls.is_ready());
+    }
+
+    #[test]
+    fn readiness_and_rls_gauges_are_unlabelled_and_overwrite_current_state() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let db = PgDbReadiness::new();
+            db.mark(PoolReadiness::Ready);
+            db.mark(PoolReadiness::Saturated);
+            let rls = PgRlsReadiness::for_test(false);
+            rls.mark(true);
+            assert_eq!(db.snapshot(), PoolReadiness::Saturated);
+            assert!(rls.is_ready());
+        });
+        let rendered = handle.render();
+        let data_lines: Vec<_> = rendered
+            .lines()
+            .filter(|line| !line.starts_with('#') && !line.is_empty())
+            .collect();
+        assert_eq!(
+            data_lines
+                .iter()
+                .filter(|line| line.starts_with("pg_readiness_up "))
+                .count(),
+            1,
+            "{rendered}"
+        );
+        assert!(rendered.contains("pg_readiness_up 1"), "{rendered}");
+        assert_eq!(
+            data_lines
+                .iter()
+                .filter(|line| line.starts_with("pg_rls_attestation_up "))
+                .count(),
+            1,
+            "{rendered}"
+        );
+        assert!(rendered.contains("pg_rls_attestation_up 1"), "{rendered}");
+        assert!(
+            !rendered.contains('{'),
+            "gauges must have no labels: {rendered}"
+        );
     }
 }

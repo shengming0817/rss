@@ -1,0 +1,27 @@
+error[E0423]: cannot initialize a tuple struct which contains private fields
+ --> tests/ui/pg_rls_readiness_forge_fail.rs:5:22
+  |
+5 |     let _readiness = PgRlsReadiness(AtomicBool::new(true));
+  |                      ^^^^^^^^^^^^^^
+  |
+note: constructor is not visible here due to private fields
+ --> src/readiness.rs
+  |
+  | pub struct PgRlsReadiness(AtomicBool);
+  |                           ^^^^^^^^^^ private field
+help: you might have meant to use the `verified` associated function
+  |
+5 -     let _readiness = PgRlsReadiness(AtomicBool::new(true));
+5 +     let _readiness = PgRlsReadiness::verified();
+  |
+
+error[E0624]: method `mark` is private
+ --> tests/ui/pg_rls_readiness_forge_fail.rs:9:15
+  |
+9 |     readiness.mark(false);
+  |               ^^^^ private method
+  |
+ ::: src/readiness.rs
+  |
+  |     pub(crate) fn mark(&self, ready: bool) {
+  |     -------------------------------------- private method defined here

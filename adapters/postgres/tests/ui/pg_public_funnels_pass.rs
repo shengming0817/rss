@@ -1,6 +1,7 @@
 use postgres::{
     DlxPayloadProtector, PgConfig, PgProjectionOperatorConfig, PgProjectionOperatorDeps,
-    PgProjectionSourceReadConfig, PgRuntimeDeps, PgRuntimeHandle, PgTenantReadConfig,
+    PgProjectionSourceReadConfig, PgReadinessInterval, PgRlsAttestationInterval, PgRuntimeDeps,
+    PgRuntimeHandle, PgRuntimeMonitorConfig, PgTenantReadConfig,
 };
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,13 +10,17 @@ fn runtime_capabilities_are_available(handle: &PgRuntimeHandle) {
     let _: PgRuntimeHandle = handle.clone();
     let _ = handle.infra();
     let _ = handle.readiness_handle();
-    let _ = handle.rls_ready_handle();
+    let _ = handle.rls_readiness();
 }
 
 fn runtime_owner_has_one_lifecycle_exit(deps: PgRuntimeDeps) {
     let handle = deps.handle();
     runtime_capabilities_are_available(&handle);
-    let (_resources, factory) = deps.into_runtime_parts(Duration::from_secs(1));
+    let config = PgRuntimeMonitorConfig::new(
+        PgReadinessInterval::try_new(Duration::from_secs(1)).expect("interval"),
+        PgRlsAttestationInterval::default(),
+    );
+    let (_resources, factory) = deps.into_runtime_parts(config);
     let _ = factory.spawn(tokio_util::sync::CancellationToken::new());
 }
 

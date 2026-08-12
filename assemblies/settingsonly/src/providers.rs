@@ -159,7 +159,12 @@ pub(crate) async fn build(
         readiness: pg_readiness,
     } = build_postgres(postgres, &secrets, projection_capture).await?;
     let pg_handle = pg.handle();
-    let (pg_resources, pg_sampler) = pg.into_runtime_parts(pg_readiness);
+    let monitor_config = postgres::PgRuntimeMonitorConfig::new(
+        postgres::PgReadinessInterval::try_new(pg_readiness)
+            .expect("settingsonly postgres readiness interval"),
+        postgres::PgRlsAttestationInterval::default(),
+    );
+    let (pg_resources, pg_monitor) = pg.into_runtime_parts(monitor_config);
     let (mut pg_resources, pg_activations) = stage_postgres_resources(transaction, pg_resources);
     let cas_resource = pg_resources
         .pop()
@@ -170,7 +175,7 @@ pub(crate) async fn build(
         .workers
         .push(bootstrap::WorkerSpec::observational_phase_one(
             "assemblies.settingsonly.src.providers.01",
-            move |token| DynManagedResource::new_box(pg_sampler.spawn(token)),
+            move |token| DynManagedResource::new_box(pg_monitor.spawn(token)),
         ));
     let audit_sink = httpserve::AuditSinkHandle::new(pg_handle.auth_audit_sink());
 
@@ -192,6 +197,15 @@ pub(crate) async fn build(
     let (settings_readiness, postgres_readiness) =
         pending_readiness.bind_postgres(pg_handle.readiness_handle())?;
     pg_output.merge(postgres_readiness.into_output());
+    let rls_probe_name = primitives::ProbeName::parse(crate::readiness::RLS)
+        .context("parse settingsonly rls_ready probe name")?;
+    pg_output.probes.push((
+        rls_probe_name.clone(),
+        Box::new(RlsReadyProbe {
+            name: rls_probe_name,
+            readiness: pg_handle.rls_readiness(),
+        }),
+    ));
     let auth_audit_sink = auth_audit_sink
         .finish(pg_output)?
         .transfer(transaction.provider_output_mut());
@@ -586,6 +600,25 @@ async fn build_redis(
 struct RedisReadyProbe {
     name: primitives::ProbeName,
     ready: Arc<AtomicBool>,
+}
+
+struct RlsReadyProbe {
+    name: primitives::ProbeName,
+    readiness: Arc<postgres::PgRlsReadiness>,
+}
+
+impl bootstrap::HealthProbe for RlsReadyProbe {
+    fn check(&self) -> primitives::HealthCheck {
+        let (status, detail) = if self.readiness.is_ready() {
+            (primitives::HealthStatus::Healthy, "ready")
+        } else {
+            (
+                primitives::HealthStatus::Unhealthy,
+                "attestation-unverified",
+            )
+        };
+        primitives::HealthCheck::new(self.name.clone(), status, detail)
+    }
 }
 
 impl bootstrap::HealthProbe for RedisReadyProbe {
@@ -1407,6 +1440,18 @@ mod tests {
             .await
             .expect("shutdown federated verifier");
         std::fs::remove_dir_all(root).expect("cleanup");
+    }
+
+    #[test]
+    fn rls_ready_probe_is_fail_closed_with_unverified_detail() {
+        let probe = RlsReadyProbe {
+            name: primitives::ProbeName::parse(crate::readiness::RLS).expect("valid probe name"),
+            readiness: Arc::new(postgres::PgRlsReadiness::for_test(false)),
+        };
+
+        let unhealthy = bootstrap::HealthProbe::check(&probe);
+        assert_eq!(unhealthy.status(), primitives::HealthStatus::Unhealthy);
+        assert_eq!(unhealthy.detail(), "attestation-unverified");
     }
 
     #[tokio::test]

@@ -6,7 +6,7 @@
 //! Private one-shot permits join the generated catalog to `RuntimePlan`; the consuming transaction
 //! prevents construction receipts or lifecycle ownership from leaking back into adapter crates.
 //!
-//! INVARIANT: PG-RUNTIME-OUTPUT-03 { level = "Hard", exec = "native-compile", source = "code", native = "private PgReadinessSamplerFactory fields and consuming spawn self; owned PgRuntimeDeps conversion into the existing DomainModuleResult output" }
+//! INVARIANT: PG-RUNTIME-OUTPUT-03 { level = "Hard", exec = "native-compile", source = "code", native = "private PgRuntimeMonitorFactory fields, mandatory typed liveness plus RLS schedule, and consuming spawn self; owned PgRuntimeDeps conversion into the existing DomainModuleResult output" }
 //!
 //! `ref: oxidecomputer/omicron nexus/src/context.rs@8eb92537bd12598dfd2c861f897a88962fabf684`
 
@@ -33,16 +33,16 @@ const IDENTITY_SIGNER_READINESS_WORKER: &str = "identity-signer-readiness";
 /// Consumes the postgres lifecycle owner into the runtime's sole lifecycle output type.
 pub(crate) fn build_pg_runtime_module(
     owner: PgRuntimeDeps,
-    period: Duration,
+    config: postgres::PgRuntimeMonitorConfig,
 ) -> DomainModuleResult {
-    let (resources, sampler_factory) = owner.into_runtime_parts(period);
-    let readiness_sampler = WorkerSpec::observational_phase_one(
+    let (resources, monitor_factory) = owner.into_runtime_parts(config);
+    let runtime_monitor = WorkerSpec::observational_phase_one(
         "assemblies.runtime.src.provider_output.01",
-        move |token| DynManagedResource::new_box(sampler_factory.spawn(token)),
+        move |token| DynManagedResource::new_box(monitor_factory.spawn(token)),
     );
     DomainModuleResult {
         resources,
-        workers: vec![readiness_sampler],
+        workers: vec![runtime_monitor],
         ..DomainModuleResult::default()
     }
 }
@@ -1789,20 +1789,20 @@ mod tests {
     }
 
     #[test]
-    fn pg_runtime_module_keeps_guards_before_sampler_channel() {
+    fn pg_runtime_module_keeps_guards_before_monitor_channel() {
         fn assert_builder(
-            _: fn(postgres::PgRuntimeDeps, std::time::Duration) -> DomainModuleResult,
+            _: fn(postgres::PgRuntimeDeps, postgres::PgRuntimeMonitorConfig) -> DomainModuleResult,
         ) {
         }
         assert_builder(build_pg_runtime_module);
         let output = DomainModuleResult {
             resources: vec![resource("postgres")],
-            workers: vec![worker("postgres-readiness-sampler")],
+            workers: vec![worker("pg-runtime-monitor")],
             ..DomainModuleResult::default()
         };
 
         assert_eq!(resource_names(&output), ["postgres"]);
-        assert_eq!(worker_names(output), ["postgres-readiness-sampler"]);
+        assert_eq!(worker_names(output), ["pg-runtime-monitor"]);
     }
 
     #[test]

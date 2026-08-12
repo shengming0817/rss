@@ -997,7 +997,11 @@ pub(in super::super) fn revocation_serial(bytes: &[u8]) -> diport::CertSerial {
 }
 
 pub(in super::super) async fn shutdown_runtime_deps(deps: PgRuntimeDeps) -> TestResult {
-    let (resources, _sampler_factory) = deps.into_runtime_parts(std::time::Duration::from_secs(1));
+    let config = crate::PgRuntimeMonitorConfig::new(
+        crate::PgReadinessInterval::try_new(std::time::Duration::from_secs(1)).expect("interval"),
+        crate::PgRlsAttestationInterval::default(),
+    );
+    let (resources, _sampler_factory) = deps.into_runtime_parts(config);
     for resource in resources.into_iter().rev() {
         resource.shutdown().await?;
     }

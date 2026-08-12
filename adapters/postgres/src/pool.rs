@@ -121,7 +121,7 @@ pub enum PgError {
     /// RLS 能力门：发现含 `tenant_id` 列却未 FORCE RLS / 缺 policy 的 tenant 表（fail-closed，拒绝启动）。
     /// 具体表名经 `tracing::error!` 输出（PII 边界：Display 仅 const literal）。
     #[error("postgres tenant table missing FORCE RLS or policy")]
-    RlsNotEnforced,
+    RlsNotEnforced { offenders: Vec<String> },
     /// RLS 能力门 anti-vacuity：durable 模式下未发现任何 tenant 表（schema 未迁移 / 库不符预期）。
     #[error("postgres rls capability: no tenant tables found")]
     RlsNoTenantTables,
@@ -1821,6 +1821,45 @@ WHERE n.nspname = 'public' AND c.relkind IN ('r', 'p') \
   AND EXISTS (SELECT 1 FROM pg_attribute a \
               WHERE a.attrelid = c.oid AND a.attname = 'tenant_id' AND NOT a.attisdropped)";
 
+#[derive(Clone, Copy)]
+pub(crate) struct PgCapabilityProbeDeadline(tokio::time::Instant);
+
+impl PgCapabilityProbeDeadline {
+    pub(crate) const fn new(value: tokio::time::Instant) -> Self {
+        Self(value)
+    }
+
+    fn server_timeout_millis(self) -> (u128, u128) {
+        // Runtime capability deadlines are monotonic Tokio instants; this local
+        // residual-budget calculation is the same boundary used by tx_retry.
+        #[allow(clippy::disallowed_methods)]
+        let remaining = self
+            .0
+            .saturating_duration_since(tokio::time::Instant::now());
+        let statement = remaining.as_millis().saturating_sub(100).max(1);
+        let lock = statement.saturating_sub(100).max(1);
+        (statement, lock)
+    }
+}
+
+pub(crate) async fn set_local_capability_probe_deadlines(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    deadline: PgCapabilityProbeDeadline,
+    map_probe: fn(sqlx::Error) -> PgError,
+) -> Result<(), PgError> {
+    let (statement_timeout_ms, lock_timeout_ms) = deadline.server_timeout_millis();
+    sqlx::query(
+        "SELECT set_config('statement_timeout', $1, true), \
+                set_config('lock_timeout', $2, true)",
+    )
+    .bind(format!("{statement_timeout_ms}ms"))
+    .bind(format!("{lock_timeout_ms}ms"))
+    .execute(&mut **tx)
+    .await
+    .map_err(map_probe)?;
+    Ok(())
+}
+
 impl PgStore {
     /// durable 启动 RLS 能力门（schema 门控，**fail-fast**：缺能力即拒绝启动）。
     ///
@@ -1839,8 +1878,25 @@ impl PgStore {
     /// `ref: oxidecomputer/omicron nexus/db-queries/src/db/datastore/mod.rs@14d89dca`）。偏离：RSS 迁移在
     /// 独立 `run_migrations` 步、不并入本校验的 retry 环。仅供 [`crate::PgRuntimeDeps::setup`] 调用。
     pub(crate) async fn verify_rls_capability(&self) -> Result<(), PgError> {
+        self.verify_rls_capability_inner(None).await
+    }
+
+    pub(crate) async fn verify_rls_capability_until(
+        &self,
+        deadline: PgCapabilityProbeDeadline,
+    ) -> Result<(), PgError> {
+        self.verify_rls_capability_inner(Some(deadline)).await
+    }
+
+    async fn verify_rls_capability_inner(
+        &self,
+        deadline: Option<PgCapabilityProbeDeadline>,
+    ) -> Result<(), PgError> {
         // 直线编排：各段校验为低复杂度 helper（任一 Err 经 `?` 冒泡，tx drop 即 rollback 自检事务）。
         let mut tx = self.pool.begin().await.map_err(PgError::RlsCapability)?;
+        if let Some(deadline) = deadline {
+            set_local_capability_probe_deadlines(&mut tx, deadline, PgError::RlsCapability).await?;
+        }
         ensure_serving_role(&mut tx).await?; // 0. 连接角色必须为 rss_app 且不绕过 RLS（最先 fail-fast）
         verify_tenant_guc_roundtrip(&mut tx, PgError::RlsCapability).await?; // 1. GUC roundtrip
         ensure_tenant_tables_present(&mut tx, PgError::RlsCapability).await?; // 2. anti-vacuity
@@ -1857,11 +1913,30 @@ impl PgStore {
     /// relation SELECT, no sequence/function/schema-create privileges, default read-only enabled,
     /// and the same tenant GUC/FORCE-RLS policy closure used by the writer lane.
     pub(crate) async fn verify_tenant_read_capability(&self) -> Result<(), PgError> {
+        self.verify_tenant_read_capability_inner(None).await
+    }
+
+    pub(crate) async fn verify_tenant_read_capability_until(
+        &self,
+        deadline: PgCapabilityProbeDeadline,
+    ) -> Result<(), PgError> {
+        self.verify_tenant_read_capability_inner(Some(deadline))
+            .await
+    }
+
+    async fn verify_tenant_read_capability_inner(
+        &self,
+        deadline: Option<PgCapabilityProbeDeadline>,
+    ) -> Result<(), PgError> {
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(PgError::TenantReadCapability)?;
+        if let Some(deadline) = deadline {
+            set_local_capability_probe_deadlines(&mut tx, deadline, PgError::TenantReadCapability)
+                .await?;
+        }
         let role = load_tenant_read_role(&mut tx).await?;
         ensure_tenant_read_direct_role(&role)?;
         ensure_tenant_read_role_attributes(&role)?;
@@ -3389,7 +3464,7 @@ fn ensure_no_offenders(offenders: Vec<String>) -> Result<(), PgError> {
         tables = %offenders.join(","),
         "rls capability gate: tenant tables missing FORCE RLS / 规范 policy 或存在 allow-all permissive widening"
     );
-    Err(PgError::RlsNotEnforced)
+    Err(PgError::RlsNotEnforced { offenders })
 }
 
 /// GUC roundtrip 自检：经 funnel 注入探测租户 → `current_setting` 回显比对（不等 → `RlsGucRoundtrip`）。

@@ -1,6 +1,7 @@
 //! Closed production readiness inventory.
 
 pub(crate) const FEDERATED_JWKS: &str = "federated_access_token_jwks_ready";
+pub(crate) const RLS: &str = "rls_ready";
 pub(crate) const REDIS: &str = "settingsonly_redis_ready";
 pub(crate) const AMQP_PUBLISHER: &str = "settingsonly_amqp_publisher_ready";
 pub(crate) const AMQP_SUBSCRIBER: &str = "settingsonly_amqp_subscriber_ready";
@@ -19,7 +20,8 @@ pub(crate) const SETTINGS_PROJECTION_WORKER: &str = "projection_worker:settings.
 /// Exact required-probe closure of the production SettingsOnly assembly.
 /// Compiled only for unit tests and the `test-support` façade (artifact acceptance).
 #[cfg(any(test, feature = "test-support"))]
-pub(crate) const PRODUCTION_REQUIRED_PROBES: [&str; 17] = [
+pub(crate) const PRODUCTION_REQUIRED_PROBES: [&str; 18] = [
+    RLS,
     settings_composition::CONFIGS_READY_PROBE_NAME,
     settings_composition::KEYPROVIDER_READY_PROBE_NAME,
     settings_composition::SECRET_RESOLVER_READY_PROBE_NAME,
@@ -46,7 +48,7 @@ mod tests {
     #[test]
     fn production_required_probe_inventory_is_exact_and_unique() {
         let probes = super::PRODUCTION_REQUIRED_PROBES;
-        assert_eq!(probes.len(), 17);
-        assert_eq!(probes.into_iter().collect::<HashSet<_>>().len(), 17);
+        assert_eq!(probes.len(), 18);
+        assert_eq!(probes.into_iter().collect::<HashSet<_>>().len(), 18);
     }
 }

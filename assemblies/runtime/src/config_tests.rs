@@ -642,7 +642,7 @@ fn config_test_ca_pem_path() -> String {
 #[test]
 fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_mapping() {
     const TEST_PASSWORD_FILE: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
-    const PG_REDIS_KEYS: [&str; 36] = [
+    const PG_REDIS_KEYS: [&str; 37] = [
         "RSS_PG_HOST",
         "RSS_PG_PORT",
         "RSS_PG_DATABASE",
@@ -678,6 +678,7 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
         "RSS_PG_DLX_PURGER_PASSWORD_FILE",
         "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES",
         "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS",
+        "RSS_PG_RLS_ATTESTATION_INTERVAL_SECS",
         "RSS_REDIS_URL",
         "RSS_REDIS_CA_CERT_PEM_PATH",
         "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS",
@@ -698,6 +699,7 @@ fn runtime_infra_pg_redis_snapshot_reads_each_key_once_across_repeated_typed_map
             "RSS_PG_MAX_CONNECTIONS" | "RSS_PG_READ_MAX_CONNECTIONS" => "5",
             "RSS_PG_READINESS_SAMPLE_INTERVAL_SECS"
             | "RSS_REDIS_READINESS_SAMPLE_INTERVAL_SECS" => "7",
+            "RSS_PG_RLS_ATTESTATION_INTERVAL_SECS" => "60",
             "RSS_SETTINGS_ALLOW_LEGACY_PLAINTEXT_CONFIG_VALUES" => "false",
             key if key.ends_with("USERNAME") => "role",
             key if key.ends_with("PASSWORD") => return None,

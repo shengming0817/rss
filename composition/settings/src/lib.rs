@@ -552,7 +552,7 @@ impl bootstrap::HealthProbe for KeyProviderReadyProbe {
 fn readiness_to_health(readiness: PoolReadiness) -> (HealthStatus, &'static str) {
     match readiness {
         PoolReadiness::Ready => (HealthStatus::Healthy, "ready"),
-        PoolReadiness::Saturated => (HealthStatus::Unhealthy, "saturated"),
+        PoolReadiness::Saturated => (HealthStatus::Degraded, "saturated"),
         PoolReadiness::Down => (HealthStatus::Unhealthy, "down"),
         _ => (HealthStatus::Unhealthy, "unknown"),
     }
@@ -1019,12 +1019,23 @@ mod tests {
         );
         assert_eq!(
             readiness_to_health(PoolReadiness::Saturated),
-            (HealthStatus::Unhealthy, "saturated")
+            (HealthStatus::Degraded, "saturated")
         );
         assert_eq!(
             readiness_to_health(PoolReadiness::Down),
             (HealthStatus::Unhealthy, "down")
         );
+    }
+
+    #[test]
+    fn configs_ready_reports_only_postgres_liveness() {
+        use bootstrap::HealthProbe as _;
+
+        let probe = ConfigsReadyProbe::new(Arc::new(PgDbReadiness::new()));
+
+        let check = probe.check();
+        assert_eq!(check.status(), HealthStatus::Unhealthy);
+        assert_eq!(check.detail(), "down");
     }
 
     #[tokio::test]
@@ -1238,7 +1249,7 @@ mod tests {
         );
         let resource = match worker {
             WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
-                make(CancellationToken::new())
+                make.into_factory()(CancellationToken::new())
             }
         };
 
@@ -1264,7 +1275,7 @@ mod tests {
         );
         let resource = match worker {
             WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
-                make(CancellationToken::new())
+                make.into_factory()(CancellationToken::new())
             }
         };
         tokio::task::yield_now().await;

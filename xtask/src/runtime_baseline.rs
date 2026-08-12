@@ -2360,13 +2360,15 @@ fn postgres_runtime_owner_is_canonical(expression: &syn::Expr) -> bool {
             "projection_registry".to_owned(),
             "projection_capture".to_owned(),
             "readiness".to_owned(),
-            "rls_ready".to_owned(),
+            "rls_readiness".to_owned(),
         ])
         && exact_field("stores", "stores")
         && exact_field("revocation_receipt", "revocation_receipt")
         && exact_field("saga_receipt", "saga_receipt")
         && exact_field("audit_admin_store", "audit_admin_store")
         && exact_field("projection_capture", "projection_capture")
+        && exact_field("readiness", "Arc::new(PgDbReadiness::new())")
+        && exact_field("rls_readiness", "Arc::new(PgRlsReadiness::verified())")
         && exact_field(
             "projection_registry",
             "projection_capture.as_ref().map_or_else(ProjectionWriteRegistry::empty,|capture|capture.registry())",

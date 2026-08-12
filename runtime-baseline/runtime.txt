@@ -28,6 +28,7 @@ crypto-adapter = path=../../adapters/crypto
 deadpool-redis = workspace=true
 diport = path=../../crates/diport
 distributed = path=../../crates/distributed
+dlqauthmint = path=../../crates/dlqauthmint
 eventexec = path=../../crates/eventexec
 eventing-composition = path=../../composition/eventing; features=[audit-consumers,settings-consumers]
 futures = workspace=true
@@ -49,6 +50,7 @@ redis = package=redis-adapter; path=../../adapters/redis; features=[backend]
 reqwest = workspace=true; features=[rustls-tls-webpki-roots]
 runctx = path=../../crates/runctx
 runtimeexec = path=../../crates/runtimeexec
+runtimeinventorymint = path=../../crates/runtimeinventorymint
 s3 = path=../../adapters/s3; features=[backend]
 sagaauthmint = path=../../crates/sagaauthmint
 secure = path=../../crates/secure

@@ -1,8 +1,10 @@
 use postgres::PgRuntimeHandle;
-use std::time::Duration;
 
 fn consume_lifecycle(handle: PgRuntimeHandle) {
-    let _ = handle.into_runtime_parts(Duration::from_secs(1));
+    let _ = handle.into_runtime_parts(postgres::PgRuntimeMonitorConfig::new(
+        postgres::PgReadinessInterval::default(),
+        postgres::PgRlsAttestationInterval::default(),
+    ));
 }
 
 fn main() {}

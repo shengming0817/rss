@@ -580,7 +580,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
         assert!(
             matches!(
                 policy_drift,
-                Err(crate::PgError::RlsNotEnforced | crate::PgError::RevocationSchema)
+                Err(crate::PgError::RlsNotEnforced { .. } | crate::PgError::RevocationSchema)
             ),
             "tenant policy expression drift must reject startup before a receipt can be minted"
         );
@@ -601,7 +601,7 @@ async fn revocation_startup_capability_gate_rejects_rls_acl_role_and_function_dr
             .execute(&mutator.pool)
             .await?;
         assert!(
-            matches!(rls_drift, Err(crate::PgError::RlsNotEnforced)),
+            matches!(rls_drift, Err(crate::PgError::RlsNotEnforced { .. })),
             "revocation RLS drift must reject startup before a receipt can be minted"
         );
 
@@ -1165,7 +1165,7 @@ impl RevocationCapabilityDriftKind {
             ),
             Self::RlsOrSchema => matches!(
                 error,
-                crate::PgError::RlsNotEnforced | crate::PgError::RevocationSchema
+                crate::PgError::RlsNotEnforced { .. } | crate::PgError::RevocationSchema
             ),
             Self::Privileges => matches!(
                 error,

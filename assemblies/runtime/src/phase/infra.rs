@@ -103,7 +103,7 @@ struct PhaseACarried {
     redis: redis::RedisRuntimeDeps,
     s3: s3::S3RuntimeDeps,
     s3_canary_config: crate::infra::s3::S3CanaryConfig,
-    pg_readiness_period: Duration,
+    pg_monitor_config: postgres::PgRuntimeMonitorConfig,
     hot_payload_protector: postgres::DlxPayloadProtector,
     archive_key: eventexec::DlxArchiveKeyName,
     auth_audit_sink_permit: crate::provider_output::AuthAuditSinkPermit,
@@ -267,7 +267,7 @@ impl<'a> ProvidersBuilt<'a> {
                 redis,
                 s3,
                 s3_canary_config,
-                pg_readiness_period,
+                pg_monitor_config,
                 hot_payload_protector,
                 archive_key,
                 auth_audit_sink_permit,
@@ -321,14 +321,15 @@ impl<'a> ProvidersBuilt<'a> {
             .context("build typed device revocation provider")?;
             let (revocation_store, revocation_output) = revocation_provider.into_parts();
             let pg_provider_module =
-                crate::provider_output::build_pg_runtime_module(pg_owner, pg_readiness_period);
+                crate::provider_output::build_pg_runtime_module(pg_owner, pg_monitor_config);
             *uncommitted_provider_module.get_mut() = pg_provider_module;
             uncommitted_provider_module
                 .get_mut()
                 .merge(local_provider_pg_output);
             tracing::info!(
-                sample_interval_secs = pg_readiness_period.as_secs(),
-                "pg readiness sampler interval configured"
+                sample_interval_secs = pg_monitor_config.readiness().get().as_secs(),
+                rls_attestation_interval_secs = pg_monitor_config.rls_attestation().get().as_secs(),
+                "pg runtime monitor intervals configured"
             );
             let runtime_service_token = runtime_service_token_result?;
             if let Some(provider) = runtime_service_token.as_ref() {
@@ -519,7 +520,7 @@ impl<'a> ProvidersBuilt<'a> {
             dlx_archiver: dlx_archiver_pg_config,
             dlx_verifier: dlx_verifier_pg_config,
             dlx_purger: dlx_purger_pg_config,
-            readiness_period: pg_readiness_period,
+            monitor_config: pg_monitor_config,
         } = pg_config.into_parts();
         let S3RuntimeConfigParts {
             general: s3_general_config,
@@ -711,7 +712,7 @@ impl<'a> ProvidersBuilt<'a> {
                 redis,
                 s3,
                 s3_canary_config,
-                pg_readiness_period,
+                pg_monitor_config,
                 hot_payload_protector,
                 archive_key,
                 auth_audit_sink_permit,
