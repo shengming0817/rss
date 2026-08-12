@@ -1053,7 +1053,6 @@ impl Policy {
         Self { version, ..self }
     }
 
-    #[cfg(test)]
     pub(crate) fn is_effective_at(&self, at: SystemTime) -> bool {
         self.effective_from <= at && self.effective_until.is_none_or(|until| at < until)
     }
@@ -1066,14 +1065,46 @@ impl Policy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum PolicyEvaluation {
     NoMatch,
-    Allow(PolicyObligations),
+    Allow(PolicyAllowEvaluation),
     Deny,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct EvaluatedPolicyReference {
+    policy_id: PolicyId,
+    version: PolicyVersion,
+}
+
+impl EvaluatedPolicyReference {
+    pub(crate) fn policy_id(&self) -> &PolicyId {
+        &self.policy_id
+    }
+
+    pub(crate) fn version(&self) -> PolicyVersion {
+        self.version
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PolicyAllowEvaluation {
+    obligations: PolicyObligations,
+    policies: Vec<EvaluatedPolicyReference>,
+}
+
+impl PolicyAllowEvaluation {
+    pub(crate) fn obligations(&self) -> &PolicyObligations {
+        &self.obligations
+    }
+
+    pub(crate) fn policies(&self) -> &[EvaluatedPolicyReference] {
+        &self.policies
+    }
 }
 
 impl PolicyEvaluation {
     #[cfg(test)]
     pub(crate) fn route_allows(&self) -> bool {
-        matches!(self, Self::Allow(obligations) if obligations.is_empty())
+        matches!(self, Self::Allow(allow) if allow.obligations.is_empty())
     }
 
     #[cfg(test)]
@@ -1112,7 +1143,13 @@ pub(crate) fn evaluate_abac_for_tenant(
         }
     }
     if saw_allow {
-        PolicyEvaluation::Allow(obligations)
+        PolicyEvaluation::Allow(PolicyAllowEvaluation {
+            obligations,
+            policies: vec![EvaluatedPolicyReference {
+                policy_id: policy.id().clone(),
+                version: policy.version(),
+            }],
+        })
     } else {
         PolicyEvaluation::NoMatch
     }
@@ -1123,7 +1160,14 @@ pub(crate) fn evaluate_policies_for_tenant(
     attrs: &[AbacAttribute],
     policies: &[Policy],
 ) -> PolicyEvaluation {
+    let mut policy_ids = policies.iter().map(Policy::id).collect::<Vec<_>>();
+    policy_ids.sort_unstable();
+    if policy_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return PolicyEvaluation::Deny;
+    }
+
     let mut obligations = PolicyObligations::empty();
+    let mut matched_policies = Vec::new();
     let mut saw_allow = false;
     for policy in policies {
         match evaluate_abac_for_tenant(tenant, attrs, policy) {
@@ -1131,12 +1175,27 @@ pub(crate) fn evaluate_policies_for_tenant(
             PolicyEvaluation::NoMatch => {}
             PolicyEvaluation::Allow(next) => {
                 saw_allow = true;
-                obligations.merge(&next);
+                obligations.merge(next.obligations());
+                matched_policies.extend_from_slice(next.policies());
             }
         }
     }
     if saw_allow {
-        PolicyEvaluation::Allow(obligations)
+        matched_policies.sort_unstable_by(|left, right| {
+            left.policy_id
+                .cmp(&right.policy_id)
+                .then(left.version.cmp(&right.version))
+        });
+        if matched_policies
+            .windows(2)
+            .any(|pair| pair[0].policy_id == pair[1].policy_id)
+        {
+            return PolicyEvaluation::Deny;
+        }
+        PolicyEvaluation::Allow(PolicyAllowEvaluation {
+            obligations,
+            policies: matched_policies,
+        })
     } else {
         PolicyEvaluation::NoMatch
     }
@@ -1287,8 +1346,8 @@ mod tests {
         POLICY_ATTR_PRINCIPAL_ID, POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID,
         POLICY_ATTR_TENANT_ID, POLICY_VALUE_SET_MAX_ITEMS, PipAttributeKey, PipAttributeKeyError,
         Policy, PolicyCondition, PolicyEffect, PolicyEvaluation, PolicyObligations,
-        PolicyRouteScope, PolicyRule, PolicyValueSet, StringOperator, StringPredicate,
-        TypedAttributeOperand, evaluate_abac, evaluate_abac_for_tenant,
+        PolicyRouteScope, PolicyRule, PolicyValueSet, PolicyVersion, StringOperator,
+        StringPredicate, TypedAttributeOperand, evaluate_abac, evaluate_abac_for_tenant,
         evaluate_policies_for_tenant,
     };
     use crate::domain::{AttributeKey, DecimalValue, PolicyId, PolicyValue};
@@ -1674,7 +1733,11 @@ mod tests {
         );
         let policy = Policy::new(pid("pol-1"), tid(TENANT_A), vec![rule]);
         let got = evaluate_abac_for_tenant(Some(tid(TENANT_A)), &[attr("role", "admin")], &policy);
-        assert_eq!(got, PolicyEvaluation::Allow(obligations));
+        assert!(matches!(
+            got,
+            PolicyEvaluation::Allow(ref allow) if allow.obligations() == &obligations
+                && allow.policies().len() == 1
+        ));
         assert!(
             !got.route_allows(),
             "route gate cannot discharge obligations"
@@ -1703,7 +1766,11 @@ mod tests {
             &attrs,
             &[empty_allow, obligated_allow],
         );
-        assert!(matches!(got, PolicyEvaluation::Allow(ref o) if !o.is_empty()));
+        assert!(matches!(
+            got,
+            PolicyEvaluation::Allow(ref allow)
+                if !allow.obligations().is_empty() && allow.policies().len() == 2
+        ));
         assert!(!got.route_allows());
 
         let deny = Policy::new(
@@ -1713,6 +1780,66 @@ mod tests {
         );
         let got = evaluate_policies_for_tenant(Some(tid(TENANT_A)), &attrs, &[deny]);
         assert_eq!(got, PolicyEvaluation::Deny);
+    }
+
+    #[test]
+    fn contributing_policy_lineage_is_sorted_and_duplicate_ids_fail_closed() {
+        let make_policy = |id: &str, version: u32| {
+            Policy::new(
+                pid(id),
+                tid(TENANT_A),
+                vec![rule("role", eq(aval("admin")), PolicyEffect::Allow)],
+            )
+            .with_version(PolicyVersion::new(version).unwrap())
+        };
+        let attrs = [attr("role", "admin")];
+        let evaluation = evaluate_policies_for_tenant(
+            Some(tid(TENANT_A)),
+            &attrs,
+            &[make_policy("policy-z", 3), make_policy("policy-a", 2)],
+        );
+        let PolicyEvaluation::Allow(evaluation_allow) = evaluation else {
+            panic!("matching policies must allow");
+        };
+        let lineage = evaluation_allow
+            .policies()
+            .iter()
+            .map(|policy| (policy.policy_id().as_str(), policy.version().get()))
+            .collect::<Vec<_>>();
+        assert_eq!(lineage, vec![("policy-a", 2), ("policy-z", 3)]);
+
+        let duplicate = evaluate_policies_for_tenant(
+            Some(tid(TENANT_A)),
+            &attrs,
+            &[make_policy("same-policy", 1), make_policy("same-policy", 2)],
+        );
+        assert_eq!(duplicate, PolicyEvaluation::Deny);
+
+        let no_match = Policy::new(
+            pid("same-policy"),
+            tid(TENANT_A),
+            vec![rule("role", eq(aval("user")), PolicyEffect::Allow)],
+        )
+        .with_version(PolicyVersion::new(2).unwrap());
+        let allow_plus_no_match = evaluate_policies_for_tenant(
+            Some(tid(TENANT_A)),
+            &attrs,
+            &[make_policy("same-policy", 1), no_match],
+        );
+        assert_eq!(allow_plus_no_match, PolicyEvaluation::Deny);
+
+        let no_match_v1 = Policy::new(
+            pid("no-match-policy"),
+            tid(TENANT_A),
+            vec![rule("role", eq(aval("user")), PolicyEffect::Allow)],
+        );
+        let no_match_v2 = no_match_v1
+            .clone()
+            .with_version(PolicyVersion::new(2).unwrap());
+        assert_eq!(
+            evaluate_policies_for_tenant(Some(tid(TENANT_A)), &attrs, &[no_match_v1, no_match_v2],),
+            PolicyEvaluation::Deny
+        );
     }
 
     #[rstest]

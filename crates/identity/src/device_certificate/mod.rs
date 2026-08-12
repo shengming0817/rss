@@ -16,9 +16,9 @@ pub use domain::{
     AcceptDesiredPolicy, ArtifactDigest, ConditionStateBatch, DesiredPolicyAccepted,
     DesiredPolicyAcceptedCondition, DesiredStateRestore, DesiredStateSnapshot,
     DeviceCertificateError, DeviceCertificateScope, DeviceCertificateStateSnapshot,
-    DevicePolicyIdempotencyKey, DevicePolicyRequestDigest, DeviceSequence, ExpectedGeneration,
-    PolicyHash, ReportEnvelopeId, ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot,
-    ReportedStateWrite,
+    DevicePolicyAcceptInputError, DevicePolicyAuthorizationReceipt, DevicePolicyIdempotencyKey,
+    DevicePolicyRequestDigest, DeviceSequence, ExpectedGeneration, PolicyHash, ReportEnvelopeId,
+    ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite,
 };
 pub use eventexec::reconcile::{DeviceCertificateCommandTtl, DeviceCertificateCommandTtlError};
 pub use ingress::{
@@ -182,6 +182,10 @@ mod tests {
         .unwrap();
         assert_eq!(input.request_digest(), same.request_digest());
         assert_ne!(input.request_digest(), changed_generation.request_digest());
+        assert_eq!(input.authorization().durable_policy().policies().len(), 1);
+        let debug = format!("{input:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("device.example"));
         assert!(
             AcceptDesiredPolicy::for_test(
                 scope(),
@@ -191,6 +195,117 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    fn durable_policy_subject(
+        contract_id: &'static str,
+        permission: vocab::RoutePermissionId,
+        resource: Option<httpserve::RouteResource>,
+    ) -> httpserve::AuthorizedSubject {
+        let policy = httpserve::AuthorizationPolicyReference::new(
+            "device-policy-17",
+            std::num::NonZeroU32::new(7).unwrap(),
+        )
+        .unwrap();
+        httpserve::AuthorizedSubject::for_test_with_durable_policy(
+            contract_id,
+            permission,
+            scope().tenant(),
+            rss_request_context::PrincipalKind::Admin,
+            "policy-admin-sensitive",
+            resource,
+            vec![policy],
+            [0x31; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
+            SystemTime::UNIX_EPOCH + Duration::from_secs(73),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn policy_accept_requires_exact_durable_route_and_consumes_shared_provenance_once() {
+        let scope = scope();
+        let resource =
+            || httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string());
+        let exact = durable_policy_subject(
+            generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+            vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+            resource(),
+        );
+        let duplicate = exact.clone();
+        let input = AcceptDesiredPolicy::from_authorized_subject(
+            &exact,
+            scope.device(),
+            ExpectedGeneration::try_new(0).unwrap(),
+            DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
+            policy(),
+        )
+        .unwrap();
+        assert_eq!(input.scope(), scope);
+        assert_eq!(
+            input.authorization().principal_kind(),
+            rss_request_context::PrincipalKind::Admin
+        );
+        assert_eq!(
+            input.authorization().principal_id(),
+            "policy-admin-sensitive"
+        );
+        assert_eq!(
+            input.authorization().durable_policy().evaluated_at(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(73)
+        );
+        assert!(
+            AcceptDesiredPolicy::from_authorized_subject(
+                &duplicate,
+                scope.device(),
+                ExpectedGeneration::try_new(0).unwrap(),
+                DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
+                policy(),
+            )
+            .is_err()
+        );
+
+        let other_device = ids::DeviceId::new(uuid::Uuid::new_v4());
+        for rejected in [
+            durable_policy_subject(
+                generated::http::identity_v2::device_certificate_status_get::CONTRACT_ID,
+                vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+                resource(),
+            ),
+            durable_policy_subject(
+                generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+                vocab::RoutePermissionId::IdentityDeviceCertificateStatusRead,
+                resource(),
+            ),
+            durable_policy_subject(
+                generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+                vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+                None,
+            ),
+            durable_policy_subject(
+                generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+                vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+                httpserve::RouteResource::new(other_device.as_uuid().hyphenated().to_string()),
+            ),
+            httpserve::AuthorizedSubject::for_test(
+                generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,
+                vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite,
+                scope.tenant(),
+                rss_request_context::PrincipalKind::Admin,
+                "local-authorizer",
+                resource(),
+            ),
+        ] {
+            assert!(
+                AcceptDesiredPolicy::from_authorized_subject(
+                    &rejected,
+                    scope.device(),
+                    ExpectedGeneration::try_new(0).unwrap(),
+                    DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4()),
+                    policy(),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
@@ -843,6 +958,13 @@ mod tests {
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains(&scope.tenant().to_string()));
         assert!(!debug.contains(&scope.device().as_uuid().hyphenated().to_string()));
+        assert!(
+            AuthorizedDeviceCertificateStatusRead::from_authorized_subject(
+                &exact.clone(),
+                scope.device(),
+            )
+            .is_err()
+        );
 
         let wrong_contract = subject(
             generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID,

@@ -73,7 +73,7 @@ impl httpserve::RouteAuthorizer for AllowAuthorizer {
         &'a self,
         _request: httpserve::RouteAuthorizationRequest,
     ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>> {
-        Box::pin(async { httpserve::RouteAuthorizationDecision::Allow })
+        Box::pin(async { httpserve::RouteAuthorizationDecision::authorizer_local() })
     }
 }
 

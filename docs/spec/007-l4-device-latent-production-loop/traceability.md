@@ -4,6 +4,11 @@ This table assigns every requirement in [spec.md](./spec.md) either to one imple
 
 Proof tiers follow the repository [verification scope matrix](../../rules/project-scope.md#验证范围矩阵): T1 is design/component proof, T2 is capability/seam proof, and T3 is production assembly/acceptance proof. Carrier strength and concrete mechanisms are owned by [ADR-022](../../architecture/202607291724-022-l4-device-latent-production-loop.md).
 
+#2110 supplies the T1 authorization-lineage prerequisite for the draft desired-policy path: private opaque
+provenance, explicit authorizer basis, canonical contributing policy/obligation/time metadata, and move-only
+device policy/status receipts. It intentionally makes no PostgreSQL, wire-schema, mounted-handler or T3 claim;
+those remain the #2113, #2114 and #2115 handoffs.
+
 | Requirement | Owner | Primary proof |
 |---|---:|---|
 | FR-001 | #1896 | T2 — real-PostgreSQL desired-generation monotonicity and tenant-scope conformance |

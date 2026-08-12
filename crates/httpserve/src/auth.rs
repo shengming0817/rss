@@ -38,9 +38,14 @@
 
 use std::fmt;
 use std::future::Future;
+use std::num::NonZeroU32;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 use std::task::{Context, Poll};
+use std::time::SystemTime;
 
 use axum::body::Body;
 use axum::extract::{FromRequestParts, RawPathParams, Request};
@@ -277,7 +282,7 @@ impl RouteMeta {
 
     /// Stable generated contract identifier.
     #[must_use]
-    pub const fn contract_id(&self) -> &'static str {
+    pub fn contract_id(&self) -> &'static str {
         self.evidence.contract_id()
     }
 
@@ -314,15 +319,20 @@ impl RouteResource {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct AuthorizedSubject {
+    evidence: Arc<AuthorizationEvidenceCore>,
+}
+
+struct AuthorizationEvidenceCore {
     contract_id: &'static str,
     permission: RoutePermissionId,
     tenant_id: TenantId,
     principal_kind: PrincipalKind,
     principal_id: String,
     resource: Option<RouteResource>,
-    projection: ResourceProjection,
+    grant: RouteAuthorizationGrant,
+    provenance_taken: AtomicBool,
 }
 
 impl AuthorizedSubject {
@@ -333,16 +343,19 @@ impl AuthorizedSubject {
         principal_kind: PrincipalKind,
         principal_id: impl Into<String>,
         resource: Option<RouteResource>,
-        projection: ResourceProjection,
+        grant: RouteAuthorizationGrant,
     ) -> Self {
         Self {
-            contract_id,
-            permission,
-            tenant_id,
-            principal_kind,
-            principal_id: principal_id.into(),
-            resource,
-            projection,
+            evidence: Arc::new(AuthorizationEvidenceCore {
+                contract_id,
+                permission,
+                tenant_id,
+                principal_kind,
+                principal_id: principal_id.into(),
+                resource,
+                grant,
+                provenance_taken: AtomicBool::new(false),
+            }),
         }
     }
 
@@ -362,7 +375,7 @@ impl AuthorizedSubject {
             principal_kind,
             principal_id,
             resource,
-            ResourceProjection::default_masked(),
+            RouteAuthorizationGrant::authorizer_local(),
         )
     }
 
@@ -383,42 +396,149 @@ impl AuthorizedSubject {
             principal_kind,
             principal_id,
             resource,
-            projection,
+            RouteAuthorizationGrant {
+                projection,
+                basis: RouteAuthorizationBasis::AuthorizerLocal,
+            },
         )
+    }
+
+    #[cfg(any(test, feature = "test-util"))]
+    #[allow(clippy::too_many_arguments)]
+    pub fn for_test_with_durable_policy(
+        contract_id: &'static str,
+        permission: RoutePermissionId,
+        tenant_id: TenantId,
+        principal_kind: PrincipalKind,
+        principal_id: impl Into<String>,
+        resource: Option<RouteResource>,
+        policies: Vec<AuthorizationPolicyReference>,
+        obligation_fingerprint: [u8; AUTHORIZATION_FINGERPRINT_BYTES],
+        evaluated_at: SystemTime,
+    ) -> Option<Self> {
+        let grant = RouteAuthorizationGrant::durable_policy(
+            &[],
+            policies,
+            obligation_fingerprint,
+            evaluated_at,
+        )?;
+        Some(Self::new(
+            contract_id,
+            permission,
+            tenant_id,
+            principal_kind,
+            principal_id,
+            resource,
+            grant,
+        ))
     }
 
     /// Exact generated contract identity authorized for this subject.
     #[must_use]
-    pub const fn contract_id(&self) -> &'static str {
-        self.contract_id
+    pub fn contract_id(&self) -> &'static str {
+        self.evidence.contract_id
     }
 
     /// Exact closed route permission authorized for this subject.
     #[must_use]
-    pub const fn permission(&self) -> RoutePermissionId {
-        self.permission
+    pub fn permission(&self) -> RoutePermissionId {
+        self.evidence.permission
     }
 
     pub fn tenant_id(&self) -> TenantId {
-        self.tenant_id
+        self.evidence.tenant_id
     }
 
     pub fn principal_kind(&self) -> PrincipalKind {
-        self.principal_kind
+        self.evidence.principal_kind
     }
 
     pub fn principal_id(&self) -> &str {
-        &self.principal_id
+        &self.evidence.principal_id
     }
 
     pub fn resource(&self) -> Option<&RouteResource> {
-        self.resource.as_ref()
+        self.evidence.resource.as_ref()
     }
 
     pub fn projection(&self) -> ResourceProjection {
-        self.projection
+        self.evidence.grant.projection
+    }
+
+    /// Atomically consume the single authorization provenance shared by every request clone.
+    pub fn take_authorization_provenance(
+        &self,
+    ) -> Result<AuthorizationProvenance, AuthorizationProvenanceAlreadyTaken> {
+        self.evidence
+            .provenance_taken
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| AuthorizationProvenanceAlreadyTaken)?;
+        Ok(AuthorizationProvenance {
+            evidence: Arc::clone(&self.evidence),
+        })
     }
 }
+
+impl fmt::Debug for AuthorizedSubject {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AuthorizedSubject")
+            .field("evidence", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Opaque, move-only evidence minted by the AuthN -> route-authorizer funnel.
+pub struct AuthorizationProvenance {
+    evidence: Arc<AuthorizationEvidenceCore>,
+}
+
+impl AuthorizationProvenance {
+    pub fn contract_id(&self) -> &'static str {
+        self.evidence.contract_id
+    }
+
+    pub fn permission(&self) -> RoutePermissionId {
+        self.evidence.permission
+    }
+
+    pub fn tenant_id(&self) -> TenantId {
+        self.evidence.tenant_id
+    }
+
+    pub fn principal_kind(&self) -> PrincipalKind {
+        self.evidence.principal_kind
+    }
+
+    pub fn principal_id(&self) -> &str {
+        &self.evidence.principal_id
+    }
+
+    pub fn resource(&self) -> Option<&RouteResource> {
+        self.evidence.resource.as_ref()
+    }
+
+    pub fn projection(&self) -> ResourceProjection {
+        self.evidence.grant.projection
+    }
+
+    pub fn durable_policy(&self) -> Option<&DurablePolicyAuthorization> {
+        match &self.evidence.grant.basis {
+            RouteAuthorizationBasis::AuthorizerLocal => None,
+            RouteAuthorizationBasis::DurablePolicy(policy) => Some(policy),
+        }
+    }
+}
+
+impl fmt::Debug for AuthorizationProvenance {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuthorizationProvenance(<redacted>)")
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("authorization provenance is unavailable")]
+pub struct AuthorizationProvenanceAlreadyTaken;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RouteAuthorizationRequest {
@@ -509,22 +629,156 @@ impl ResourceProjection {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub const AUTHORIZATION_FINGERPRINT_BYTES: usize = 32;
+
+/// Validated durable-policy identity carried into authorization provenance.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct AuthorizationPolicyReference {
+    policy_id: String,
+    version: NonZeroU32,
+}
+
+impl AuthorizationPolicyReference {
+    /// Build a policy reference, rejecting an empty opaque policy identity.
+    pub fn new(policy_id: impl Into<String>, version: NonZeroU32) -> Option<Self> {
+        let policy_id = policy_id.into();
+        (!policy_id.is_empty()).then_some(Self { policy_id, version })
+    }
+
+    pub fn policy_id(&self) -> &str {
+        &self.policy_id
+    }
+
+    pub const fn version(&self) -> NonZeroU32 {
+        self.version
+    }
+}
+
+/// Canonical durable-policy metadata supplied by a trusted route authorizer.
+#[derive(Clone, PartialEq, Eq)]
+pub struct DurablePolicyAuthorization {
+    policies: Box<[AuthorizationPolicyReference]>,
+    obligation_fingerprint: [u8; AUTHORIZATION_FINGERPRINT_BYTES],
+    evaluated_at: SystemTime,
+}
+
+impl DurablePolicyAuthorization {
+    pub fn policies(&self) -> &[AuthorizationPolicyReference] {
+        &self.policies
+    }
+
+    pub const fn obligation_fingerprint(&self) -> &[u8; AUTHORIZATION_FINGERPRINT_BYTES] {
+        &self.obligation_fingerprint
+    }
+
+    pub const fn evaluated_at(&self) -> SystemTime {
+        self.evaluated_at
+    }
+}
+
+impl fmt::Debug for DurablePolicyAuthorization {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("DurablePolicyAuthorization(<redacted>)")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RouteAuthorizationBasis {
+    AuthorizerLocal,
+    DurablePolicy(DurablePolicyAuthorization),
+}
+
+/// Explicit authorization grant. Every Allow must name its authorization basis.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RouteAuthorizationGrant {
+    projection: ResourceProjection,
+    basis: RouteAuthorizationBasis,
+}
+
+impl RouteAuthorizationGrant {
+    pub fn authorizer_local() -> Self {
+        Self {
+            projection: ResourceProjection::default_masked(),
+            basis: RouteAuthorizationBasis::AuthorizerLocal,
+        }
+    }
+
+    pub fn authorizer_local_with_unmasked_fields(fields: &[ProjectionField]) -> Self {
+        Self {
+            projection: ResourceProjection::allowing(fields),
+            basis: RouteAuthorizationBasis::AuthorizerLocal,
+        }
+    }
+
+    /// Build a canonical durable-policy grant from one trusted evaluation snapshot.
+    ///
+    /// Policy references are sorted by identity and version. Empty lineage or repeated policy
+    /// identities (including conflicting versions) fail closed with `None`. The caller must supply
+    /// the obligation fingerprint and evaluation time from that same trusted evaluation.
+    pub fn durable_policy(
+        fields: &[ProjectionField],
+        mut policies: Vec<AuthorizationPolicyReference>,
+        obligation_fingerprint: [u8; AUTHORIZATION_FINGERPRINT_BYTES],
+        evaluated_at: SystemTime,
+    ) -> Option<Self> {
+        policies.sort_unstable();
+        if policies.is_empty()
+            || policies
+                .windows(2)
+                .any(|pair| pair[0].policy_id == pair[1].policy_id)
+        {
+            return None;
+        }
+        Some(Self {
+            projection: ResourceProjection::allowing(fields),
+            basis: RouteAuthorizationBasis::DurablePolicy(DurablePolicyAuthorization {
+                policies: policies.into_boxed_slice(),
+                obligation_fingerprint,
+                evaluated_at,
+            }),
+        })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RouteAuthorizationDecision {
-    Allow,
-    AllowWithProjection(ResourceProjection),
+    Allow(RouteAuthorizationGrant),
     Deny,
 }
 
 impl RouteAuthorizationDecision {
-    pub fn allow_with_unmasked_fields(fields: &[ProjectionField]) -> Self {
-        Self::AllowWithProjection(ResourceProjection::allowing(fields))
+    pub fn authorizer_local() -> Self {
+        Self::Allow(RouteAuthorizationGrant::authorizer_local())
     }
 
-    fn projection(self) -> Option<ResourceProjection> {
+    pub fn authorizer_local_with_unmasked_fields(fields: &[ProjectionField]) -> Self {
+        Self::Allow(RouteAuthorizationGrant::authorizer_local_with_unmasked_fields(fields))
+    }
+
+    pub const fn is_allow(&self) -> bool {
+        matches!(self, Self::Allow(_))
+    }
+
+    pub const fn projection(&self) -> Option<ResourceProjection> {
         match self {
-            Self::Allow => Some(ResourceProjection::default_masked()),
-            Self::AllowWithProjection(projection) => Some(projection),
+            Self::Allow(grant) => Some(grant.projection),
+            Self::Deny => None,
+        }
+    }
+
+    pub fn durable_policy(&self) -> Option<&DurablePolicyAuthorization> {
+        match self {
+            Self::Allow(RouteAuthorizationGrant {
+                basis: RouteAuthorizationBasis::DurablePolicy(policy),
+                ..
+            }) => Some(policy),
+            Self::Allow(_) | Self::Deny => None,
+        }
+    }
+
+    fn into_grant(self) -> Option<RouteAuthorizationGrant> {
+        match self {
+            Self::Allow(grant) => Some(grant),
             Self::Deny => None,
         }
     }
@@ -567,7 +821,7 @@ pub async fn authorize_subject_for_permission(
             federated_permissions: evidence.federated_permissions(),
         })
         .await;
-    decision.projection().map(|projection| {
+    decision.into_grant().map(|grant| {
         AuthorizedSubject::new(
             contract_id,
             permission,
@@ -575,7 +829,7 @@ pub async fn authorize_subject_for_permission(
             principal_kind,
             principal_id,
             resource,
-            projection,
+            grant,
         )
     })
 }
@@ -1289,7 +1543,7 @@ async fn authorize_route_permission(
             federated_permissions: evidence.federated_permissions(),
         })
         .await;
-    decision.projection().map(|projection| {
+    decision.into_grant().map(|grant| {
         tenant_id.map(|tenant_id| {
             AuthorizedSubject::new(
                 meta.contract_id(),
@@ -1298,7 +1552,7 @@ async fn authorize_route_permission(
                 principal_kind,
                 principal_id,
                 resource,
-                projection,
+                grant,
             )
         })
     })
@@ -1322,7 +1576,10 @@ async fn authorize_mtls_route(
         resource: None,
         federated_permissions: evidence.federated_permissions(),
     };
-    authorizer.authorize(request).await.projection().is_some()
+    matches!(
+        authorizer.authorize(request).await,
+        RouteAuthorizationDecision::Allow(_)
+    )
 }
 
 fn authorize_service_route(
@@ -1620,10 +1877,13 @@ mod tests {
             "<redacted>"
         );
 
-        let decision =
-            RouteAuthorizationDecision::allow_with_unmasked_fields(&[ProjectionField::AuditActor]);
+        let decision = RouteAuthorizationDecision::Allow(
+            RouteAuthorizationGrant::authorizer_local_with_unmasked_fields(&[
+                ProjectionField::AuditActor,
+            ]),
+        );
         let projection = match decision {
-            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
+            RouteAuthorizationDecision::Allow(grant) => grant.projection,
             other => return Err(format!("expected projection allow, got {other:?}")),
         };
         assert!(projection.allows(ProjectionField::AuditActor));
@@ -2026,7 +2286,7 @@ mod tests {
             &'a self,
             request: RouteAuthorizationRequest,
         ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
-            let decision = self.decision;
+            let decision = self.decision.clone();
             let seen = self.seen.clone();
             Box::pin(async move {
                 seen.lock().unwrap_or_else(|e| e.into_inner()).push((
@@ -2045,9 +2305,11 @@ mod tests {
     async fn route_authorization_projection_builds_authorized_subject_from_evidence()
     -> Result<(), String> {
         let authorizer_impl = Arc::new(TestProjectionAuthorizer {
-            decision: RouteAuthorizationDecision::allow_with_unmasked_fields(&[
-                ProjectionField::AuditActor,
-            ]),
+            decision: RouteAuthorizationDecision::Allow(
+                RouteAuthorizationGrant::authorizer_local_with_unmasked_fields(&[
+                    ProjectionField::AuditActor,
+                ]),
+            ),
             seen: Arc::new(Mutex::new(Vec::new())),
         });
         let authorizer: Arc<dyn RouteAuthorizer> = authorizer_impl.clone();
@@ -2094,6 +2356,96 @@ mod tests {
                 PrincipalKind::Admin,
                 "principal-1".to_string()
             )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn durable_policy_provenance_is_bound_redacted_and_shared_one_shot() -> Result<(), String>
+    {
+        let policy = AuthorizationPolicyReference::new("policy-sensitive", NonZeroU32::MIN)
+            .ok_or_else(|| "valid policy reference rejected".to_string())?;
+        let evaluated_at = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(41);
+        let grant = RouteAuthorizationGrant::durable_policy(
+            &[],
+            vec![policy],
+            [0x5A; AUTHORIZATION_FINGERPRINT_BYTES],
+            evaluated_at,
+        )
+        .ok_or_else(|| "non-empty policy lineage rejected".to_string())?;
+        let authorizer: Arc<dyn RouteAuthorizer> = Arc::new(TestProjectionAuthorizer {
+            decision: RouteAuthorizationDecision::Allow(grant),
+            seen: Arc::new(Mutex::new(Vec::new())),
+        });
+        let evidence = reject_matrix_authed(RssAccessRejectMatrixKind::Admin);
+        let resource = RouteResource::new("550e8400-e29b-41d4-a716-446655440000")
+            .ok_or_else(|| "canonical resource rejected".to_string())?;
+        let subject = authorize_subject_for_permission(
+            Some(authorizer),
+            Some(&evidence),
+            TEST_CONTRACT,
+            vocab::AUDIT_READ_PERMISSION,
+            tenant(),
+            Some(resource),
+        )
+        .await
+        .ok_or_else(|| "durable allow did not mint subject".to_string())?;
+
+        let left = subject.clone();
+        let right = subject.clone();
+        let results = std::thread::scope(|scope| {
+            let left = scope.spawn(move || left.take_authorization_provenance().is_ok());
+            let right = scope.spawn(move || right.take_authorization_provenance().is_ok());
+            [left.join().unwrap_or(false), right.join().unwrap_or(false)]
+        });
+        assert_eq!(results.into_iter().filter(|taken| *taken).count(), 1);
+        assert!(subject.take_authorization_provenance().is_err());
+
+        let debug = format!("{subject:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("principal-1"));
+        assert!(!debug.contains("policy-sensitive"));
+        assert!(!debug.contains("550e8400"));
+        Ok(())
+    }
+
+    #[test]
+    fn durable_policy_grant_rejects_empty_and_duplicate_lineage() -> Result<(), String> {
+        assert!(
+            RouteAuthorizationGrant::durable_policy(
+                &[],
+                vec![],
+                [0; AUTHORIZATION_FINGERPRINT_BYTES],
+                SystemTime::UNIX_EPOCH,
+            )
+            .is_none()
+        );
+        let policy = AuthorizationPolicyReference::new("same-policy", NonZeroU32::MIN)
+            .ok_or_else(|| "valid policy reference rejected".to_string())?;
+        assert!(
+            RouteAuthorizationGrant::durable_policy(
+                &[],
+                vec![policy.clone(), policy],
+                [0; AUTHORIZATION_FINGERPRINT_BYTES],
+                SystemTime::UNIX_EPOCH,
+            )
+            .is_none()
+        );
+        let version_two = AuthorizationPolicyReference::new(
+            "same-policy",
+            NonZeroU32::new(2).ok_or_else(|| "non-zero version rejected".to_string())?,
+        )
+        .ok_or_else(|| "valid policy reference rejected".to_string())?;
+        let version_one = AuthorizationPolicyReference::new("same-policy", NonZeroU32::MIN)
+            .ok_or_else(|| "valid policy reference rejected".to_string())?;
+        assert!(
+            RouteAuthorizationGrant::durable_policy(
+                &[],
+                vec![version_two, version_one],
+                [0; AUTHORIZATION_FINGERPRINT_BYTES],
+                SystemTime::UNIX_EPOCH,
+            )
+            .is_none()
         );
         Ok(())
     }

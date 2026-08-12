@@ -1385,7 +1385,7 @@ async fn runtime_inventory_admin_uses_rss_user_and_identity_durable_grant_policy
     };
     assert_eq!(
         authorizer.authorize(request(bound_subject)).await,
-        httpserve::RouteAuthorizationDecision::Allow
+        httpserve::RouteAuthorizationDecision::authorizer_local()
     );
     assert_eq!(
         authorizer.authorize(request("unbound-rss-user")).await,

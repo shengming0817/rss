@@ -1707,9 +1707,9 @@ mod tests {
                     && request.permission == vocab::AUDIT_READ_PERMISSION
                 {
                     if self.fields.is_empty() {
-                        httpserve::RouteAuthorizationDecision::Allow
+                        httpserve::RouteAuthorizationDecision::authorizer_local()
                     } else {
-                        httpserve::RouteAuthorizationDecision::allow_with_unmasked_fields(
+                        httpserve::RouteAuthorizationDecision::authorizer_local_with_unmasked_fields(
                             self.fields,
                         )
                     }
@@ -1767,7 +1767,7 @@ mod tests {
                     .unwrap_or_else(|error| error.into_inner())
                     .push(request);
                 if allow {
-                    httpserve::RouteAuthorizationDecision::Allow
+                    httpserve::RouteAuthorizationDecision::authorizer_local()
                 } else {
                     httpserve::RouteAuthorizationDecision::Deny
                 }

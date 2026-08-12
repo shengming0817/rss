@@ -40,6 +40,18 @@ does not imply command receipt, certificate application, or convergence.
 
 `validity_seconds` is `300..=31,536,000`. Draft-07 schemas carry each field's independent bounds; the domain's sealed policy constructor enforces the cross-field `renew_before_seconds < validity_seconds` relation and rejects a request before persistence.
 
+### DevicePolicyAuthorizationReceipt
+
+Before a desired-policy input can reach the repository port, the AuthN-to-RouteAuthorizer funnel mints an
+opaque provenance bound to authenticated tenant/principal, exact contract/typed permission, canonical path
+device, contributing policy ids/versions, canonical obligation fingerprint, and one evaluation time. The device
+domain consumes that provenance exactly once and adds the canonical request digest, producing a move-only
+`DevicePolicyAuthorizationReceipt`; `AcceptDesiredPolicy` cannot be built from a naked scope.
+
+This is a T1 in-process capability only. It has no durable receipt identifier and does not by itself prove replay,
+commit outcome, restart survival, or cross-process authenticity. #2113 owns atomic persistence with desired state,
+idempotency and wake; #2114 owns public lineage schema; #2115 owns the production HTTP consumer.
+
 ### DevicePolicyOperation
 
 Identity: `(tenant_id, device_id, idempotency_key)` where `idempotency_key` is a UUID from the PUT request.

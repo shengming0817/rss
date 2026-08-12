@@ -59,13 +59,14 @@ pub mod device_certificate {
         DeviceCertificateStatusStoreLocal, DeviceIngressApplicationReceipt, DeviceIngressContract,
         DeviceIngressDelivery, DeviceIngressDomainOutcome, DeviceIngressError,
         DeviceIngressPreparation, DeviceIngressReceiptMismatch, DeviceIngressRepository,
-        DeviceIngressWrite, DeviceLatentObservationError, DevicePolicyIdempotencyKey,
-        DevicePolicyRequestDigest, DeviceSequence, DynDeviceCertificateRepository,
-        DynDeviceCertificateStatusStore, ExpectedGeneration, FencedMutationOutcome,
-        PendingDeviceIngress, PolicyHash, PreparedDeviceIngress, ReportEnvelopeId,
-        ReportedStateHash, ReportedStateRestore, ReportedStateSnapshot, ReportedStateWrite,
-        RotationOutcome, UnaddressableDeviceIngress, UnaddressableDeviceIngressReason,
-        application_receipt, device_ingress_receipt_fact, prepare_device_ingress,
+        DeviceIngressWrite, DeviceLatentObservationError, DevicePolicyAcceptInputError,
+        DevicePolicyAuthorizationReceipt, DevicePolicyIdempotencyKey, DevicePolicyRequestDigest,
+        DeviceSequence, DynDeviceCertificateRepository, DynDeviceCertificateStatusStore,
+        ExpectedGeneration, FencedMutationOutcome, PendingDeviceIngress, PolicyHash,
+        PreparedDeviceIngress, ReportEnvelopeId, ReportedStateHash, ReportedStateRestore,
+        ReportedStateSnapshot, ReportedStateWrite, RotationOutcome, UnaddressableDeviceIngress,
+        UnaddressableDeviceIngressReason, application_receipt, device_ingress_receipt_fact,
+        prepare_device_ingress,
     };
 }
 

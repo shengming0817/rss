@@ -69,7 +69,7 @@ fn main() {
                 None,
                 false,
                 vocab::http::HttpResourceSharing::TenantScoped,
-                vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::BusinessTransaction]),
+                vocab::HttpEffectProfile::new(&[vocab::HttpEffectKind::Read]),
             );
         rb.mount(
             httpserve::GeneratedEndpoint::new(

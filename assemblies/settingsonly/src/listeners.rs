@@ -50,7 +50,7 @@ impl httpserve::RouteAuthorizer for FederatedPermissionAuthorizer {
             let tenant_shape = request.permission == vocab::RoutePermissionId::RuntimeInventoryRead
                 || request.tenant_id.is_some();
             if exact_pair && exact_grant && tenant_shape {
-                httpserve::RouteAuthorizationDecision::Allow
+                httpserve::RouteAuthorizationDecision::authorizer_local()
             } else {
                 httpserve::RouteAuthorizationDecision::Deny
             }
@@ -641,7 +641,7 @@ mod tests {
                     grant(vocab::RoutePermissionId::RuntimeInventoryRead),
                 ))
                 .await,
-            httpserve::RouteAuthorizationDecision::Allow
+            httpserve::RouteAuthorizationDecision::authorizer_local()
         );
         for (contract, permission) in [
             (
@@ -663,7 +663,7 @@ mod tests {
             )?);
             assert_eq!(
                 FederatedPermissionAuthorizer.authorize(authorized).await,
-                httpserve::RouteAuthorizationDecision::Allow,
+                httpserve::RouteAuthorizationDecision::authorizer_local(),
                 "{contract} must accept only its exact typed route grant"
             );
         }

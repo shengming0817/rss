@@ -205,7 +205,7 @@ impl RouteAuthorizer for AllowAuthorizer {
         &'a self,
         _request: RouteAuthorizationRequest,
     ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
-        Box::pin(async { RouteAuthorizationDecision::Allow })
+        Box::pin(async { RouteAuthorizationDecision::authorizer_local() })
     }
 }
 

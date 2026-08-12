@@ -1381,7 +1381,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
                 federated_permissions: None,
             })
             .await,
-        RouteAuthorizationDecision::Allow,
+        RouteAuthorizationDecision::authorizer_local(),
         "typed PostgreSQL resource attributes must drive the production route authorizer"
     );
 

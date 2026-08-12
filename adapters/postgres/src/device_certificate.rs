@@ -2706,8 +2706,9 @@ mod integration_tests {
         let target = scope();
         precreate_reconcile_target(&owner, target).await?;
         let key = DevicePolicyIdempotencyKey::new(uuid::Uuid::new_v4());
-        let request = desired_with_key(target, 0, key, "replay.example");
-        let accepted = repo.accept_desired_policy(request.clone()).await?;
+        let accepted = repo
+            .accept_desired_policy(desired_with_key(target, 0, key, "replay.example"))
+            .await?;
         let wake = match accepted {
             DesiredPolicyAcceptOutcome::Accepted { result, wake } => {
                 assert_eq!(result.accepted_generation().get(), 1);
@@ -2741,7 +2742,8 @@ mod integration_tests {
         .await?;
 
         assert!(matches!(
-            repo.accept_desired_policy(request).await?,
+            repo.accept_desired_policy(desired_with_key(target, 0, key, "replay.example"))
+                .await?,
             DesiredPolicyAcceptOutcome::Replayed { ref result }
                 if result.accepted_generation().get() == 1
         ));

@@ -11,6 +11,7 @@
 //!
 //! ref: uber-go/fx lifecycle.go@6fab1b2d3a549a67dfcf50b96161a887181c2afa（Domain::init push 声明）
 
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
@@ -91,9 +92,9 @@ use ::generated::http::{
     settings_v6::SPEC as SETTINGS_CONFIG_ROLLBACK_HTTP_SPEC,
 };
 use ::httpserve::{
-    AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint, ListenerRouter, Primary,
-    ProducerMarker, ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest,
-    RouteAuthorizer,
+    AuthorizationPolicyReference, AuthorizedSubject, ContractMarker, GeneratedPrimaryEndpoint,
+    ListenerRouter, Primary, ProducerMarker, ResourceProjection, RouteAuthorizationDecision,
+    RouteAuthorizationGrant, RouteAuthorizationRequest, RouteAuthorizer,
 };
 #[cfg(test)]
 use authn::AuthGrantSnapshot;
@@ -124,6 +125,7 @@ use vocab::http::HttpResourceSharing as HttpResourceSharingMode;
 #[cfg(test)]
 use primitives::ListenerKind;
 use rss_request_context::TenantId;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use vocab::{
     CoreError, CoreErrorKind, GrantPermission, HttpRouteAuth, ProjectionField, PublicDetail,
@@ -136,10 +138,10 @@ use crate::domain::{
     AbacAttribute, AttributeKey, AuthOutcome, IdentityError, LoginIdentifier,
     POLICY_ATTR_CONTRACT_ID, POLICY_ATTR_PERMISSION, POLICY_ATTR_PRINCIPAL_ID,
     POLICY_ATTR_PRINCIPAL_KIND, POLICY_ATTR_RESOURCE_ID, POLICY_ATTR_TENANT_ID, Policy,
-    PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope, PolicyValue, RefreshStatus,
-    RefreshTokenHash, RefreshTokenId, RefreshTokenRecord, ResourceAttributeKey,
-    ResourceAttributeResolution, ResourceAttributeResourceId, ResourcePolicyAttributeKey, RoleId,
-    evaluate_policies_for_tenant,
+    PolicyAllowEvaluation, PolicyEvaluation, PolicyId, PolicyObligations, PolicyRouteScope,
+    PolicyValue, RefreshStatus, RefreshTokenHash, RefreshTokenId, RefreshTokenRecord,
+    ResourceAttributeKey, ResourceAttributeResolution, ResourceAttributeResourceId,
+    ResourcePolicyAttributeKey, RoleId, evaluate_policies_for_tenant,
 };
 use crate::ports::{
     AccountReactivationLifecycle, AccountSecurityReadRepo, AccountStatusSetProducerReceipt,
@@ -1584,10 +1586,16 @@ impl ContractAuthorizer {
             projection: ResourceProjection::default_masked(),
         };
         let policy = contract_auth_policy(request)?;
-        match self.authorize_durable_policy(&ctx, request).await? {
+        let (evaluation, evaluated_at) = self.authorize_durable_policy(&ctx, request).await?;
+        match evaluation {
             PolicyEvaluation::Deny => return Err(AuthReject::Forbidden),
-            PolicyEvaluation::Allow(obligations) => {
-                return projection_decision_from_obligations(request, &obligations);
+            PolicyEvaluation::Allow(allow) => {
+                return projection_decision_from_policy(request, &allow, evaluated_at).map_err(
+                    |reason| {
+                        log_durable_policy_failure(&ctx, request, reason);
+                        AuthReject::Forbidden
+                    },
+                );
             }
             PolicyEvaluation::NoMatch => {}
         }
@@ -1691,7 +1699,7 @@ impl ContractAuthorizer {
         &self,
         ctx: &AuthSubjectContext,
         request: &RouteAuthorizationRequest,
-    ) -> Result<PolicyEvaluation, AuthReject> {
+    ) -> Result<(PolicyEvaluation, SystemTime), AuthReject> {
         let scope = PolicyRouteScope::parse(request.contract_id, request.permission.as_str())
             .map_err(|_| AuthReject::Forbidden)?;
         let tenant_scope = tenant_repo_scope(ctx.tenant);
@@ -1710,6 +1718,10 @@ impl ContractAuthorizer {
                 );
                 AuthReject::Forbidden
             })?;
+        if let Err(reason) = validate_effective_policies(&policies, ctx.tenant, &scope, now) {
+            log_durable_policy_failure(ctx, request, reason);
+            return Err(AuthReject::Forbidden);
+        }
         let mut attrs = route_policy_attributes(ctx, request)?;
         let required_keys = required_resource_attribute_keys(&policies)?;
         if !required_keys.is_empty() {
@@ -1718,10 +1730,9 @@ impl ContractAuthorizer {
                     .await?,
             );
         }
-        Ok(evaluate_policies_for_tenant(
-            Some(ctx.tenant),
-            &attrs,
-            &policies,
+        Ok((
+            evaluate_policies_for_tenant(Some(ctx.tenant), &attrs, &policies),
+            now,
         ))
     }
 
@@ -1785,7 +1796,9 @@ impl ContractAuthorizer {
         if ctx.kind == rss_request_context::PrincipalKind::SuperAdmin
             && projection_enabled_route(contract_id, permission)
         {
-            return Ok(RouteAuthorizationDecision::Allow);
+            return Ok(RouteAuthorizationDecision::Allow(
+                RouteAuthorizationGrant::authorizer_local(),
+            ));
         }
         let runtime_inventory_rss_user = ctx.kind == rss_request_context::PrincipalKind::User
             && contract_id == RUNTIME_INVENTORY_HTTP_SPEC.route.contract_id()
@@ -1816,7 +1829,9 @@ impl ContractAuthorizer {
             return Err(AuthReject::Forbidden);
         }
         if builtin_admin_permission(contract_id, permission) {
-            return Ok(RouteAuthorizationDecision::Allow);
+            return Ok(RouteAuthorizationDecision::Allow(
+                RouteAuthorizationGrant::authorizer_local(),
+            ));
         }
         let role_permissions = self
             .role_grant_permissions_for_subject(ctx, contract_id)
@@ -1888,6 +1903,74 @@ impl ContractAuthorizer {
         }
         Err(AuthReject::Forbidden)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DurablePolicyFailure {
+    TenantMismatch,
+    RouteScopeMismatch,
+    NotEffective,
+    DuplicateIdentity,
+    UnsupportedRowScope,
+    UnsupportedFieldMask,
+    UnknownProjectionField,
+    InvalidPolicyReference,
+    InvalidGrant,
+}
+
+impl DurablePolicyFailure {
+    const fn as_label(self) -> &'static str {
+        match self {
+            Self::TenantMismatch => "tenant_mismatch",
+            Self::RouteScopeMismatch => "route_scope_mismatch",
+            Self::NotEffective => "not_effective",
+            Self::DuplicateIdentity => "duplicate_identity",
+            Self::UnsupportedRowScope => "unsupported_row_scope",
+            Self::UnsupportedFieldMask => "unsupported_field_mask",
+            Self::UnknownProjectionField => "unknown_projection_field",
+            Self::InvalidPolicyReference => "invalid_policy_reference",
+            Self::InvalidGrant => "invalid_grant",
+        }
+    }
+}
+
+fn log_durable_policy_failure(
+    ctx: &AuthSubjectContext,
+    request: &RouteAuthorizationRequest,
+    reason: DurablePolicyFailure,
+) {
+    tracing::error!(
+        reason = reason.as_label(),
+        tenant_id = %ctx.tenant,
+        contract_id = request.contract_id,
+        permission = %request.permission,
+        "identity contract authorizer rejected invalid durable policy data"
+    );
+}
+
+fn validate_effective_policies(
+    policies: &[Policy],
+    tenant: TenantId,
+    scope: &PolicyRouteScope,
+    at: SystemTime,
+) -> Result<(), DurablePolicyFailure> {
+    for policy in policies {
+        if policy.tenant() != tenant {
+            return Err(DurablePolicyFailure::TenantMismatch);
+        }
+        if policy.route_scope() != scope {
+            return Err(DurablePolicyFailure::RouteScopeMismatch);
+        }
+        if !policy.is_effective_at(at) {
+            return Err(DurablePolicyFailure::NotEffective);
+        }
+    }
+    let mut policy_ids = policies.iter().map(Policy::id).collect::<Vec<_>>();
+    policy_ids.sort_unstable();
+    if policy_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(DurablePolicyFailure::DuplicateIdentity);
+    }
+    Ok(())
 }
 
 /// Build the process-root contract authorizer independently of identity route ownership.
@@ -1965,28 +2048,78 @@ fn projection_fields_from_permissions(
     fields
 }
 
-fn projection_decision_from_obligations(
+const AUTHORIZATION_OBLIGATION_FINGERPRINT_DOMAIN: &[u8] =
+    b"rss.identity.authorization-obligations.v1";
+
+fn projection_decision_from_policy(
     request: &RouteAuthorizationRequest,
-    obligations: &PolicyObligations,
-) -> Result<RouteAuthorizationDecision, AuthReject> {
+    allow: &PolicyAllowEvaluation,
+    evaluated_at: SystemTime,
+) -> Result<RouteAuthorizationDecision, DurablePolicyFailure> {
+    let obligations = allow.obligations();
     if obligations.row_scope().is_some() {
-        return Err(AuthReject::Forbidden);
+        return Err(DurablePolicyFailure::UnsupportedRowScope);
     }
     if !obligations.field_mask().is_empty()
         && !projection_enabled_route(request.contract_id, request.permission)
     {
-        return Err(AuthReject::Forbidden);
+        return Err(DurablePolicyFailure::UnsupportedFieldMask);
     }
     let mut fields = Vec::new();
     for key in obligations.field_mask() {
         let Some(field) = projection_field_from_obligation_key(request, key.as_str()) else {
-            return Err(AuthReject::Forbidden);
+            return Err(DurablePolicyFailure::UnknownProjectionField);
         };
         if !fields.contains(&field) {
             fields.push(field);
         }
     }
-    Ok(projection_decision_from_fields(&fields))
+    let policies = allow
+        .policies()
+        .iter()
+        .map(|policy| {
+            let version = NonZeroU32::new(policy.version().get())
+                .ok_or(DurablePolicyFailure::InvalidPolicyReference)?;
+            AuthorizationPolicyReference::new(policy.policy_id().as_str(), version)
+                .ok_or(DurablePolicyFailure::InvalidPolicyReference)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let fingerprint = obligation_fingerprint(obligations)?;
+    RouteAuthorizationGrant::durable_policy(&fields, policies, fingerprint, evaluated_at)
+        .map(RouteAuthorizationDecision::Allow)
+        .ok_or(DurablePolicyFailure::InvalidGrant)
+}
+
+fn obligation_fingerprint(
+    obligations: &PolicyObligations,
+) -> Result<[u8; httpserve::AUTHORIZATION_FINGERPRINT_BYTES], DurablePolicyFailure> {
+    fn frame(hasher: &mut Sha256, bytes: &[u8]) {
+        hasher.update((bytes.len() as u64).to_be_bytes());
+        hasher.update(bytes);
+    }
+
+    let row_scope = match obligations.row_scope() {
+        None => b"none".as_slice(),
+        Some(rss_request_context::RowScope::SelfOnly) => b"self".as_slice(),
+        Some(rss_request_context::RowScope::Device) => b"device".as_slice(),
+        Some(rss_request_context::RowScope::Tenant) => b"tenant".as_slice(),
+    };
+    let mut fields = obligations
+        .field_mask()
+        .iter()
+        .map(AttributeKey::as_str)
+        .collect::<Vec<_>>();
+    fields.sort_unstable();
+    fields.dedup();
+
+    let mut hasher = Sha256::new();
+    frame(&mut hasher, AUTHORIZATION_OBLIGATION_FINGERPRINT_DOMAIN);
+    frame(&mut hasher, row_scope);
+    frame(&mut hasher, &(fields.len() as u64).to_be_bytes());
+    for field in fields {
+        frame(&mut hasher, field.as_bytes());
+    }
+    Ok(hasher.finalize().into())
 }
 
 fn projection_field_from_obligation_key(
@@ -2001,11 +2134,9 @@ fn projection_field_from_obligation_key(
 }
 
 fn projection_decision_from_fields(fields: &[ProjectionField]) -> RouteAuthorizationDecision {
-    if fields.is_empty() {
-        RouteAuthorizationDecision::Allow
-    } else {
-        RouteAuthorizationDecision::allow_with_unmasked_fields(fields)
-    }
+    RouteAuthorizationDecision::Allow(
+        RouteAuthorizationGrant::authorizer_local_with_unmasked_fields(fields),
+    )
 }
 
 fn route_policy_attributes(
@@ -6058,10 +6189,128 @@ mod tests {
     }
 
     fn projection_for(fields: &[ProjectionField]) -> Option<ResourceProjection> {
-        match RouteAuthorizationDecision::allow_with_unmasked_fields(fields) {
-            RouteAuthorizationDecision::AllowWithProjection(projection) => Some(projection),
-            _ => None,
+        RouteAuthorizationDecision::Allow(
+            RouteAuthorizationGrant::authorizer_local_with_unmasked_fields(fields),
+        )
+        .projection()
+    }
+
+    #[test]
+    fn authorization_obligation_fingerprint_is_canonical_and_domain_separated() {
+        let left = PolicyObligations::new(
+            None,
+            vec![AttributeKey::new("field.z"), AttributeKey::new("field.a")],
+        );
+        let right = PolicyObligations::new(
+            None,
+            vec![
+                AttributeKey::new("field.a"),
+                AttributeKey::new("field.z"),
+                AttributeKey::new("field.a"),
+            ],
+        );
+        let empty = PolicyObligations::empty();
+        assert_eq!(
+            obligation_fingerprint(&left).ok(),
+            obligation_fingerprint(&right).ok()
+        );
+        assert_ne!(
+            obligation_fingerprint(&left).ok(),
+            obligation_fingerprint(&empty).ok()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn durable_policy_provider_output_is_revalidated_fail_closed() {
+        let tenant = tid(CANON_TENANT);
+        let scope = PolicyRouteScope::parse(
+            "other.contract",
+            vocab::RoutePermissionId::IdentityPolicyRead.as_str(),
+        )
+        .expect("valid scope");
+        let now = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        let build = |id: &str,
+                     policy_tenant: TenantId,
+                     policy_scope: PolicyRouteScope,
+                     from: SystemTime,
+                     until: Option<SystemTime>| {
+            Policy::build(
+                id,
+                policy_tenant,
+                policy_scope,
+                from,
+                until,
+                vec![PolicyRule::new(
+                    AttributeKey::new(POLICY_ATTR_PRINCIPAL_KIND),
+                    Operator::equal(PolicyValue::new("admin")),
+                    PolicyEffect::Allow,
+                )],
+            )
+            .expect("valid policy")
+        };
+        let valid = build("valid", tenant, scope.clone(), SystemTime::UNIX_EPOCH, None);
+        assert_eq!(
+            validate_effective_policies(&[valid.clone()], tenant, &scope, now),
+            Ok(())
+        );
+
+        let wrong_tenant = build(
+            "wrong-tenant",
+            tid(OTHER_TENANT),
+            scope.clone(),
+            SystemTime::UNIX_EPOCH,
+            None,
+        );
+        let wrong_contract = build(
+            "wrong-contract",
+            tenant,
+            PolicyRouteScope::parse("wrong.contract", scope.permission().as_str())
+                .expect("valid scope"),
+            SystemTime::UNIX_EPOCH,
+            None,
+        );
+        let wrong_permission = build(
+            "wrong-permission",
+            tenant,
+            PolicyRouteScope::parse(
+                scope.contract_id(),
+                vocab::RoutePermissionId::IdentityPolicyCreate.as_str(),
+            )
+            .expect("valid scope"),
+            SystemTime::UNIX_EPOCH,
+            None,
+        );
+        let future = build(
+            "future",
+            tenant,
+            scope.clone(),
+            now + Duration::from_secs(1),
+            None,
+        );
+        let expired = build(
+            "expired",
+            tenant,
+            scope.clone(),
+            SystemTime::UNIX_EPOCH,
+            Some(now),
+        );
+        for (invalid, reason) in [
+            (wrong_tenant, DurablePolicyFailure::TenantMismatch),
+            (wrong_contract, DurablePolicyFailure::RouteScopeMismatch),
+            (wrong_permission, DurablePolicyFailure::RouteScopeMismatch),
+            (future, DurablePolicyFailure::NotEffective),
+            (expired, DurablePolicyFailure::NotEffective),
+        ] {
+            assert_eq!(
+                validate_effective_policies(&[invalid], tenant, &scope, now),
+                Err(reason)
+            );
         }
+        assert_eq!(
+            validate_effective_policies(&[valid.clone(), valid], tenant, &scope, now),
+            Err(DurablePolicyFailure::DuplicateIdentity)
+        );
     }
 
     fn with_auth(router: axum::Router, auth: AuthorizedSubject) -> axum::Router {
@@ -6609,7 +6858,10 @@ mod tests {
             uid(CANON_USER).as_uuid(),
             "payload.subject = canonical user id（typed uuid::Uuid），非登录标识 \"alice\""
         );
-        assert_eq!(payload.tenant_id, tid(CANON_TENANT).as_uuid());
+        assert_eq!(
+            payload.tenant_id,
+            uuid::Uuid::from_bytes(tid(CANON_TENANT).octets())
+        );
         assert_eq!(payload.session_id.to_string(), resp.data.session_id);
         assert_eq!(payload.occurred_at, 1_000);
 
@@ -7365,7 +7617,7 @@ mod tests {
                 resource: Some(httpserve::RouteResource::new(CANON_USER).expect("route resource")),
             })
             .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+        assert!(decision.is_allow());
 
         let HttpRouteAuth::Permission(get_permission) = ACCOUNT_STATUS_GET_HTTP_SPEC.route.auth()
         else {
@@ -7382,7 +7634,7 @@ mod tests {
                 resource: Some(httpserve::RouteResource::new(CANON_USER).expect("route resource")),
             })
             .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+        assert!(decision.is_allow());
     }
 
     #[test]
@@ -7437,9 +7689,8 @@ mod tests {
                     resource: None,
                 })
                 .await;
-            assert_eq!(
-                decision,
-                RouteAuthorizationDecision::Allow,
+            assert!(
+                decision.is_allow(),
                 "trusted Admin gets built-in settings permission for {}",
                 spec.route.contract_id()
             );
@@ -7536,7 +7787,7 @@ mod tests {
                 resource: None,
             })
             .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+        assert!(decision.is_allow());
 
         for request in [
             RouteAuthorizationRequest {
@@ -7676,7 +7927,23 @@ mod tests {
                 resource: None,
             })
             .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+        assert!(decision.is_allow());
+        let durable = decision
+            .durable_policy()
+            .expect("durable allow must retain evaluation lineage");
+        assert_eq!(durable.policies().len(), 1);
+        assert_eq!(durable.policies()[0].policy_id(), "policy-allow");
+        assert_eq!(durable.policies()[0].version().get(), 1);
+        assert_eq!(
+            durable.obligation_fingerprint(),
+            &obligation_fingerprint(&PolicyObligations::empty())
+                .ok()
+                .expect("closed obligations fingerprint")
+        );
+        assert_eq!(
+            durable.evaluated_at(),
+            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)
+        );
     }
 
     #[test]
@@ -7800,7 +8067,7 @@ mod tests {
                 resource: Some(route_resource()),
             })
             .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+        assert!(decision.is_allow());
     }
 
     #[tokio::test]
@@ -8174,10 +8441,9 @@ mod tests {
             })
             .await;
 
-        let projection = match decision {
-            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
-            other => return Err(format!("expected projection allow, got {other:?}")),
-        };
+        let projection = decision
+            .projection()
+            .ok_or_else(|| format!("expected projection allow, got {decision:?}"))?;
         assert!(projection.allows(vocab::ProjectionField::AuditActor));
         assert!(projection.allows(vocab::ProjectionField::AuditTenantId));
         assert!(!projection.allows(vocab::ProjectionField::AuditResourceId));
@@ -8233,7 +8499,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+        assert!(decision.is_allow());
     }
 
     #[tokio::test]
@@ -8266,7 +8532,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+        assert!(decision.is_allow());
     }
 
     #[test]
@@ -8354,10 +8620,9 @@ mod tests {
             })
             .await;
 
-        let projection = match decision {
-            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
-            other => return Err(format!("expected projection allow, got {other:?}")),
-        };
+        let projection = decision
+            .projection()
+            .ok_or_else(|| format!("expected projection allow, got {decision:?}"))?;
         assert!(!projection.allows(vocab::ProjectionField::AuditActor));
         assert!(projection.allows(vocab::ProjectionField::AuditTenantId));
         assert!(!projection.allows(vocab::ProjectionField::AuditResourceId));
@@ -8409,10 +8674,9 @@ mod tests {
             })
             .await;
 
-        let projection = match decision {
-            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
-            other => return Err(format!("expected projection allow, got {other:?}")),
-        };
+        let projection = decision
+            .projection()
+            .ok_or_else(|| format!("expected projection allow, got {decision:?}"))?;
         assert!(projection.allows(vocab::ProjectionField::IdentityProfileSubject));
         assert!(!projection.allows(vocab::ProjectionField::IdentityProfileTenantId));
         Ok(())
@@ -8460,10 +8724,9 @@ mod tests {
             })
             .await;
 
-        let projection = match decision {
-            RouteAuthorizationDecision::AllowWithProjection(projection) => projection,
-            other => return Err(format!("expected projection allow, got {other:?}")),
-        };
+        let projection = decision
+            .projection()
+            .ok_or_else(|| format!("expected projection allow, got {decision:?}"))?;
         assert!(projection.allows(vocab::ProjectionField::IdentityProfileSubject));
         assert!(!projection.allows(vocab::ProjectionField::IdentityProfileTenantId));
         Ok(())
@@ -8593,7 +8856,7 @@ mod tests {
                 resource: None,
             })
             .await;
-        assert_eq!(decision, RouteAuthorizationDecision::Allow);
+        assert!(decision.is_allow());
     }
 
     #[tokio::test]

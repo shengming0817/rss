@@ -304,6 +304,23 @@ round-trip。writer 另核验 current role 精确为 `rss_app` 且非 owner/supe
 - 租户 allow 可以放宽路由门禁，但不能扩大数据访问。读端点可见性由 `RowScope` 决定；
   写端点没有 RowScope 维度，必须依赖 typed tenant 参数与 FORCE RLS 维护 tenant 边界。
 
+### Authorization provenance 与一次性 receipt
+
+- `RouteAuthorizationDecision::Allow` 必须携带闭值 `RouteAuthorizationGrant`，并显式区分
+  authorizer-local 与 durable-policy basis；不存在无依据的 bare Allow 或 projection-only 旁路。
+- route gate 只从 verified AuthN evidence、generated contract/permission 和 canonical path resource
+  铸造 opaque `AuthorizationProvenance`。authorizer 返回值不得提供或覆盖 tenant、principal 或 resource。
+- durable-policy basis 记录同次求值实际贡献 Allow 的规范有序 policy id/version、canonical obligation
+  fingerprint 与单次 authorizer clock evaluation time。deny、NoMatch、PIP/store 错误和未知 obligation
+  均不得铸造该 basis；RBAC/builtin/service allow 只能使用 authorizer-local basis。
+- `AuthorizedSubject` 为适配 HTTP extension 可以 Clone，但 clone 共享不可重置的一次性消费状态；任何
+  clone 成功取走 provenance 后，其余 clone 都 fail-closed。派生 receipt 本身不可 Clone/Copy/Serialize。
+- device policy receipt 只接受 exact policy-put contract、typed write permission、authenticated tenant/
+  principal、canonical path `DeviceId`、durable-policy basis 与域内派生 request digest。handler 不能从
+  getter、body tenant/device 或裸 scope 重建 receipt。
+- 上述 T1 carrier 只证明进程内可信 mint、绑定和一次消费，不是 durable、cryptographic 或跨重启证明；
+  PostgreSQL 原子持久化、公开 lineage schema 和 production handler 分别由 #2113、#2114、#2115 闭合。
+
 ## Open-source AuthZ parity boundary
 
 开源授权对标边界单源见

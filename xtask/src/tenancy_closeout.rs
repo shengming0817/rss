@@ -574,37 +574,6 @@ fn scan_httpserve_projection_carrier(content: &str) -> Vec<Finding> {
         ));
     }
 
-    let decision_enum = slice_from_marker_until(
-        &stripped,
-        "pub enum RouteAuthorizationDecision",
-        "impl RouteAuthorizationDecision",
-    )
-    .unwrap_or_default();
-    if !decision_enum.contains("AllowWithProjection(ResourceProjection)") {
-        findings.push(finding(
-            Rule::ProjectionAnchor,
-            "crates/httpserve/src/auth.rs:AllowWithProjection",
-            "route authorization must keep projection-bearing allow decision",
-        ));
-    }
-
-    let decision_impl = compact_ws(
-        slice_from_marker_until(
-            &stripped,
-            "impl RouteAuthorizationDecision",
-            "impl RouteAuthorizer",
-        )
-        .unwrap_or_default(),
-    );
-    if !(decision_impl.contains("Self::Allow => Some(ResourceProjection::default_masked())")
-        && decision_impl.contains("Self::AllowWithProjection(projection) => Some(projection)"))
-    {
-        findings.push(finding(
-            Rule::ProjectionAnchor,
-            "crates/httpserve/src/auth.rs:RouteAuthorizationDecision::projection",
-            "allow decisions must carry default-masked or explicit ResourceProjection into auth context",
-        ));
-    }
     findings
 }
 
@@ -729,10 +698,6 @@ fn slice_from_marker_with_len<'a>(content: &'a str, marker: &str, len: usize) ->
     let start = content.find(marker)?;
     let end = content.len().min(start + len);
     Some(&content[start..end])
-}
-
-fn compact_ws(content: &str) -> String {
-    content.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn read_required(root: &Path, rel: &str) -> Result<String> {

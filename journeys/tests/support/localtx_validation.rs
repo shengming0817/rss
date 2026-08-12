@@ -1354,7 +1354,7 @@ impl httpserve::RouteAuthorizer for AuditReadAuthorizer {
             if request.contract_id == generated::http::audit_v1::list_tenant_entries::CONTRACT_ID
                 && request.permission == vocab::AUDIT_READ_PERMISSION
             {
-                httpserve::RouteAuthorizationDecision::Allow
+                httpserve::RouteAuthorizationDecision::authorizer_local()
             } else {
                 httpserve::RouteAuthorizationDecision::Deny
             }

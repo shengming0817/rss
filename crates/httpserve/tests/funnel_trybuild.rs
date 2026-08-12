@@ -74,4 +74,8 @@ fn ui() {
     t.compile_fail("tests/ui/producer_duplicate_facts.rs");
     t.compile_fail("tests/ui/declared_producer_rejects_raw_response.rs");
     t.compile_fail("tests/ui/authorized_subject_has_no_grant_evidence.rs");
+    t.compile_fail("tests/ui/authorization_provenance_private_fields_fail.rs");
+    t.compile_fail("tests/ui/authorization_provenance_non_clone_fail.rs");
+    t.compile_fail("tests/ui/authorization_provenance_non_serialize_fail.rs");
+    t.compile_fail("tests/ui/legacy_authorization_decision_removed_fail.rs");
 }

@@ -111,7 +111,7 @@ audit append，再由 audit-owned sealed receipt 铸造 read scope。
 `ResourceProjection` 是 field obligation carrier。coarse allow 不等于字段明文 allow：
 
 - 缺 projection 时 protected fields 默认渲染为 `"<redacted>"`。
-- explicit unmask 只能来自 `RouteAuthorizationDecision::AllowWithProjection`。
+- explicit unmask 只能来自 `RouteAuthorizationDecision::Allow(RouteAuthorizationGrant)` 中的闭值 projection。
 - handler/rendering layer 消费 `AuthorizedSubject::projection()` 或 admin read 中同等 projection，不读取 role、
   permission string 或 durable policy 细节。
 

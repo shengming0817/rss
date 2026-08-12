@@ -1,26 +1,30 @@
 error[E0624]: associated function `new` is private
  --> tests/ui/cannot_construct_listener_router.rs:6:62
   |
-6 |     let _rb = httpserve::ListenerRouter::<httpserve::Admin>::new(axum::Router::new());
-  |                                                              ^^^ private associated function
+6 |       let _rb = httpserve::ListenerRouter::<httpserve::Admin>::new(axum::Router::new());
+  |                                                                ^^^ private associated function
   |
  ::: src/routes.rs
   |
-  |     pub(crate) fn new(router: axum::Router, prefix: &'static str) -> Self {
-  |     --------------------------------------------------------------------- private associated function defined here
+  | /     pub(crate) fn new(
+  | |         router: axum::Router,
+  | |         prefix: &'static str,
+  | |         write_admission: RouteAdmissionContext,
+  | |     ) -> Self {
+  | |_____________- private associated function defined here
 
-error[E0061]: this function takes 2 arguments but 1 argument was supplied
+error[E0061]: this function takes 3 arguments but 1 argument was supplied
  --> tests/ui/cannot_construct_listener_router.rs:6:15
   |
 6 |     let _rb = httpserve::ListenerRouter::<httpserve::Admin>::new(axum::Router::new());
-  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------------- argument #2 of type `&'static str` is missing
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^--------------------- two arguments of type `&'static str` and `routes::RouteAdmissionContext` are missing
   |
 note: associated function defined here
  --> src/routes.rs
   |
-  |     pub(crate) fn new(router: axum::Router, prefix: &'static str) -> Self {
+  |     pub(crate) fn new(
   |                   ^^^
-help: provide the argument
+help: provide the arguments
   |
-6 |     let _rb = httpserve::ListenerRouter::<httpserve::Admin>::new(axum::Router::new(), /* &'static str */);
-  |                                                                                     ++++++++++++++++++++
+6 |     let _rb = httpserve::ListenerRouter::<httpserve::Admin>::new(axum::Router::new(), /* &'static str */, /* routes::RouteAdmissionContext */);
+  |                                                                                     +++++++++++++++++++++++++++++++++++++++++++++++++++++++++

@@ -421,7 +421,7 @@ impl httpserve::RouteAuthorizer for MtlsRouteAuthorizer {
                     .map(|id| self.allow_set.allows(&id))
                     .unwrap_or(false);
             if allowed {
-                httpserve::RouteAuthorizationDecision::Allow
+                httpserve::RouteAuthorizationDecision::authorizer_local()
             } else {
                 httpserve::RouteAuthorizationDecision::Deny
             }
@@ -952,7 +952,7 @@ mod tests {
             _request: httpserve::RouteAuthorizationRequest,
         ) -> Pin<Box<dyn Future<Output = httpserve::RouteAuthorizationDecision> + Send + 'a>>
         {
-            Box::pin(async { httpserve::RouteAuthorizationDecision::Allow })
+            Box::pin(async { httpserve::RouteAuthorizationDecision::authorizer_local() })
         }
     }
 
@@ -1852,10 +1852,9 @@ mod tests {
                                     })
                                     .await
                                 {
-                                    httpserve::RouteAuthorizationDecision::Allow
-                                    | httpserve::RouteAuthorizationDecision::AllowWithProjection(
-                                        _,
-                                    ) => axum::http::StatusCode::OK.into_response(),
+                                    httpserve::RouteAuthorizationDecision::Allow(_) => {
+                                        axum::http::StatusCode::OK.into_response()
+                                    }
                                     httpserve::RouteAuthorizationDecision::Deny => {
                                         axum::http::StatusCode::FORBIDDEN.into_response()
                                     }

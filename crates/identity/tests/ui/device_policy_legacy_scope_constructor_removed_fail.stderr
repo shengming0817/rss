@@ -1,0 +1,17 @@
+error[E0599]: no associated function or constant named `from_authorized` found for struct `AcceptDesiredPolicy` in the current scope
+ --> tests/ui/device_policy_legacy_scope_constructor_removed_fail.rs:4:34
+  |
+4 |     let _ = AcceptDesiredPolicy::from_authorized;
+  |                                  ^^^^^^^^^^^^^^^ associated function or constant not found in `AcceptDesiredPolicy`
+  |
+help: there is an associated function `from_authorized_subject` with a similar name
+ --> src/device_certificate/domain.rs
+  |
+  | /     pub fn from_authorized_subject(
+  | |         subject: &httpserve::AuthorizedSubject,
+  | |         device: DeviceId,
+  | |         expected_generation: ExpectedGeneration,
+  | |         idempotency_key: DevicePolicyIdempotencyKey,
+  | |         policy: CertificatePolicy,
+  | |     ) -> Result<Self, DevicePolicyAcceptInputError> {
+  | |___________________________________________________^

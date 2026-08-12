@@ -204,7 +204,7 @@ impl httpserve::RouteAuthorizer for ExactDeviceCertificateStatusAuthorizer {
                     .as_ref()
                     .is_some_and(|resource| resource.id() == self.device_id);
             if exact {
-                httpserve::RouteAuthorizationDecision::Allow
+                httpserve::RouteAuthorizationDecision::authorizer_local()
             } else {
                 httpserve::RouteAuthorizationDecision::Deny
             }

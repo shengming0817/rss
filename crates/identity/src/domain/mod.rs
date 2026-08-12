@@ -51,7 +51,7 @@ pub use abac::{
     PolicyRouteScope, PolicyRule, PolicyScalarInput, PolicyVersion, ScalarOperandInput,
     ScalarOperandRef, StringPredicate, TypedPolicyValueInput,
 };
-pub(crate) use abac::{PolicyEvaluation, evaluate_policies_for_tenant};
+pub(crate) use abac::{PolicyAllowEvaluation, PolicyEvaluation, evaluate_policies_for_tenant};
 // Role / RoleBinding 是 pub（ports::{RoleReadRepo, RoleBindingLifecycle} 签名实体，跨 crate 命名）。
 pub use rbac::{Role, RoleBinding};
 pub use security_event::{
@@ -575,7 +575,7 @@ impl PolicyValue {
 /// 策略标识 newtype（私有字段；构造经 funnel；不 derive Serialize——域类型）。
 // reason: 同 RoleId（生产调用方待 W；当前仅测试消费）。
 #[allow(dead_code)]
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PolicyId(String);
 
 // reason: 同 RoleId impl（生产调用方待 W；当前仅测试消费）。

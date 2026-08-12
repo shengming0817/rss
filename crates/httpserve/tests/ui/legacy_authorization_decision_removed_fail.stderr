@@ -1,0 +1,38 @@
+error[E0308]: mismatched types
+ --> tests/ui/legacy_authorization_decision_removed_fail.rs:4:41
+  |
+4 |     let _: RouteAuthorizationDecision = RouteAuthorizationDecision::Allow;
+  |            --------------------------   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ expected `RouteAuthorizationDecision`, found enum constructor
+  |            |
+  |            expected due to this
+  |
+  = note:          expected enum `RouteAuthorizationDecision`
+          found enum constructor `fn(RouteAuthorizationGrant) -> RouteAuthorizationDecision {Allow}`
+help: use parentheses to construct this tuple variant
+  |
+4 |     let _: RouteAuthorizationDecision = RouteAuthorizationDecision::Allow(/* RouteAuthorizationGrant */);
+  |                                                                          +++++++++++++++++++++++++++++++
+
+error[E0599]: no variant, associated function, or constant named `AllowWithProjection` found for enum `RouteAuthorizationDecision` in the current scope
+ --> tests/ui/legacy_authorization_decision_removed_fail.rs:5:41
+  |
+5 |     let _ = RouteAuthorizationDecision::AllowWithProjection;
+  |                                         ^^^^^^^^^^^^^^^^^^^ variant, associated function, or constant not found in `RouteAuthorizationDecision`
+  |
+help: there is a method `projection` with a similar name
+ --> src/auth.rs
+  |
+  |     pub const fn projection(&self) -> Option<ResourceProjection> {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+error[E0599]: no variant, associated function, or constant named `allow_with_unmasked_fields` found for enum `RouteAuthorizationDecision` in the current scope
+ --> tests/ui/legacy_authorization_decision_removed_fail.rs:6:41
+  |
+6 |     let _ = RouteAuthorizationDecision::allow_with_unmasked_fields;
+  |                                         ^^^^^^^^^^^^^^^^^^^^^^^^^^ variant, associated function, or constant not found in `RouteAuthorizationDecision`
+  |
+help: there is an associated function `authorizer_local_with_unmasked_fields` with a similar name
+ --> src/auth.rs
+  |
+  |     pub fn authorizer_local_with_unmasked_fields(fields: &[ProjectionField]) -> Self {
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

@@ -27,9 +27,9 @@ use std::sync::{Arc, Mutex};
 use tower::ServiceExt; // oneshot
 
 use httpserve::{
-    Authenticated, AuthenticatedRoutes, RouteAuthorizationDecision, RouteAuthorizationRequest,
-    RouteAuthorizer, RouteGroupError, RouteMeta, TestPrimaryRoute as PrimaryRoute,
-    TestRoute as Route, TestRoutePermission as RoutePermission,
+    Authenticated, AuthenticatedRoutes, RouteAuthorizationDecision, RouteAuthorizationGrant,
+    RouteAuthorizationRequest, RouteAuthorizer, RouteGroupError, RouteMeta,
+    TestPrimaryRoute as PrimaryRoute, TestRoute as Route, TestRoutePermission as RoutePermission,
     TestRouteResourceScope as RouteResourceScope, UnfinalizedRoutes, finalize_auth,
     finalize_primary_auth,
 };
@@ -127,7 +127,9 @@ impl RouteAuthorizer for AllowAuthorizer {
         &'a self,
         _request: RouteAuthorizationRequest,
     ) -> Pin<Box<dyn Future<Output = RouteAuthorizationDecision> + Send + 'a>> {
-        Box::pin(async { RouteAuthorizationDecision::Allow })
+        Box::pin(async {
+            RouteAuthorizationDecision::Allow(RouteAuthorizationGrant::authorizer_local())
+        })
     }
 }
 
@@ -175,7 +177,9 @@ impl RouteAuthorizer for RecordingAuthorizer {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .push(request);
-        Box::pin(async { RouteAuthorizationDecision::Allow })
+        Box::pin(async {
+            RouteAuthorizationDecision::Allow(RouteAuthorizationGrant::authorizer_local())
+        })
     }
 }
 

@@ -36,8 +36,8 @@ pub struct DeviceCertificateStatusAuthorizationError;
 /// let _ = AuthorizedDeviceCertificateStatusRead {};
 /// ```
 pub struct AuthorizedDeviceCertificateStatusRead {
+    provenance: httpserve::AuthorizationProvenance,
     scope: DeviceCertificateScope,
-    projection: httpserve::ResourceProjection,
 }
 
 impl AuthorizedDeviceCertificateStatusRead {
@@ -55,9 +55,12 @@ impl AuthorizedDeviceCertificateStatusRead {
         if !exact_route {
             return Err(DeviceCertificateStatusAuthorizationError);
         }
+        let provenance = subject
+            .take_authorization_provenance()
+            .map_err(|_| DeviceCertificateStatusAuthorizationError)?;
         Ok(Self {
-            scope: DeviceCertificateScope::from_authorized(subject.tenant_id(), device),
-            projection: subject.projection(),
+            scope: DeviceCertificateScope::from_authorized(provenance.tenant_id(), device),
+            provenance,
         })
     }
 
@@ -70,8 +73,8 @@ impl AuthorizedDeviceCertificateStatusRead {
 
     /// Field projection carried by the successful authorization decision.
     #[must_use]
-    pub const fn projection(&self) -> httpserve::ResourceProjection {
-        self.projection
+    pub fn projection(&self) -> httpserve::ResourceProjection {
+        self.provenance.projection()
     }
 }
 
@@ -80,7 +83,7 @@ impl std::fmt::Debug for AuthorizedDeviceCertificateStatusRead {
         formatter
             .debug_struct("AuthorizedDeviceCertificateStatusRead")
             .field("scope", &"<redacted>")
-            .field("projection", &self.projection)
+            .field("projection", &self.projection())
             .finish()
     }
 }

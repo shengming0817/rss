@@ -1,0 +1,5 @@
+error: cannot construct `DevicePolicyAuthorizationReceipt` with struct literal syntax due to private fields
+ --> tests/ui/device_policy_authorization_receipt_private_fields_fail.rs:2:13
+  |
+2 |     let _ = identity::ports::device_certificate::DevicePolicyAuthorizationReceipt {};
+  |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

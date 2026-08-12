@@ -1924,7 +1924,7 @@ mod tests {
                 .push(request);
             Box::pin(async move {
                 if allow {
-                    httpserve::RouteAuthorizationDecision::Allow
+                    httpserve::RouteAuthorizationDecision::authorizer_local()
                 } else {
                     httpserve::RouteAuthorizationDecision::Deny
                 }

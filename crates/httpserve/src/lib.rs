@@ -19,10 +19,12 @@ pub mod routes;
 mod server_observation;
 
 pub use auth::{
-    AuditSinkHandle, Authenticated, AuthenticatedAuditEvent, AuthorizedSubject,
-    BearerCredentialError, ExtractedBearerCredential, FieldMask, PendingScopeCtx,
-    ResourceProjection, RouteAuthorizationDecision, RouteAuthorizationRequest, RouteAuthorizer,
-    RouteMeta, RouteResource, ServiceTokenTenantBindingError, TenantHeaderError,
+    AUTHORIZATION_FINGERPRINT_BYTES, AuditSinkHandle, Authenticated, AuthenticatedAuditEvent,
+    AuthorizationPolicyReference, AuthorizationProvenance, AuthorizationProvenanceAlreadyTaken,
+    AuthorizedSubject, BearerCredentialError, DurablePolicyAuthorization,
+    ExtractedBearerCredential, FieldMask, PendingScopeCtx, ResourceProjection,
+    RouteAuthorizationDecision, RouteAuthorizationGrant, RouteAuthorizationRequest,
+    RouteAuthorizer, RouteMeta, RouteResource, ServiceTokenTenantBindingError, TenantHeaderError,
     authorize_subject_for_permission, exact_tenant_header, extract_bearer_credential,
     service_token_tenant_binding,
 };

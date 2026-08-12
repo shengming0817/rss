@@ -148,7 +148,7 @@ pub mod test_support {
                     && request.principal_id == ALLOWED_SUBJECT
                     && request.tenant_id.is_some()
                 {
-                    httpserve::RouteAuthorizationDecision::Allow
+                    httpserve::RouteAuthorizationDecision::authorizer_local()
                 } else {
                     httpserve::RouteAuthorizationDecision::Deny
                 }

@@ -23,6 +23,10 @@ const DIGEST_HEX_LEN: usize = DIGEST_BYTES * 2;
 const MAX_REPORT_ENVELOPE_ID_BYTES: usize = 256;
 const MAX_SIGNED_COORDINATE: u64 = i64::MAX as u64;
 const POLICY_REQUEST_DIGEST_DOMAIN: &[u8] = b"rss.identity.device-certificate-policy-request.v1";
+const POLICY_WRITE_CONTRACT_ID: &str =
+    generated::http::identity_v2::device_certificate_policy_put::CONTRACT_ID;
+const POLICY_WRITE_PERMISSION: vocab::RoutePermissionId =
+    vocab::RoutePermissionId::IdentityDeviceCertificatePolicyWrite;
 
 /// A malformed device-certificate persistence value or restored aggregate.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -320,31 +324,102 @@ fn digest_frame(hasher: &mut Sha256, value: &[u8]) {
     hasher.update(value);
 }
 
-/// Sealed desired-policy accept input. Scope and request digest cannot come from body data.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AcceptDesiredPolicy {
+/// Move-only device-policy authorization receipt.
+pub struct DevicePolicyAuthorizationReceipt {
+    provenance: httpserve::AuthorizationProvenance,
+    durable_policy: httpserve::DurablePolicyAuthorization,
     scope: DeviceCertificateScope,
+    request_digest: DevicePolicyRequestDigest,
+}
+
+impl DevicePolicyAuthorizationReceipt {
+    fn mint(
+        provenance: httpserve::AuthorizationProvenance,
+        device: DeviceId,
+        request_digest: DevicePolicyRequestDigest,
+    ) -> Option<Self> {
+        let expected_resource = device.as_uuid().hyphenated().to_string();
+        let durable_policy = provenance.durable_policy().cloned()?;
+        let exact = provenance.contract_id() == POLICY_WRITE_CONTRACT_ID
+            && provenance.permission() == POLICY_WRITE_PERMISSION
+            && provenance
+                .resource()
+                .is_some_and(|resource| resource.id() == expected_resource);
+        if !exact {
+            return None;
+        }
+        Some(Self {
+            scope: DeviceCertificateScope::from_authorized(provenance.tenant_id(), device),
+            provenance,
+            durable_policy,
+            request_digest,
+        })
+    }
+
+    pub const fn scope(&self) -> DeviceCertificateScope {
+        self.scope
+    }
+
+    pub const fn request_digest(&self) -> &DevicePolicyRequestDigest {
+        &self.request_digest
+    }
+
+    pub fn principal_kind(&self) -> rss_request_context::PrincipalKind {
+        self.provenance.principal_kind()
+    }
+
+    pub fn principal_id(&self) -> &str {
+        self.provenance.principal_id()
+    }
+
+    pub fn durable_policy(&self) -> &httpserve::DurablePolicyAuthorization {
+        &self.durable_policy
+    }
+}
+
+impl std::fmt::Debug for DevicePolicyAuthorizationReceipt {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DevicePolicyAuthorizationReceipt(<redacted>)")
+    }
+}
+
+/// Sealed desired-policy accept input. Scope, digest, and lineage come from one receipt.
+pub struct AcceptDesiredPolicy {
+    authorization: DevicePolicyAuthorizationReceipt,
     expected_generation: ExpectedGeneration,
     idempotency_key: DevicePolicyIdempotencyKey,
-    request_digest: DevicePolicyRequestDigest,
     policy: CertificatePolicy,
 }
 
 impl AcceptDesiredPolicy {
-    #[allow(dead_code)]
-    pub(crate) fn from_authorized(
-        scope: DeviceCertificateScope,
+    /// Consume exact route authorization into a sealed desired-policy input.
+    ///
+    /// The subject must bind the policy-put contract, write permission, path device, and a durable
+    /// policy basis. All clones share one provenance slot: once authorization is taken, later
+    /// attempts return [`DevicePolicyAcceptInputError::Unauthorized`], including an attempt that
+    /// fails exact receipt binding. Invalid generation input is rejected before consuming that
+    /// slot.
+    pub fn from_authorized_subject(
+        subject: &httpserve::AuthorizedSubject,
+        device: DeviceId,
         expected_generation: ExpectedGeneration,
         idempotency_key: DevicePolicyIdempotencyKey,
         policy: CertificatePolicy,
-    ) -> Result<Self, DeviceCertificateError> {
-        expected_generation.next()?;
+    ) -> Result<Self, DevicePolicyAcceptInputError> {
+        expected_generation
+            .next()
+            .map_err(DevicePolicyAcceptInputError::InvalidInput)?;
         let request_digest = DevicePolicyRequestDigest::derive(expected_generation, &policy);
+        let provenance = subject
+            .take_authorization_provenance()
+            .map_err(|_| DevicePolicyAcceptInputError::Unauthorized)?;
+        let authorization =
+            DevicePolicyAuthorizationReceipt::mint(provenance, device, request_digest)
+                .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
         Ok(Self {
-            scope,
+            authorization,
             expected_generation,
             idempotency_key,
-            request_digest,
             policy,
         })
     }
@@ -356,14 +431,40 @@ impl AcceptDesiredPolicy {
         expected_generation: ExpectedGeneration,
         idempotency_key: DevicePolicyIdempotencyKey,
         policy: CertificatePolicy,
-    ) -> Result<Self, DeviceCertificateError> {
-        Self::from_authorized(scope, expected_generation, idempotency_key, policy)
+    ) -> Result<Self, DevicePolicyAcceptInputError> {
+        use std::num::NonZeroU32;
+
+        let resource =
+            httpserve::RouteResource::new(scope.device().as_uuid().hyphenated().to_string())
+                .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
+        let policy_ref =
+            httpserve::AuthorizationPolicyReference::new("test-device-policy", NonZeroU32::MIN)
+                .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
+        let subject = httpserve::AuthorizedSubject::for_test_with_durable_policy(
+            POLICY_WRITE_CONTRACT_ID,
+            POLICY_WRITE_PERMISSION,
+            scope.tenant(),
+            rss_request_context::PrincipalKind::Admin,
+            "test-device-policy-authorizer",
+            Some(resource),
+            vec![policy_ref],
+            [0xA5; httpserve::AUTHORIZATION_FINGERPRINT_BYTES],
+            SystemTime::UNIX_EPOCH,
+        )
+        .ok_or(DevicePolicyAcceptInputError::Unauthorized)?;
+        Self::from_authorized_subject(
+            &subject,
+            scope.device(),
+            expected_generation,
+            idempotency_key,
+            policy,
+        )
     }
 
     /// Tenant/device persistence scope.
     #[must_use]
     pub const fn scope(&self) -> DeviceCertificateScope {
-        self.scope
+        self.authorization.scope()
     }
 
     /// Expected current generation.
@@ -381,7 +482,7 @@ impl AcceptDesiredPolicy {
     /// Canonical request identity derived inside the sealed constructor.
     #[must_use]
     pub const fn request_digest(&self) -> &DevicePolicyRequestDigest {
-        &self.request_digest
+        self.authorization.request_digest()
     }
 
     /// Strictly newer generation derived from the expectation.
@@ -394,6 +495,24 @@ impl AcceptDesiredPolicy {
     pub const fn policy(&self) -> &CertificatePolicy {
         &self.policy
     }
+
+    pub const fn authorization(&self) -> &DevicePolicyAuthorizationReceipt {
+        &self.authorization
+    }
+}
+
+impl std::fmt::Debug for AcceptDesiredPolicy {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("AcceptDesiredPolicy(<redacted>)")
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum DevicePolicyAcceptInputError {
+    #[error("device policy input is invalid")]
+    InvalidInput(#[source] DeviceCertificateError),
+    #[error("device policy request is not authorized")]
+    Unauthorized,
 }
 
 /// Closed deterministic condition returned when a desired policy is accepted.
