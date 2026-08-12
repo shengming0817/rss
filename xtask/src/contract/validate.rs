@@ -311,12 +311,11 @@ fn r25_candidate_exact_set_findings(contracts: &[RepositoryContract]) -> Vec<Fin
                     ),
                 ));
             }
-            if !contract.dir().ends_with(
-                expected
-                    .source_dir
-                    .strip_prefix("contracts/")
-                    .expect("candidate sourceDir is repository-relative"),
-            ) {
+            if expected
+                .source_dir
+                .strip_prefix("contracts/")
+                .is_none_or(|source_dir| !contract.dir().ends_with(source_dir))
+            {
                 out.push(r25_finding(
                     contract,
                     format!(

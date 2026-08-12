@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use workspacefacts::{
     ApiStability, DependencyKind, DependencyResolution, DependencySource, OfficialProfile,
-    PublicApiOwner, PublishPolicy, TargetKind, WorkspaceFacts,
+    PublicApiOwner, PublishPolicy, ReleaseProfileArtifactSelection, TargetKind, WorkspaceFacts,
 };
 
 use crate::assembly::{Finding, Rule};
@@ -603,69 +603,14 @@ pub(crate) fn project_artifacts(
         .collect()
 }
 
-pub(crate) fn validate(
+fn validate_profile_artifacts(
     facts: &WorkspaceFacts,
     artifacts: &[ArtifactProjection],
-) -> (Option<ReleaseSurface>, Vec<Finding>) {
-    // INVARIANT: PREPUBLICATION-PATCH-LINE-01 { level = "Medium", exec = "release-surface", synthetic_red = "tests::release_version_line_rejects_major_or_minor_changes" }.
-    let mut surface = ReleaseSurface {
-        packages: Vec::new(),
-        profile_artifacts: Vec::new(),
-        publish_order: Vec::new(),
-    };
-    let selection = match facts.release_selection() {
-        Ok(Some(selection)) => selection,
-        Ok(None) => {
-            return (
-                None,
-                vec![finding(
-                    Rule::ReleaseSurfaceDeclaration,
-                    "workspace.metadata.release-surface",
-                    "positive release selection is missing",
-                )],
-            );
-        }
-        Err(error) => {
-            return (
-                None,
-                vec![finding(
-                    Rule::ReleaseSurfaceDeclaration,
-                    error.subject(),
-                    error.detail(),
-                )],
-            );
-        }
-    };
-
-    let catalog = facts.workspace_packages();
-    let packages_by_name = catalog
-        .iter()
-        .map(|package| (package.key().as_str(), package))
-        .collect::<BTreeMap<_, _>>();
-    let publishable = catalog
-        .iter()
-        .filter(|package| package.publish_policy().is_publishable())
-        .map(|package| package.key().as_str().to_owned())
-        .collect::<BTreeSet<_>>();
-    let selected = selection
-        .packages()
-        .iter()
-        .map(|package| package.package().to_owned())
-        .collect::<BTreeSet<_>>();
+    selections: &[ReleaseProfileArtifactSelection],
+) -> Vec<Finding> {
     let mut findings = Vec::new();
-
-    findings.extend(project_publish_order(facts, &selected, &mut surface));
-
-    for package in publishable.difference(&selected) {
-        findings.push(finding(
-            Rule::ReleaseSurfaceExactSet,
-            format!("package:{package}"),
-            "Cargo-publishable package is missing from the positive selection",
-        ));
-    }
-
     let mut profile_rows = BTreeMap::new();
-    for (index, selected_profile) in selection.profile_artifacts().iter().enumerate() {
+    for (index, selected_profile) in selections.iter().enumerate() {
         let profile = selected_profile.profile();
         let subject = format!("workspace.metadata.release-surface.profile-artifacts[{index}]");
         findings.push(finding(
@@ -730,13 +675,81 @@ pub(crate) fn validate(
                         subject,
                         "selected artifact binary/image identity does not resolve in governed facts",
                     ));
-                    continue;
                 }
                 // The joined artifact proves identity only. A later profile-activation owner must
                 // provide independent typed authority before this row may mint surface state.
             }
         }
     }
+    findings
+}
+
+pub(crate) fn validate(
+    facts: &WorkspaceFacts,
+    artifacts: &[ArtifactProjection],
+) -> (Option<ReleaseSurface>, Vec<Finding>) {
+    // INVARIANT: PREPUBLICATION-PATCH-LINE-01 { level = "Medium", exec = "release-surface", synthetic_red = "tests::release_version_line_rejects_major_or_minor_changes" }.
+    let mut surface = ReleaseSurface {
+        packages: Vec::new(),
+        profile_artifacts: Vec::new(),
+        publish_order: Vec::new(),
+    };
+    let selection = match facts.release_selection() {
+        Ok(Some(selection)) => selection,
+        Ok(None) => {
+            return (
+                None,
+                vec![finding(
+                    Rule::ReleaseSurfaceDeclaration,
+                    "workspace.metadata.release-surface",
+                    "positive release selection is missing",
+                )],
+            );
+        }
+        Err(error) => {
+            return (
+                None,
+                vec![finding(
+                    Rule::ReleaseSurfaceDeclaration,
+                    error.subject(),
+                    error.detail(),
+                )],
+            );
+        }
+    };
+
+    let catalog = facts.workspace_packages();
+    let packages_by_name = catalog
+        .iter()
+        .map(|package| (package.key().as_str(), package))
+        .collect::<BTreeMap<_, _>>();
+    let publishable = catalog
+        .iter()
+        .filter(|package| package.publish_policy().is_publishable())
+        .map(|package| package.key().as_str().to_owned())
+        .collect::<BTreeSet<_>>();
+    let selected = selection
+        .packages()
+        .iter()
+        .map(|package| package.package().to_owned())
+        .collect::<BTreeSet<_>>();
+    let mut findings = Vec::new();
+
+    findings.extend(project_publish_order(facts, &selected, &mut surface));
+
+    for package in publishable.difference(&selected) {
+        findings.push(finding(
+            Rule::ReleaseSurfaceExactSet,
+            format!("package:{package}"),
+            "Cargo-publishable package is missing from the positive selection",
+        ));
+    }
+
+    findings.extend(validate_profile_artifacts(
+        facts,
+        artifacts,
+        selection.profile_artifacts(),
+    ));
 
     let selected_profiles = BTreeSet::<OfficialProfile>::new();
     let mut seen_packages = BTreeSet::new();

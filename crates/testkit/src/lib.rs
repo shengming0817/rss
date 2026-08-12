@@ -20,7 +20,8 @@
 //!
 //! 边界（按层职责切分）：
 //! - **不依赖任何 adapter crate**——域 crate 经 `[dev-dependencies]` 消费本 crate 写契约测试，不拉
-//!   adapter（`rust-standards.md §命名`）。本 crate 出边全是外部 crate（axum/tower/serde…）。
+//!   adapter（`rust-standards.md §命名`）。本 crate 唯一内部 shipped 出边为 `rss-conformance`，其余
+//!   出边为外部 crate（axum/tower/serde…）。
 //! - **不构造 `AuthPlan` / 不挂 `finalize_auth`**——auth 装配是组合根关注点；harness 只驱动调用方已
 //!   组装好的 `Router`。运行期鉴权闸（401/403）的端到端断言见 `httpserve/tests/runtime.rs`。
 //!

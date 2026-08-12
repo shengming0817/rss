@@ -2,7 +2,7 @@
 //!
 //! 本模块只表达 provider-agnostic 的 eventing 行为断言：outbox relay / sampler / sweeper、
 //! inbox claim / lease CAS，以及 consumer settlement / DLX 语义。调用方用闭包适配具体 adapter
-//! 类型和探针；testkit 不依赖任何 workspace crate，因而本 conformance 是 Medium 机器门，
+//! 类型和探针；本模块不依赖任何 RSS domain 类型，因而本 conformance 是 Medium 机器门，
 //! 不替代生产 API 的类型层 Hard 约束。
 //!
 //! ref: serverlesstechnology/cqrs persistence/postgres-es/src/event_repository.rs@d6bc03ca1cd7a6538fedb51fd4c592126527a3c0

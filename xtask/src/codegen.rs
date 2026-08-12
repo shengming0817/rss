@@ -547,17 +547,18 @@ fn render_device_certificate_candidates(
             );
         };
         let manifest = contract.manifest();
+        let Some(source_dir) = expected.source_dir.strip_prefix("contracts/") else {
+            bail!(
+                "device-certificate candidate id={} sourceDir must be repository-relative",
+                expected.id
+            );
+        };
         if manifest.kind != expected.kind
             || manifest.consistency_level != expected.consistency_level
             || manifest.lifecycle != expected.lifecycle
             || manifest.domain != "identity"
             || contract.owner().domain().map(|owner| owner.as_str()) != Some("identity")
-            || !contract.dir().ends_with(
-                expected
-                    .source_dir
-                    .strip_prefix("contracts/")
-                    .expect("candidate sourceDir is repository-relative"),
-            )
+            || !contract.dir().ends_with(source_dir)
         {
             bail!(
                 "device-certificate candidate id={} metadata/source drifted from the typed catalog",

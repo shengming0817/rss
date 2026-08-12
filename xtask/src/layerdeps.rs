@@ -47,8 +47,8 @@
 //!   （暂停 application-receipt relay 的测试控制）；生产构建启用即可伪造 tenant scope / 事件拓扑或
 //!   暴露 relay 控制，绕过 typed funnel（#1105 review C-3 + #1594 review F6：Soft→Medium 机器门）。
 //! INVARIANT: LAYER-DEPS-10 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::test_support_internal_dependencies_red_shipped_edges", anti_vacuity = "tests::test_support_internal_dependencies_green_no_shipped_edge" }—— test-support 库（`layers::TEST_SUPPORT_CRATES`）的 shipped
-//!   出边只能指向外部 crate；任一指向 workspace 内部成员的出边均失败，保持 test-support crate 为零
-//!   production-adapter、零 workspace 依赖的独立测试工具。与 LAYER-DEPS-08 的 shipped 入边约束正交。
+//!   出边默认只能指向外部 crate；唯一内部例外为 `testkit → rss-conformance`，使内部 harness 复用同一
+//!   provider-neutral 分类 owner，其余 workspace 内部出边均失败。与 LAYER-DEPS-08 的 shipped 入边约束正交。
 //! INVARIANT: RUNTIMEEXEC-LAYER-01 { level = "Medium", exec = "check", source = "code", synthetic_red = "tests::runtimeexec_wrapper_widened_to_bin_red|tests::runtimeexec_wrapper_missing_assembly_red", anti_vacuity = "tests::runtimeexec_wrapper_exact_green" }——
 //!   `runtimeexec` target wrapper 必须恰为 runtime/settingsonly/identityaudit 三个 assembly，禁止 bins、composition、
 //!   journeys 与 xtask 直接依赖；该特殊 wrapper 不得被一般 Domain/Adapter/Generated stale 逻辑误判。
@@ -102,7 +102,7 @@ pub(crate) enum Rule {
     /// LAYER-DEPS-09：scoped construction 的 `test-support` **feature** 被 shipped 依赖表启用（应只经
     /// `[dev-dependencies]` 启用）。
     TestSupportFeatureShipped,
-    /// LAYER-DEPS-10：test-support 库 shipped 依赖 workspace 内部成员（只准依赖外部 crate）。
+    /// LAYER-DEPS-10：test-support 库出现非 `testkit → rss-conformance` 的内部 shipped 出边。
     TestSupportInternalShipped,
     /// RUNTIMEEXEC-DEPS-01：runtimeexec 出现 allowlist 外的 shipped direct dependency。
     RuntimeExecDependencyScope,
@@ -1337,7 +1337,7 @@ pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
         .collect()
 }
 
-/// LAYER-DEPS-10：test-support 库的 shipped 出边不得指向 workspace 内部成员。
+/// LAYER-DEPS-10：test-support 库的内部 shipped 出边只允许 `testkit → rss-conformance`。
 ///
 /// [`Edge`] 只表示已解析的 workspace 内部 shipped 边，因此只需按 source 精确筛选
 /// [`layers::TEST_SUPPORT_CRATES`]；外部依赖不会进入 `edges`，`[dev-dependencies]` 也不在扫描范围。
@@ -2559,7 +2559,7 @@ mod tests {
         );
     }
 
-    /// LAYER-DEPS-10（红）：test-support 的任意 shipped workspace 内部出边均被拒绝。
+    /// LAYER-DEPS-10（红）：精确例外外的 test-support 内部 shipped 出边均被拒绝。
     #[test]
     fn test_support_internal_dependencies_red_shipped_edges() {
         let findings = check_test_support_internal_dependencies(&[

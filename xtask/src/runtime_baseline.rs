@@ -1568,9 +1568,9 @@ fn collect_transparent_owner_calls(
     }
 }
 
-fn resolve_runtime_binary_lifecycle_owner<'a>(
-    file: &'a syn::File,
-) -> std::result::Result<(&'a syn::ItemFn, String), String> {
+fn resolve_runtime_binary_lifecycle_owner(
+    file: &syn::File,
+) -> std::result::Result<(&syn::ItemFn, String), String> {
     let functions = production_free_functions(file)?;
     let module_aliases = lifecycle_module_aliases(file);
     let main = functions

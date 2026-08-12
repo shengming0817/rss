@@ -1,7 +1,7 @@
 //! Provider-neutral `RevocationStore` conformance.
 //!
-//! The helper owns no RSS types: adapters provide opaque scope/serial/expiry values plus boxed
-//! async operations. This keeps testkit free of workspace dependencies while making the security
+//! The helper owns no RSS domain types: adapters provide opaque scope/serial/expiry values plus
+//! boxed async operations. This keeps the helper provider-neutral while making the security
 //! semantics executable by every implementation.
 
 use std::fmt::Debug;

@@ -5563,7 +5563,6 @@ members = ["rss_demo"]
             "LINT-DEMO-01",
             "PUBLICAPI-DEMO-01",
             "RUNTIME-DEPS-CONFIG-DEMO-01",
-            "RUNTIME-ROOT-CONFIG-DEMO-01",
             "XTASK-DEMO-01",
         ] {
             assert!(index.records.iter().any(|r| r.id == id), "missing {id}");

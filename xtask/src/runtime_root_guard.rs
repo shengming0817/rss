@@ -120,7 +120,7 @@ fn scan_source(source: &str) -> Result<Vec<Finding<Rule>>> {
                 format!("{ROOT_PATH}:{}", other.span().start().line),
                 format!(
                     "runtime crate root permits only external mod/use declarations; found {}",
-                    item_kind(&other)
+                    item_kind(other)
                 ),
             )),
         }

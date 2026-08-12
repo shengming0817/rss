@@ -1,8 +1,9 @@
 //! repository conformance helpers（#1426）。
 //!
 //! 本模块只表达 provider-agnostic 的 repo 行为断言：CAS、tombstone、tenant scope、storage error、
-//! co-tx both-or-neither。调用方用闭包适配具体域类型、错误枚举和存储探针；testkit 不依赖任何 workspace crate，
-//! 因而本 conformance 是 Medium 机器门，不替代生产 API 的类型层 Hard 约束。
+//! co-tx both-or-neither。调用方用闭包适配具体域类型、错误枚举和存储探针；testkit 仅经唯一内部 shipped
+//! 出边 `rss-conformance` 复用 provider-neutral 错误分类，因而本 conformance 是 Medium 机器门，
+//! 不替代生产 API 的类型层 Hard 约束。
 //!
 //! ref: launchbadge/sqlx examples/postgres/transaction/src/main.rs@v0.8.6
 

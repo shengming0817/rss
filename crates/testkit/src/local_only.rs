@@ -133,8 +133,8 @@ pub struct StaticExclusion<D> {
 impl<D> StaticExclusion<D> {
     /// Adapts an owner-side typed route/state proof into Medium conformance evidence.
     ///
-    /// The proof type is intentionally generic because testkit has no workspace dependencies.
-    /// The repository provenance gate accepts only canonical httpserve proof constructors.
+    /// The proof type is intentionally generic because this helper does not depend on route-owner
+    /// types. The repository provenance gate accepts only canonical httpserve proof constructors.
     pub const fn from_governed<Proof>(_proof: &Proof) -> Self {
         Self {
             dimension: PhantomData,
@@ -249,9 +249,10 @@ impl LocalOnlySideEffects {
 /// Opaque evidence that one route operation completed its `LocalOnly` post-check.
 ///
 /// The receipt retains its generic marker and only [`assert_local_only_with_receipt`] can construct
-/// it; callers cannot mint evidence independently. Because `testkit` deliberately has no workspace
-/// dependency, the cross-crate relationship between that marker, a generated active `LocalOnly`
-/// contract, and its mounted route is closed by the repository's Medium source-provenance gate.
+/// it; callers cannot mint evidence independently. Because this helper deliberately does not depend
+/// on generated contract or route-owner types, the cross-crate relationship between that marker, a
+/// generated active `LocalOnly` contract, and its mounted route is closed by the repository's Medium
+/// source-provenance gate.
 ///
 /// ```compile_fail
 /// use std::marker::PhantomData;

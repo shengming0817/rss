@@ -653,15 +653,14 @@ fn collect_source_ids(value: &serde_json::Value, ids: &mut BTreeSet<u32>) {
     match value {
         serde_json::Value::Object(object) => {
             for (key, nested) in object {
-                if matches!(key.as_str(), "resolved_path" | "use") {
-                    if let Some(id) = nested
+                if matches!(key.as_str(), "resolved_path" | "use")
+                    && let Some(id) = nested
                         .as_object()
                         .and_then(|fields| fields.get("id"))
                         .and_then(serde_json::Value::as_u64)
                         .and_then(|id| u32::try_from(id).ok())
-                    {
-                        ids.insert(id);
-                    }
+                {
+                    ids.insert(id);
                 }
                 collect_source_ids(nested, ids);
             }
@@ -900,25 +899,25 @@ pub(crate) fn run_release_check(
         }
     }
 
-    if let (Some(delta), Some(base_revision)) = (&delta, &base_revision) {
-        if !delta.semver_packages.is_empty() {
-            match ensure_semver_tool_available(allow_missing_tools) {
-                Ok(true) => {
-                    if let Err(error) =
-                        run_semver_packages(&delta.semver_packages, |package, profile| {
-                            run_semver_check(root, package, base_revision, profile)
-                        })
-                    {
-                        failures.push(ReleaseProofFailure::from_error(4, "semver", error));
-                    }
+    if let (Some(delta), Some(base_revision)) = (&delta, &base_revision)
+        && !delta.semver_packages.is_empty()
+    {
+        match ensure_semver_tool_available(allow_missing_tools) {
+            Ok(true) => {
+                if let Err(error) =
+                    run_semver_packages(&delta.semver_packages, |package, profile| {
+                        run_semver_check(root, package, base_revision, profile)
+                    })
+                {
+                    failures.push(ReleaseProofFailure::from_error(4, "semver", error));
                 }
-                Ok(false) => {}
-                Err(error) => failures.push(ReleaseProofFailure::from_error(
-                    4,
-                    "semver-prerequisite",
-                    error,
-                )),
             }
+            Ok(false) => {}
+            Err(error) => failures.push(ReleaseProofFailure::from_error(
+                4,
+                "semver-prerequisite",
+                error,
+            )),
         }
     }
 
