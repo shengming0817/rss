@@ -28,7 +28,7 @@ impl Handler<Inventory> for InventoryHandler {
     ) -> HandlerFuture<'a, u32> {
         Box::pin(async move {
             if context.principal().matches_subject("fail") {
-                Err(HandlerError)
+                Err(HandlerError::new(HandlerFailureClass::Internal))
             } else if request == u32::MAX {
                 std::future::pending().await
             } else {
@@ -112,7 +112,19 @@ impl CancellationObserver for Cancel {
     }
 }
 
-fn dispatcher(host: Arc<Host>) -> Dispatcher {
+struct ImmediatelyCancelled;
+impl CancellationObserver for ImmediatelyCancelled {
+    fn is_cancelled(&self) -> bool {
+        false
+    }
+    fn cancelled(&self, _: Deadline) -> rss_request_context::CancellationFuture<'_> {
+        Box::pin(std::future::ready(
+            rss_request_context::CancellationReason::Cancelled,
+        ))
+    }
+}
+
+fn application(host: Arc<Host>) -> (Dispatcher, TrustedContextMinter) {
     ApplicationBuilder::new(ApplicationName::parse("consumer").unwrap(), host)
         .module(
             ApplicationModule::new(ModuleName::parse("runtime").unwrap())
@@ -120,6 +132,7 @@ fn dispatcher(host: Arc<Host>) -> Dispatcher {
         )
         .build()
         .unwrap()
+        .into_parts()
 }
 
 fn context<'a>(
@@ -141,19 +154,21 @@ fn context<'a>(
 #[tokio::test]
 async fn dispatches_external_contract_and_closed_outcomes() {
     let host = Arc::new(Host::new(AdmissionState::Ready));
-    let dispatcher = dispatcher(host.clone());
+    let (dispatcher, minter) = application(host.clone());
     let request = RequestId::parse("request-1").unwrap();
     let principal = PrincipalRef::new(PrincipalKind::User, "user-1").unwrap();
     let cancel = Cancel::new(false);
     let output = dispatcher
         .dispatch::<Inventory>(
             &Inventory::DESCRIPTOR,
-            41,
-            context(
-                &request,
-                &principal,
-                &cancel,
-                Instant::now() + Duration::from_secs(1),
+            minter.admit(
+                41,
+                context(
+                    &request,
+                    &principal,
+                    &cancel,
+                    Instant::now() + Duration::from_secs(1),
+                ),
             ),
         )
         .await
@@ -165,12 +180,14 @@ async fn dispatches_external_contract_and_closed_outcomes() {
         dispatcher
             .dispatch::<Inventory>(
                 &Inventory::DESCRIPTOR,
-                1,
-                context(
-                    &request,
-                    &principal,
-                    &cancel,
-                    Instant::now() + Duration::from_secs(1)
+                minter.admit(
+                    1,
+                    context(
+                        &request,
+                        &principal,
+                        &cancel,
+                        Instant::now() + Duration::from_secs(1)
+                    )
                 )
             )
             .await
@@ -182,12 +199,14 @@ async fn dispatches_external_contract_and_closed_outcomes() {
         dispatcher
             .dispatch::<Inventory>(
                 &Inventory::DESCRIPTOR,
-                1,
-                context(
-                    &request,
-                    &principal,
-                    &cancel,
-                    Instant::now() - Duration::from_secs(1)
+                minter.admit(
+                    1,
+                    context(
+                        &request,
+                        &principal,
+                        &cancel,
+                        Instant::now() - Duration::from_secs(1)
+                    )
                 )
             )
             .await
@@ -201,12 +220,14 @@ async fn dispatches_external_contract_and_closed_outcomes() {
     };
     let running = dispatcher.dispatch::<Inventory>(
         &Inventory::DESCRIPTOR,
-        u32::MAX,
-        context(
-            &request,
-            &principal,
-            &cancel,
-            Instant::now() + Duration::from_secs(1),
+        minter.admit(
+            u32::MAX,
+            context(
+                &request,
+                &principal,
+                &cancel,
+                Instant::now() + Duration::from_secs(1),
+            ),
         ),
     );
     let (running, ()) = tokio::join!(running, cancel_during);
@@ -217,12 +238,14 @@ async fn dispatches_external_contract_and_closed_outcomes() {
         dispatcher
             .dispatch::<Inventory>(
                 &Inventory::DESCRIPTOR,
-                u32::MAX,
-                context(
-                    &request,
-                    &principal,
-                    &cancel,
-                    Instant::now() + Duration::from_millis(5),
+                minter.admit(
+                    u32::MAX,
+                    context(
+                        &request,
+                        &principal,
+                        &cancel,
+                        Instant::now() + Duration::from_millis(5),
+                    )
                 ),
             )
             .await
@@ -235,12 +258,14 @@ async fn dispatches_external_contract_and_closed_outcomes() {
         dispatcher
             .dispatch::<Inventory>(
                 &Inventory::DESCRIPTOR,
-                1,
-                context(
-                    &request,
-                    &principal,
-                    &cancel,
-                    Instant::now() + Duration::from_secs(1)
+                minter.admit(
+                    1,
+                    context(
+                        &request,
+                        &principal,
+                        &cancel,
+                        Instant::now() + Duration::from_secs(1)
+                    )
                 )
             )
             .await
@@ -252,17 +277,67 @@ async fn dispatches_external_contract_and_closed_outcomes() {
         dispatcher
             .dispatch::<Inventory>(
                 &Inventory::DESCRIPTOR,
-                1,
-                context(
-                    &request,
-                    &principal,
-                    &cancel,
-                    Instant::now() + Duration::from_secs(1)
+                minter.admit(
+                    1,
+                    context(
+                        &request,
+                        &principal,
+                        &cancel,
+                        Instant::now() + Duration::from_secs(1)
+                    )
                 )
             )
             .await
             .unwrap_err(),
         DispatchError::HostStopped
+    );
+}
+
+#[tokio::test]
+async fn completed_operation_wins_when_termination_is_ready_in_the_same_poll() {
+    let (dispatcher, minter) = application(Arc::new(Host::new(AdmissionState::Ready)));
+    let request = RequestId::parse("request-race").unwrap();
+    let principal = PrincipalRef::new(PrincipalKind::User, "user-1").unwrap();
+    let context = RequestContextView::new(
+        None,
+        &request,
+        &principal,
+        Deadline::at(Instant::now() + Duration::from_secs(1)),
+        Cancellation::observe(&ImmediatelyCancelled),
+        ObligationsView::new(Some(RowScope::Tenant), FieldMaskView::new(&[])),
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch::<Inventory>(&Inventory::DESCRIPTOR, minter.admit(1, context))
+            .await
+            .unwrap(),
+        DispatchOutcome::Completed(2)
+    );
+}
+
+#[tokio::test]
+async fn admitted_request_is_bound_to_its_application_instance() {
+    let host = Arc::new(Host::new(AdmissionState::Ready));
+    let (dispatcher, _) = application(Arc::clone(&host));
+    let (_, other_minter) = application(host);
+    let request = RequestId::parse("request-seal").unwrap();
+    let principal = PrincipalRef::new(PrincipalKind::User, "user-1").unwrap();
+    let cancel = Cancel::new(false);
+    let admitted = other_minter.admit(
+        1,
+        context(
+            &request,
+            &principal,
+            &cancel,
+            Instant::now() + Duration::from_secs(1),
+        ),
+    );
+    assert_eq!(
+        dispatcher
+            .dispatch::<Inventory>(&Inventory::DESCRIPTOR, admitted)
+            .await
+            .unwrap_err(),
+        DispatchError::AdmissionCapabilityMismatch
     );
 }
 
@@ -285,7 +360,7 @@ async fn rejects_unknown_mismatch_and_handler_failure() {
         const DESCRIPTOR: ContractDescriptor = Inventory::DESCRIPTOR;
     }
     let host = Arc::new(Host::new(AdmissionState::Ready));
-    let dispatcher = dispatcher(host);
+    let (dispatcher, minter) = application(host);
     let request = RequestId::parse("request-1").unwrap();
     let cancel = Cancel::new(false);
     let principal = PrincipalRef::new(PrincipalKind::User, "fail").unwrap();
@@ -299,7 +374,7 @@ async fn rejects_unknown_mismatch_and_handler_failure() {
     };
     assert_eq!(
         dispatcher
-            .dispatch::<Unknown>(&Unknown::DESCRIPTOR, (), ctx())
+            .dispatch::<Unknown>(&Unknown::DESCRIPTOR, minter.admit((), ctx()))
             .await
             .unwrap_err(),
         DispatchError::UnknownContract
@@ -311,24 +386,24 @@ async fn rejects_unknown_mismatch_and_handler_failure() {
     );
     assert_eq!(
         dispatcher
-            .dispatch::<Inventory>(&mismatch, 1, ctx())
+            .dispatch::<Inventory>(&mismatch, minter.admit(1, ctx()))
             .await
             .unwrap_err(),
         DispatchError::DescriptorMismatch
     );
     assert_eq!(
         dispatcher
-            .dispatch::<WrongTypes>(&WrongTypes::DESCRIPTOR, String::new(), ctx())
+            .dispatch::<WrongTypes>(&WrongTypes::DESCRIPTOR, minter.admit(String::new(), ctx()),)
             .await
             .unwrap_err(),
         DispatchError::DescriptorMismatch
     );
     assert_eq!(
         dispatcher
-            .dispatch::<Inventory>(&Inventory::DESCRIPTOR, 1, ctx())
+            .dispatch::<Inventory>(&Inventory::DESCRIPTOR, minter.admit(1, ctx()))
             .await
             .unwrap(),
-        DispatchOutcome::HandlerFailed
+        DispatchOutcome::HandlerFailed(HandlerFailureClass::Internal)
     );
 }
 

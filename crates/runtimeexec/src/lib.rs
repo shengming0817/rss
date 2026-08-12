@@ -790,11 +790,6 @@ where
     Shutdown: Future<Output = anyhow::Result<()>>,
 {
     register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches, true)?;
-    if let Some(host) = platform_host {
-        // Registered last so LIFO shutdown stops Platform admission and waits for every admitted
-        // handler before listener/provider resources begin draining.
-        stack.register_detached(host.managed_resource());
-    }
     // The complete provider/domain lifecycle is accepted by the cancellation-safe owner before a
     // platform signal constructor can fail. Installation still precedes listener preparation and
     // readiness publication, so no ready -> signal race is reintroduced.
@@ -802,6 +797,11 @@ where
     let mut transaction = LaunchTransaction { stack };
     let prepared = adapter.prepare(probe_receipt, &mut transaction).await?;
     let activated = Adapter::activate(prepared, transaction.commit())?;
+    if let Some(host) = platform_host {
+        // Listener activation has finished registering resources. Push admission last so LIFO
+        // closes it first and waits for admitted handlers before any listener/provider drain.
+        register_platform_admission(stack, host);
+    }
     let readiness = on_ready(activated.into_inventory());
     tokio::pin!(readiness);
     tokio::pin!(shutdown);
@@ -814,6 +814,10 @@ where
         },
     }
     shutdown.await
+}
+
+fn register_platform_admission(stack: &mut ShutdownStack, host: &RuntimeHostView) {
+    stack.register_detached(host.managed_resource());
 }
 
 fn register_lifecycle_outputs(

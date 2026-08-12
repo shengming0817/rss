@@ -7,7 +7,40 @@ use runtimeexec::inventory as model;
 
 #[derive(Clone)]
 pub(crate) struct RuntimeInventoryRoutes {
+    application: InventoryApplication,
+}
+
+#[derive(Clone)]
+struct InventoryApplication {
     dispatcher: rss_platform::Dispatcher,
+    context_minter: std::sync::Arc<rss_platform::TrustedContextMinter>,
+}
+
+impl InventoryApplication {
+    async fn dispatch(
+        &self,
+        request: AdmittedInventoryRequest,
+    ) -> Result<
+        rss_platform::DispatchOutcome<wire::RuntimeInventoryHandlerResult>,
+        rss_platform::DispatchError,
+    > {
+        let AdmittedInventoryRequest {
+            request_id,
+            context,
+        } = request;
+        let admitted = self.context_minter.admit(request_id, context.view());
+        self.dispatcher
+            .dispatch::<InventoryContract>(
+                &<InventoryContract as rss_platform::Contract>::DESCRIPTOR,
+                admitted,
+            )
+            .await
+    }
+}
+
+struct AdmittedInventoryRequest {
+    request_id: httpserve::VerifiedRequestId,
+    context: TrustedRequestContext,
 }
 
 impl RuntimeInventoryRoutes {
@@ -15,7 +48,7 @@ impl RuntimeInventoryRoutes {
         reader: runtimeexec::inventory::InventoryReader,
         host: runtimeexec::RuntimeHostView,
     ) -> anyhow::Result<Self> {
-        let dispatcher = rss_platform::ApplicationBuilder::new(
+        let application = rss_platform::ApplicationBuilder::new(
             rss_platform::ApplicationName::parse("runtime")?,
             std::sync::Arc::new(host),
         )
@@ -26,7 +59,13 @@ impl RuntimeInventoryRoutes {
             }),
         )
         .build()?;
-        Ok(Self { dispatcher })
+        let (dispatcher, context_minter) = application.into_parts();
+        Ok(Self {
+            application: InventoryApplication {
+                dispatcher,
+                context_minter: std::sync::Arc::new(context_minter),
+            },
+        })
     }
 
     #[cfg(test)]
@@ -115,23 +154,31 @@ async fn inventory_handler(
         return internal_response(request_id);
     };
     match state
-        .dispatcher
-        .dispatch::<InventoryContract>(
-            &<InventoryContract as rss_platform::Contract>::DESCRIPTOR,
-            request_id.clone(),
-            trusted.view(),
-        )
+        .application
+        .dispatch(AdmittedInventoryRequest {
+            request_id: request_id.clone(),
+            context: trusted,
+        })
         .await
     {
         Ok(rss_platform::DispatchOutcome::Completed(response)) => response,
+        Ok(rss_platform::DispatchOutcome::HandlerFailed(class)) => {
+            tracing::warn!(
+                contract_id = wire::CONTRACT_ID,
+                request_id = request_id.as_str(),
+                failure_class = ?class,
+                "platform handler failed"
+            );
+            internal_response(request_id)
+        }
         Ok(
-            rss_platform::DispatchOutcome::HandlerFailed
-            | rss_platform::DispatchOutcome::Cancelled
+            rss_platform::DispatchOutcome::Cancelled
             | rss_platform::DispatchOutcome::DeadlineExceeded,
         )
         | Err(
             rss_platform::DispatchError::UnknownContract
-            | rss_platform::DispatchError::DescriptorMismatch,
+            | rss_platform::DispatchError::DescriptorMismatch
+            | rss_platform::DispatchError::AdmissionCapabilityMismatch,
         ) => internal_response(request_id),
         Err(
             rss_platform::DispatchError::HostNotReady

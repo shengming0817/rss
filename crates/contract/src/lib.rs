@@ -1,4 +1,4 @@
-//! Canonical, authority-free contract identity values for the RSS public Foundation.
+#![doc = include_str!("../README.md")]
 
 use std::error::Error;
 use std::fmt;
@@ -50,7 +50,12 @@ pub enum IdentityError {
 
 impl fmt::Display for IdentityError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid contract identity")
+        formatter.write_str(match self {
+            Self::Empty => "contract identity is empty",
+            Self::TooLong => "contract identity is too long",
+            Self::InvalidFormat => "contract identity has invalid format",
+            Self::ZeroVersion => "contract version is zero",
+        })
     }
 }
 impl Error for IdentityError {}
@@ -288,12 +293,23 @@ const fn parse_static_version(value: &str) -> u32 {
         bytes.len() >= 2 && bytes[0] == b'v',
         "invalid contract version"
     );
+    assert!(
+        bytes.len() == 2 || bytes[1] != b'0',
+        "invalid contract version"
+    );
     let mut index = 1;
     let mut major = 0_u32;
     while index < bytes.len() {
         let byte = bytes[index];
         assert!(byte.is_ascii_digit(), "invalid contract version");
-        major = major * 10 + (byte - b'0') as u32;
+        major = match major.checked_mul(10) {
+            Some(value) => value,
+            None => panic!("invalid contract version"),
+        };
+        major = match major.checked_add((byte - b'0') as u32) {
+            Some(value) => value,
+            None => panic!("invalid contract version"),
+        };
         index += 1;
     }
     assert!(major != 0, "invalid contract version");
@@ -328,6 +344,32 @@ mod tests {
             assert!(ContractVersion::parse(value).is_err(), "{value}");
         }
         assert!(SchemaDigest::parse(&format!("sha256:{}", "A".repeat(64))).is_err());
+    }
+
+    #[test]
+    fn static_versions_reject_leading_zero_and_overflow() {
+        for value in ["v01", "v4294967296"] {
+            assert!(std::panic::catch_unwind(|| parse_static_version(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn identity_error_messages_are_stable_distinct_and_redacted() {
+        let messages = [
+            IdentityError::Empty,
+            IdentityError::TooLong,
+            IdentityError::InvalidFormat,
+            IdentityError::ZeroVersion,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            messages
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            4
+        );
+        assert!(messages.iter().all(|message| !message.contains("secret")));
     }
 
     #[test]

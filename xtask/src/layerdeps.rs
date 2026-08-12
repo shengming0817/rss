@@ -1345,10 +1345,7 @@ pub(crate) fn check_test_support_confinement(edges: &[Edge]) -> Vec<Finding> {
 pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Finding> {
     edges
         .iter()
-        .filter(|edge| {
-            layers::is_test_support(&edge.from)
-                && !matches!(edge.to.as_str(), "rss-contract" | "rss-request-context")
-        })
+        .filter(|edge| layers::is_test_support(&edge.from))
         .map(|edge| {
             finding(
                 Rule::TestSupportInternalShipped,
@@ -2588,12 +2585,12 @@ mod tests {
     }
 
     #[test]
-    fn test_support_may_consume_public_foundation_only() {
+    fn test_support_cannot_consume_public_foundation_as_shipped_dependencies() {
         let edges = [
             e("testkit", "rss-contract"),
             e("testkit", "rss-request-context"),
         ];
-        assert!(check_test_support_internal_dependencies(&edges).is_empty());
+        assert_eq!(check_test_support_internal_dependencies(&edges).len(), 2);
     }
 
     /// LAYER-DEPS-10 anti-vacuity：无 shipped 出边时不误报；dev-dep 本来就不进入 `edges`。

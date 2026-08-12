@@ -5,6 +5,8 @@ APIs: dotted contract IDs, `vN` versions, SHA-256 schema digests, and immutable 
 
 Values can be parsed at runtime or authored as validated constants. The package deliberately does
 not contain a registry, generated catalog, runtime binding, or admission authority.
+Parsing errors distinguish empty, overlong, malformed, and zero-version identities without
+echoing rejected input.
 
 ```rust
 use rss_contract::{ContractDescriptor, ContractId, ContractVersion};

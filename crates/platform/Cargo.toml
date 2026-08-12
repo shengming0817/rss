@@ -16,6 +16,7 @@ rss-request-context.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["sync", "time"] }
+trybuild.workspace = true
 
 [features]
 default = []

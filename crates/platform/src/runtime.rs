@@ -6,6 +6,7 @@ use std::future::Future;
 use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::task::Poll;
 use std::time::Instant;
 
@@ -13,6 +14,8 @@ use rss_contract::{ContractDescriptor, ContractId};
 use rss_request_context::RequestContextView;
 
 use crate::{ApplicationName, ModuleName};
+
+static NEXT_APPLICATION_SEAL: AtomicU64 = AtomicU64::new(1);
 
 pub type HandlerFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, HandlerError>> + Send + 'a>>;
 
@@ -30,8 +33,27 @@ pub trait Handler<C: Contract>: Send + Sync + 'static {
     ) -> HandlerFuture<'a, C::Response>;
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct HandlerError;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HandlerFailureClass {
+    Rejected,
+    Unavailable,
+    Internal,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HandlerError {
+    class: HandlerFailureClass,
+}
+impl HandlerError {
+    #[must_use]
+    pub const fn new(class: HandlerFailureClass) -> Self {
+        Self { class }
+    }
+    #[must_use]
+    pub const fn class(self) -> HandlerFailureClass {
+        self.class
+    }
+}
 impl fmt::Display for HandlerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("platform handler failed")
@@ -72,6 +94,7 @@ pub enum DispatchError {
     HostNotReady,
     HostDraining,
     HostStopped,
+    AdmissionCapabilityMismatch,
 }
 impl fmt::Display for DispatchError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -81,6 +104,7 @@ impl fmt::Display for DispatchError {
             Self::HostNotReady => "platform host is not ready",
             Self::HostDraining => "platform host is draining",
             Self::HostStopped => "platform host is stopped",
+            Self::AdmissionCapabilityMismatch => "platform admission capability mismatch",
         })
     }
 }
@@ -89,7 +113,7 @@ impl Error for DispatchError {}
 #[derive(Debug, Eq, PartialEq)]
 pub enum DispatchOutcome<T> {
     Completed(T),
-    HandlerFailed,
+    HandlerFailed(HandlerFailureClass),
     Cancelled,
     DeadlineExceeded,
 }
@@ -157,7 +181,7 @@ impl ApplicationBuilder {
         self.modules.push(module);
         self
     }
-    pub fn build(self) -> Result<Dispatcher, BuildError> {
+    pub fn build(self) -> Result<Application, BuildError> {
         let mut module_names = HashSet::new();
         let mut handlers = HashMap::new();
         for module in self.modules {
@@ -176,12 +200,61 @@ impl ApplicationBuilder {
                 }
             }
         }
-        Ok(Dispatcher {
-            application: self.name,
-            host: self.host,
-            handlers: Arc::new(handlers),
+        let seal = NEXT_APPLICATION_SEAL.fetch_add(1, Ordering::Relaxed);
+        Ok(Application {
+            dispatcher: Dispatcher {
+                application: self.name,
+                host: self.host,
+                handlers: Arc::new(handlers),
+                seal,
+            },
+            context_minter: TrustedContextMinter { seal },
         })
     }
+}
+
+/// Built application split into the public dispatcher and its private-integration mint authority.
+pub struct Application {
+    dispatcher: Dispatcher,
+    context_minter: TrustedContextMinter,
+}
+
+impl Application {
+    #[must_use]
+    pub fn into_parts(self) -> (Dispatcher, TrustedContextMinter) {
+        (self.dispatcher, self.context_minter)
+    }
+}
+
+/// Instance-bound authority used by a private AuthN/AuthZ integration to admit request values.
+///
+/// This capability is intentionally not `Clone` and has no public constructor. Holding only a
+/// [`Dispatcher`] and an authority-free [`RequestContextView`] is insufficient to dispatch.
+pub struct TrustedContextMinter {
+    seal: u64,
+}
+
+impl TrustedContextMinter {
+    #[must_use]
+    pub fn admit<'a, T>(
+        &self,
+        request: T,
+        context: RequestContextView<'a>,
+    ) -> AdmittedRequest<'a, T> {
+        AdmittedRequest {
+            seal: self.seal,
+            request,
+            context,
+        }
+    }
+}
+
+/// Move-only request capability minted after the owning integration has authenticated and
+/// authorized the authority-free Foundation values.
+pub struct AdmittedRequest<'a, T> {
+    seal: u64,
+    request: T,
+    context: RequestContextView<'a>,
 }
 
 #[derive(Clone)]
@@ -189,6 +262,7 @@ pub struct Dispatcher {
     application: ApplicationName,
     host: Arc<dyn HostView>,
     handlers: Arc<HashMap<ContractId, Registration>>,
+    seal: u64,
 }
 
 impl Dispatcher {
@@ -204,9 +278,14 @@ impl Dispatcher {
     pub async fn dispatch<C: Contract>(
         &self,
         descriptor: &ContractDescriptor,
-        request: C::Request,
-        context: RequestContextView<'_>,
+        admitted: AdmittedRequest<'_, C::Request>,
     ) -> Result<DispatchOutcome<C::Response>, DispatchError> {
+        if admitted.seal != self.seal {
+            return Err(DispatchError::AdmissionCapabilityMismatch);
+        }
+        let AdmittedRequest {
+            request, context, ..
+        } = admitted;
         let _admission = self.host.try_admit().map_err(dispatch_state_error)?;
         let contract_id = rss_contract::ContractId::from_static(descriptor.id());
         let Some(registration) = self.handlers.get(&contract_id) else {
@@ -229,10 +308,10 @@ impl Dispatcher {
         let mut operation = registration.handler.handle(Box::new(request), context);
         let mut termination = context.cancellation().cancelled(context.deadline());
         let output = std::future::poll_fn(move |cx| {
-            if let Poll::Ready(reason) = termination.as_mut().poll(cx) {
-                return Poll::Ready(Err(reason));
+            if let Poll::Ready(output) = operation.as_mut().poll(cx) {
+                return Poll::Ready(Ok(output));
             }
-            operation.as_mut().poll(cx).map(Ok)
+            termination.as_mut().poll(cx).map(Err)
         })
         .await;
         let output = match output {
@@ -249,7 +328,7 @@ impl Dispatcher {
                 .downcast::<C::Response>()
                 .map(|value| DispatchOutcome::Completed(*value))
                 .map_err(|_| DispatchError::DescriptorMismatch),
-            Err(()) => Ok(DispatchOutcome::HandlerFailed),
+            Err(class) => Ok(DispatchOutcome::HandlerFailed(class)),
         }
     }
 }
@@ -288,7 +367,7 @@ trait ErasedHandler: Send + Sync {
         &'a self,
         request: Box<dyn Any + Send>,
         context: RequestContextView<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, ()>> + Send + 'a>>;
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, HandlerFailureClass>> + Send + 'a>>;
 }
 struct TypedHandler<C, H> {
     handler: H,
@@ -299,14 +378,17 @@ impl<C: Contract, H: Handler<C>> ErasedHandler for TypedHandler<C, H> {
         &'a self,
         request: Box<dyn Any + Send>,
         context: RequestContextView<'a>,
-    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, ()>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = Result<Box<dyn Any + Send>, HandlerFailureClass>> + Send + 'a>>
+    {
         Box::pin(async move {
-            let request = request.downcast::<C::Request>().map_err(|_| ())?;
+            let request = request
+                .downcast::<C::Request>()
+                .map_err(|_| HandlerFailureClass::Internal)?;
             self.handler
                 .handle(*request, context)
                 .await
                 .map(|value| Box::new(value) as Box<dyn Any + Send>)
-                .map_err(|_| ())
+                .map_err(HandlerError::class)
         })
     }
 }

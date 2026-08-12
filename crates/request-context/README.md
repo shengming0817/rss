@@ -8,6 +8,9 @@ These values are not authentication or authorization evidence. The package expos
 context mint, cancellation trigger, deadline extension, cross-tenant capability, or obligation
 elevation API.
 
+Parsing errors are stable, non-sensitive categories: empty, too long, invalid format, and nil
+tenant identifiers. Error messages never echo the rejected input.
+
 ```rust
 use rss_request_context::{PrincipalKind, PrincipalRef, RequestId, TenantId};
 

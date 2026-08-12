@@ -133,6 +133,21 @@ impl HostView for RuntimeHostView {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    struct StateProbe {
+        host: RuntimeHostView,
+        seen: Arc<Mutex<Vec<AdmissionState>>>,
+    }
+    impl diport::ManagedResource for StateProbe {
+        fn name(&self) -> &str {
+            "listener-probe"
+        }
+        async fn shutdown(&self) -> Result<(), diport::ShutdownError> {
+            self.seen.lock().unwrap().push(self.host.admission_state());
+            Ok(())
+        }
+    }
 
     #[test]
     fn lifecycle_projection_is_one_way_and_inventory_is_fail_closed() {
@@ -155,5 +170,31 @@ mod tests {
         assert_eq!(host.admission_state(), AdmissionState::Draining);
         host.mark_stopped();
         assert_eq!(host.admission_state(), AdmissionState::Stopped);
+    }
+
+    #[tokio::test]
+    async fn admission_is_closed_before_listener_resources() {
+        let host = RuntimeHostView {
+            inner: Arc::new(HostTruth {
+                state: AtomicU8::new(1),
+                inventory: None,
+                admission_gate: Arc::new(RwLock::new(())),
+            }),
+        };
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut stack =
+            bootstrap::shutdown::ShutdownStack::new(tokio_util::sync::CancellationToken::new());
+        stack.register_detached(diport::DynManagedResource::new_box(StateProbe {
+            host: host.clone(),
+            seen: Arc::clone(&seen),
+        }));
+        crate::register_platform_admission(&mut stack, &host);
+        assert!(
+            stack
+                .shutdown_within(std::time::Duration::from_secs(1))
+                .await
+                .is_empty()
+        );
+        assert_eq!(*seen.lock().unwrap(), [AdmissionState::Draining]);
     }
 }

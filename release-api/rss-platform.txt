@@ -64,6 +64,7 @@ impl core::marker::UnsafeUnpin for rss_platform::ConditionStatus
 impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ConditionStatus
 impl core::panic::unwind_safe::UnwindSafe for rss_platform::ConditionStatus
 pub enum rss_platform::DispatchError
+pub rss_platform::DispatchError::AdmissionCapabilityMismatch
 pub rss_platform::DispatchError::DescriptorMismatch
 pub rss_platform::DispatchError::HostDraining
 pub rss_platform::DispatchError::HostNotReady
@@ -92,7 +93,7 @@ pub enum rss_platform::DispatchOutcome<T>
 pub rss_platform::DispatchOutcome::Cancelled
 pub rss_platform::DispatchOutcome::Completed(T)
 pub rss_platform::DispatchOutcome::DeadlineExceeded
-pub rss_platform::DispatchOutcome::HandlerFailed
+pub rss_platform::DispatchOutcome::HandlerFailed(rss_platform::HandlerFailureClass)
 impl<T: core::cmp::Eq> core::cmp::Eq for rss_platform::DispatchOutcome<T>
 impl<T: core::cmp::PartialEq> core::cmp::PartialEq for rss_platform::DispatchOutcome<T>
 pub fn rss_platform::DispatchOutcome<T>::eq(&self, &rss_platform::DispatchOutcome<T>) -> bool
@@ -106,6 +107,26 @@ impl<T> core::marker::Unpin for rss_platform::DispatchOutcome<T> where T: core::
 impl<T> core::marker::UnsafeUnpin for rss_platform::DispatchOutcome<T> where T: core::marker::UnsafeUnpin
 impl<T> core::panic::unwind_safe::RefUnwindSafe for rss_platform::DispatchOutcome<T> where T: core::panic::unwind_safe::RefUnwindSafe
 impl<T> core::panic::unwind_safe::UnwindSafe for rss_platform::DispatchOutcome<T> where T: core::panic::unwind_safe::UnwindSafe
+pub enum rss_platform::HandlerFailureClass
+pub rss_platform::HandlerFailureClass::Internal
+pub rss_platform::HandlerFailureClass::Rejected
+pub rss_platform::HandlerFailureClass::Unavailable
+impl core::clone::Clone for rss_platform::HandlerFailureClass
+pub fn rss_platform::HandlerFailureClass::clone(&self) -> rss_platform::HandlerFailureClass
+impl core::cmp::Eq for rss_platform::HandlerFailureClass
+impl core::cmp::PartialEq for rss_platform::HandlerFailureClass
+pub fn rss_platform::HandlerFailureClass::eq(&self, &rss_platform::HandlerFailureClass) -> bool
+impl core::fmt::Debug for rss_platform::HandlerFailureClass
+pub fn rss_platform::HandlerFailureClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::HandlerFailureClass
+impl core::marker::StructuralPartialEq for rss_platform::HandlerFailureClass
+impl core::marker::Freeze for rss_platform::HandlerFailureClass
+impl core::marker::Send for rss_platform::HandlerFailureClass
+impl core::marker::Sync for rss_platform::HandlerFailureClass
+impl core::marker::Unpin for rss_platform::HandlerFailureClass
+impl core::marker::UnsafeUnpin for rss_platform::HandlerFailureClass
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::HandlerFailureClass
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::HandlerFailureClass
 #[non_exhaustive] pub enum rss_platform::NameError
 pub rss_platform::NameError::Empty
 pub rss_platform::NameError::InvalidFormat
@@ -129,9 +150,27 @@ impl core::marker::Unpin for rss_platform::NameError
 impl core::marker::UnsafeUnpin for rss_platform::NameError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::NameError
 impl core::panic::unwind_safe::UnwindSafe for rss_platform::NameError
+pub struct rss_platform::AdmittedRequest<'a, T>
+impl<'a, T> core::marker::Freeze for rss_platform::AdmittedRequest<'a, T> where T: core::marker::Freeze
+impl<'a, T> core::marker::Send for rss_platform::AdmittedRequest<'a, T> where T: core::marker::Send
+impl<'a, T> core::marker::Sync for rss_platform::AdmittedRequest<'a, T> where T: core::marker::Sync
+impl<'a, T> core::marker::Unpin for rss_platform::AdmittedRequest<'a, T> where T: core::marker::Unpin
+impl<'a, T> core::marker::UnsafeUnpin for rss_platform::AdmittedRequest<'a, T> where T: core::marker::UnsafeUnpin
+impl<'a, T> !core::panic::unwind_safe::RefUnwindSafe for rss_platform::AdmittedRequest<'a, T>
+impl<'a, T> !core::panic::unwind_safe::UnwindSafe for rss_platform::AdmittedRequest<'a, T>
+pub struct rss_platform::Application
+impl rss_platform::Application
+pub fn rss_platform::Application::into_parts(self) -> (rss_platform::Dispatcher, rss_platform::TrustedContextMinter)
+impl core::marker::Freeze for rss_platform::Application
+impl core::marker::Send for rss_platform::Application
+impl core::marker::Sync for rss_platform::Application
+impl core::marker::Unpin for rss_platform::Application
+impl core::marker::UnsafeUnpin for rss_platform::Application
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::Application
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::Application
 pub struct rss_platform::ApplicationBuilder
 impl rss_platform::ApplicationBuilder
-pub fn rss_platform::ApplicationBuilder::build(self) -> core::result::Result<rss_platform::Dispatcher, rss_platform::BuildError>
+pub fn rss_platform::ApplicationBuilder::build(self) -> core::result::Result<rss_platform::Application, rss_platform::BuildError>
 pub fn rss_platform::ApplicationBuilder::module(self, rss_platform::ApplicationModule) -> Self
 pub fn rss_platform::ApplicationBuilder::new(rss_platform::ApplicationName, alloc::sync::Arc<dyn rss_platform::HostView>) -> Self
 impl core::marker::Freeze for rss_platform::ApplicationBuilder
@@ -177,7 +216,7 @@ impl core::panic::unwind_safe::UnwindSafe for rss_platform::ApplicationName
 pub struct rss_platform::Dispatcher
 impl rss_platform::Dispatcher
 pub fn rss_platform::Dispatcher::application_name(&self) -> &rss_platform::ApplicationName
-pub async fn rss_platform::Dispatcher::dispatch<C: rss_platform::Contract>(&self, &rss_contract::ContractDescriptor, <C as rss_platform::Contract>::Request, rss_request_context::RequestContextView<'_>) -> core::result::Result<rss_platform::DispatchOutcome<<C as rss_platform::Contract>::Response>, rss_platform::DispatchError>
+pub async fn rss_platform::Dispatcher::dispatch<C: rss_platform::Contract>(&self, &rss_contract::ContractDescriptor, rss_platform::AdmittedRequest<'_, <C as rss_platform::Contract>::Request>) -> core::result::Result<rss_platform::DispatchOutcome<<C as rss_platform::Contract>::Response>, rss_platform::DispatchError>
 pub fn rss_platform::Dispatcher::host(&self) -> &dyn rss_platform::HostView
 impl core::clone::Clone for rss_platform::Dispatcher
 pub fn rss_platform::Dispatcher::clone(&self) -> rss_platform::Dispatcher
@@ -189,13 +228,14 @@ impl core::marker::UnsafeUnpin for rss_platform::Dispatcher
 impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::Dispatcher
 impl !core::panic::unwind_safe::UnwindSafe for rss_platform::Dispatcher
 pub struct rss_platform::HandlerError
+impl rss_platform::HandlerError
+pub const fn rss_platform::HandlerError::class(self) -> rss_platform::HandlerFailureClass
+pub const fn rss_platform::HandlerError::new(rss_platform::HandlerFailureClass) -> Self
 impl core::clone::Clone for rss_platform::HandlerError
 pub fn rss_platform::HandlerError::clone(&self) -> rss_platform::HandlerError
 impl core::cmp::Eq for rss_platform::HandlerError
 impl core::cmp::PartialEq for rss_platform::HandlerError
 pub fn rss_platform::HandlerError::eq(&self, &rss_platform::HandlerError) -> bool
-impl core::default::Default for rss_platform::HandlerError
-pub fn rss_platform::HandlerError::default() -> rss_platform::HandlerError
 impl core::error::Error for rss_platform::HandlerError
 impl core::fmt::Debug for rss_platform::HandlerError
 pub fn rss_platform::HandlerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -231,6 +271,16 @@ impl core::marker::Unpin for rss_platform::ModuleName
 impl core::marker::UnsafeUnpin for rss_platform::ModuleName
 impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ModuleName
 impl core::panic::unwind_safe::UnwindSafe for rss_platform::ModuleName
+pub struct rss_platform::TrustedContextMinter
+impl rss_platform::TrustedContextMinter
+pub fn rss_platform::TrustedContextMinter::admit<'a, T>(&self, T, rss_request_context::RequestContextView<'a>) -> rss_platform::AdmittedRequest<'a, T>
+impl core::marker::Freeze for rss_platform::TrustedContextMinter
+impl core::marker::Send for rss_platform::TrustedContextMinter
+impl core::marker::Sync for rss_platform::TrustedContextMinter
+impl core::marker::Unpin for rss_platform::TrustedContextMinter
+impl core::marker::UnsafeUnpin for rss_platform::TrustedContextMinter
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::TrustedContextMinter
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::TrustedContextMinter
 pub trait rss_platform::AdmissionPermit: core::marker::Send
 pub trait rss_platform::Contract: core::marker::Send + core::marker::Sync + 'static
 pub type rss_platform::Contract::Request: core::marker::Send + 'static
@@ -310,6 +360,7 @@ impl core::marker::UnsafeUnpin for rss_platform::ConditionStatus
 impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ConditionStatus
 impl core::panic::unwind_safe::UnwindSafe for rss_platform::ConditionStatus
 pub enum rss_platform::DispatchError
+pub rss_platform::DispatchError::AdmissionCapabilityMismatch
 pub rss_platform::DispatchError::DescriptorMismatch
 pub rss_platform::DispatchError::HostDraining
 pub rss_platform::DispatchError::HostNotReady
@@ -338,7 +389,7 @@ pub enum rss_platform::DispatchOutcome<T>
 pub rss_platform::DispatchOutcome::Cancelled
 pub rss_platform::DispatchOutcome::Completed(T)
 pub rss_platform::DispatchOutcome::DeadlineExceeded
-pub rss_platform::DispatchOutcome::HandlerFailed
+pub rss_platform::DispatchOutcome::HandlerFailed(rss_platform::HandlerFailureClass)
 impl<T: core::cmp::Eq> core::cmp::Eq for rss_platform::DispatchOutcome<T>
 impl<T: core::cmp::PartialEq> core::cmp::PartialEq for rss_platform::DispatchOutcome<T>
 pub fn rss_platform::DispatchOutcome<T>::eq(&self, &rss_platform::DispatchOutcome<T>) -> bool
@@ -352,6 +403,26 @@ impl<T> core::marker::Unpin for rss_platform::DispatchOutcome<T> where T: core::
 impl<T> core::marker::UnsafeUnpin for rss_platform::DispatchOutcome<T> where T: core::marker::UnsafeUnpin
 impl<T> core::panic::unwind_safe::RefUnwindSafe for rss_platform::DispatchOutcome<T> where T: core::panic::unwind_safe::RefUnwindSafe
 impl<T> core::panic::unwind_safe::UnwindSafe for rss_platform::DispatchOutcome<T> where T: core::panic::unwind_safe::UnwindSafe
+pub enum rss_platform::HandlerFailureClass
+pub rss_platform::HandlerFailureClass::Internal
+pub rss_platform::HandlerFailureClass::Rejected
+pub rss_platform::HandlerFailureClass::Unavailable
+impl core::clone::Clone for rss_platform::HandlerFailureClass
+pub fn rss_platform::HandlerFailureClass::clone(&self) -> rss_platform::HandlerFailureClass
+impl core::cmp::Eq for rss_platform::HandlerFailureClass
+impl core::cmp::PartialEq for rss_platform::HandlerFailureClass
+pub fn rss_platform::HandlerFailureClass::eq(&self, &rss_platform::HandlerFailureClass) -> bool
+impl core::fmt::Debug for rss_platform::HandlerFailureClass
+pub fn rss_platform::HandlerFailureClass::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for rss_platform::HandlerFailureClass
+impl core::marker::StructuralPartialEq for rss_platform::HandlerFailureClass
+impl core::marker::Freeze for rss_platform::HandlerFailureClass
+impl core::marker::Send for rss_platform::HandlerFailureClass
+impl core::marker::Sync for rss_platform::HandlerFailureClass
+impl core::marker::Unpin for rss_platform::HandlerFailureClass
+impl core::marker::UnsafeUnpin for rss_platform::HandlerFailureClass
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::HandlerFailureClass
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::HandlerFailureClass
 #[non_exhaustive] pub enum rss_platform::NameError
 pub rss_platform::NameError::Empty
 pub rss_platform::NameError::InvalidFormat
@@ -375,9 +446,27 @@ impl core::marker::Unpin for rss_platform::NameError
 impl core::marker::UnsafeUnpin for rss_platform::NameError
 impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::NameError
 impl core::panic::unwind_safe::UnwindSafe for rss_platform::NameError
+pub struct rss_platform::AdmittedRequest<'a, T>
+impl<'a, T> core::marker::Freeze for rss_platform::AdmittedRequest<'a, T> where T: core::marker::Freeze
+impl<'a, T> core::marker::Send for rss_platform::AdmittedRequest<'a, T> where T: core::marker::Send
+impl<'a, T> core::marker::Sync for rss_platform::AdmittedRequest<'a, T> where T: core::marker::Sync
+impl<'a, T> core::marker::Unpin for rss_platform::AdmittedRequest<'a, T> where T: core::marker::Unpin
+impl<'a, T> core::marker::UnsafeUnpin for rss_platform::AdmittedRequest<'a, T> where T: core::marker::UnsafeUnpin
+impl<'a, T> !core::panic::unwind_safe::RefUnwindSafe for rss_platform::AdmittedRequest<'a, T>
+impl<'a, T> !core::panic::unwind_safe::UnwindSafe for rss_platform::AdmittedRequest<'a, T>
+pub struct rss_platform::Application
+impl rss_platform::Application
+pub fn rss_platform::Application::into_parts(self) -> (rss_platform::Dispatcher, rss_platform::TrustedContextMinter)
+impl core::marker::Freeze for rss_platform::Application
+impl core::marker::Send for rss_platform::Application
+impl core::marker::Sync for rss_platform::Application
+impl core::marker::Unpin for rss_platform::Application
+impl core::marker::UnsafeUnpin for rss_platform::Application
+impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::Application
+impl !core::panic::unwind_safe::UnwindSafe for rss_platform::Application
 pub struct rss_platform::ApplicationBuilder
 impl rss_platform::ApplicationBuilder
-pub fn rss_platform::ApplicationBuilder::build(self) -> core::result::Result<rss_platform::Dispatcher, rss_platform::BuildError>
+pub fn rss_platform::ApplicationBuilder::build(self) -> core::result::Result<rss_platform::Application, rss_platform::BuildError>
 pub fn rss_platform::ApplicationBuilder::module(self, rss_platform::ApplicationModule) -> Self
 pub fn rss_platform::ApplicationBuilder::new(rss_platform::ApplicationName, alloc::sync::Arc<dyn rss_platform::HostView>) -> Self
 impl core::marker::Freeze for rss_platform::ApplicationBuilder
@@ -423,7 +512,7 @@ impl core::panic::unwind_safe::UnwindSafe for rss_platform::ApplicationName
 pub struct rss_platform::Dispatcher
 impl rss_platform::Dispatcher
 pub fn rss_platform::Dispatcher::application_name(&self) -> &rss_platform::ApplicationName
-pub async fn rss_platform::Dispatcher::dispatch<C: rss_platform::Contract>(&self, &rss_contract::ContractDescriptor, <C as rss_platform::Contract>::Request, rss_request_context::RequestContextView<'_>) -> core::result::Result<rss_platform::DispatchOutcome<<C as rss_platform::Contract>::Response>, rss_platform::DispatchError>
+pub async fn rss_platform::Dispatcher::dispatch<C: rss_platform::Contract>(&self, &rss_contract::ContractDescriptor, rss_platform::AdmittedRequest<'_, <C as rss_platform::Contract>::Request>) -> core::result::Result<rss_platform::DispatchOutcome<<C as rss_platform::Contract>::Response>, rss_platform::DispatchError>
 pub fn rss_platform::Dispatcher::host(&self) -> &dyn rss_platform::HostView
 impl core::clone::Clone for rss_platform::Dispatcher
 pub fn rss_platform::Dispatcher::clone(&self) -> rss_platform::Dispatcher
@@ -435,13 +524,14 @@ impl core::marker::UnsafeUnpin for rss_platform::Dispatcher
 impl !core::panic::unwind_safe::RefUnwindSafe for rss_platform::Dispatcher
 impl !core::panic::unwind_safe::UnwindSafe for rss_platform::Dispatcher
 pub struct rss_platform::HandlerError
+impl rss_platform::HandlerError
+pub const fn rss_platform::HandlerError::class(self) -> rss_platform::HandlerFailureClass
+pub const fn rss_platform::HandlerError::new(rss_platform::HandlerFailureClass) -> Self
 impl core::clone::Clone for rss_platform::HandlerError
 pub fn rss_platform::HandlerError::clone(&self) -> rss_platform::HandlerError
 impl core::cmp::Eq for rss_platform::HandlerError
 impl core::cmp::PartialEq for rss_platform::HandlerError
 pub fn rss_platform::HandlerError::eq(&self, &rss_platform::HandlerError) -> bool
-impl core::default::Default for rss_platform::HandlerError
-pub fn rss_platform::HandlerError::default() -> rss_platform::HandlerError
 impl core::error::Error for rss_platform::HandlerError
 impl core::fmt::Debug for rss_platform::HandlerError
 pub fn rss_platform::HandlerError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -477,6 +567,16 @@ impl core::marker::Unpin for rss_platform::ModuleName
 impl core::marker::UnsafeUnpin for rss_platform::ModuleName
 impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::ModuleName
 impl core::panic::unwind_safe::UnwindSafe for rss_platform::ModuleName
+pub struct rss_platform::TrustedContextMinter
+impl rss_platform::TrustedContextMinter
+pub fn rss_platform::TrustedContextMinter::admit<'a, T>(&self, T, rss_request_context::RequestContextView<'a>) -> rss_platform::AdmittedRequest<'a, T>
+impl core::marker::Freeze for rss_platform::TrustedContextMinter
+impl core::marker::Send for rss_platform::TrustedContextMinter
+impl core::marker::Sync for rss_platform::TrustedContextMinter
+impl core::marker::Unpin for rss_platform::TrustedContextMinter
+impl core::marker::UnsafeUnpin for rss_platform::TrustedContextMinter
+impl core::panic::unwind_safe::RefUnwindSafe for rss_platform::TrustedContextMinter
+impl core::panic::unwind_safe::UnwindSafe for rss_platform::TrustedContextMinter
 pub trait rss_platform::AdmissionPermit: core::marker::Send
 pub trait rss_platform::Contract: core::marker::Send + core::marker::Sync + 'static
 pub type rss_platform::Contract::Request: core::marker::Send + 'static

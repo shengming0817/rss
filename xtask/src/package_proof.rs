@@ -249,7 +249,31 @@ impl ProofBehavior {
             Self::TraceContext => trace_context_receipt(),
         };
         if receipt != &expected {
-            bail!("package consumer receipt is incomplete or non-canonical");
+            let expected = expected
+                .as_object()
+                .context("expected receipt must be an object")?;
+            let actual = receipt
+                .as_object()
+                .context("consumer receipt must be an object")?;
+            let expected_keys = expected.keys().cloned().collect::<BTreeSet<_>>();
+            let actual_keys = actual.keys().cloned().collect::<BTreeSet<_>>();
+            let missing = expected_keys
+                .difference(&actual_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            let unexpected = actual_keys
+                .difference(&expected_keys)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mismatched = expected_keys
+                .intersection(&actual_keys)
+                .filter(|key| expected.get(*key) != actual.get(*key))
+                .cloned()
+                .collect::<Vec<_>>();
+            bail!(
+                "package consumer receipt differs for behavior={}: missing={missing:?} unexpected={unexpected:?} mismatched={mismatched:?}",
+                self.fixture()
+            );
         }
         Ok(())
     }
@@ -671,16 +695,14 @@ fn validate_archive(plan: &PackageProofPlan, crate_root: &Path, head: &str) -> R
     }
     validate_packaged_dependencies(&manifest.document)?;
     validate_declared_content(&manifest, crate_root)?;
-    if plan.behavior == ProofBehavior::TraceContext {
-        let library = fs::read_to_string(crate_root.join(manifest.library_path()))?;
-        let readme_path = manifest
-            .package
-            .readme
-            .as_deref()
-            .context("rss-trace-context archive has no README")?;
-        let readme = fs::read_to_string(crate_root.join(readme_path))?;
-        validate_trace_context_doctest_source(&library, &readme)?;
-    }
+    let library = fs::read_to_string(crate_root.join(manifest.library_path()))?;
+    let readme_path = manifest
+        .package
+        .readme
+        .as_deref()
+        .context("release archive has no README")?;
+    let readme = fs::read_to_string(crate_root.join(readme_path))?;
+    validate_doctest_source(&plan.package, &library, &readme)?;
     let vcs = fs::read_to_string(crate_root.join(".cargo_vcs_info.json"))?;
     validate_vcs_revision(&vcs, head)
 }
@@ -688,15 +710,15 @@ fn validate_archive(plan: &PackageProofPlan, crate_root: &Path, head: &str) -> R
 /// INVARIANT: TRACE-CONTEXT-DOCTEST-01 { level = "Medium", exec = "release-check", source = "code", synthetic_red = "tests::trace_context_doctest_source_rejects_unowned_or_empty_example", anti_vacuity = "tests::trace_context_archive_doctest_source_is_non_vacuous" }.
 /// The archive matrix may claim its doctest axis only when the packaged README is the crate-level
 /// rustdoc owner and contains at least one executable Rust fence.
-fn validate_trace_context_doctest_source(library: &str, readme: &str) -> Result<()> {
+fn validate_doctest_source(package: &str, library: &str, readme: &str) -> Result<()> {
     if !library
         .lines()
         .any(|line| line.trim() == "#![doc = include_str!(\"../README.md\")]")
     {
-        bail!("rss-trace-context library does not include its packaged README as crate rustdoc");
+        bail!("{package} library does not include its packaged README as crate rustdoc");
     }
     if !readme.lines().any(|line| line.trim() == "```rust") {
-        bail!("rss-trace-context README has no executable Rust doctest");
+        bail!("{package} README has no executable Rust doctest");
     }
     Ok(())
 }
@@ -1408,6 +1430,27 @@ mod tests {
     }
 
     #[test]
+    fn receipt_mismatch_reports_stable_field_sets_without_echoing_values() {
+        let mut receipt = platform_receipt();
+        let object = receipt.as_object_mut().expect("receipt object");
+        object.remove("contract");
+        object.insert("unexpected".to_owned(), json!("secret-value"));
+        object.insert("asyncHandlerImplemented".to_owned(), json!(false));
+        let error = ProofBehavior::Platform
+            .validate_receipt(&receipt)
+            .expect_err("receipt must differ")
+            .to_string();
+        assert!(error.contains("behavior=platform"), "{error}");
+        assert!(error.contains("missing=[\"contract\"]"), "{error}");
+        assert!(error.contains("unexpected=[\"unexpected\"]"), "{error}");
+        assert!(
+            error.contains("mismatched=[\"asyncHandlerImplemented\"]"),
+            "{error}"
+        );
+        assert!(!error.contains("secret"), "{error}");
+    }
+
+    #[test]
     #[allow(clippy::expect_used)]
     fn diag_receipt_requires_every_public_behavior_axis() {
         let green = diag_context_receipt();
@@ -1466,16 +1509,37 @@ mod tests {
             .expect("trace-context library source");
         let readme = fs::read_to_string(root.join("crates/tracewire/README.md"))
             .expect("trace-context README");
-        assert!(validate_trace_context_doctest_source(&library, &readme).is_ok());
+        assert!(validate_doctest_source("rss-trace-context", &library, &readme).is_ok());
+    }
+
+    #[test]
+    fn every_release_surface_archive_has_a_non_vacuous_doctest_source() {
+        let root = crate::workspace_root().expect("workspace root");
+        for (package, path) in [
+            ("rss-contract", "crates/contract"),
+            ("rss-request-context", "crates/request-context"),
+            ("rss-platform", "crates/platform"),
+            ("rss-diag-context", "crates/diagctx"),
+            ("rss-trace-context", "crates/tracewire"),
+        ] {
+            let library = fs::read_to_string(root.join(path).join("src/lib.rs")).unwrap();
+            let readme = fs::read_to_string(root.join(path).join("README.md")).unwrap();
+            assert!(
+                validate_doctest_source(package, &library, &readme).is_ok(),
+                "{package}"
+            );
+        }
     }
 
     #[test]
     fn trace_context_doctest_source_rejects_unowned_or_empty_example() {
         const LIBRARY: &str = "#![doc = include_str!(\"../README.md\")]";
         const README: &str = "# candidate\n\n```rust\nassert!(true);\n```";
-        assert!(validate_trace_context_doctest_source(LIBRARY, README).is_ok());
-        assert!(validate_trace_context_doctest_source("pub struct Candidate;", README).is_err());
-        assert!(validate_trace_context_doctest_source(LIBRARY, "# no example").is_err());
+        assert!(validate_doctest_source("rss-trace-context", LIBRARY, README).is_ok());
+        assert!(
+            validate_doctest_source("rss-trace-context", "pub struct Candidate;", README).is_err()
+        );
+        assert!(validate_doctest_source("rss-trace-context", LIBRARY, "# no example").is_err());
     }
 
     #[test]

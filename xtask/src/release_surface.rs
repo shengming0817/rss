@@ -450,6 +450,7 @@ fn validate_publish_metadata(
 pub(crate) struct ReleasePackage {
     package: String,
     version: Version,
+    version_line: String,
     minimum_rust_version: Version,
     publish_policy: PublishPolicy,
     public_api_owner: PublicApiOwner,
@@ -464,6 +465,9 @@ impl ReleasePackage {
 
     pub(crate) fn version(&self) -> &Version {
         &self.version
+    }
+    pub(crate) fn version_line(&self) -> &str {
+        &self.version_line
     }
 
     pub(crate) fn minimum_rust_version(&self) -> &Version {
@@ -819,6 +823,7 @@ pub(crate) fn validate(
             surface.packages.push(ReleasePackage {
                 package: package.key().as_str().to_owned(),
                 version: package.version().clone(),
+                version_line: version_line.to_owned(),
                 minimum_rust_version: minimum_rust_version.clone(),
                 publish_policy: package.publish_policy().clone(),
                 public_api_owner: selected_package.public_api_owner(),

@@ -5308,6 +5308,7 @@ dependencies = [
  "rss-contract",
  "rss-request-context",
  "tokio",
+ "trybuild",
 ]
 
 [[package]]
@@ -6864,7 +6865,6 @@ dependencies = [
  "axum",
  "futures",
  "rcgen",
- "rss-request-context",
  "serde",
  "serde_json",
  "sqlx",

@@ -1,4 +1,4 @@
-//! Authority-free request values and read-only views for RSS handlers.
+#![doc = include_str!("../README.md")]
 
 use std::error::Error;
 use std::fmt;
@@ -16,7 +16,11 @@ pub enum ContextValueError {
 
 impl fmt::Display for ContextValueError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid request context value")
+        formatter.write_str(match self {
+            Self::Empty => "request context value is empty",
+            Self::TooLong => "request context value is too long",
+            Self::InvalidFormat => "request context value has invalid format",
+        })
     }
 }
 impl Error for ContextValueError {}
@@ -30,7 +34,11 @@ pub enum TenantIdError {
 }
 impl fmt::Display for TenantIdError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("invalid tenant identifier")
+        formatter.write_str(match self {
+            Self::Empty => "tenant identifier is empty",
+            Self::Nil => "tenant identifier is nil",
+            Self::InvalidFormat => "tenant identifier has invalid format",
+        })
     }
 }
 impl Error for TenantIdError {}
@@ -354,6 +362,42 @@ impl<'a> RequestContextView<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn value_error_messages_are_stable_distinct_and_redacted() {
+        let context = [
+            ContextValueError::Empty,
+            ContextValueError::TooLong,
+            ContextValueError::InvalidFormat,
+        ]
+        .map(|error| error.to_string());
+        let tenant = [
+            TenantIdError::Empty,
+            TenantIdError::Nil,
+            TenantIdError::InvalidFormat,
+        ]
+        .map(|error| error.to_string());
+        assert_eq!(
+            context
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert_eq!(
+            tenant
+                .iter()
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            3
+        );
+        assert!(
+            context
+                .iter()
+                .chain(&tenant)
+                .all(|message| !message.contains("secret"))
+        );
+    }
 
     struct Never;
     impl CancellationObserver for Never {
