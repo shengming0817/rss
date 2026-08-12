@@ -67,7 +67,8 @@
 - 下行 `send_command` 返回的 `BrokerAccepted` 只证明 broker PUBACK，即 **BrokerAccepted**；它不是设备 ACK、
   durable RSS ingress 或 application receipt。durable commit 后的 application receipt 由 #1903 ingress
   transaction outcome 唯一产生，broker/session 与 ingress 的断连、饱和 join hazard 归 #1908，生产 assembly
-  provider closure/readiness/drain 归 #1910。
+  typed provider closure 与组件 lifecycle 交 ADR-028 的 future candidate T1/T2 owners；designated binary/image 的真实
+  startup/readiness/restart/drain 与 activation/T3 当前无 owner，须等待 hardening trigger 后的独立 T3 carrier issue/PR。
 - credential reload 只接受同一稳定 client ID、完整本地可验证 material 和更高 revision；在有界 deadline 内
   切换，candidate 失败则回滚 last-good credentials。`MqttReadiness` 只暴露闭合状态、`session_present` 与
   revision，不暴露 endpoint、certificate、private key 或 payload。

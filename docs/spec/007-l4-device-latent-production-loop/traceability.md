@@ -1,6 +1,6 @@
 # DeviceLatent requirement traceability
 
-This table assigns every requirement in [spec.md](./spec.md) to exactly one implementation PBI and one canonical primary proof. Higher-level tests may cover a join hazard, but they do not become duplicate primary proofs for requirements already closed below.
+This table assigns every requirement in [spec.md](./spec.md) either to one implemented PBI and canonical primary proof or to one explicit ADR-028 future handoff. A future-handoff row is an acknowledged proof gap, not evidence of implementation or permission to claim candidate, T3, or active status. Higher-level tests may cover a join hazard, but they do not become duplicate primary proofs for requirements already closed below.
 
 Proof tiers follow the repository [verification scope matrix](../../rules/project-scope.md#验证范围矩阵): T1 is design/component proof, T2 is capability/seam proof, and T3 is production assembly/acceptance proof. Carrier strength and concrete mechanisms are owned by [ADR-022](../../architecture/202607291724-022-l4-device-latent-production-loop.md).
 
@@ -36,15 +36,15 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | FR-027 | #1905 | T2 — authenticated tenant-scoped LocalOnly inspection authorization and redaction test |
 | FR-028 | #1905 | T1 — closed metric-label type and cardinality projection test |
 | FR-029 | #1909 | T1 — six-contract exact-set and synthetic-red proof rejecting an undeclared operator mutation surface |
-| FR-030 | #1901 | T2 — schema inventory plus deletion transaction proving retained artifact receipts reuse the existing PostgreSQL revocation truth source |
+| FR-030 | #1901 | T2 — schema inventory plus deletion transaction proving retained artifact receipts reuse the existing PostgreSQL decision-side revocation projection |
 | FR-031 | #1906 | T2 — programmable simulator journey keeps draft artifacts production-ineligible; #1904 owns compile-only draft pilot assembly |
-| FR-032 | #1910 | T3 — production assembly missing-provider startup/readiness rejection |
+| FR-032 | ADR-028 future handoff | T1/T2 required — typed provider construction plus missing-provider seam/component-readiness rejection; no designated-process startup/readiness claim or current carrier |
 | FR-033 | #1898 | T2 — authenticated tenant/device idempotency replay/reuse PostgreSQL conformance |
 | FR-034 | #1893 | T1 — bounded duration and sealed cross-field policy-constructor boundary/property test |
 | FR-035 | #1909 | T2 — existing typed registry/codegen six-contract exact-set synthetic-red proof |
 | FR-036 | #1895 | T1 — four command/event identity, link, kind, consistency, and shape golden |
 | FR-037 | #1901 | T2 — append-once per-generation artifact binding, stale-fence PostgreSQL tests and incompatible-provider compile proof |
-| FR-038 | #1910 | T3 — assembly-level external PKI provider/config/conformance closure activation proof |
+| FR-038 | ADR-028 future handoff | T1/T2 required — private production mint bound to a distinct assembly-wide external-PKI provider/config/conformance closure; no current carrier |
 | FR-039 | #1903 | T2 — public receipt non-oracle equivalence plus authorized internal-audit detail test |
 | FR-040 | #1893 | T1 — reported-state constructor/transition synthetic red rejecting generation zero |
 | FR-041 | #1895 | T1 — report schema/validator synthetic red rejecting `observedGeneration: 0` |
@@ -56,21 +56,22 @@ Proof tiers follow the repository [verification scope matrix](../../rules/projec
 | NFR-005 | #1901 | T2 — private eligibility/receipt/Ready/completion proofs plus generic-command and production-provider substitution rejection |
 | NFR-006 | #1905 | T2 — authorized output, audit, log/trace, and metric redaction test |
 | NFR-007 | #1896 | T2 — authenticated tenant transaction and server-time ordering PostgreSQL test |
-| NFR-008 | #1910 | T3 — disable/pause/drain runtime rollback retaining facts while lifecycle never regresses to draft |
+| NFR-008 | ADR-028 future handoff | T2 required — component disable/pause/drain semantics retaining facts; a later authorized T3 owns designated-process lifecycle and rollback proof |
 | NFR-009 | #1895 | T1 — generated sealed-coordinate compile/golden proof and caller-forgery synthetic red |
-| NFR-010 | #1910 | T3 — production assembly dependency type and prohibited-provider substitution rejection |
+| NFR-010 | ADR-028 future handoff | T1/T2 required — typed candidate dependencies plus prohibited-provider substitution rejection; no current carrier |
 | NFR-011 | #1906 | T2 — canonical offline/reconnect/newest-command/ACK/report/post-commit-receipt journey join proof |
 | NFR-012 | #1907 | T2 — exact PG join-hazard table mapping each cross-boundary failure to one observable assertion |
 | NFR-013 | #1908 | T2 — exact cross-boundary MQTT join-hazard table mapping broker/backpressure plus durable-ingress failures to one observable assertion, reusing rather than duplicating #1902/#1903 component proofs |
 
 ## Exact-set rule
 
-This table contains every FR/NFR declared in [spec.md](./spec.md) exactly once. The one-time specification smoke derives both sets dynamically rather than encoding a count; it is not a repository enforcement mechanism.
+This table contains every FR/NFR declared in [spec.md](./spec.md) exactly once. Existing proofs and explicit future handoffs are deliberately distinct: a handoff cannot satisfy acceptance. The one-time specification smoke derives both sets dynamically rather than encoding a count; it is not a repository enforcement mechanism.
 
 ## MQTT proof boundary
 
 #1902 closes the standalone MQTTS/mTLS, peer-certificate assertion, exact ACL/topic, persistent-session,
 manual-ACK, readiness and credential-reload behavior. #1903 begins only after an authenticated delivery exists
 and owns durable ingress plus post-commit application receipt. #1908 owns only independent joins that require
-both those capabilities, while #1910 owns the production assembly's required-provider activation/readiness/drain
-proof. A broker PUBACK is `BrokerAccepted`; none of these assignments permits treating it as an application receipt.
+both those capabilities. ADR-028 leaves production candidate integration and required-provider readiness/drain to
+future T1/T2 owners and leaves activation to a separately authorized T3 owner. A broker PUBACK is
+`BrokerAccepted`; none of these assignments permits treating it as an application receipt.

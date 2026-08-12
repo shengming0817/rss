@@ -2,7 +2,8 @@
 //!
 //! Provider material enters as [`ProviderCertificateCandidate`]. Only the binding funnel in this
 //! module can turn it into an [`AuthorizedCertificateArtifact`]; production eligibility remains an
-//! unforgeable capability until the verified closure tracked by #1910 is wired.
+//! unforgeable capability. ADR-028 supersedes #1910: a future candidate integration must bind any
+//! private production mint to its separately authorized, assembly-wide verified provider closure.
 //!
 //! ref: instant-labs/instant-acme src/order.rs@8e4441f
 
@@ -109,8 +110,9 @@ artifact_digest_type!(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DraftEligibility {}
 
-/// Production eligibility. No public constructor exists in #1901; #1910 owns the verified
-/// production closure that may mint this capability.
+/// Production eligibility. No public or non-test constructor exists; ADR-028 assigns any future
+/// private mint and verified assembly-wide provider closure to an independently scoped candidate
+/// integration rather than the superseded #1910 activation route.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProductionEligibility {}
 

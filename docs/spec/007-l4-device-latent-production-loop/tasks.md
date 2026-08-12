@@ -109,7 +109,7 @@ This document groups executable work by implementation PBI. Requirements are own
 - [x] Keep all six proposal contracts draft and outside assembly activation; the canonical contract set remains owned by [contracts/contract-set.md](./contracts/contract-set.md).
 - [x] Classify the pilot `compile-only` with no binary, listener, image, configuration carrier, health inventory, journey, or other deployable artifact claim.
 
-This PBI closes static library composition and bounded worker-control observation only. The programmable convergence journey remains #1906, broker/backpressure fault joins remain #1908, and external-PKI production activation and production readiness/drain remain #1910.
+This PBI closes static library composition and bounded worker-control observation only. The programmable convergence journey remains #1906 and broker/backpressure fault joins remain #1908. Production candidate integration, readiness/drain, and activation are outside this completed plan and follow ADR-028's independent handoff.
 
 ## #1905 — Operations, metrics, and inspection
 
@@ -149,11 +149,6 @@ This PBI closes static library composition and bounded worker-control observatio
 - [x] Own the six-contract identity/kind/consistency exact-set proof before activation.
 - [x] Do not introduce a subsystem-specific parallel gate, required job, or duplicated evidence inventory.
 
-## #1910 — Conditional production activation
+## Superseded activation handoff
 
-- [ ] Require an assembly-level sealed `ExternalPkiProviderClosure` bound to selected provider, production configuration, and provider-conformance evidence.
-- [ ] Keep that closure type non-interchangeable with per-command `AuthorizedCertificateArtifact`; neither one can satisfy the other's dependency.
-- [ ] Require production persistent-state, revocation, secure MQTT, authorization, audit, readiness, and drain providers by non-optional type.
-- [ ] Reject raw signer, software-CA, simulator, plaintext, missing-provider, and in-memory assembly variants.
-- [ ] Activate proposal contracts only after the production assembly and existing verification paths prove their join hazards.
-- [ ] Prove disable, pause, and drain of the active runtime path while retaining durable facts and evidence; keep active contracts active or advance them only through formal deprecation.
+#1910 closed without implementing production activation. ADR-028 withdraws its direct activation/T3 route instead of retaining a dormant checklist. The safety distinction between a future assembly-wide external-PKI provider closure and each command's `AuthorizedCertificateArtifact` remains mandatory, but future candidate integration and any later activation must be independently scoped and authorized.

@@ -1,12 +1,14 @@
 # L4 DeviceLatent Production Loop Specification
 
-**Status:** Draft proposal
+**Status:** Candidate capability specification; contracts remain Draft
 
 **Scope:** device certificate desired-state convergence
 
 **Issue:** #1892
 
-This specification freezes the intended product semantics for RSS's first device-latent certificate convergence loop. It does not activate a contract or production path. Contract activation is conditional on the external PKI boundary described below.
+This specification freezes the intended capability semantics for RSS's first device-latent certificate convergence loop. It
+does not activate a contract or production path. Candidate product identity, public waist, external consumer and activation
+handoff are owned by [ADR-028](../../architecture/202608120423-028-device-security-candidate-scope.md).
 
 ## User stories
 
@@ -49,9 +51,13 @@ Success means:
 
 An authorized operator can use the `LocalOnly` status read to inspect desired/reported generations, closed conditions, and payload-free command summaries. This proposal defines no operator mutation contract: resync, quarantine, unquarantine, cancel, supersede, and delete are not promised as manual recovery actions. Automatic lost-wake repair and fenced supersession remain internal loop behavior.
 
-### US-5 — Activate only a production-eligible assembly
+### US-5 — Prepare only a production-eligible candidate assembly
 
-Release engineering can run a simulator-backed pilot while every proposal remains draft. An active production path is possible only after the assembly consumes a sealed `ExternalPkiProviderClosure` proving provider/configuration/conformance closure and the selected provider returns a distinct `AuthorizedCertificateArtifact` for each command. Missing providers fail closed; no demo, in-memory, plaintext, or locally signed fallback may impersonate production.
+Release engineering can run a simulator-backed pilot while every contract remains draft. A future candidate assembly may be
+constructed only after it consumes a sealed assembly-wide provider closure proving provider/configuration/conformance and the
+selected provider returns a distinct `AuthorizedCertificateArtifact` for each command. Missing providers fail closed; no
+demo, in-memory, plaintext, or locally signed fallback may impersonate candidate production eligibility. This candidate
+closure is T1/T2 and does not itself authorize contract activation or T3.
 
 ## Functional requirements
 
@@ -70,7 +76,7 @@ Release engineering can run a simulator-backed pilot while every proposal remain
 - **FR-008:** The two HTTP proposal identities MUST retain the kind and consistency frozen in [contracts/contract-set.md](contracts/contract-set.md).
 - **FR-009:** HTTP payloads MUST use a `data` envelope. Tenant identity MUST come only from authenticated scope, and the path device identity MUST NOT be repeated in the payload as an authorization fact.
 - **FR-010:** Every command and event identity MUST have one stable generated envelope source and MUST NOT be duplicated in its payload; an ACK `commandId` correlates to the command envelope identity.
-- **FR-011:** Future contract implementation MUST directly replace the empty draft `identity.reconcile-loop`; it MUST NOT introduce an alias, compatibility shim, second reader, dual write, or parallel contract.
+- **FR-011:** The materialized contract set MUST remain the direct replacement for the former empty draft `identity.reconcile-loop`; it MUST NOT introduce an alias, compatibility shim, second reader, dual write, or parallel contract.
 - **FR-012:** Command, ACK, report, and application-receipt contracts MUST remain distinct facts. ACK MUST NOT imply reported convergence.
 
 ### Commands, fencing, and durable execution
@@ -99,15 +105,15 @@ Release engineering can run a simulator-backed pilot while every proposal remain
 - **FR-027:** The `LocalOnly` operator inspection MUST be authorized by authenticated subject and tenant and MUST redact payload and certificate material. This six-contract proposal exposes no operator recovery mutation.
 - **FR-028:** Metrics MUST use crate-owned closed labels and MUST NOT label by tenant, device, command, artifact, or other unbounded identity.
 - **FR-029:** Automatic repair and fenced command supersession MUST remain internal loop transitions and MUST NOT be presented as operator resync, quarantine, unquarantine, cancel, supersede, or delete APIs.
-- **FR-030:** The existing PostgreSQL revocation model keyed by `(tenant_id, device_id, serial)` with `not_after` MUST remain the single revocation source; this feature MUST NOT introduce a parallel revocation table or identity.
+- **FR-030:** The existing PostgreSQL model keyed by `(tenant_id, device_id, serial)` with `not_after` MUST remain the sole RSS decision-side revocation projection/cache/lookup; External PKI MUST remain the lifecycle/publication authority, and this feature MUST NOT introduce a parallel RSS revocation table or identity.
 - **FR-031:** A simulator-backed pilot MUST keep every proposal contract draft and its simulator artifacts production-ineligible.
-- **FR-032:** An active assembly MUST require persistent state providers and secure transport providers; absence MUST fail startup or readiness without fallback.
+- **FR-032:** A future candidate assembly MUST require persistent state providers and secure transport providers; absence MUST fail typed construction or provider-seam/component readiness without fallback. This T1/T2 requirement MUST NOT claim designated binary/image process startup or readiness.
 - **FR-033:** Policy PUT MUST require a UUID `idempotencyKey` bound to authenticated tenant and path device. New acceptance and identical canonical replay MUST return the same `200` accepted result; expected-generation conflict or key reuse with different canonical input MUST return `409`; a hidden cross-tenant device MUST be indistinguishable from absence at `404`.
 - **FR-034:** Policy validity MUST be between 300 and 31,536,000 seconds, renew-before MUST be between 60 and 31,535,999 seconds, and `renewBeforeSeconds` MUST be strictly less than `validitySeconds`.
 - **FR-035:** The existing verification-path closure MUST prove the six-contract identity/kind/consistency exact set and reject missing or extra members before activation.
 - **FR-036:** The four command/event proposal identities MUST retain the kind, consistency, links, and distinct payload shapes frozen in [contracts/contract-set.md](contracts/contract-set.md).
 - **FR-037:** `AuthorizedCertificateArtifact` MUST be a per-command sealed capability bound to authenticated tenant, path device, desired generation, policy digest, public-key digest, certificate-chain digest, and expiry; it MUST NOT prove assembly-wide provider eligibility.
-- **FR-038:** Production activation MUST require a separate sealed `ExternalPkiProviderClosure` bound to the selected external provider, production configuration, and conformance evidence; it MUST NOT substitute for any per-command artifact authorization.
+- **FR-038:** Candidate production eligibility MUST require a separate sealed assembly-wide provider closure bound to the selected external provider, production configuration, and conformance evidence; it MUST NOT substitute for any per-command artifact authorization. The current repository does not yet implement this closure.
 - **FR-039:** A public application receipt MUST collapse unknown-command, unauthorized, and scope-mismatch failures to `NotAccepted`; only separately authorized internal audit evidence may distinguish them.
 - **FR-040:** #1893 MUST include a behavioral red proof that neither its reported-state constructor nor state transition can construct or persist generation zero; absence of the reported row is the only initial state.
 - **FR-041:** #1895 MUST include a schema/validator synthetic red proof that a report with `observedGeneration: 0` is rejected before registration or emission.
@@ -122,9 +128,9 @@ Release engineering can run a simulator-backed pilot while every proposal remain
 - **NFR-005:** A per-command production artifact dependency MUST be unrepresentable by raw signer, SoftCA, or simulator artifact types. Its sealed internal receipt MUST expose typed `CertScope`, `CertSerial`, and `CertNotAfter` capabilities (or an equally non-forgeable equivalent) needed for readiness and revocation checks, while the device command remains limited to opaque artifact ID and digest.
 - **NFR-006:** Logs, traces, status views, audit, and operator output MUST redact certificate material, CSR data, credentials, transport payloads, and unbounded identifiers where they would create unsafe disclosure or metric cardinality.
 - **NFR-007:** Persistent state mutation MUST use server-authoritative transaction time and authenticated tenant scope; device clocks are observation metadata only.
-- **NFR-008:** Production runtime activation MUST be reversible by disabling and draining the active path while retaining durable facts, receipts, audit, and evidence; an active contract MUST remain active or advance through the formal deprecated lifecycle, never return to draft.
+- **NFR-008:** Future candidate components MUST expose T2 disable and bounded-drain semantics while retaining durable facts, receipts, audit, and evidence. Designated binary/image process disable/drain/restart and any later contract activation/rollback lifecycle are governed by ADR-028's separately authorized T3 and MUST NOT be inferred from this component requirement.
 - **NFR-009:** Contract ID, topic, schema hash, transport coordinate, command envelope identity, and event envelope identity MUST be supplied only by generated sealed seams, not callers.
-- **NFR-010:** Production assembly dependencies MUST be unrepresentable by plaintext, simulator, missing-provider, or in-memory provider variants.
+- **NFR-010:** Candidate assembly dependencies MUST be unrepresentable by plaintext, simulator, missing-provider, or in-memory provider variants.
 - **NFR-011:** One canonical simulator journey MUST prove the cross-capability sequence offline, reconnect, newest command, ACK without convergence, matching report convergence, and post-commit application receipt; it MUST NOT duplicate the primary proofs of the individual capabilities.
 - **NFR-012:** PostgreSQL fault evidence MUST cover only cross-transaction, cross-worker, or crash-boundary join hazards not already owned by a single capability proof, and MUST map each hazard to one observable assertion and one primary owner.
 - **NFR-013:** MQTT fault evidence MUST cover only broker-session, backpressure, or durable-ingress join hazards not already owned by a single transport or ingress proof, and MUST map each hazard to one observable assertion and one primary owner.
@@ -135,7 +141,21 @@ Every implementation claim above must have one lowest-sufficient canonical Hard 
 
 RSS owns desired/reported state, command and receipt facts, convergence scheduling, tenant-scoped authorization, and consumption of an authorized public certificate artifact.
 
-External PKI owns CA hierarchy, EST/CSR onboarding and authorization, SAN and key-usage authorization, signing, CRL/OCSP, and certificate lifecycle. RSS production assembly consumes a sealed `ExternalPkiProviderClosure` bound to provider identity, production configuration digest, and conformance evidence. Separately, each command consumes an `AuthorizedCertificateArtifact` bound to authenticated tenant, path device, desired generation, policy digest, device public-key digest, certificate-chain digest, and expiry. Neither capability substitutes for the other, and RSS does not manufacture either from a raw signer or software CA.
+External PKI owns CA hierarchy, EST/CSR onboarding and authorization, SAN and key-usage authorization, signing, CRL/OCSP,
+and certificate lifecycle. A future RSS candidate assembly must consume a sealed assembly-wide provider closure bound to
+provider identity, production configuration digest, and conformance evidence. Separately, each command consumes an
+`AuthorizedCertificateArtifact` bound to authenticated tenant, path device, desired generation, policy digest, device
+public-key digest, certificate-chain digest, and expiry. Neither capability substitutes for the other, and RSS does not
+manufacture either from a raw signer or software CA.
+
+Resource Security Fact source, authoring lifecycle and management remain External. RSS may consume a narrow tenant/resource
+projection through Common ABAC, but this six-contract specification contains no public fact write ingress. Incubator
+bootstrap is candidate/test fixture input only and cannot become production freshness or authorization authority.
+
+Operator recovery is federated without widening the contract set: RSS owns authorized `LocalOnly` inspection, automatic
+repair and fail-closed pause/drain seams; the incubator product owns authorized recovery orchestration and its runbook;
+External control planes own resource/PKI remediation actions and audit receipts. Production activation requires evidence of
+that joined recovery path, not an RSS mutation contract or MDM/fleet control plane.
 
 Out of scope:
 
@@ -155,6 +175,7 @@ The proposal is successful when downstream implementation can demonstrate all of
 - generation and epoch fencing prevent stale effects across concurrency and restart;
 - durable ingress commit precedes application receipt publication;
 - authenticated tenant scope and path device identity cannot be overridden by body fields;
-- simulator evidence cannot activate a production contract;
-- production activation is impossible without the assembly-level external PKI provider closure and required persistent, secure providers;
-- no command is authored without its own tenant/device/generation-bound authorized artifact.
+- simulator evidence cannot mint candidate production eligibility or activate a production contract;
+- candidate production eligibility is impossible without the assembly-level external PKI provider closure and required persistent, secure providers;
+- no command is authored without its own tenant/device/generation-bound authorized artifact;
+- activation remains blocked on ADR-028's independent hardening/T3 first-green, federated operator-recovery evidence, and atomic six-contract transition.
