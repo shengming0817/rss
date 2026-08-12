@@ -1345,9 +1345,8 @@ pub(crate) fn check_test_support_internal_dependencies(edges: &[Edge]) -> Vec<Fi
     edges
         .iter()
         .filter(|edge| {
-            (layers::is_test_support(&edge.from)
-                && !(edge.from == "testkit" && edge.to == "rss-conformance"))
-                || (edge.to == "rss-conformance" && edge.from != "testkit")
+            layers::is_test_support(&edge.from)
+                && !(edge.from == "testkit" && edge.to == "rss-conformance")
         })
         .map(|edge| {
             finding(
@@ -2594,7 +2593,7 @@ mod tests {
     }
 
     #[test]
-    fn test_support_internal_dependencies_allows_only_testkit_conformance_edge() {
+    fn test_support_internal_dependencies_allows_testkit_conformance_edge() {
         assert!(
             check_test_support_internal_dependencies(&[e("testkit", "rss-conformance")]).is_empty()
         );
@@ -2603,9 +2602,9 @@ mod tests {
                 .len(),
             1
         );
-        assert_eq!(
-            check_test_support_internal_dependencies(&[e("identity", "rss-conformance")]).len(),
-            1
+        assert!(
+            check_test_support_internal_dependencies(&[e("identity", "rss-conformance")])
+                .is_empty()
         );
     }
 

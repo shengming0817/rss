@@ -48,8 +48,9 @@ pub use wait::{await_delay, await_map, await_notified, await_try, await_try_ever
 
 // 容器 fixture（#1137，仅 `containers` feature）：legacy `env_or_*` resolver 仅覆盖
 // postgres/redis/rabbitmq；MQTT 与其它安全敏感 provider 使用 hermetic TLS guard。
-// 供 adapter 集成测试 + journeys durable journey 经 [dev-dependencies] 消费。零内部 workspace 依赖（只回
-// typed 连接坐标与信任材料，不构造 adapter 类型）。default 构建 / 契约 harness 消费方不拉 testcontainers 树。
+// 供 adapter 集成测试 + journeys durable journey 经 [dev-dependencies] 消费。唯一内部 shipped 出边为
+// rss-conformance，仍为零 adapter 依赖（只回 typed 连接坐标与信任材料，不构造 adapter 类型）。
+// default 构建 / 契约 harness 消费方不拉 testcontainers 树。
 #[cfg(feature = "containers")]
 mod containers;
 #[cfg(feature = "containers")]
