@@ -37,6 +37,10 @@ Platform Application vNext 是由 #2107 原子激活的 breaking 0.x cutover；�
 shim、`From`/`TryFrom`、feature flag、双读写、双 dispatch 或 v0.2
 fallback。旧 #2045 executable contract 已原子删除，同样不构成 compatibility authority。
 
+Release Surface package 的稳定版本策略单源见 [`RELEASES.md`](../../RELEASES.md)。首次 registry 发布前，已接纳的
+major/minor 版本线冻结，发布准备只允许修改 patch；实验 API 的破坏式替换不要求兼容，也不以此触发 minor
+递增。major/minor 变更必须在 candidate 形成前由独立架构决策接纳，不能混入发布收尾。首次发布后恢复标准 SemVer。
+
 `cargo xtask public-api release --check`
 只验证 baseline exact-set；canonical ReleaseCheck 才聚合 default/all-features SemVer、publish closure、
 forbidden-type leakage，并在同一 release-only carrier 中执行 `cargo xtask package-proof`。后者从同一 revision 的

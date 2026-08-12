@@ -105,11 +105,11 @@ exclude = ["lints"]
 # Positive Release Surface selection. Unlisted packages and profile artifacts remain internal.
 [workspace.metadata.release-surface]
 packages = [
-  { package = "rss-contract", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
-  { package = "rss-request-context", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
-  { package = "rss-platform", public-api-owner = "platform-public", api-stability = "experimental", profiles = [] },
-  { package = "rss-diag-context", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
-  { package = "rss-trace-context", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
+  { package = "rss-contract", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
+  { package = "rss-request-context", version-line = "0.1", public-api-owner = "foundation-public", api-stability = "experimental", profiles = [] },
+  { package = "rss-platform", version-line = "0.3", public-api-owner = "platform-public", api-stability = "experimental", profiles = [] },
+  { package = "rss-diag-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
+  { package = "rss-trace-context", version-line = "0.1", public-api-owner = "standalone-component", api-stability = "experimental", profiles = [] },
 ]
 profile-artifacts = []
 

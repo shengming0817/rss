@@ -2002,6 +2002,7 @@ mod tests {
             "release-surface": {
                 "packages": [{
                     "package": "alpha-release",
+                    "version-line": "0.1",
                     "public-api-owner": "standalone-component",
                     "api-stability": "experimental",
                     "profiles": []
@@ -2070,8 +2071,8 @@ mod tests {
         metadata["metadata"] = json!({
             "release-surface": {
                 "packages": [
-                    {"package":"alpha-release","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]},
-                    {"package":"beta-release","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]}
+                    {"package":"alpha-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]},
+                    {"package":"beta-release","version-line":"0.1","public-api-owner":"standalone-component","api-stability":"stable","profiles":[]}
                 ],
                 "profile-artifacts": []
             }
@@ -2153,7 +2154,13 @@ mod tests {
                 .iter()
                 .map(PackageKey::as_str)
                 .collect::<Vec<_>>(),
-            vec!["rss-diag-context", "rss-platform", "rss-trace-context"]
+            vec![
+                "rss-contract",
+                "rss-diag-context",
+                "rss-platform",
+                "rss-request-context",
+                "rss-trace-context"
+            ]
         );
         let internal = catalog.internal.iter().collect::<BTreeSet<_>>();
         let release = catalog.release.iter().collect::<BTreeSet<_>>();

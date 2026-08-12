@@ -45,6 +45,8 @@ impl OfficialProfile {
 #[serde(deny_unknown_fields, rename_all = "kebab-case")]
 pub struct ReleasePackageSelection {
     package: String,
+    #[serde(default)]
+    version_line: Option<String>,
     public_api_owner: PublicApiOwner,
     api_stability: ApiStability,
     profiles: Vec<OfficialProfile>,
@@ -54,6 +56,11 @@ impl ReleasePackageSelection {
     #[must_use]
     pub fn package(&self) -> &str {
         &self.package
+    }
+
+    #[must_use]
+    pub fn version_line(&self) -> Option<&str> {
+        self.version_line.as_deref()
     }
 
     #[must_use]
