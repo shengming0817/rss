@@ -95,6 +95,7 @@ rss/
 │   ├── runtimeinventorymint/ # runtimeexec-only inventory observation mint capability（RUNTIME-INVENTORY-MINT-01）
 │   ├── consistency/      # outbox / saga / reconcile / projection / command_journal / idempotency（纯态机 + trait，L0–L4）
 │   ├── primitives/       # crypto / authplan / healthz / circuitbreaker（引擎纯计算原语）
+│   ├── conformance/      # provider-neutral LocalTx assertion primitive（Release API）
 │   ├── tracewire/        # W3C Trace Context capture/remote-parent restore 单源（HTTP + outbox，唯一 otel 桥落点）
 │   ├── tracewiretest/    # publish=false、dev-dependency-only 的 OTel subscriber/exporter 测试脚手架
 │   ├── workspacefacts/   # Tooling/Verification：guppy PackageGraph/CargoSet 薄适配；owned Cargo facts

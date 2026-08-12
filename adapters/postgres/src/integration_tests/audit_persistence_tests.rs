@@ -349,7 +349,6 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
                 })
                 .map_err(audit_profile_classified)
             },
-            rss_conformance::ConformanceErrorCategory::CommitUnknown,
             || unknown_probe.attempts(unknown_tenant),
         ),
     )
@@ -370,7 +369,6 @@ async fn localtx_audit_backend_profile_unsafe_settlements() -> TestResult {
                 })
                 .map_err(audit_profile_classified)
             },
-            rss_conformance::ConformanceErrorCategory::RollbackFailed,
             || rollback_failed_probe.attempts(rollback_failed_tenant),
         ),
     )

@@ -3,7 +3,7 @@ use std::cell::Cell;
 use release_package::{
     ConformanceErrorCategory,
     localtx::{
-        ClassifiedError, CommitCase, CommitUnknownCase, RejectedNoWriteCase,
+        ClassifiedError, CommitCase, CommitUnknownCase, NoWriteRejection, RejectedNoWriteCase,
         RollbackCase, RollbackFailedCase, assert_commit, assert_commit_unknown_no_replay,
         assert_rejected_no_write, assert_rollback, assert_rollback_failed_no_replay,
     },
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_rejected_no_write(RejectedNoWriteCase::new(
         || async { Err::<(), _>(classified(ConformanceErrorCategory::Validation)) },
-        ConformanceErrorCategory::Validation,
+        NoWriteRejection::Validation,
         || async { Ok::<_, ClassifiedError<SecretProviderError>>(0_u32) },
         0,
         || 0,
@@ -46,7 +46,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             commit_attempts.set(commit_attempts.get() + 1);
             Err::<(), _>(classified(ConformanceErrorCategory::CommitUnknown))
         },
-        ConformanceErrorCategory::CommitUnknown,
         || commit_attempts.get(),
     )).await?;
 
@@ -56,13 +55,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             rollback_attempts.set(rollback_attempts.get() + 1);
             Err::<(), _>(classified(ConformanceErrorCategory::RollbackFailed))
         },
-        ConformanceErrorCategory::RollbackFailed,
         || rollback_attempts.get(),
     )).await?;
 
     let secret = "tenant=secret provider payload";
-    let rendered = classified(ConformanceErrorCategory::Storage).category().to_string();
-    let sanitized_errors = !rendered.contains(secret);
+    let provider_error = assert_commit(CommitCase::new(
+        || async { Err::<(), _>(classified(ConformanceErrorCategory::Storage)) },
+        || async { Ok::<_, ClassifiedError<SecretProviderError>>(0_u32) },
+        0,
+        || 0,
+    ))
+    .await
+    .expect_err("provider failure must be surfaced");
+    let rendered = provider_error.to_string();
+    let sanitized_errors = rendered.contains("commit action (storage)")
+        && !rendered.contains(secret);
     let _opaque_secret = SecretProviderError(secret).0;
     println!("{}", serde_json::json!({
         "package": "rss-conformance",

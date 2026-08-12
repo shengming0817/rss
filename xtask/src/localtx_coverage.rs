@@ -7483,6 +7483,22 @@ mod tests {
     }
 
     #[test]
+    fn legacy_testkit_localtx_path_cannot_supply_backend_evidence() -> anyhow::Result<()> {
+        let temp = FixtureCopy::new("localtx-legacy-testkit-path")?;
+        let profile = temp.path.join("adapters/pg/src/lib.rs");
+        let source = fs::read_to_string(&profile)?;
+        fs::write(
+            &profile,
+            source.replacen("::rss_conformance::localtx", "::testkit::localtx", 1),
+        )?;
+        let (_, findings) = check_fixture_root(&temp.path)?;
+        assert!(findings.iter().any(|finding| {
+            finding.rule == Rule::MissingBackendProbe && finding.detail.contains("commit")
+        }));
+        Ok(())
+    }
+
+    #[test]
     fn tenant_contract_cannot_enroll_repo_atomic_probe_set() -> anyhow::Result<()> {
         let temp = FixtureCopy::new("localtx-wrong-backend-profile")?;
         let profile = temp.path.join("adapters/pg/src/lib.rs");

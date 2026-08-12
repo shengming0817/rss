@@ -2866,7 +2866,7 @@ async fn ts9_secret_repo_no_write_probe_antivacuity() -> TestResult {
                     std::io::Error::other("synthetic rejection"),
                 ))
             },
-            rss_conformance::ConformanceErrorCategory::Validation,
+            rss_conformance::NoWriteRejection::Validation,
             || async {
                 sqlx::query_as::<_, (i64,)>(
                     "SELECT count(*) FROM secret_refs WHERE secret_key = $1",
@@ -2983,7 +2983,7 @@ async fn ts9_secret_repo_real_rss_app_validation_profile() -> TestResult {
                         )
                     })
             },
-            rss_conformance::ConformanceErrorCategory::Validation,
+            rss_conformance::NoWriteRejection::Validation,
             || async {
                 sqlx::query_as::<_, (i64,)>(
                     "SELECT count(*) FROM secret_refs WHERE secret_key = $1",
@@ -3496,7 +3496,6 @@ async fn ts9_secret_repo_real_rss_app_commit_unknown_profile() -> TestResult {
                         )
                     })
             },
-            rss_conformance::ConformanceErrorCategory::CommitUnknown,
             || crate::secret_repo::secret_save_attempts(&unknown_key),
         ),
     )

@@ -2149,7 +2149,12 @@ mod tests {
                 .iter()
                 .map(PackageKey::as_str)
                 .collect::<Vec<_>>(),
-            vec!["rss-diag-context", "rss-platform", "rss-trace-context"]
+            vec![
+                "rss-conformance",
+                "rss-diag-context",
+                "rss-platform",
+                "rss-trace-context",
+            ]
         );
         let internal = catalog.internal.iter().collect::<BTreeSet<_>>();
         let release = catalog.release.iter().collect::<BTreeSet<_>>();
