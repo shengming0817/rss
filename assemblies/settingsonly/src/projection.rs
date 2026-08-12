@@ -10,7 +10,10 @@ const SETTINGS_PROJECTION_ID: &str = generated::projection::settings_v3::CONTRAC
 pub(crate) struct ProjectionLifecycleBatch(bootstrap::DomainModuleResult);
 
 impl ProjectionLifecycleBatch {
-    pub(crate) fn from_runtime_plan(plan: &eventexec::WorkflowRuntimePlan) -> anyhow::Result<Self> {
+    pub(crate) fn from_runtime_plan(
+        plan: &eventexec::WorkflowRuntimePlan,
+        write_admission: &primitives::WriteAdmission,
+    ) -> anyhow::Result<Self> {
         let mut targets = plan.projection_targets().entries();
         anyhow::ensure!(
             targets.len() == 1,
@@ -29,8 +32,12 @@ impl ProjectionLifecycleBatch {
         let health = Arc::new(eventexec::WorkerHealth::starting());
         let runtime = Arc::clone(target.runtime_factory());
         let worker_health = Arc::clone(&health);
-        let worker =
-            bootstrap::WorkerSpec::deferred(move |token| runtime.spawn(token, worker_health));
+        let worker_admission = write_admission.clone();
+        let worker = bootstrap::WorkerSpec::writes_deferred(
+            "assemblies.settingsonly.src.projection.01",
+            write_admission,
+            move |token, _write_admission| runtime.spawn(token, worker_health, worker_admission),
+        );
         let probe = ProjectionWorkerProbe {
             name: name.clone(),
             health,
@@ -94,8 +101,11 @@ mod tests {
     #[test]
     fn active_projection_emits_one_deferred_worker_and_matching_probe() -> anyhow::Result<()> {
         let plan = crate::plan::SettingsOnlyPlan::bundled()?.bind_fixture_projection()?;
+        let (_control, _relay, _consumer, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
         let output =
-            ProjectionLifecycleBatch::from_runtime_plan(plan.workflow_runtime())?.into_output();
+            ProjectionLifecycleBatch::from_runtime_plan(plan.workflow_runtime(), &write_admission)?
+                .into_output();
         assert!(output.resources.is_empty());
         assert!(matches!(
             output.workers.as_slice(),

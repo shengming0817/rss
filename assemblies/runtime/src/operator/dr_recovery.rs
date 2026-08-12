@@ -44,11 +44,55 @@ pub(super) struct L2DrRecoveryCliArgs {
     operator_service_token: OperatorServiceToken,
     operator_tenant: vocab::TenantId,
     plan: eventexec::L2DrRecoveryPlan,
+    admission_epoch: primitives::AdmissionEpochId,
+}
+
+#[derive(Debug)]
+struct L2DrAdmissionCliArgs {
+    operator_service_token: OperatorServiceToken,
+    operator_tenant: vocab::TenantId,
+    tenant: vocab::TenantId,
+    admission_epoch: primitives::AdmissionEpochId,
+    action: L2DrAdmissionAction,
+}
+
+#[derive(Debug)]
+enum L2DrAdmissionAction {
+    Pause {
+        plan: eventexec::L2DrRecoveryPlan,
+        declared_instances: serde_json::Value,
+        requires_startup_epoch_witness: bool,
+    },
+    Status,
+    Resume {
+        lane: &'static str,
+        expected_phase: &'static str,
+    },
+}
+
+impl L2DrAdmissionCliArgs {
+    fn action_label(&self) -> &'static str {
+        match self.action {
+            L2DrAdmissionAction::Pause { .. } => "pause",
+            L2DrAdmissionAction::Status => "status",
+            L2DrAdmissionAction::Resume { lane: "relay", .. } => "resume-relay",
+            L2DrAdmissionAction::Resume {
+                lane: "consumer", ..
+            } => "resume-consumer",
+            L2DrAdmissionAction::Resume { lane: "writes", .. } => "resume-writes",
+            L2DrAdmissionAction::Resume { .. } => "invalid",
+        }
+    }
+}
+
+enum PreparedL2DrRecoveryInner {
+    Apply(L2DrRecoveryCliArgs),
+    Admission(L2DrAdmissionCliArgs),
 }
 
 /// Opaque command whose argv and stdin token have been validated before runtime setup.
 #[cfg(feature = "operator-cli")]
-pub struct PreparedL2DrRecoveryCommand(L2DrRecoveryCliArgs);
+pub struct PreparedL2DrRecoveryCommand(PreparedL2DrRecoveryInner);
 
 /// Pure CLI preparation result. Help performs no stdin / environment / provider access beyond
 /// clap's own help/version render (already printed when this variant is returned).
@@ -67,8 +111,8 @@ mod clap_cli {
     #![deny(clippy::wildcard_imports)]
 
     use super::{
-        COMMAND_NAMESPACE, L2DrRecoveryCliArgs, L2DrRecoveryCommandPreparation,
-        PreparedL2DrRecoveryCommand,
+        COMMAND_NAMESPACE, L2DrAdmissionAction, L2DrAdmissionCliArgs, L2DrRecoveryCliArgs,
+        L2DrRecoveryCommandPreparation, PreparedL2DrRecoveryCommand, PreparedL2DrRecoveryInner,
     };
     use crate::operator::cli_clap::{
         ClapHelpPrinted, OperatorAuthSharedArgs, map_clap_parse_error,
@@ -88,8 +132,8 @@ mod clap_cli {
     #[command(
         name = COMMAND_NAMESPACE,
         bin_name = "rss l2-dr-recovery",
-        about = "Apply one authorized, start-audited L2 recovery plan",
-        long_about = "Operator command for closed L2 DR recovery apply. \
+        about = "Control process admission and apply one fenced L2 recovery plan",
+        long_about = "Operator command for the closed L2 DR admission and recovery protocol. \
 The operator service token is read from stdin after argv validation \
 (--operator-service-token-stdin). The help subcommand is disabled; use --help.",
         disable_help_subcommand = true,
@@ -104,6 +148,39 @@ The operator service token is read from stdin after argv validation \
     enum L2DrRecoverySubcommand {
         /// Apply one authorized, start-audited L2 recovery plan.
         Apply(L2DrRecoveryApplyArgs),
+        /// Close all three process admission lanes and wait for declared drain acknowledgements.
+        Pause(L2DrRecoveryPauseArgs),
+        /// Read the current store-sourced admission state.
+        Status(L2DrAdmissionScopeArgs),
+        /// Resume relay and wait for declared acknowledgements.
+        ResumeRelay(L2DrAdmissionScopeArgs),
+        /// Resume consumers after relay is running.
+        ResumeConsumer(L2DrAdmissionScopeArgs),
+        /// Resume serving writes after consumers are running.
+        ResumeWrites(L2DrAdmissionScopeArgs),
+    }
+
+    #[derive(Debug, Args)]
+    struct L2DrRecoveryPauseArgs {
+        #[command(flatten)]
+        apply: L2DrRecoveryApplyArgs,
+
+        /// Declared process tuple `assembly|runtime-plan-fingerprint|instance-uuid`; repeat exactly.
+        #[arg(long = "declared-instance", required = true, action = clap::ArgAction::Append)]
+        declared_instances: Vec<String>,
+
+        /// Require every declared process to prove it booted fail-closed for this exact epoch.
+        #[arg(long)]
+        require_startup_epoch_witness: bool,
+    }
+
+    #[derive(Debug, Args)]
+    struct L2DrAdmissionScopeArgs {
+        #[command(flatten)]
+        auth: OperatorAuthSharedArgs,
+
+        #[arg(long, value_parser = parse_admission_epoch_id_cli)]
+        admission_epoch_id: primitives::AdmissionEpochId,
     }
 
     #[derive(Debug, Args)]
@@ -114,6 +191,10 @@ The operator service token is read from stdin after argv validation \
         /// Canonical non-nil recovery epoch id (UUID).
         #[arg(long, value_parser = parse_epoch_id_cli)]
         epoch_id: eventexec::RecoveryEpochId,
+
+        /// Canonical non-nil post-restore admission epoch id (UUID).
+        #[arg(long, value_parser = parse_admission_epoch_id_cli)]
+        admission_epoch_id: primitives::AdmissionEpochId,
 
         /// Change ticket (1..=128 printable ASCII).
         #[arg(long, value_parser = parse_change_ticket_cli)]
@@ -140,6 +221,11 @@ The operator service token is read from stdin after argv validation \
     fn parse_epoch_id_cli(raw: &str) -> Result<eventexec::RecoveryEpochId, String> {
         eventexec::RecoveryEpochId::parse(raw)
             .map_err(|_| "--epoch-id must be a canonical non-nil UUID".to_owned())
+    }
+
+    fn parse_admission_epoch_id_cli(raw: &str) -> Result<primitives::AdmissionEpochId, String> {
+        primitives::AdmissionEpochId::parse(raw)
+            .map_err(|_| "--admission-epoch-id must be a canonical non-nil UUID".to_owned())
     }
 
     fn parse_change_ticket_cli(raw: &str) -> Result<eventexec::RecoveryChangeTicket, String> {
@@ -175,9 +261,10 @@ The operator service token is read from stdin after argv validation \
         stdin: &mut impl std::io::BufRead,
     ) -> anyhow::Result<L2DrRecoveryCliArgs> {
         match prepare_l2_dr_recovery_command_with_stdin(args, stdin)? {
-            L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(parsed)) => {
-                Ok(parsed)
-            }
+            L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(
+                PreparedL2DrRecoveryInner::Apply(parsed),
+            )) => Ok(parsed),
+            L2DrRecoveryCommandPreparation::Execute(_) => anyhow::bail!("test expected apply"),
             L2DrRecoveryCommandPreparation::Help => {
                 anyhow::bail!("test expected an executable L2 DR recovery command")
             }
@@ -200,7 +287,74 @@ The operator service token is read from stdin after argv validation \
                 return Ok(L2DrRecoveryCommandPreparation::Help);
             }
         };
-        let L2DrRecoverySubcommand::Apply(shared) = cli.action;
+        let prepared = match cli.action {
+            L2DrRecoverySubcommand::Apply(shared) => {
+                PreparedL2DrRecoveryInner::Apply(parse_apply(shared, stdin)?)
+            }
+            L2DrRecoverySubcommand::Pause(pause) => {
+                let L2DrRecoveryPauseArgs {
+                    apply: shared,
+                    declared_instances: declared,
+                    require_startup_epoch_witness,
+                } = pause;
+                let apply = parse_apply(shared, stdin)?;
+                let declared_instances = parse_declared_instances(declared)?;
+                let L2DrRecoveryCliArgs {
+                    operator_service_token,
+                    operator_tenant,
+                    plan,
+                    admission_epoch,
+                } = apply;
+                let tenant = plan.tenant();
+                PreparedL2DrRecoveryInner::Admission(L2DrAdmissionCliArgs {
+                    operator_service_token,
+                    operator_tenant,
+                    tenant,
+                    admission_epoch,
+                    action: L2DrAdmissionAction::Pause {
+                        plan,
+                        declared_instances,
+                        requires_startup_epoch_witness: require_startup_epoch_witness,
+                    },
+                })
+            }
+            L2DrRecoverySubcommand::Status(scope) => {
+                parse_admission_scope(scope, stdin, L2DrAdmissionAction::Status)?
+            }
+            L2DrRecoverySubcommand::ResumeRelay(scope) => parse_admission_scope(
+                scope,
+                stdin,
+                L2DrAdmissionAction::Resume {
+                    lane: "relay",
+                    expected_phase: "relay_running",
+                },
+            )?,
+            L2DrRecoverySubcommand::ResumeConsumer(scope) => parse_admission_scope(
+                scope,
+                stdin,
+                L2DrAdmissionAction::Resume {
+                    lane: "consumer",
+                    expected_phase: "consumer_running",
+                },
+            )?,
+            L2DrRecoverySubcommand::ResumeWrites(scope) => parse_admission_scope(
+                scope,
+                stdin,
+                L2DrAdmissionAction::Resume {
+                    lane: "writes",
+                    expected_phase: "running",
+                },
+            )?,
+        };
+        Ok(L2DrRecoveryCommandPreparation::Execute(
+            PreparedL2DrRecoveryCommand(prepared),
+        ))
+    }
+
+    fn parse_apply(
+        shared: L2DrRecoveryApplyArgs,
+        stdin: &mut impl std::io::BufRead,
+    ) -> anyhow::Result<L2DrRecoveryCliArgs> {
         // Presence is enforced by clap (`required = true`); token never enters argv.
         debug_assert!(shared.auth.token_stdin.operator_service_token_stdin);
         // Event-set cardinality/uniqueness fails closed before stdin.
@@ -217,13 +371,58 @@ The operator service token is read from stdin after argv validation \
             shared.change_ticket,
         )
         .context("invalid divergent L2 DR recovery plan")?;
-        Ok(L2DrRecoveryCommandPreparation::Execute(
-            PreparedL2DrRecoveryCommand(L2DrRecoveryCliArgs {
-                operator_service_token,
-                operator_tenant: shared.auth.operator_tenant,
-                plan,
-            }),
-        ))
+        Ok(L2DrRecoveryCliArgs {
+            operator_service_token,
+            operator_tenant: shared.auth.operator_tenant,
+            plan,
+            admission_epoch: shared.admission_epoch_id,
+        })
+    }
+
+    fn parse_admission_scope(
+        scope: L2DrAdmissionScopeArgs,
+        stdin: &mut impl std::io::BufRead,
+        action: L2DrAdmissionAction,
+    ) -> anyhow::Result<PreparedL2DrRecoveryInner> {
+        debug_assert!(scope.auth.token_stdin.operator_service_token_stdin);
+        Ok(PreparedL2DrRecoveryInner::Admission(L2DrAdmissionCliArgs {
+            operator_service_token: read_operator_service_token_stdin(stdin)?,
+            operator_tenant: scope.auth.operator_tenant,
+            tenant: scope.auth.tenant,
+            admission_epoch: scope.admission_epoch_id,
+            action,
+        }))
+    }
+
+    pub(super) fn parse_declared_instances(
+        values: Vec<String>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let mut exact = std::collections::BTreeSet::new();
+        for value in values {
+            let parts = value.split('|').collect::<Vec<_>>();
+            anyhow::ensure!(
+                parts.len() == 3,
+                "--declared-instance must have three fields"
+            );
+            anyhow::ensure!(
+                (1..=64).contains(&parts[0].len()) && (8..=256).contains(&parts[1].len())
+            );
+            let instance_id = uuid::Uuid::parse_str(parts[2])?;
+            anyhow::ensure!(!instance_id.is_nil());
+            anyhow::ensure!(exact.insert((parts[0].to_owned(), parts[1].to_owned(), instance_id)));
+        }
+        anyhow::ensure!((1..=256).contains(&exact.len()));
+        let parsed = exact
+            .into_iter()
+            .map(|(assembly, fingerprint, instance_id)| {
+                serde_json::json!({
+                    "assemblyIdentity": assembly,
+                    "runtimePlanFingerprint": fingerprint,
+                    "instanceId": instance_id.to_string(),
+                })
+            })
+            .collect();
+        Ok(serde_json::Value::Array(parsed))
     }
 }
 
@@ -239,8 +438,9 @@ pub fn prepare_l2_dr_recovery_command(
     clap_cli::prepare_l2_dr_recovery_command_with_stdin(args, &mut stdin.lock())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct L2DrRecoveryOperatorGrant {
+    action: String,
     tenant: vocab::TenantId,
 }
 
@@ -254,13 +454,22 @@ fn parse_l2_dr_recovery_operator_grants(
     raw.split(',')
         .map(|entry| {
             let parts = entry.split('|').map(str::trim).collect::<Vec<_>>();
-            anyhow::ensure!(
-                matches!(parts.as_slice(), ["apply", _]),
-                "{L2_DR_RECOVERY_OPERATOR_GRANTS_ENV} entries must be exact apply|tenant"
-            );
+            let action = match parts.as_slice() {
+                [
+                    action @ ("apply" | "pause" | "status" | "resume-relay" | "resume-consumer"
+                    | "resume-writes"),
+                    _,
+                ] => *action,
+                _ => anyhow::bail!(
+                    "{L2_DR_RECOVERY_OPERATOR_GRANTS_ENV} entries must be exact action|tenant"
+                ),
+            };
             let tenant = vocab::TenantId::parse(parts[1])
                 .context("L2 DR recovery grant tenant must be a UUID")?;
-            Ok(L2DrRecoveryOperatorGrant { tenant })
+            Ok(L2DrRecoveryOperatorGrant {
+                action: action.to_owned(),
+                tenant,
+            })
         })
         .collect()
 }
@@ -283,9 +492,24 @@ fn authorize_l2_dr_recovery_operator(
     anyhow::ensure!(
         grants
             .iter()
-            .any(|grant| grant.tenant == parsed.plan.tenant()),
+            .any(|grant| grant.action == "apply" && grant.tenant == parsed.plan.tenant()),
         "L2 DR recovery operator is not authorized for action=apply tenant={}",
         parsed.plan.tenant()
+    );
+    Ok(())
+}
+
+fn authorize_l2_dr_admission_operator(
+    parsed: &L2DrAdmissionCliArgs,
+    grants: &[L2DrRecoveryOperatorGrant],
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        grants.iter().any(|grant| {
+            grant.action == parsed.action_label() && grant.tenant == parsed.tenant
+        }),
+        "L2 DR admission operator is not authorized for action={} tenant={}",
+        parsed.action_label(),
+        parsed.tenant
     );
     Ok(())
 }
@@ -319,7 +543,7 @@ trait L2DrRecoveryCommandRuntime {
     async fn apply(
         &self,
         session: &Self::Session,
-        authorized: eventexec::AuthorizedL2DrRecoveryPlan,
+        required: eventexec::RequiredAdmissionFence,
         capability: eventexec::OperatorL2DrRecoveryCapability,
     ) -> Result<eventexec::L2DrRecoveryReceipt, eventexec::L2DrRecoveryError>;
     async fn shutdown(&self, session: Self::Session) -> anyhow::Result<()>;
@@ -405,13 +629,13 @@ impl L2DrRecoveryCommandRuntime for ProductionL2DrRecoveryRuntime<'_> {
     async fn apply(
         &self,
         session: &Self::Session,
-        authorized: eventexec::AuthorizedL2DrRecoveryPlan,
+        required: eventexec::RequiredAdmissionFence,
         capability: eventexec::OperatorL2DrRecoveryCapability,
     ) -> Result<eventexec::L2DrRecoveryReceipt, eventexec::L2DrRecoveryError> {
-        if authorized.capability() != capability {
+        if required.authorized().capability() != capability {
             return Err(eventexec::L2DrRecoveryError::InvalidOperatorCaller);
         }
-        session.apply_l2_dr_recovery(authorized).await
+        session.apply_l2_dr_recovery(required).await
     }
 
     async fn shutdown(&self, session: Self::Session) -> anyhow::Result<()> {
@@ -570,7 +794,8 @@ async fn execute_connected_l2_dr_recovery<R: L2DrRecoveryCommandRuntime>(
         capability,
     )
     .context("bind L2 DR recovery authorization")?;
-    match runtime.apply(session, authorized, capability).await {
+    let required = authorized.require_admission(parsed.admission_epoch);
+    match runtime.apply(session, required, capability).await {
         Ok(receipt) => {
             finish_audit_after_apply(runtime, session, parsed, &subject, start_audit_id, &receipt)
                 .await?;
@@ -614,6 +839,8 @@ fn committed_cleanup_error(
 
 fn emit_committed_output(error: &anyhow::Error) -> anyhow::Result<()> {
     if let Some(failure) = error.downcast_ref::<CommittedCleanupFailure>() {
+        println!("{}", serde_json::to_string(&failure.output)?);
+    } else if let Some(failure) = error.downcast_ref::<CommittedAdmissionFailure>() {
         println!("{}", serde_json::to_string(&failure.output)?);
     }
     Ok(())
@@ -721,6 +948,251 @@ async fn execute_l2_dr_recovery_with_runtime<R: L2DrRecoveryCommandRuntime>(
     combine_command_and_postgres_shutdown(command_result, shutdown_result)
 }
 
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct L2DrAdmissionCommandOutput {
+    action: &'static str,
+    admission_epoch_id: String,
+    recovery_epoch_id: String,
+    tenant: String,
+    phase: String,
+    declared_instances: serde_json::Value,
+    acknowledged_instances: serde_json::Value,
+    invalidation_evidence: serde_json::Value,
+    invalidated: bool,
+    expired: bool,
+    expires_at_micros: Option<i64>,
+}
+
+impl L2DrAdmissionCommandOutput {
+    fn from_state(action: &'static str, state: postgres::PgL2DrAdmissionState) -> Self {
+        Self {
+            action,
+            admission_epoch_id: state.admission_epoch_id,
+            recovery_epoch_id: state.recovery_epoch_id,
+            tenant: state.tenant_id,
+            phase: state.phase,
+            declared_instances: state.declared_instances,
+            acknowledged_instances: state.acknowledged_instances,
+            invalidation_evidence: state.invalidation_evidence,
+            invalidated: state.invalidated,
+            expired: state.expired,
+            expires_at_micros: state.expires_at_epoch_micros,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct CommittedAdmissionFailure {
+    kind: &'static str,
+    output: L2DrAdmissionCommandOutput,
+}
+
+impl std::fmt::Display for CommittedAdmissionFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "L2 DR admission action committed but {} failed; action={} admission_epoch_id={} tenant={}",
+            self.kind, self.output.action, self.output.admission_epoch_id, self.output.tenant
+        )
+    }
+}
+
+impl std::error::Error for CommittedAdmissionFailure {}
+
+fn committed_admission_error(
+    kind: &'static str,
+    output: &L2DrAdmissionCommandOutput,
+) -> anyhow::Error {
+    anyhow::Error::new(CommittedAdmissionFailure {
+        kind,
+        output: output.clone(),
+    })
+}
+
+async fn authenticate_l2_dr_admission_operator(
+    parsed: &L2DrAdmissionCliArgs,
+    session: &PgL2DrRecoveryDeps,
+    operator_config: crate::config::SnapshotConfig<'_>,
+    operator: OperatorRuntimeCapability<'_>,
+) -> anyhow::Result<eventexec::L2DrRecoveryOperatorSubject> {
+    let provider = build_operator_service_token_provider(operator_config, operator, session)
+        .context("L2 DR admission operator verifier")?;
+    verified_service_maintenance_operator(
+        parsed.operator_service_token.as_str(),
+        parsed.operator_tenant,
+        diport::DynPdp::from_ref(provider.as_ref()),
+        "L2 DR admission maintenance",
+    )
+    .await
+    .and_then(|proof| {
+        eventexec::L2DrRecoveryOperatorSubject::parse(service_maintenance_operator_audit_subject(
+            &proof,
+        ))
+        .context("validate L2 DR admission operator audit subject")
+    })
+}
+
+async fn wait_l2_dr_admission_phase(
+    session: &PgL2DrRecoveryDeps,
+    parsed: &L2DrAdmissionCliArgs,
+    expected_phase: &str,
+) -> anyhow::Result<postgres::PgL2DrAdmissionState> {
+    // The canonical process drain budget is 60s and a relay permit may legitimately span 45s.
+    // Keep the operator observation window above both closed runtime bounds.
+    tokio::time::timeout(std::time::Duration::from_secs(90), async {
+        loop {
+            let state = session
+                .l2_dr_admission_status(parsed.admission_epoch, parsed.tenant)
+                .await
+                .context("observe L2 DR admission status")?
+                .context("L2 DR admission epoch is absent")?;
+            anyhow::ensure!(
+                state.admission_epoch_id == parsed.admission_epoch.as_uuid().to_string()
+                    && state.tenant_id == parsed.tenant.to_string(),
+                "L2 DR admission status scope is fenced"
+            );
+            anyhow::ensure!(!state.invalidated, "L2 DR admission epoch is invalidated");
+            anyhow::ensure!(!state.expired, "L2 DR admission epoch is expired");
+            if state.phase == expected_phase {
+                return Ok(state);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    })
+    .await
+    .context("timed out waiting for declared L2 DR admission acknowledgements")?
+}
+
+async fn execute_l2_dr_admission(
+    parsed: L2DrAdmissionCliArgs,
+    runtime_inputs: &OperatorRuntimeInputs,
+    l2_dr_config: crate::config::SnapshotConfig<'_>,
+    grants: &[L2DrRecoveryOperatorGrant],
+) -> anyhow::Result<L2DrAdmissionCommandOutput> {
+    let (audit_config, executor_config) = build_pg_l2_dr_recovery_configs(l2_dr_config)?;
+    let session = PgL2DrRecoveryDeps::connect(&audit_config, &executor_config)
+        .await
+        .context("setup L2 DR admission postgres capability")?;
+    let result = async {
+        let subject = authenticate_l2_dr_admission_operator(
+            &parsed,
+            &session,
+            runtime_inputs.config(),
+            runtime_inputs.operator_capability(),
+        )
+        .await?;
+        authorize_l2_dr_admission_operator(&parsed, grants)?;
+        let request_id = uuid::Uuid::new_v4();
+        session
+            .record_l2_dr_admission_start_audit(
+                &subject,
+                parsed.tenant,
+                parsed.admission_epoch,
+                parsed.action_label(),
+                request_id,
+            )
+            .await
+            .context("record L2 DR admission operator start audit")?;
+        let operation_result: anyhow::Result<L2DrAdmissionCommandOutput> = async {
+            let expected_phase = match &parsed.action {
+                L2DrAdmissionAction::Pause {
+                    plan,
+                    declared_instances,
+                    requires_startup_epoch_witness,
+                } => {
+                    session
+                        .request_l2_dr_admission_pause(
+                            parsed.admission_epoch,
+                            plan,
+                            declared_instances,
+                            *requires_startup_epoch_witness,
+                        )
+                        .await
+                        .context("request L2 DR admission pause")?;
+                    "drained"
+                }
+                L2DrAdmissionAction::Status => {
+                    let state = session
+                        .l2_dr_admission_status(parsed.admission_epoch, parsed.tenant)
+                        .await
+                        .context("observe L2 DR admission status")?
+                        .context("L2 DR admission epoch is absent")?;
+                    return Ok(L2DrAdmissionCommandOutput::from_state("status", state));
+                }
+                L2DrAdmissionAction::Resume {
+                    lane,
+                    expected_phase,
+                } => {
+                    session
+                        .request_l2_dr_admission_resume(parsed.admission_epoch, parsed.tenant, lane)
+                        .await
+                        .context("request L2 DR admission resume")?;
+                    *expected_phase
+                }
+            };
+            let state = wait_l2_dr_admission_phase(&session, &parsed, expected_phase).await?;
+            Ok(L2DrAdmissionCommandOutput::from_state(
+                parsed.action_label(),
+                state,
+            ))
+        }
+        .await;
+        let audit_outcome = match &operation_result {
+            Ok(_) => MaintenanceAuditOutcome::Success,
+            Err(_) => MaintenanceAuditOutcome::Failure {
+                reason: "execution",
+            },
+        };
+        let audit_result = session
+            .record_l2_dr_admission_finish_audit(
+                &subject,
+                parsed.tenant,
+                parsed.admission_epoch,
+                parsed.action_label(),
+                audit_outcome,
+                request_id,
+            )
+            .await
+            .context("record L2 DR admission operator audit");
+        match (operation_result, audit_result) {
+            (Ok(output), Ok(())) => Ok(output),
+            (Err(error), _) => Err(error),
+            (Ok(output), Err(error)) => {
+                tracing::error!(
+                    component = COMPONENT,
+                    operation = "l2_dr_admission_finish_audit",
+                    secondary_failure = "finish_audit",
+                    action = output.action,
+                    error = %secure::redact_error(error.as_ref()),
+                    "L2 DR admission finish audit failed after a committed action"
+                );
+                Err(committed_admission_error("finish audit", &output))
+            }
+        }
+    }
+    .await;
+    let shutdown = session
+        .shutdown()
+        .await
+        .context("shutdown L2 DR admission postgres capability");
+    match (result, shutdown) {
+        (Ok(output), Ok(())) => Ok(output),
+        (Err(error), _) => Err(error),
+        (Ok(output), Err(error)) => {
+            tracing::error!(
+                component = COMPONENT,
+                operation = "l2_dr_admission_postgres_shutdown",
+                secondary_failure = "postgres_cleanup",
+                action = output.action,
+                error = %secure::redact_error(error.as_ref()),
+                "L2 DR admission postgres cleanup failed after a committed action"
+            );
+            Err(committed_admission_error("postgres cleanup", &output))
+        }
+    }
+}
+
 /// Execute the prepared command and print exactly one safe JSON result on success.
 #[cfg(feature = "operator-cli")]
 pub async fn run_l2_dr_recovery_command(
@@ -730,23 +1202,57 @@ pub async fn run_l2_dr_recovery_command(
     let l2_dr_snapshot =
         crate::config::RuntimeConfigSnapshot::capture_l2_dr_operator_process_snapshot()
             .context("capture L2 DR recovery operator configuration")?;
-    let command_result = {
-        let config = l2_dr_snapshot.view();
-        let operator = runtime_inputs.operator_capability();
-        let grants = load_l2_dr_recovery_operator_grants_from_snapshot(config, operator)?;
-        execute_l2_dr_recovery_with_runtime(
-            command.0,
-            &ProductionL2DrRecoveryRuntime {
-                operator_config: runtime_inputs.config(),
-                l2_dr_config: config,
-                operator,
-                grants,
-            },
-        )
-        .await
-    };
-    let runtime_cleanup = super::shutdown_runtime(runtime_inputs).await;
-    emit_command_output_after_runtime_cleanup(command_result, runtime_cleanup)
+    let config = l2_dr_snapshot.view();
+    let operator = runtime_inputs.operator_capability();
+    let grants = load_l2_dr_recovery_operator_grants_from_snapshot(config, operator)?;
+    match command.0 {
+        PreparedL2DrRecoveryInner::Apply(parsed) => {
+            let command_result = {
+                execute_l2_dr_recovery_with_runtime(
+                    parsed,
+                    &ProductionL2DrRecoveryRuntime {
+                        operator_config: runtime_inputs.config(),
+                        l2_dr_config: config,
+                        operator,
+                        grants,
+                    },
+                )
+                .await
+            };
+            let runtime_cleanup = super::shutdown_runtime(runtime_inputs).await;
+            emit_command_output_after_runtime_cleanup(command_result, runtime_cleanup)
+        }
+        PreparedL2DrRecoveryInner::Admission(parsed) => {
+            let command_result =
+                { execute_l2_dr_admission(parsed, &runtime_inputs, config, &grants).await };
+            let runtime_cleanup = super::shutdown_runtime(runtime_inputs).await;
+            match (command_result, runtime_cleanup) {
+                (Ok(output), Ok(())) => {
+                    println!("{}", serde_json::to_string(&output)?);
+                    Ok(())
+                }
+                (Err(error), cleanup) => {
+                    emit_committed_output(&error)?;
+                    if let Err(cleanup_error) = cleanup {
+                        log_runtime_cleanup_after_failure(cleanup_error);
+                    }
+                    Err(error)
+                }
+                (Ok(output), Err(error)) => {
+                    println!("{}", serde_json::to_string(&output)?);
+                    tracing::error!(
+                        component = COMPONENT,
+                        operation = "l2_dr_admission_runtime_shutdown",
+                        secondary_failure = "runtime_cleanup",
+                        action = output.action,
+                        error = %secure::redact_error(error.as_ref()),
+                        "L2 DR admission runtime cleanup failed after a committed action"
+                    );
+                    Err(committed_admission_error("runtime cleanup", &output))
+                }
+            }
+        }
+    }
 }
 
 #[cfg(all(test, feature = "operator-cli"))]
@@ -759,6 +1265,31 @@ mod tests {
     const OPERATOR_TENANT: &str = "018f5d8a-7b6c-7d2e-8a1b-1234567890aa";
     const TENANT: &str = "018f5d8a-7b6c-7d2e-8a1b-1234567890ab";
     const EPOCH: &str = "018f5d8a-7b6c-7d2e-8a1b-1234567890ac";
+    const ADMISSION_EPOCH: &str = "018f5d8a-7b6c-7d2e-8a1b-1234567890ad";
+
+    #[test]
+    fn admission_committed_failure_retains_safe_output() {
+        let output = L2DrAdmissionCommandOutput {
+            action: "pause",
+            admission_epoch_id: ADMISSION_EPOCH.to_owned(),
+            recovery_epoch_id: EPOCH.to_owned(),
+            tenant: TENANT.to_owned(),
+            phase: "drained".to_owned(),
+            declared_instances: serde_json::json!([]),
+            acknowledged_instances: serde_json::json!([]),
+            invalidation_evidence: serde_json::Value::Null,
+            invalidated: false,
+            expired: false,
+            expires_at_micros: None,
+        };
+        let error = committed_admission_error("finish audit", &output);
+        assert!(
+            error
+                .downcast_ref::<CommittedAdmissionFailure>()
+                .is_some_and(|failure| failure.output.admission_epoch_id == ADMISSION_EPOCH)
+        );
+        assert!(format!("{error:#}").contains("action committed but finish audit failed"));
+    }
 
     fn argv(events: &[&str]) -> Vec<String> {
         let mut args = [
@@ -771,6 +1302,8 @@ mod tests {
             TENANT,
             "--epoch-id",
             EPOCH,
+            "--admission-epoch-id",
+            ADMISSION_EPOCH,
             "--change-ticket",
             "CHG-1837",
             "--pg-restore-point-micros",
@@ -786,6 +1319,23 @@ mod tests {
             args.push((*event).to_owned());
         }
         args
+    }
+
+    fn admission_argv(action: &str) -> Vec<String> {
+        [
+            COMMAND_NAMESPACE,
+            action,
+            "--operator-service-token-stdin",
+            "--operator-tenant",
+            OPERATOR_TENANT,
+            "--tenant",
+            TENANT,
+            "--admission-epoch-id",
+            ADMISSION_EPOCH,
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
     }
 
     #[allow(clippy::expect_used)]
@@ -981,6 +1531,68 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dr_admission_cli_has_closed_status_and_resume_actions() {
+        for (action, expected) in [
+            ("status", "status"),
+            ("resume-relay", "resume-relay"),
+            ("resume-consumer", "resume-consumer"),
+            ("resume-writes", "resume-writes"),
+        ] {
+            let prepared = clap_cli::prepare_l2_dr_recovery_command_with_stdin(
+                &admission_argv(action),
+                &mut Cursor::new(b"opaque-token\n"),
+            )
+            .expect("valid admission command");
+            let L2DrRecoveryCommandPreparation::Execute(PreparedL2DrRecoveryCommand(
+                PreparedL2DrRecoveryInner::Admission(parsed),
+            )) = prepared
+            else {
+                panic!("expected admission command");
+            };
+            assert_eq!(parsed.action_label(), expected);
+            let grants = parse_l2_dr_recovery_operator_grants(&format!("{expected}|{TENANT}"))
+                .expect("exact action grant");
+            assert!(authorize_l2_dr_admission_operator(&parsed, &grants).is_ok());
+            let wrong = parse_l2_dr_recovery_operator_grants(&format!("apply|{TENANT}"))
+                .expect("different exact action");
+            assert!(authorize_l2_dr_admission_operator(&parsed, &wrong).is_err());
+        }
+    }
+
+    #[test]
+    fn dr_admission_declared_instances_are_canonical_and_bounded() {
+        let first = uuid::Uuid::from_u128(1);
+        let second = uuid::Uuid::from_u128(2);
+        let parsed = clap_cli::parse_declared_instances(vec![
+            format!("runtime|sha256:z-plan|{second}"),
+            format!("identityaudit|sha256:a-plan|{first}"),
+        ])
+        .expect("valid declared set");
+        assert_eq!(
+            parsed,
+            serde_json::json!([
+                {
+                    "assemblyIdentity": "identityaudit",
+                    "runtimePlanFingerprint": "sha256:a-plan",
+                    "instanceId": first.to_string(),
+                },
+                {
+                    "assemblyIdentity": "runtime",
+                    "runtimePlanFingerprint": "sha256:z-plan",
+                    "instanceId": second.to_string(),
+                }
+            ])
+        );
+        assert!(
+            clap_cli::parse_declared_instances(vec![format!(
+                "{}|sha256:test|{first}",
+                "x".repeat(65)
+            )])
+            .is_err()
+        );
+    }
+
     #[derive(Default)]
     struct FakeRuntime {
         calls: Mutex<Vec<&'static str>>,
@@ -1097,12 +1709,13 @@ mod tests {
         async fn apply(
             &self,
             _session: &Self::Session,
-            authorized: eventexec::AuthorizedL2DrRecoveryPlan,
+            required: eventexec::RequiredAdmissionFence,
             capability: eventexec::OperatorL2DrRecoveryCapability,
         ) -> Result<eventexec::L2DrRecoveryReceipt, eventexec::L2DrRecoveryError> {
             #[allow(clippy::expect_used)]
             // reason: FakeRuntime call log is a single-threaded test fixture.
             self.calls.lock().expect("calls").push("apply");
+            let authorized = required.authorized();
             if authorized.capability() != capability {
                 return Err(eventexec::L2DrRecoveryError::InvalidOperatorCaller);
             }

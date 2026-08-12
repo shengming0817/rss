@@ -5,5 +5,5 @@ error[E0451]: fields `target` and `spawn` of struct `ProjectionRuntime` are priv
   |     ----------------- in this type
 7 |         target,
   |         ^^^^^^ private field
-8 |         spawn: Arc::new(|_, _| loop {}),
+8 |         spawn: Arc::new(|_, _, _| loop {}),
   |         ^^^^^ private field

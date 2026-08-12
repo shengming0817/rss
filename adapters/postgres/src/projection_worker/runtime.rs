@@ -71,7 +71,7 @@ impl PgProjectionWorkerDeps {
         let worker = self.worker;
         let payload_protector = self.payload_protector;
         let clock = self.clock;
-        binding.issue_runtime(Arc::new(target), move |target, token, health| {
+        binding.issue_runtime(Arc::new(target), move |target, token, health, admission| {
             spawn_settings_projection_worker(
                 SettingsProjectionWorkerLaunch {
                     worker_store: worker.clone(),
@@ -82,6 +82,7 @@ impl PgProjectionWorkerDeps {
                     metrics: Arc::clone(&metrics),
                     metric_scope,
                     clock: Arc::clone(&clock),
+                    admission,
                 },
                 token,
                 health,
@@ -196,6 +197,7 @@ struct SettingsProjectionWorkerLaunch {
     metrics: Arc<dyn eventexec::ProjectionMetrics>,
     metric_scope: eventexec::ProjectionMetricScope,
     clock: Arc<dyn Clock>,
+    admission: primitives::WriteAdmission,
 }
 
 #[cfg(feature = "domain-settings")]
@@ -235,6 +237,7 @@ async fn projection_worker_loop(
         metrics,
         metric_scope,
         clock,
+        admission,
     } = launch;
     let mut ticker = tokio::time::interval(runner.poll_interval());
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -245,6 +248,10 @@ async fn projection_worker_loop(
             () = token.cancelled() => return Ok(()),
             _ = ticker.tick() => {}
         }
+
+        let Ok(_permit) = admission.try_enter() else {
+            continue;
+        };
 
         if !startup_observed {
             match observe_projection_worker_startup(&worker, &target_scope, runner).await {

@@ -1163,37 +1163,94 @@ pub(in super::super) fn l2_dr_recovery_plan(
 }
 
 pub(in super::super) async fn authorize_l2_dr_recovery(
+    owner: &PgStore,
     deps: &crate::PgL2DrRecoveryDeps,
     plan: eventexec::L2DrRecoveryPlan,
     start_audit_id: uuid::Uuid,
-) -> Result<eventexec::AuthorizedL2DrRecoveryPlan, TestError> {
-    authorize_l2_dr_recovery_as(deps, plan, "service:l2-dr-test", start_audit_id).await
+) -> Result<eventexec::RequiredAdmissionFence, TestError> {
+    authorize_l2_dr_recovery_as(owner, deps, plan, "service:l2-dr-test", start_audit_id).await
 }
 
 pub(in super::super) async fn authorize_l2_dr_recovery_as(
+    owner: &PgStore,
     deps: &crate::PgL2DrRecoveryDeps,
     plan: eventexec::L2DrRecoveryPlan,
     operator_subject: &str,
     start_audit_id: uuid::Uuid,
-) -> Result<eventexec::AuthorizedL2DrRecoveryPlan, TestError> {
+) -> Result<eventexec::RequiredAdmissionFence, TestError> {
+    let admission_epoch = arm_l2_dr_admission(owner, deps, &plan).await?;
+    authorize_l2_dr_recovery_as_with_admission(
+        deps,
+        plan,
+        operator_subject,
+        start_audit_id,
+        admission_epoch,
+    )
+    .await
+}
+
+pub(in super::super) async fn authorize_l2_dr_recovery_as_with_admission(
+    deps: &crate::PgL2DrRecoveryDeps,
+    plan: eventexec::L2DrRecoveryPlan,
+    operator_subject: &str,
+    start_audit_id: uuid::Uuid,
+    admission_epoch: primitives::AdmissionEpochId,
+) -> Result<eventexec::RequiredAdmissionFence, TestError> {
     let operator_subject = eventexec::L2DrRecoveryOperatorSubject::parse(operator_subject)?;
     let proof = deps
         .record_l2_dr_recovery_start_audit_subject(&operator_subject, &plan, start_audit_id)
         .await?;
-    Ok(
-        eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
-            plan,
-            proof,
-            eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator(),
-        )?,
+    let authorized = eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
+        plan,
+        proof,
+        eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator(),
+    )?;
+    Ok(authorized.require_admission(admission_epoch))
+}
+
+pub(in super::super) async fn arm_l2_dr_admission(
+    owner: &PgStore,
+    deps: &crate::PgL2DrRecoveryDeps,
+    plan: &eventexec::L2DrRecoveryPlan,
+) -> Result<primitives::AdmissionEpochId, TestError> {
+    sqlx::query("DELETE FROM public.event_l2_dr_admission_epoch WHERE singleton")
+        .execute(&owner.pool)
+        .await?;
+    let admission_epoch = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4())?;
+    let assembly_identity = "runtime";
+    let runtime_plan_fingerprint = "sha256:test-runtime-plan";
+    let instance_id = uuid::Uuid::new_v4();
+    let boot_id = uuid::Uuid::new_v4();
+    let declared = serde_json::json!([{
+        "assemblyIdentity": assembly_identity,
+        "runtimePlanFingerprint": runtime_plan_fingerprint,
+        "instanceId": instance_id.to_string(),
+    }]);
+    deps.request_l2_dr_admission_pause(admission_epoch, &plan, &declared, true)
+        .await?;
+    let acknowledged: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_ack(\
+         $1::uuid, $2, $3, $4::uuid, $5::uuid, 'drained', $1::uuid)",
     )
+    .bind(admission_epoch.as_uuid().to_string())
+    .bind(assembly_identity)
+    .bind(runtime_plan_fingerprint)
+    .bind(instance_id.to_string())
+    .bind(boot_id.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    if !acknowledged {
+        return Err("test admission fence acknowledgement was rejected".into());
+    }
+    Ok(admission_epoch)
 }
 
 pub(in super::super) fn mint_l2_dr_authorized_without_durable_start(
     plan: eventexec::L2DrRecoveryPlan,
     operator_subject: &str,
     start_audit_id: uuid::Uuid,
-) -> Result<eventexec::AuthorizedL2DrRecoveryPlan, TestError> {
+    admission_epoch: primitives::AdmissionEpochId,
+) -> Result<eventexec::RequiredAdmissionFence, TestError> {
     let operator_subject = eventexec::L2DrRecoveryOperatorSubject::parse(operator_subject)?;
     let proof = eventexec::L2DrRecoveryDurableStartProof::from_store(
         vocab::ServiceCallerDomain::MaintenanceOperator,
@@ -1203,13 +1260,12 @@ pub(in super::super) fn mint_l2_dr_authorized_without_durable_start(
         *plan.digest(),
         start_audit_id,
     )?;
-    Ok(
-        eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
-            plan,
-            proof,
-            eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator(),
-        )?,
-    )
+    let authorized = eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
+        plan,
+        proof,
+        eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator(),
+    )?;
+    Ok(authorized.require_admission(admission_epoch))
 }
 
 pub(in super::super) async fn l2_dr_receipt_count(

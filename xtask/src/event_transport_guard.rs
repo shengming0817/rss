@@ -1432,7 +1432,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
                     "SubscriberReadiness::Required=>",
                     "module.workers.push(worker)",
                     "module.probes.push(consumer_probe)",
-                    "wire_inbox_sweeper(pg,timing,module)?",
+                    "wire_inbox_sweeper(pg,timing,write_admission,module)?",
                 ]
                 .iter()
                 .all(|required| body.contains(required));
@@ -1856,7 +1856,7 @@ fn identityaudit_closure_findings(path: &Path, content: &str) -> Vec<Finding<Rul
                 "SubscriberReadiness::Required=>",
                 "output.workers.push(worker)",
                 "output.probes.push(",
-                "wire_inbox_sweeper(pg,&mutoutput)?",
+                "wire_inbox_sweeper(pg,write_admission,&mutoutput)?",
             ]
             .iter()
             .all(|required| {
@@ -4227,7 +4227,7 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                     &[
                         "let timing = worker.relay",
                         "pg.validate_relay_budget(timing.budget)",
-                        "wire_durable(pg, distributed, subscribers, DurableEventExecution { per_domain, local_producers, }, timing, security, audit_key,)",
+                        "wire_durable(pg, distributed, subscribers, DurableEventExecution { per_domain, local_producers, }, timing, security, audit_key, relay_admission, consumer_admission, write_admission,)",
                     ][..],
                 ),
                 (
@@ -6335,10 +6335,10 @@ fn worker_binding(statement: &syn::Stmt, outbox: &str) -> Option<String> {
     let syn::Expr::Call(policy) = peel_expr(init) else {
         return None;
     };
-    if !call_ends_with(&policy.func, "WorkerSpec", "deferred") || policy.args.len() != 1 {
+    if !call_ends_with(&policy.func, "WorkerSpec", "relay_deferred") || policy.args.len() != 3 {
         return None;
     }
-    let syn::Expr::Closure(closure) = peel_expr(policy.args.first()?) else {
+    let syn::Expr::Closure(closure) = peel_expr(policy.args.iter().nth(2)?) else {
         return None;
     };
     let tail = closure_tail_expr(&closure.body)?;
@@ -7360,7 +7360,7 @@ mod tests {
                         module.probes.push(consumer_probe);
                     }
                 }
-                wire_inbox_sweeper(pg, timing, module)?;
+                wire_inbox_sweeper(pg, timing, write_admission, module)?;
             }
             fn consumer_tx_worker_for_subscription(token: Token, pg: Pg, audit_key: Key, inputs: Inputs) {
                 match token.dispatch() {
@@ -8913,7 +8913,7 @@ pub mod fault_matrix;
                 "relay worker uses phase-one policy",
                 r#"
                 fn wire_domain_relay(outbox: postgres::PgOutbox, module: &mut DomainModuleResult) {
-                    let worker = WorkerSpec::phase_one(move |token| {
+                    let worker = WorkerSpec::observational_phase_one(move |token| {
                         DynManagedResource::new_box(spawn_relay(name, outbox, token))
                     });
                     module.workers.push(worker);
@@ -8924,7 +8924,7 @@ pub mod fault_matrix;
                 "wrong outbox parameter type",
                 r#"
                 fn wire_domain_relay(outbox: RogueOutbox, module: &mut DomainModuleResult) {
-                    let worker = WorkerSpec::deferred(move |token| {
+                    let worker = WorkerSpec::observational_deferred(move |token| {
                         DynManagedResource::new_box(spawn_relay(name, outbox, token))
                     });
                     module.workers.push(worker);
@@ -9359,7 +9359,10 @@ $do$;
                     outbox: postgres::PgOutbox,
                     module: &mut DomainModuleResult,
                 ) -> anyhow::Result<()> {
-                    let worker = WorkerSpec::deferred(move |token| {
+                    let worker = WorkerSpec::relay_deferred(
+                        "outbox-relay:test",
+                        &admission,
+                        move |token, relay_admission| {
                         DynManagedResource::new_box(spawn_relay(
                             worker_name,
                             outbox,
@@ -9368,6 +9371,7 @@ $do$;
                             token,
                             health,
                             metrics,
+                            relay_admission,
                         ))
                     });
                     module.workers.push(worker);

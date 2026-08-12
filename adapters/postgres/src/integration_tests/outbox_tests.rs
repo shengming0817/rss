@@ -5192,6 +5192,7 @@ async fn t10b_pg_emitter_persists_verified_consumer_causation() -> TestResult {
         &(conf_consumer_meta(&group)),
         &(handler),
         conf_lease_cfg(),
+        conf_consumer_admission(),
     )
     .await;
 

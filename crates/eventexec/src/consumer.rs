@@ -25,6 +25,8 @@ use diport::{
 // #1224：consume span `.instrument()` handler loop，使 handler span 挂回 producer trace。
 use tracing::Instrument as _;
 
+use primitives::{AdmissionError, ConsumerAdmission};
+
 use crate::MAX_REDELIVERY;
 use crate::tenant_authority::{TenantAuthority, TenantAuthorityBinding, TenantAuthorityError};
 
@@ -239,11 +241,12 @@ pub async fn run_consumer<S, H>(
     meta: ConsumerMeta,
     handler: H,
     lease_cfg: LeaseConfig,
+    admission: ConsumerAdmission,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
-    while let Some(msg) = stream.next().await {
+    while let Some((msg, _permit)) = next_admitted(&mut stream, &admission).await {
         consume_one(&idempotency, &dlx, &meta, &handler, msg, None, lease_cfg).await;
     }
 }
@@ -277,11 +280,12 @@ pub async fn run_consumer_ackable<S, H>(
     meta: &ConsumerMeta,
     handler: &H,
     lease_cfg: LeaseConfig,
+    admission: ConsumerAdmission,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
     H: Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync,
 {
-    while let Some(d) = stream.next().await {
+    while let Some((d, _permit)) = next_admitted(&mut stream, &admission).await {
         let diport::Delivery { message, acker } = d;
         consume_one(
             &idempotency,
@@ -293,6 +297,36 @@ pub async fn run_consumer_ackable<S, H>(
             lease_cfg,
         )
         .await;
+    }
+}
+
+async fn next_admitted<T>(
+    stream: &mut (impl futures::Stream<Item = T> + Unpin),
+    admission: &ConsumerAdmission,
+) -> Option<(T, primitives::AdmissionPermit<primitives::ConsumerLane>)> {
+    loop {
+        if admission.wait_open().await.is_err() {
+            return None;
+        }
+        let permit = match admission.try_enter() {
+            Ok(permit) => permit,
+            Err(AdmissionError::Paused) => continue,
+            Err(AdmissionError::Stopped) => return None,
+            Err(error) => {
+                tracing::error!(error = %error, "consumer: admission invariant failed");
+                return None;
+            }
+        };
+        tokio::select! {
+            biased;
+            closed = admission.wait_closed() => {
+                drop(permit);
+                if matches!(closed, Err(AdmissionError::Stopped)) {
+                    return None;
+                }
+            }
+            item = stream.next() => return item.map(|item| (item, permit)),
+        }
     }
 }
 
@@ -1241,6 +1275,12 @@ mod tests {
         LeaseConfig::from_ttl(Duration::from_millis(15))
     }
 
+    fn consumer_admission() -> primitives::ConsumerAdmission {
+        let (control, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+        assert!(control.start_running().is_ok());
+        consumer
+    }
+
     #[test]
     fn in_progress_delay_is_provider_derived_and_capped() {
         assert_eq!(
@@ -1905,6 +1945,7 @@ mod tests {
             meta(),
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -1949,6 +1990,7 @@ mod tests {
             meta(),
             handler_requeue(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2005,6 +2047,7 @@ mod tests {
             meta(),
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2041,6 +2084,7 @@ mod tests {
             cross_domain_meta(),
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2078,6 +2122,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2167,6 +2212,7 @@ mod tests {
                     &(meta()),
                     &(handler_ack(handler_count.clone())),
                     lease_cfg_test(),
+                    consumer_admission(),
                 ));
             });
 
@@ -2317,6 +2363,7 @@ mod tests {
                     &(meta()),
                     &(handler_reject(handler_count.clone())),
                     lease_cfg_test(),
+                    consumer_admission(),
                 ));
             });
 
@@ -2376,6 +2423,7 @@ mod tests {
             meta(),
             handler_reject_invariant(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2407,6 +2455,7 @@ mod tests {
             meta(),
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2432,6 +2481,7 @@ mod tests {
             meta(),
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2462,6 +2512,7 @@ mod tests {
             meta(),
             handler_ack(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2492,6 +2543,7 @@ mod tests {
             meta(),
             handler_reject(handler_count.clone()),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2643,6 +2695,7 @@ mod tests {
                     tc5_meta,
                     handler_reject(handler_count),
                     lease_cfg_test(),
+                    consumer_admission(),
                 )
                 .await;
             });
@@ -2705,6 +2758,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2738,6 +2792,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2771,6 +2826,7 @@ mod tests {
             &(meta()),
             &(handler_requeue(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2804,6 +2860,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2846,6 +2903,7 @@ mod tests {
                 &(meta()),
                 &(handler_reject(handler_count)),
                 lease_cfg_test(),
+                consumer_admission(),
             ));
         });
 
@@ -2884,6 +2942,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2914,6 +2973,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -2955,6 +3015,7 @@ mod tests {
                     &consumer_meta,
                     &handler,
                     lease_cfg_fast(),
+                    consumer_admission(),
                 ));
                 let delayed = tokio::time::timeout(Duration::from_millis(1), &mut run)
                     .await
@@ -2996,6 +3057,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -3025,6 +3087,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -3055,6 +3118,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -3088,6 +3152,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -3127,6 +3192,7 @@ mod tests {
                     &(meta()),
                     &(handler_ack(handler_count)),
                     lease_cfg_test(),
+                    consumer_admission(),
                 )
                 .await;
             });
@@ -3211,6 +3277,7 @@ mod tests {
             &(meta()),
             &(handler_slow_ack(started.clone(), finished.clone(), Duration::from_millis(50))),
             lease_cfg_fast(),
+            consumer_admission(),
         )
         .await;
 
@@ -3248,6 +3315,7 @@ mod tests {
             &(meta()),
             &(handler_slow_ack(started.clone(), finished.clone(), Duration::from_secs(5))),
             lease_cfg_fast(),
+            consumer_admission(),
         )
         .await;
 
@@ -3287,6 +3355,7 @@ mod tests {
             &(meta()),
             &(handler_ack(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -3322,6 +3391,7 @@ mod tests {
                 Duration::from_millis(100),
             )),
             lease_cfg_fast(),
+            consumer_admission(),
         )
         .await;
 
@@ -3360,6 +3430,7 @@ mod tests {
             &(meta()),
             &(handler_reject(handler_count.clone())),
             lease_cfg_test(),
+            consumer_admission(),
         )
         .await;
 
@@ -3551,6 +3622,7 @@ mod tests {
                 meta(),
                 handler,
                 lease_cfg_test(),
+                consumer_admission(),
             ));
             trace_id_of(producer_tp.as_str())
         });
@@ -3616,6 +3688,7 @@ mod tests {
             meta(),
             handler,
             lease_cfg_test(),
+            consumer_admission(),
         ));
 
         assert_eq!(seen.lock().unwrap().as_deref(), Some(message_id));
@@ -3647,6 +3720,7 @@ mod tests {
             meta(),
             handler,
             lease_cfg_test(),
+            consumer_admission(),
         ));
 
         assert_eq!(calls.load(Ordering::SeqCst), 0);

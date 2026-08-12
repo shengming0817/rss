@@ -195,7 +195,7 @@ pub use bundle::{
 };
 pub use bundle::{
     MaintenanceAuditOutcome, PgConsumerRuntimeBundle, PgDomain, PgDomainDeps, PgInfraDeps,
-    PgL2DrRecoveryDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
+    PgL2DrAdmissionState, PgL2DrRecoveryDeps, PgMaintenanceDeps, PgProjectionOperatorAction,
     PgProjectionOperatorCapability, PgProjectionOperatorDeps, PgProjectionReplayStores,
     PgReadinessSamplerFactory, PgRuntimeDeps, PgRuntimeHandle, PgSagaOperatorDeps,
     ProjectionReplayAction, ProjectionStatusAction, ProjectionSwapAction, caps,

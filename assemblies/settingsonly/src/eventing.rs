@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use anyhow::Context as _;
 use bootstrap::DomainModuleResult;
-use diport::{DynDeadLetterStore, DynManagedResource, ManagedResource, ShutdownError, Topic};
+use diport::{
+    AckableSubscriber as _, DynDeadLetterStore, DynManagedResource, ManagedResource, ShutdownError,
+    Topic,
+};
 #[cfg(test)]
 use eventexec::EVENT_CONSUMER_PROBE;
 use eventexec::{
@@ -42,10 +45,17 @@ pub(crate) struct EventingInputs {
     tenant_authority: Arc<eventexec::TenantAuthority>,
     dlx_payload_protector: postgres::DlxPayloadProtector,
     consumer_runtime: postgres::PgConsumerRuntimeBundle,
+    admission_control: primitives::ProcessAdmissionControl,
+    relay_admission: primitives::RelayAdmission,
+    consumer_admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
+    admission_identity: Option<eventexec::DrAdmissionProcessIdentity>,
 }
 
 impl EventingInputs {
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    // reason: sealed assembly input owns the exact provider set and all three typed admission lanes.
     pub(crate) fn new(
         pg: postgres::PgRuntimeHandle,
         redis: redis::RedisRuntimeDeps,
@@ -53,6 +63,10 @@ impl EventingInputs {
         amqp_resources: Vec<Box<diport::DynManagedResource<'static>>>,
         tenant_authority: Arc<eventexec::TenantAuthority>,
         dlx_payload_protector: postgres::DlxPayloadProtector,
+        admission_control: primitives::ProcessAdmissionControl,
+        relay_admission: primitives::RelayAdmission,
+        consumer_admission: primitives::ConsumerAdmission,
+        write_admission: primitives::WriteAdmission,
     ) -> Self {
         let consumer_runtime = pg
             .infra()
@@ -65,11 +79,33 @@ impl EventingInputs {
             tenant_authority,
             dlx_payload_protector,
             consumer_runtime,
+            admission_control,
+            relay_admission,
+            consumer_admission,
+            write_admission,
+            admission_identity: None,
         }
+    }
+
+    pub(crate) fn bind_admission_identity(
+        mut self,
+        identity: eventexec::DrAdmissionProcessIdentity,
+    ) -> anyhow::Result<Self> {
+        if let Some(epoch) = identity.required_admission_epoch() {
+            self.admission_control
+                .pause_all(epoch)
+                .context("arm settingsonly required DR admission epoch")?;
+        }
+        self.admission_identity = Some(identity);
+        Ok(self)
     }
 
     pub(crate) fn projection_payload_protector(&self) -> postgres::DlxPayloadProtector {
         self.dlx_payload_protector.clone()
+    }
+
+    pub(crate) fn write_admission(&self) -> primitives::WriteAdmission {
+        self.write_admission.clone()
     }
 }
 
@@ -85,7 +121,7 @@ pub(crate) struct EventingRoleOutputs {
 }
 
 /// Activate the one generated Settings reconciliation subscription and its supporting workers.
-pub(crate) fn wire(
+pub(crate) async fn wire(
     mut inputs: EventingInputs,
     bindings: Vec<bootstrap::SubscriberBinding>,
 ) -> anyhow::Result<EventingRoleOutputs> {
@@ -119,18 +155,31 @@ pub(crate) fn wire(
         tenant_authority,
         dlx_payload_protector: _,
         consumer_runtime,
+        admission_control,
+        relay_admission: _,
+        consumer_admission,
+        write_admission,
+        admission_identity,
     } = inputs;
     wire_consumer(
         &pg,
         &amqp,
         tenant_authority,
         consumer_runtime,
+        consumer_admission,
         subscriptions,
         &mut event_subscriber,
-    )?;
+    )
+    .await?;
     wire_amqp_readiness(&amqp, &mut event_publisher, &mut event_subscriber)?;
-    wire_inbox_sweeper(&pg, &mut event_subscriber)?;
-    wire_outbox_maintenance(&pg, &redis, &mut distributed_cas)?;
+    wire_inbox_sweeper(&pg, write_admission.clone(), &mut event_subscriber)?;
+    wire_outbox_maintenance(&pg, &redis, write_admission, &mut distributed_cas)?;
+    retain_admission_authority(
+        pg.clone(),
+        admission_control,
+        admission_identity.context("settingsonly DR admission identity was not bound")?,
+        &mut distributed_cas,
+    )?;
     Ok(assemble_role_outputs(
         distributed_cas,
         event_publisher,
@@ -158,14 +207,17 @@ fn wire_amqp_readiness(
     let publisher_amqp = amqp.clone();
     publisher
         .workers
-        .push(bootstrap::WorkerSpec::phase_one(move |token| {
-            DynManagedResource::new_box(AmqpReadinessWorker::spawn(
-                publisher_amqp,
-                AmqpReadinessRole::Publisher,
-                publisher_ready,
-                token,
-            ))
-        }));
+        .push(bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.settingsonly.src.eventing.01",
+            move |token| {
+                DynManagedResource::new_box(AmqpReadinessWorker::spawn(
+                    publisher_amqp,
+                    AmqpReadinessRole::Publisher,
+                    publisher_ready,
+                    token,
+                ))
+            },
+        ));
 
     let subscriber_ready = Arc::new(std::sync::atomic::AtomicBool::new(
         amqp.subscriber_readiness().is_ready(),
@@ -182,14 +234,17 @@ fn wire_amqp_readiness(
     let subscriber_amqp = amqp.clone();
     subscriber
         .workers
-        .push(bootstrap::WorkerSpec::phase_one(move |token| {
-            DynManagedResource::new_box(AmqpReadinessWorker::spawn(
-                subscriber_amqp,
-                AmqpReadinessRole::Subscriber,
-                subscriber_ready,
-                token,
-            ))
-        }));
+        .push(bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.settingsonly.src.eventing.02",
+            move |token| {
+                DynManagedResource::new_box(AmqpReadinessWorker::spawn(
+                    subscriber_amqp,
+                    AmqpReadinessRole::Subscriber,
+                    subscriber_ready,
+                    token,
+                ))
+            },
+        ));
     Ok(())
 }
 
@@ -339,9 +394,11 @@ fn wire_relay(
     );
     let health = Arc::new(WorkerHealth::starting());
     let worker_health = Arc::clone(&health);
-    output
-        .workers
-        .push(bootstrap::WorkerSpec::deferred(move |token| {
+    let admission = inputs.relay_admission.clone();
+    output.workers.push(bootstrap::WorkerSpec::relay_deferred(
+        "assemblies.settingsonly.src.eventing.03",
+        &admission,
+        move |token, relay_admission| {
             DynManagedResource::new_box(spawn_relay(
                 "settingsonly-outbox-relay-settings".to_owned(),
                 outbox,
@@ -350,8 +407,10 @@ fn wire_relay(
                 token,
                 worker_health,
                 Arc::new(MetricsOutboxMetrics),
+                relay_admission,
             ))
-        }));
+        },
+    ));
     let name = primitives::ProbeName::parse(crate::readiness::OUTBOX_RELAY)
         .context("build settingsonly relay probe name")?;
     output
@@ -360,17 +419,29 @@ fn wire_relay(
     Ok(())
 }
 
-fn wire_consumer(
+async fn wire_consumer(
     pg: &postgres::PgRuntimeHandle,
     amqp: &amqp::AmqpRuntimeDeps,
     tenant_authority: Arc<eventexec::TenantAuthority>,
     consumer_runtime: postgres::PgConsumerRuntimeBundle,
+    admission: primitives::ConsumerAdmission,
     subscriptions: Vec<eventing_composition::BridgedSubscription>,
     output: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let [subscription] = subscriptions.as_slice() else {
         anyhow::bail!("settingsonly requires exactly one bridged settings subscription");
     };
+    let topic = Topic::new(subscription.topic());
+    amqp.infra()
+        .subscriber()
+        .prepare_ackable(topic.clone())
+        .await
+        .with_context(|| {
+            format!(
+                "prepare settingsonly durable consumer topology for '{}'",
+                subscription.topic()
+            )
+        })?;
     let (inbox, dead_letter) = consumer_runtime.into_parts();
     let lease = LeaseConfig::from_ttl(inbox.lease_ttl());
     let health = Arc::new(WorkerHealth::starting());
@@ -386,12 +457,13 @@ fn wire_consumer(
         eventing_composition::WorkerInputs::new(
             worker_name,
             amqp.infra().subscriber(),
-            Topic::new(subscription.topic()),
+            topic,
             Arc::new(inbox),
             DynDeadLetterStore::new_box(dead_letter),
             subscription.consumer_meta(tenant_authority),
             lease,
             Arc::clone(&health),
+            admission,
         ),
     )?;
     match subscription.readiness() {
@@ -408,6 +480,7 @@ fn wire_consumer(
 
 fn wire_inbox_sweeper(
     pg: &postgres::PgRuntimeHandle,
+    admission: primitives::WriteAdmission,
     output: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let sweeper = pg.infra().inbox_sweeper();
@@ -415,9 +488,10 @@ fn wire_inbox_sweeper(
         .context("build settingsonly inbox sweeper config")?;
     let health = Arc::new(WorkerHealth::starting());
     let worker_health = Arc::clone(&health);
-    output
-        .workers
-        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+    output.workers.push(bootstrap::WorkerSpec::writes_phase_one(
+        "assemblies.settingsonly.src.eventing.04",
+        &admission,
+        move |token, worker_admission| {
             let loop_health = Arc::clone(&worker_health);
             let loop_token = token.clone();
             let handle = tokio::spawn(async move {
@@ -429,6 +503,7 @@ fn wire_inbox_sweeper(
                     loop_token,
                     Arc::clone(&loop_health),
                     RetentionTarget::InboxReceipts,
+                    worker_admission,
                 )
                 .await;
             });
@@ -438,7 +513,8 @@ fn wire_inbox_sweeper(
                 worker_health,
                 token,
             ))
-        }));
+        },
+    ));
     let name = primitives::ProbeName::parse(crate::readiness::INBOX_SWEEPER)
         .context("build settingsonly inbox sweeper probe name")?;
     output
@@ -450,6 +526,7 @@ fn wire_inbox_sweeper(
 fn wire_outbox_maintenance(
     pg: &postgres::PgRuntimeHandle,
     redis: &redis::RedisRuntimeDeps,
+    admission: primitives::WriteAdmission,
     output: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let coordinator = distributed::OutboxMaintenanceCoordinator::from_ports(
@@ -470,25 +547,28 @@ fn wire_outbox_maintenance(
     let sampler_worker_health = Arc::clone(&sampler_health);
     output
         .workers
-        .push(bootstrap::WorkerSpec::phase_one(move |token| {
-            DynManagedResource::new_box(spawn_on_dedicated_runtime(
-                "settingsonly-outbox-sampler",
-                token,
-                Arc::clone(&sampler_worker_health),
-                EVENT_WORKER_SHUTDOWN_TIMEOUT,
-                move |thread_token| async move {
-                    backlog_sampler_loop(
-                        Arc::new(sampler),
-                        sampler_config,
-                        thread_token,
-                        Arc::clone(&sampler_worker_health),
-                        Arc::new(MetricsOutboxMetrics),
-                    )
-                    .await;
-                    Ok(())
-                },
-            ))
-        }));
+        .push(bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.settingsonly.src.eventing.05",
+            move |token| {
+                DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                    "settingsonly-outbox-sampler",
+                    token,
+                    Arc::clone(&sampler_worker_health),
+                    EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                    move |thread_token| async move {
+                        backlog_sampler_loop(
+                            Arc::new(sampler),
+                            sampler_config,
+                            thread_token,
+                            Arc::clone(&sampler_worker_health),
+                            Arc::new(MetricsOutboxMetrics),
+                        )
+                        .await;
+                        Ok(())
+                    },
+                ))
+            },
+        ));
     let sampler_name = primitives::ProbeName::parse(crate::readiness::OUTBOX_SAMPLER)
         .context("build settingsonly sampler probe name")?;
     output.probes.push((
@@ -498,9 +578,10 @@ fn wire_outbox_maintenance(
 
     let sweeper_health = Arc::new(WorkerHealth::starting());
     let sweeper_worker_health = Arc::clone(&sweeper_health);
-    output
-        .workers
-        .push(bootstrap::WorkerSpec::phase_one(move |token| {
+    output.workers.push(bootstrap::WorkerSpec::writes_phase_one(
+        "assemblies.settingsonly.src.eventing.06",
+        &admission,
+        move |token, worker_admission| {
             DynManagedResource::new_box(spawn_on_dedicated_runtime(
                 "settingsonly-outbox-sweeper",
                 token,
@@ -514,18 +595,60 @@ fn wire_outbox_maintenance(
                         thread_token,
                         Arc::clone(&sweeper_worker_health),
                         RetentionTarget::OutboxPublished,
+                        worker_admission,
                     )
                     .await;
                     Ok(())
                 },
             ))
-        }));
+        },
+    ));
     let sweeper_name = primitives::ProbeName::parse(crate::readiness::OUTBOX_SWEEPER)
         .context("build settingsonly sweeper probe name")?;
     output.probes.push((
         sweeper_name.clone(),
         Box::new(WorkerProbe::new(sweeper_name, sweeper_health)),
     ));
+    Ok(())
+}
+
+fn retain_admission_authority(
+    pg: postgres::PgRuntimeHandle,
+    control: primitives::ProcessAdmissionControl,
+    identity: eventexec::DrAdmissionProcessIdentity,
+    output: &mut DomainModuleResult,
+) -> anyhow::Result<()> {
+    let health = Arc::new(WorkerHealth::starting());
+    let probe_name = primitives::ProbeName::parse("settingsonly_dr_admission")
+        .context("build settingsonly DR admission probe name")?;
+    output.probes.push((
+        probe_name.clone(),
+        Box::new(WorkerProbe::new(probe_name, Arc::clone(&health))),
+    ));
+    output
+        .workers
+        .push(bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.settingsonly.src.eventing.07",
+            move |token| {
+                DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                    "settingsonly-dr-admission-owner",
+                    token,
+                    Arc::clone(&health),
+                    EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                    move |thread_token| async move {
+                        eventexec::run_dr_admission_controller(
+                            pg,
+                            control,
+                            identity,
+                            thread_token,
+                            health,
+                        )
+                        .await;
+                        Ok(())
+                    },
+                ))
+            },
+        ));
     Ok(())
 }
 

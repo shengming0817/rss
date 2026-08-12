@@ -134,6 +134,7 @@ pub struct SagaWorkerRuntime<T, S, E> {
     executor: Arc<E>,
     clock: Arc<dyn diport::Clock>,
     config: SagaWorkerConfig,
+    admission: primitives::WriteAdmission,
 }
 
 impl<T, S, E> SagaWorkerRuntime<T, S, E>
@@ -150,6 +151,7 @@ where
         executor: Arc<E>,
         clock: Arc<dyn diport::Clock>,
         config: SagaWorkerConfig,
+        admission: primitives::WriteAdmission,
     ) -> Self {
         Self {
             identity,
@@ -158,6 +160,7 @@ where
             executor,
             clock,
             config,
+            admission,
         }
     }
 
@@ -170,6 +173,7 @@ where
             executor,
             clock,
             config,
+            admission,
         } = self;
         let worker_name = saga_worker_name(&identity);
         let task_token = token.clone();
@@ -183,6 +187,7 @@ where
                     executor,
                     clock,
                     config,
+                    admission,
                 ),
                 task_token,
                 task_health,
@@ -209,6 +214,7 @@ async fn saga_worker_loop<T, S, E>(
         executor,
         clock,
         config,
+        admission,
     } = runtime;
     let _stopped_guard = health.stopped_on_exit();
     let mut ticker = tokio::time::interval(config.poll_interval());
@@ -219,6 +225,9 @@ async fn saga_worker_loop<T, S, E>(
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
+                let Ok(_permit) = admission.try_enter() else {
+                    continue;
+                };
                 let tick = saga_worker_tick(
                     &identity,
                     tenant_source.as_ref(),
@@ -1115,6 +1124,11 @@ mod tests {
         let tenant = tenant();
         let health = Arc::new(WorkerHealth::starting());
         let token = CancellationToken::new();
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("test admission starts running");
         let worker = SagaWorkerRuntime::new(
             identity(),
             Arc::new(FakeTenantSource::with_tenants(vec![tenant])),
@@ -1122,6 +1136,7 @@ mod tests {
             Arc::new(FakeExecutor::new(Vec::new())),
             Arc::new(FixedClock),
             SagaWorkerConfig::default(),
+            write_admission,
         )
         .spawn(token, health.clone());
         tokio::task::yield_now().await;

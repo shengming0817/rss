@@ -70,6 +70,10 @@ impl SettingsOnlyPlan {
         })
     }
 
+    pub(crate) fn expected_workers(&self) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
+        expected_workers()
+    }
+
     #[cfg(test)]
     pub(crate) const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.typed
@@ -257,9 +261,12 @@ fn fixture_projection_factory(
         std::sync::Arc::new(FixtureProjectionStore),
     )
     .expect("generated settings projection bindings must be canonical");
-    binding.issue_runtime(std::sync::Arc::new(target), |_target, _token, _health| {
-        diport::DynManagedResource::new_box(FixtureProjectionResource)
-    })
+    binding.issue_runtime(
+        std::sync::Arc::new(target),
+        |_target, _token, _health, _admission| {
+            diport::DynManagedResource::new_box(FixtureProjectionResource)
+        },
+    )
 }
 
 #[cfg(any(test, feature = "test-support"))]
@@ -310,10 +317,36 @@ impl diport::ManagedResource for FixtureProjectionResource {
 }
 
 impl BoundSettingsOnlyPlan {
+    pub(crate) fn runtime_plan_fingerprint(&self) -> &str {
+        self.typed.runtime_plan_fingerprint().as_str()
+    }
+
     pub(crate) const fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
         &self.workflow_runtime
     }
+}
 
+fn expected_workers() -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
+    use bootstrap::{WorkerAdmissionLane as Lane, WorkerDescriptor as Worker};
+
+    bootstrap::ExpectedWorkerInventory::closed([
+        Worker::expected("assemblies.settingsonly.src.projection.01", Lane::Writes),
+        Worker::expected("assemblies.settingsonly.src.dlx.01", Lane::Writes),
+        Worker::expected("assemblies.settingsonly.src.eventing.03", Lane::Relay),
+        Worker::expected("assemblies.settingsonly.src.eventing.04", Lane::Writes),
+        Worker::expected("assemblies.settingsonly.src.eventing.06", Lane::Writes),
+        Worker::expected(
+            format!(
+                "event-consumer:settingsonly-event-consumer:settings:{}",
+                generated::event::settings_v1::TOPIC
+            ),
+            Lane::Consumer,
+        ),
+    ])
+    .map_err(Into::into)
+}
+
+impl BoundSettingsOnlyPlan {
     /// Consume the sole production handoff of the exact service whose identity entered active
     /// binding. Inventory sealing rejects an active plan until this handoff has been claimed.
     pub(crate) fn take_settings_v3_serving(

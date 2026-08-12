@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -25,11 +24,11 @@ use consistency::{
     OutboxMetricSubject, OutboxRelay, RetentionSweeper,
 };
 use primitives::healthz::HealthStatus;
+use primitives::{AdmissionError, RelayAdmission, WriteAdmission};
 use vocab::DomainName;
 
 use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
 use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
-use crate::worker_control::WorkerDrainObservation;
 use crate::{MetricsRetentionMetrics, RetentionMetrics, RetentionOutcome, RetentionTarget};
 
 // ── probe 名常量 ────────────────────────────────────────────────────────────
@@ -249,6 +248,7 @@ pub async fn relay_loop<A>(
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     metrics: Arc<dyn OutboxMetrics>,
+    admission: RelayAdmission,
 ) where
     A: OutboxRelay,
 {
@@ -258,6 +258,16 @@ pub async fn relay_loop<A>(
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
+                let _permit = match admission.try_enter() {
+                    Ok(permit) => permit,
+                    Err(AdmissionError::Paused) => continue,
+                    Err(AdmissionError::Stopped) => break,
+                    Err(error) => {
+                        tracing::error!(error = %error, "relay: admission invariant failed");
+                        health.mark_invariant();
+                        break;
+                    }
+                };
                 relay_tick(
                     &store,
                     config.max_in_flight(),
@@ -269,132 +279,6 @@ pub async fn relay_loop<A>(
             }
         }
     }
-    health.mark_stopped();
-}
-
-/// Pause/resume handle plus bounded drain observation for an outbox relay loop.
-///
-/// Pause is admission-only: an already claimed batch finishes before the loop acknowledges a
-/// drained state. Resume immediately closes a prior drained observation. Stopped is terminal.
-#[derive(Clone)]
-pub struct RelayWorkerControl {
-    paused: watch::Sender<bool>,
-    drain: WorkerDrainObservation,
-}
-
-impl RelayWorkerControl {
-    /// Create a control to pass to [`relay_loop_controlled`] and retain at the composition root.
-    pub fn new() -> Self {
-        let (paused, _receiver) = watch::channel(false);
-        Self {
-            paused,
-            drain: WorkerDrainObservation::new(),
-        }
-    }
-
-    /// Stop new claims after the current relay batch completes.
-    pub fn pause(&self) {
-        if self.drain.is_stopped() {
-            return;
-        }
-        self.paused.send_replace(true);
-    }
-
-    /// Resume relay claims.
-    pub fn resume(&self) {
-        if self.drain.is_stopped() {
-            return;
-        }
-        self.drain.mark_running();
-        self.paused.send_replace(false);
-    }
-
-    /// Current requested pause flag.
-    pub fn is_paused(&self) -> bool {
-        *self.paused.borrow()
-    }
-
-    /// Number of entries in the currently claimed relay batch.
-    pub fn in_flight(&self) -> usize {
-        self.drain.in_flight()
-    }
-
-    /// Whether pause has taken effect and current relay work is zero, or the loop stopped.
-    pub fn is_drained(&self) -> bool {
-        self.drain.is_drained()
-    }
-
-    /// Whether the relay loop reached its terminal stopped state.
-    pub fn is_stopped(&self) -> bool {
-        self.drain.is_stopped()
-    }
-
-    /// Wait until admission is paused and current work reaches zero, or the loop stops.
-    pub async fn wait_drained(&self) {
-        self.drain.wait_drained().await;
-    }
-}
-
-impl Default for RelayWorkerControl {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-/// Outbox relay loop with explicit admission and drain control.
-pub async fn relay_loop_controlled<A>(
-    store: Arc<A>,
-    config: RelayConfig,
-    clock: Arc<dyn diport::Clock>,
-    token: CancellationToken,
-    health: Arc<WorkerHealth>,
-    metrics: Arc<dyn OutboxMetrics>,
-    control: RelayWorkerControl,
-) where
-    A: OutboxRelay,
-{
-    let mut ticker = tokio::time::interval(config.poll_interval());
-    let mut paused = control.paused.subscribe();
-    loop {
-        if token.is_cancelled() {
-            break;
-        }
-        if *paused.borrow() {
-            control.drain.mark_paused();
-            tokio::select! {
-                biased;
-                () = token.cancelled() => break,
-                changed = paused.changed() => {
-                    if changed.is_err() {
-                        break;
-                    }
-                }
-            }
-            continue;
-        }
-        control.drain.mark_running();
-        tokio::select! {
-            biased;
-            () = token.cancelled() => break,
-            changed = paused.changed() => {
-                if changed.is_err() {
-                    break;
-                }
-            }
-            _ = ticker.tick() => {
-                relay_tick_controlled(
-                    &store,
-                    config.max_in_flight(),
-                    clock.as_ref(),
-                    &health,
-                    metrics.as_ref(),
-                    &control.drain,
-                )
-                .await;
-            }
-        }
-    }
-    control.drain.mark_stopped();
     health.mark_stopped();
 }
 
@@ -421,24 +305,7 @@ async fn relay_tick<A>(
 ) where
     A: OutboxRelay,
 {
-    let tick = relay_domain_once(store, max_in_flight, clock, metrics, None).await;
-    match tick {
-        TickOutcome::Clean => health.mark_healthy(),
-        TickOutcome::Degraded => health.mark_degraded(),
-    }
-}
-
-async fn relay_tick_controlled<A>(
-    store: &Arc<A>,
-    max_in_flight: usize,
-    clock: &dyn diport::Clock,
-    health: &Arc<WorkerHealth>,
-    metrics: &dyn OutboxMetrics,
-    drain: &WorkerDrainObservation,
-) where
-    A: OutboxRelay,
-{
-    let tick = relay_domain_once(store, max_in_flight, clock, metrics, Some(drain)).await;
+    let tick = relay_domain_once(store, max_in_flight, clock, metrics).await;
     match tick {
         TickOutcome::Clean => health.mark_healthy(),
         TickOutcome::Degraded => health.mark_degraded(),
@@ -462,7 +329,6 @@ async fn relay_domain_once<A>(
     batch: usize,
     clock: &dyn diport::Clock,
     metrics: &dyn OutboxMetrics,
-    drain: Option<&WorkerDrainObservation>,
 ) -> TickOutcome
 where
     A: OutboxRelay,
@@ -481,14 +347,8 @@ where
     if !entries.is_empty() {
         log_claimed(domain.as_str(), entries.len());
     }
-    if let Some(drain) = drain {
-        drain.set_in_flight(entries.len());
-    }
     let publish_start = clock.now();
     let outcome = relay_batch(store, domain, entries, metrics).await;
-    if let Some(drain) = drain {
-        drain.set_in_flight(0);
-    }
     metrics.record_tick_duration(RelayPhase::Publish, secs_since(clock, publish_start));
     outcome
 }
@@ -603,6 +463,7 @@ pub async fn sweeper_loop<S>(
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     target: RetentionTarget,
+    admission: WriteAdmission,
 ) where
     S: RetentionSweeper,
 {
@@ -611,13 +472,25 @@ pub async fn sweeper_loop<S>(
         tokio::select! {
             biased;
             () = token.cancelled() => break,
-            _ = ticker.tick() => sweeper_tick(
-                &store,
-                config.retain_seconds(),
-                clock.as_ref(),
-                &health,
-                target,
-            ).await,
+            _ = ticker.tick() => {
+                let _permit = match admission.try_enter() {
+                    Ok(permit) => permit,
+                    Err(AdmissionError::Paused) => continue,
+                    Err(AdmissionError::Stopped) => break,
+                    Err(error) => {
+                        tracing::error!(error = %error, "sweeper: admission invariant failed");
+                        health.mark_invariant();
+                        break;
+                    }
+                };
+                sweeper_tick(
+                    &store,
+                    config.retain_seconds(),
+                    clock.as_ref(),
+                    &health,
+                    target,
+                ).await;
+            },
         }
     }
     health.mark_stopped();
@@ -976,7 +849,7 @@ mod tests {
         SamplerWorker, SweeperWorker, WorkerHealth, backlog_sampler_loop, sweeper_loop,
     };
     use crate::RetentionTarget;
-    use crate::relay::{RelayWorker, RelayWorkerControl, relay_loop, relay_loop_controlled};
+    use crate::relay::{RelayWorker, relay_loop};
     use crate::relay_config::{RelayConfig, SamplerConfig, SweeperConfig};
     use crate::relay_metrics::{OutboxMetricScope, OutboxMetrics, RelayPhase};
     // ── 测试配置 / metrics 辅助 ───────────────────────────────────────────────
@@ -1009,6 +882,18 @@ mod tests {
     /// 丢弃式 metrics（loop 测试不断言发射时用；复用 CountingMetrics fake，不另设 public no-op）。
     fn noop_metrics() -> Arc<dyn OutboxMetrics> {
         CountingMetrics::new()
+    }
+
+    fn relay_admission() -> primitives::RelayAdmission {
+        let (control, relay, _, _) = primitives::prepare_dr_admission_controls().into_parts();
+        assert!(control.start_running().is_ok());
+        relay
+    }
+
+    fn write_admission() -> primitives::WriteAdmission {
+        let (control, _, _, writes) = primitives::prepare_dr_admission_controls().into_parts();
+        assert!(control.start_running().is_ok());
+        writes
     }
 
     /// 固定时钟（test 替身；`duration_since` 恒 0，满足 tick 相记录断言又不触系统时钟纪律）。
@@ -1501,6 +1386,7 @@ mod tests {
             token.clone(),
             health.clone(),
             noop_metrics(),
+            relay_admission(),
         ));
 
         let worker = RelayWorker::adopt(handle, health.clone(), token.clone());
@@ -1530,37 +1416,37 @@ mod tests {
         let store = ObservedRelayStore::new(vec![make_claimed_entry(), make_claimed_entry()]);
         let health = Arc::new(WorkerHealth::healthy());
         let token = CancellationToken::new();
-        let control = RelayWorkerControl::new();
+        let (control, admission, _, _) = primitives::prepare_dr_admission_controls().into_parts();
+        control
+            .start_running()
+            .expect("test admission starts running");
+        let epoch = primitives::AdmissionEpochId::parse("6f09752b-1050-4261-a435-e19192e11f53")
+            .expect("valid admission epoch");
         let config = RelayConfig::new(Duration::from_secs(60), 1).expect("valid relay config");
-        let handle = tokio::spawn(relay_loop_controlled(
+        let handle = tokio::spawn(relay_loop(
             store.clone(),
             config,
             fixed_clock(),
             token.clone(),
             health,
             noop_metrics(),
-            control.clone(),
+            admission,
         ));
 
         store.wait_until_started(1).await;
-        assert_eq!(control.in_flight(), 1);
-        assert!(!control.is_drained(), "active relay is not drained");
+        assert_eq!(control.snapshot().in_flight()[0], 1);
 
-        control.pause();
+        control.pause_all(epoch).expect("pause relay");
         store.finish.notify_one();
-        control.wait_drained().await;
-        assert_eq!(control.in_flight(), 0);
+        control.wait_drained().await.expect("relay drained");
+        assert_eq!(control.snapshot().in_flight()[0], 0);
         assert_eq!(
             store.claim_count.load(AtomOrd::Acquire),
             1,
             "pause must prevent a second claim after current work drains"
         );
 
-        control.resume();
-        assert!(
-            !control.is_drained(),
-            "resume closes the drained observation"
-        );
+        control.resume_relay(epoch).expect("resume relay");
         tokio::time::advance(Duration::from_secs(60)).await;
         store.wait_until_started(2).await;
         store.finish.notify_one();
@@ -1568,13 +1454,8 @@ mod tests {
 
         token.cancel();
         assert!(handle.await.is_ok(), "controlled relay stops cleanly");
-        assert!(control.is_stopped());
-        assert!(control.is_drained());
-        control.resume();
-        assert!(
-            control.is_drained(),
-            "a stopped relay remains terminally drained"
-        );
+        control.stop();
+        assert!(control.snapshot().is_stopped());
     }
 
     // ── T9：shutdown 收敛/幂等；shutdown_timeout == 45s ──────────────────────
@@ -1594,6 +1475,7 @@ mod tests {
             token.clone(),
             health.clone(),
             noop_metrics(),
+            relay_admission(),
         ));
 
         let worker = RelayWorker::adopt(handle, health.clone(), token.clone());
@@ -1632,6 +1514,7 @@ mod tests {
             token.clone(),
             health.clone(),
             RetentionTarget::OutboxPublished,
+            write_admission(),
         ));
 
         let worker =
@@ -1664,6 +1547,7 @@ mod tests {
             token.clone(),
             health.clone(),
             noop_metrics(),
+            relay_admission(),
         ));
 
         let worker = RelayWorker::adopt(handle, health.clone(), token.clone());
@@ -1841,6 +1725,7 @@ mod tests {
             token.clone(),
             health.clone(),
             noop_metrics(),
+            relay_admission(),
         ));
 
         tokio::time::advance(std::time::Duration::from_millis(200)).await;
@@ -1873,6 +1758,7 @@ mod tests {
             token.clone(),
             health.clone(),
             RetentionTarget::OutboxPublished,
+            write_admission(),
         ));
 
         tokio::time::advance(std::time::Duration::from_secs(2)).await;
@@ -1996,6 +1882,7 @@ mod tests {
             token.clone(),
             health.clone(),
             noop_metrics(),
+            relay_admission(),
         ));
         let worker = RelayWorker::adopt(handle, health, token);
         assert_eq!(worker.name(), "outbox-relay");
@@ -2016,6 +1903,7 @@ mod tests {
                 token.clone(),
                 health.clone(),
                 RetentionTarget::OutboxPublished,
+                write_admission(),
             ));
             SweeperWorker::adopt(name, handle, health, token)
         }

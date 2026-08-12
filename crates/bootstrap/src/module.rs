@@ -70,27 +70,339 @@ impl DomainBinding {
 /// 或动态 policy 字符串。runtime sink 对本枚举穷尽 match，把两种 policy 分别送入唯一 token funnel。
 pub enum WorkerSpec {
     /// shutdown phase-one 立即取消，适用于 readiness、sampler、sweeper 等不接收业务事务的 task。
-    PhaseOne(Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>),
+    PhaseOne(WorkerRegistration),
     /// 等后注册资源完成 LIFO drain 后，到本 worker 自身相位才取消并 join。
-    Deferred(Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>),
+    Deferred(WorkerRegistration),
+}
+
+pub struct WorkerRegistration {
+    descriptor: WorkerDescriptor,
+    make: Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WorkerAdmissionLane {
+    Observational,
+    Relay,
+    Consumer,
+    Writes,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct WorkerDescriptor {
+    pub lane: WorkerAdmissionLane,
+    pub identity: String,
+}
+
+impl WorkerRegistration {
+    pub fn descriptor(&self) -> WorkerDescriptor {
+        self.descriptor.clone()
+    }
+    pub fn into_factory(
+        self,
+    ) -> Box<dyn FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send> {
+        self.make
+    }
 }
 
 impl WorkerSpec {
-    /// 构造 shutdown phase-one 立即取消的 worker。
-    pub fn phase_one<F>(make: F) -> Self
+    fn registration<F>(
+        identity: impl Into<String>,
+        lane: WorkerAdmissionLane,
+        make: F,
+    ) -> WorkerRegistration
     where
         F: FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send + 'static,
     {
-        Self::PhaseOne(Box::new(make))
+        let identity = identity.into();
+        assert!(!identity.is_empty(), "worker identity must not be empty");
+        WorkerRegistration {
+            descriptor: WorkerDescriptor { lane, identity },
+            make: Box::new(make),
+        }
     }
 
-    /// 构造到自身 LIFO 相位才取消并 join 的 worker。
-    pub fn deferred<F>(make: F) -> Self
+    #[track_caller]
+    pub fn observational_phase_one<F>(identity: impl Into<String>, make: F) -> Self
     where
         F: FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send + 'static,
     {
-        Self::Deferred(Box::new(make))
+        Self::PhaseOne(Self::registration(
+            identity,
+            WorkerAdmissionLane::Observational,
+            make,
+        ))
     }
+
+    #[track_caller]
+    pub fn observational_deferred<F>(identity: impl Into<String>, make: F) -> Self
+    where
+        F: FnOnce(CancellationToken) -> Box<DynManagedResource<'static>> + Send + 'static,
+    {
+        Self::Deferred(Self::registration(
+            identity,
+            WorkerAdmissionLane::Observational,
+            make,
+        ))
+    }
+
+    #[track_caller]
+    pub fn relay_deferred<F>(
+        identity: impl Into<String>,
+        gate: &primitives::RelayAdmission,
+        make: F,
+    ) -> Self
+    where
+        F: FnOnce(
+                CancellationToken,
+                primitives::RelayAdmission,
+            ) -> Box<DynManagedResource<'static>>
+            + Send
+            + 'static,
+    {
+        let gate = gate.clone();
+        Self::Deferred(Self::registration(
+            identity,
+            WorkerAdmissionLane::Relay,
+            move |token| make(token, gate),
+        ))
+    }
+
+    #[track_caller]
+    pub fn relay_phase_one<F>(
+        identity: impl Into<String>,
+        gate: &primitives::RelayAdmission,
+        make: F,
+    ) -> Self
+    where
+        F: FnOnce(
+                CancellationToken,
+                primitives::RelayAdmission,
+            ) -> Box<DynManagedResource<'static>>
+            + Send
+            + 'static,
+    {
+        let gate = gate.clone();
+        Self::PhaseOne(Self::registration(
+            identity,
+            WorkerAdmissionLane::Relay,
+            move |token| make(token, gate),
+        ))
+    }
+
+    #[track_caller]
+    pub fn consumer_phase_one<F>(
+        identity: impl Into<String>,
+        gate: &primitives::ConsumerAdmission,
+        make: F,
+    ) -> Self
+    where
+        F: FnOnce(
+                CancellationToken,
+                primitives::ConsumerAdmission,
+            ) -> Box<DynManagedResource<'static>>
+            + Send
+            + 'static,
+    {
+        let gate = gate.clone();
+        Self::PhaseOne(Self::registration(
+            identity,
+            WorkerAdmissionLane::Consumer,
+            move |token| make(token, gate),
+        ))
+    }
+
+    #[track_caller]
+    pub fn consumer_deferred<F>(
+        identity: impl Into<String>,
+        gate: &primitives::ConsumerAdmission,
+        make: F,
+    ) -> Self
+    where
+        F: FnOnce(
+                CancellationToken,
+                primitives::ConsumerAdmission,
+            ) -> Box<DynManagedResource<'static>>
+            + Send
+            + 'static,
+    {
+        let gate = gate.clone();
+        Self::Deferred(Self::registration(
+            identity,
+            WorkerAdmissionLane::Consumer,
+            move |token| make(token, gate),
+        ))
+    }
+
+    #[track_caller]
+    pub fn writes_phase_one<F>(
+        identity: impl Into<String>,
+        gate: &primitives::WriteAdmission,
+        make: F,
+    ) -> Self
+    where
+        F: FnOnce(
+                CancellationToken,
+                primitives::WriteAdmission,
+            ) -> Box<DynManagedResource<'static>>
+            + Send
+            + 'static,
+    {
+        let gate = gate.clone();
+        Self::PhaseOne(Self::registration(
+            identity,
+            WorkerAdmissionLane::Writes,
+            move |token| make(token, gate),
+        ))
+    }
+
+    #[track_caller]
+    pub fn writes_deferred<F>(
+        identity: impl Into<String>,
+        gate: &primitives::WriteAdmission,
+        make: F,
+    ) -> Self
+    where
+        F: FnOnce(
+                CancellationToken,
+                primitives::WriteAdmission,
+            ) -> Box<DynManagedResource<'static>>
+            + Send
+            + 'static,
+    {
+        let gate = gate.clone();
+        Self::Deferred(Self::registration(
+            identity,
+            WorkerAdmissionLane::Writes,
+            move |token| make(token, gate),
+        ))
+    }
+
+    pub fn descriptor(&self) -> WorkerDescriptor {
+        match self {
+            Self::PhaseOne(r) | Self::Deferred(r) => r.descriptor(),
+        }
+    }
+}
+
+/// Stable, startup-time proof of the exact worker set about to be spawned.
+pub fn validate_worker_inventory<'a>(
+    workers: impl IntoIterator<Item = &'a WorkerSpec>,
+) -> Result<WorkerInventory, WorkerInventoryError> {
+    let mut descriptors: Vec<_> = workers.into_iter().map(WorkerSpec::descriptor).collect();
+    descriptors.sort_unstable();
+    let mut digest = 0xcbf29ce484222325_u64;
+    for descriptor in &descriptors {
+        for byte in format!("{:?}:{}\n", descriptor.lane, descriptor.identity).bytes() {
+            digest ^= u64::from(byte);
+            digest = digest.wrapping_mul(0x100000001b3);
+        }
+    }
+    if let Some(pair) = descriptors
+        .windows(2)
+        .find(|pair| pair[0].identity == pair[1].identity)
+    {
+        return Err(WorkerInventoryError::DuplicateIdentity(
+            pair[0].identity.clone(),
+        ));
+    }
+    Ok(WorkerInventory {
+        descriptors,
+        digest,
+    })
+}
+
+pub fn validate_worker_inventory_exact<'a>(
+    workers: impl IntoIterator<Item = &'a WorkerSpec>,
+    expected: &ExpectedWorkerInventory,
+) -> Result<WorkerInventory, WorkerInventoryError> {
+    let inventory = validate_worker_inventory(workers)?;
+    let mutating =
+        |descriptor: &&WorkerDescriptor| descriptor.lane != WorkerAdmissionLane::Observational;
+    for descriptor in inventory.descriptors.iter().filter(mutating) {
+        match expected
+            .descriptors
+            .iter()
+            .find(|candidate| candidate.identity == descriptor.identity)
+        {
+            None => return Err(WorkerInventoryError::Unexpected(descriptor.clone())),
+            Some(candidate) if candidate.lane != descriptor.lane => {
+                return Err(WorkerInventoryError::WrongLane {
+                    identity: descriptor.identity.clone(),
+                    expected: candidate.lane,
+                    actual: descriptor.lane,
+                });
+            }
+            Some(_) => {}
+        }
+    }
+    if let Some(missing) = expected.descriptors.iter().find(|candidate| {
+        candidate.lane != WorkerAdmissionLane::Observational
+            && !inventory
+                .descriptors
+                .iter()
+                .filter(mutating)
+                .any(|descriptor| descriptor.identity == candidate.identity)
+    }) {
+        return Err(WorkerInventoryError::Missing(missing.clone()));
+    }
+    Ok(inventory)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExpectedWorkerInventory {
+    descriptors: Vec<WorkerDescriptor>,
+}
+
+impl ExpectedWorkerInventory {
+    pub fn closed(
+        descriptors: impl IntoIterator<Item = WorkerDescriptor>,
+    ) -> Result<Self, WorkerInventoryError> {
+        let mut descriptors: Vec<_> = descriptors.into_iter().collect();
+        descriptors.sort_unstable();
+        if let Some(pair) = descriptors
+            .windows(2)
+            .find(|pair| pair[0].identity == pair[1].identity)
+        {
+            return Err(WorkerInventoryError::DuplicateExpectedIdentity(
+                pair[0].identity.clone(),
+            ));
+        }
+        Ok(Self { descriptors })
+    }
+}
+
+impl WorkerDescriptor {
+    pub fn expected(identity: impl Into<String>, lane: WorkerAdmissionLane) -> Self {
+        Self {
+            identity: identity.into(),
+            lane,
+        }
+    }
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct WorkerInventory {
+    pub descriptors: Vec<WorkerDescriptor>,
+    pub digest: u64,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum WorkerInventoryError {
+    #[error("duplicate worker identity: {0}")]
+    DuplicateIdentity(String),
+    #[error("duplicate expected worker identity: {0}")]
+    DuplicateExpectedIdentity(String),
+    #[error("unexpected worker: {0:?}")]
+    Unexpected(WorkerDescriptor),
+    #[error("missing worker: {0:?}")]
+    Missing(WorkerDescriptor),
+    #[error("worker {identity} has wrong lane: expected {expected:?}, actual {actual:?}")]
+    WrongLane {
+        identity: String,
+        expected: WorkerAdmissionLane,
+        actual: WorkerAdmissionLane,
+    },
 }
 
 /// 域能力的标准装配出口（ADR-010 §2.2）：`module()` / `wire_X` 的可聚合产物，组合根经
@@ -224,7 +536,105 @@ mod result_tests {
     }
 
     fn worker_entry() -> WorkerSpec {
-        WorkerSpec::phase_one(|_token| DynManagedResource::new_box(NoopResource))
+        WorkerSpec::observational_phase_one("crates.bootstrap.src.module.01", |_token| {
+            DynManagedResource::new_box(NoopResource)
+        })
+    }
+
+    #[test]
+    fn worker_inventory_is_order_independent_and_lane_exact() {
+        let (_, relay, _, _) = primitives::prepare_dr_admission_controls().into_parts();
+        let first = WorkerSpec::observational_phase_one("crates.bootstrap.src.module.02", |_| {
+            DynManagedResource::new_box(NoopResource)
+        });
+        let second =
+            WorkerSpec::relay_deferred("crates.bootstrap.src.module.03", &relay, |_, _| {
+                DynManagedResource::new_box(NoopResource)
+            });
+        let expected = ExpectedWorkerInventory::closed([
+            WorkerDescriptor::expected(
+                "crates.bootstrap.src.module.02",
+                WorkerAdmissionLane::Observational,
+            ),
+            WorkerDescriptor::expected(
+                "crates.bootstrap.src.module.03",
+                WorkerAdmissionLane::Relay,
+            ),
+        ])
+        .expect("valid expected inventory");
+        let forward =
+            validate_worker_inventory_exact([&first, &second], &expected).expect("valid inventory");
+        let reverse =
+            validate_worker_inventory_exact([&second, &first], &expected).expect("valid inventory");
+        assert_eq!(forward.digest, reverse.digest);
+        assert_eq!(
+            forward
+                .descriptors
+                .iter()
+                .map(|descriptor| descriptor.lane)
+                .collect::<Vec<_>>(),
+            vec![
+                WorkerAdmissionLane::Observational,
+                WorkerAdmissionLane::Relay
+            ]
+        );
+    }
+
+    #[test]
+    fn worker_inventory_rejects_duplicate_identity() {
+        let first = WorkerSpec::observational_phase_one("duplicate", |_| {
+            DynManagedResource::new_box(NoopResource)
+        });
+        let second = WorkerSpec::observational_deferred("duplicate", |_| {
+            DynManagedResource::new_box(NoopResource)
+        });
+        assert!(matches!(
+            validate_worker_inventory_exact(
+                [&first, &second],
+                &ExpectedWorkerInventory::closed([WorkerDescriptor::expected(
+                    "duplicate",
+                    WorkerAdmissionLane::Observational,
+                )]).expect("valid expected inventory"),
+            ),
+            Err(WorkerInventoryError::DuplicateIdentity(identity)) if identity == "duplicate"
+        ));
+    }
+
+    #[test]
+    fn worker_inventory_rejects_missing_extra_and_wrong_lane() {
+        let (_, relay, _, _) = primitives::prepare_dr_admission_controls().into_parts();
+        let actual = WorkerSpec::relay_deferred("actual", &relay, |_, _| {
+            DynManagedResource::new_box(NoopResource)
+        });
+        let expected = ExpectedWorkerInventory::closed([WorkerDescriptor::expected(
+            "expected",
+            WorkerAdmissionLane::Relay,
+        )])
+        .expect("valid expected inventory");
+        assert!(matches!(
+            validate_worker_inventory_exact([&actual], &expected),
+            Err(WorkerInventoryError::Unexpected(_))
+        ));
+
+        let missing = ExpectedWorkerInventory::closed([
+            WorkerDescriptor::expected("actual", WorkerAdmissionLane::Relay),
+            WorkerDescriptor::expected("missing", WorkerAdmissionLane::Writes),
+        ])
+        .expect("valid expected inventory");
+        assert!(matches!(
+            validate_worker_inventory_exact([&actual], &missing),
+            Err(WorkerInventoryError::Missing(_))
+        ));
+
+        let wrong_lane = ExpectedWorkerInventory::closed([WorkerDescriptor::expected(
+            "actual",
+            WorkerAdmissionLane::Consumer,
+        )])
+        .expect("valid expected inventory");
+        assert!(matches!(
+            validate_worker_inventory_exact([&actual], &wrong_lane),
+            Err(WorkerInventoryError::WrongLane { .. })
+        ));
     }
 
     struct DeclaringDomain(&'static str);
@@ -285,13 +695,15 @@ mod result_tests {
     }
 
     fn labeled_worker(label: &'static str) -> WorkerSpec {
-        WorkerSpec::phase_one(move |_token| labeled_resource(label))
+        WorkerSpec::observational_phase_one("crates.bootstrap.src.module.04", move |_token| {
+            labeled_resource(label)
+        })
     }
 
     fn invoke_worker(worker: WorkerSpec) -> Box<DynManagedResource<'static>> {
         match worker {
             WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
-                make(CancellationToken::new())
+                make.into_factory()(CancellationToken::new())
             }
         }
     }
@@ -493,10 +905,11 @@ mod result_tests {
     fn worker_is_moved_and_invoked_once() {
         let calls = Arc::new(AtomicUsize::new(0));
         let worker_calls = Arc::clone(&calls);
-        let worker = WorkerSpec::deferred(move |_token| {
-            worker_calls.fetch_add(1, Ordering::SeqCst);
-            labeled_resource("single-use")
-        });
+        let worker =
+            WorkerSpec::observational_deferred("crates.bootstrap.src.module.05", move |_token| {
+                worker_calls.fetch_add(1, Ordering::SeqCst);
+                labeled_resource("single-use")
+            });
         let mut output = DomainModuleResult {
             workers: vec![worker],
             ..DomainModuleResult::default()

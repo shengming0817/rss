@@ -501,6 +501,44 @@ impl AuthorizedL2DrRecoveryPlan {
     pub const fn capability(&self) -> OperatorL2DrRecoveryCapability {
         self.capability
     }
+
+    /// Bind this authorization to the post-restore admission epoch that SQL must consume.
+    pub fn require_admission(
+        self,
+        admission_epoch: primitives::AdmissionEpochId,
+    ) -> RequiredAdmissionFence {
+        RequiredAdmissionFence {
+            authorized: self,
+            admission_epoch,
+        }
+    }
+}
+
+/// Move-only recovery request whose admission epoch is mandatory and cannot be defaulted.
+///
+/// This is a misuse-prevention capability, not a substitute for the durable SQL checks: the
+/// PostgreSQL function validates and consumes the named drained epoch in the apply transaction.
+#[derive(Debug, PartialEq, Eq)]
+pub struct RequiredAdmissionFence {
+    authorized: AuthorizedL2DrRecoveryPlan,
+    admission_epoch: primitives::AdmissionEpochId,
+}
+
+impl RequiredAdmissionFence {
+    /// Borrow the authenticated recovery authorization.
+    pub const fn authorized(&self) -> &AuthorizedL2DrRecoveryPlan {
+        &self.authorized
+    }
+
+    /// Exact post-restore admission epoch that must be atomically consumed.
+    pub const fn admission_epoch(&self) -> primitives::AdmissionEpochId {
+        self.admission_epoch
+    }
+
+    /// Consume into the adapter-owned SQL request parts.
+    pub fn into_parts(self) -> (AuthorizedL2DrRecoveryPlan, primitives::AdmissionEpochId) {
+        (self.authorized, self.admission_epoch)
+    }
 }
 
 /// Closed durable application result.
@@ -729,6 +767,10 @@ pub enum L2DrRecoveryError {
     FactConflict,
     #[error("the original same-id recovery deadline has expired")]
     DeadlineExpired,
+    #[error("the required drained admission fence is missing, stale, or incomplete")]
+    AdmissionFenceRejected,
+    #[error("the admission phase transition conflicts with durable state")]
+    AdmissionPhaseConflict,
     #[error("the recovery executor lost a selected row lock")]
     ApplyLostLock,
     #[error("the L2 DR recovery store is unavailable")]
@@ -761,6 +803,8 @@ impl L2DrRecoveryError {
             Self::FactNotPublished => "fact_not_published",
             Self::FactConflict => "fact_conflict",
             Self::DeadlineExpired => "deadline_expired",
+            Self::AdmissionFenceRejected => "admission_fence_rejected",
+            Self::AdmissionPhaseConflict => "admission_phase_conflict",
             Self::ApplyLostLock => "apply_lost_lock",
             Self::StoreUnavailable => "store_unavailable",
             Self::StoreInvariant => "store_invariant",
@@ -776,7 +820,8 @@ impl L2DrRecoveryError {
             Self::EpochConflict => "epoch_conflict",
             Self::FactNotFound => "event_missing",
             Self::FactNotPublished | Self::FactConflict => "event_state",
-            Self::DeadlineExpired => "deadline",
+            Self::DeadlineExpired | Self::AdmissionFenceRejected => "deadline",
+            Self::AdmissionPhaseConflict => "epoch_conflict",
             Self::DeliveryPolicyMismatch | Self::StoreInvariant => "policy",
             Self::StoreUnavailable | Self::ApplyLostLock => "execution",
             Self::InvalidRestorePoint
@@ -799,7 +844,7 @@ pub trait L2DrRecoveryStore: Send + Sync {
     /// Atomically persist and apply one authenticated, authorized, start-audited recovery plan.
     async fn apply_l2_dr_recovery(
         &self,
-        plan: AuthorizedL2DrRecoveryPlan,
+        required: RequiredAdmissionFence,
     ) -> Result<L2DrRecoveryReceipt, L2DrRecoveryError>;
 }
 

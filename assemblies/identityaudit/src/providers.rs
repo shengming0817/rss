@@ -172,9 +172,10 @@ pub(crate) async fn build(
     };
     auth_audit_output
         .workers
-        .push(bootstrap::WorkerSpec::phase_one(move |token| {
-            DynManagedResource::new_box(pg_sampler.spawn(token))
-        }));
+        .push(bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.identityaudit.src.providers.01",
+            move |token| DynManagedResource::new_box(pg_sampler.spawn(token)),
+        ));
     let auth_audit_sink = auth_audit_sink_constructor
         .finish(auth_audit_output)?
         .transfer(transaction.provider_output_mut());
@@ -202,13 +203,16 @@ pub(crate) async fn build(
             }) as Box<dyn bootstrap::HealthProbe>,
         )]),
         resources: redis.runtime_resources(),
-        workers: Vec::from([bootstrap::WorkerSpec::phase_one(move |token| {
-            DynManagedResource::new_box(RedisReadinessWorker::spawn(
-                redis_for_worker.clone(),
-                token,
-                Arc::clone(&redis_worker_ready),
-            ))
-        })]),
+        workers: Vec::from([bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.identityaudit.src.providers.02",
+            move |token| {
+                DynManagedResource::new_box(RedisReadinessWorker::spawn(
+                    redis_for_worker.clone(),
+                    token,
+                    Arc::clone(&redis_worker_ready),
+                ))
+            },
+        )]),
     };
     let distributed_lock_store = distributed_lock_constructor
         .finish(lock_output)?
@@ -635,25 +639,31 @@ async fn build_vault(
     let worker_signing_binding = signing_binding;
     let worker_dlx_key = dlx_key_name.clone();
     let signer_readiness = Arc::clone(&readiness);
-    let signer_readiness_worker = bootstrap::WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(VaultReadinessWorker::spawn_signer(
-            token,
-            timeout,
-            worker_signer,
-            worker_signing_binding,
-            jwks,
-            signer_readiness,
-        ))
-    });
-    let dlx_readiness_worker = bootstrap::WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(VaultReadinessWorker::spawn_dlx(
-            token,
-            timeout,
-            worker_key_provider,
-            worker_dlx_key,
-            readiness,
-        ))
-    });
+    let signer_readiness_worker = bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.identityaudit.src.providers.03",
+        move |token| {
+            DynManagedResource::new_box(VaultReadinessWorker::spawn_signer(
+                token,
+                timeout,
+                worker_signer,
+                worker_signing_binding,
+                jwks,
+                signer_readiness,
+            ))
+        },
+    );
+    let dlx_readiness_worker = bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.identityaudit.src.providers.04",
+        move |token| {
+            DynManagedResource::new_box(VaultReadinessWorker::spawn_dlx(
+                token,
+                timeout,
+                worker_key_provider,
+                worker_dlx_key,
+                readiness,
+            ))
+        },
+    );
     Ok(VaultProducts {
         signer,
         dlx_key_provider,
@@ -1265,11 +1275,14 @@ mod tests {
         if workers {
             output
                 .workers
-                .push(bootstrap::WorkerSpec::phase_one(|_token| {
-                    DynManagedResource::new_box(TestResource {
-                        shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-                    })
-                }));
+                .push(bootstrap::WorkerSpec::observational_phase_one(
+                    "assemblies.identityaudit.src.providers.05",
+                    |_token| {
+                        DynManagedResource::new_box(TestResource {
+                            shutdowns: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                        })
+                    },
+                ));
         }
         output
     }
@@ -1746,7 +1759,7 @@ mod tests {
         let token = tokio_util::sync::CancellationToken::new();
         let spawn = |worker: bootstrap::WorkerSpec| match worker {
             bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
-                make(token.clone())
+                make.into_factory()(token.clone())
             }
         };
         let signer_worker = spawn(products.signer_readiness_worker);

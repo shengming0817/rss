@@ -15,6 +15,7 @@ fn main() {
             runtimeexec::DomainLifecycleBatch::from_domain_output(
                 bootstrap::DomainModuleResult::default(),
             ),
+            Some(bootstrap::ExpectedWorkerInventory::closed([]).unwrap()),
         ),
         runtimeexec::TotalDrainBudget::new(std::time::Duration::from_secs(20))
         .expect("valid test drain budget"),

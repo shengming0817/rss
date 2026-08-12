@@ -343,6 +343,13 @@ impl<S> AckableSubscriber for SharedAmqpSubscriber<S>
 where
     S: AckableSubscriber + Sync,
 {
+    fn prepare_ackable(
+        &self,
+        topic: Topic,
+    ) -> impl std::future::Future<Output = Result<(), SubscriberError>> + Send {
+        AckableSubscriber::prepare_ackable(self.0.as_ref(), topic)
+    }
+
     async fn subscribe_ackable(
         &self,
         topic: Topic,
@@ -402,11 +409,20 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingSubscriber {
+        prepare_called: AtomicBool,
         subscribe_called: AtomicBool,
         shutdown_calls: AtomicUsize,
     }
 
     impl AckableSubscriber for RecordingSubscriber {
+        fn prepare_ackable(
+            &self,
+            _topic: Topic,
+        ) -> impl std::future::Future<Output = Result<(), SubscriberError>> + Send {
+            self.prepare_called.store(true, Ordering::SeqCst);
+            std::future::ready(Ok(()))
+        }
+
         async fn subscribe_ackable(
             &self,
             _topic: Topic,
@@ -435,6 +451,18 @@ mod tests {
         .await?;
 
         assert!(inner.subscribe_called.load(Ordering::SeqCst));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn shared_subscriber_port_delegates_topology_preparation() -> Result<(), SubscriberError>
+    {
+        let inner = Arc::new(RecordingSubscriber::default());
+        let handle = SharedAmqpSubscriber(Arc::clone(&inner));
+
+        AckableSubscriber::prepare_ackable(&handle, Topic::new("session.created")).await?;
+
+        assert!(inner.prepare_called.load(Ordering::SeqCst));
         Ok(())
     }
 

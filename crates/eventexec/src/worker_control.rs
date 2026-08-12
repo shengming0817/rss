@@ -26,10 +26,7 @@ impl DrainSnapshot {
     }
 }
 
-/// Shared observation state for worker-specific pause controls.
-///
-/// This is not a worker runner: relay and reconcile retain their existing loops and merely
-/// publish admission acknowledgement plus current work count through this watch value.
+/// Reconcile-local observation state retained until that independent worker is migrated.
 #[derive(Clone)]
 pub(crate) struct WorkerDrainObservation {
     state: watch::Sender<DrainSnapshot>,

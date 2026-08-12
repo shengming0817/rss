@@ -808,6 +808,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
     topic: impl Into<String>,
     consumer_group: impl Into<String>,
     tenant_authority: Arc<TenantAuthority>,
+    admission: primitives::ConsumerAdmission,
     handler: H,
     lease_cfg: LeaseConfig,
 ) where
@@ -849,6 +850,7 @@ pub async fn register_command_handler<S, R, H, Fut>(
             })
         },
         lease_cfg,
+        admission,
     )
     .await;
 }
@@ -911,6 +913,12 @@ mod tests {
     /// 测试用 lease 配置（续租间隔大，命令消费测试中续租不触发）。
     fn lease_cfg() -> LeaseConfig {
         LeaseConfig::from_ttl(std::time::Duration::from_secs(60))
+    }
+
+    fn consumer_admission() -> primitives::ConsumerAdmission {
+        let (control, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+        assert!(control.start_running().is_ok());
+        consumer
     }
 
     #[allow(clippy::expect_used)]
@@ -1351,6 +1359,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            consumer_admission(),
             move |req: DoThing| {
                 let seen2 = seen2.clone();
                 async move {
@@ -1393,6 +1402,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            consumer_admission(),
             move |_req: DoThing| {
                 let calls2 = calls2.clone();
                 async move {
@@ -1429,6 +1439,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            consumer_admission(),
             move |_req: DoThing| {
                 let calls2 = calls2.clone();
                 async move {
@@ -1461,6 +1472,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            consumer_admission(),
             move |_req: DoThing| async move { HandleResult::ack() },
             lease_cfg(),
         )
@@ -1486,6 +1498,7 @@ mod tests {
             "seed.commands.do-thing",
             "seed.do-thing.consumer",
             tenant_authority(),
+            consumer_admission(),
             move |_req: DoThing| {
                 let calls2 = calls2.clone();
                 async move {

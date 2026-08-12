@@ -419,7 +419,7 @@ fn keyprovider_readiness_worker(
     period: Duration,
     ready: Arc<AtomicBool>,
 ) -> WorkerSpec {
-    WorkerSpec::phase_one(move |token| {
+    WorkerSpec::observational_phase_one("composition.settings.src.lib.01", move |token| {
         DynManagedResource::new_box(spawn_keyprovider_readiness_sampler(
             provider, key_name, period, token, ready,
         ))
@@ -465,7 +465,7 @@ fn secret_resolver_readiness_worker(
     period: Duration,
     ready: Arc<AtomicBool>,
 ) -> WorkerSpec {
-    WorkerSpec::phase_one(move |token| {
+    WorkerSpec::observational_phase_one("composition.settings.src.lib.02", move |token| {
         DynManagedResource::new_box(spawn_secret_resolver_readiness_sampler(
             resolver, targets, period, token, ready,
         ))
@@ -881,7 +881,9 @@ mod tests {
     }
 
     fn readiness_test_worker() -> WorkerSpec {
-        WorkerSpec::phase_one(|_| DynManagedResource::new_box(ReadinessTestWorker))
+        WorkerSpec::observational_phase_one("composition.settings.src.lib.03", |_| {
+            DynManagedResource::new_box(ReadinessTestWorker)
+        })
     }
 
     struct FailingKeyProvider;

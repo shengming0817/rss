@@ -48,6 +48,7 @@ pub(crate) struct PlacedRuntimePlan {
     events: LocalEventExecutionPlan,
     security: RuntimeSecurityExecutionPlan,
     placement: PlacementExecutionPlan,
+    expected_workers: bootstrap::ExpectedWorkerInventory,
 }
 
 /// Process-owned listener security capability minted only by placement.
@@ -150,6 +151,7 @@ pub(crate) struct PlacedRuntimeParts {
     pub(crate) events: LocalEventExecutionPlan,
     pub(crate) security: RuntimeSecurityExecutionPlan,
     pub(crate) placement: PlacementExecutionPlan,
+    pub(crate) expected_workers: bootstrap::ExpectedWorkerInventory,
 }
 
 impl PlacedRuntimePlan {
@@ -162,6 +164,7 @@ impl PlacedRuntimePlan {
             events: self.events,
             security: self.security,
             placement: self.placement,
+            expected_workers: self.expected_workers,
         }
     }
 }
@@ -429,6 +432,7 @@ impl RuntimePlan {
             requires_audit_consumer_key,
             required_amqp_domains,
         };
+        let expected_workers = expected_runtime_workers(&self, &events, &local_domains)?;
         let mut plans = Vec::new();
         let mut catalog = Vec::new();
         anyhow::ensure!(
@@ -481,6 +485,7 @@ impl RuntimePlan {
             events,
             security: RuntimeSecurityExecutionPlan { _private: () },
             placement,
+            expected_workers,
         })
     }
 
@@ -515,6 +520,63 @@ impl RuntimePlan {
     ) -> ListenerExecutionPlan {
         listener_execution_plan_from_typed(&self.plan, Some(placement))
     }
+}
+
+fn expected_runtime_workers(
+    plan: &RuntimePlan,
+    events: &LocalEventExecutionPlan,
+    local_domains: &[AssemblyDomain],
+) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
+    use bootstrap::{WorkerAdmissionLane as Lane, WorkerDescriptor as Worker};
+
+    let mut expected = vec![
+        Worker::expected("assemblies.runtime.src.event_transport.03", Lane::Writes),
+        Worker::expected("assemblies.runtime.src.phase.maintenance.01", Lane::Writes),
+        Worker::expected("assemblies.runtime.src.phase.maintenance.02", Lane::Writes),
+        Worker::expected("assemblies.runtime.src.phase.maintenance.03", Lane::Writes),
+    ];
+    if events.is_active() {
+        expected.extend([
+            Worker::expected("assemblies.runtime.src.event_transport.07", Lane::Writes),
+            Worker::expected("assemblies.runtime.src.event_transport.08", Lane::Writes),
+        ]);
+    }
+    for producer in events.local_producers() {
+        expected.push(Worker::expected(
+            format!("outbox-relay:{}", producer.as_str()),
+            Lane::Relay,
+        ));
+    }
+    for event in generated::event::EVENTS {
+        for subscription in event.subscriptions().iter().filter(|subscription| {
+            local_domains
+                .iter()
+                .any(|domain| domain.as_str() == subscription.consumer())
+        }) {
+            expected.push(Worker::expected(
+                format!(
+                    "event-consumer:event-consumer:{}:{}",
+                    subscription.consumer(),
+                    event.topic()
+                ),
+                Lane::Consumer,
+            ));
+        }
+    }
+    let sagas = plan.workflow_runtime().sagas();
+    if !sagas.is_empty() {
+        expected.push(Worker::expected(
+            "assemblies.runtime.src.phase.maintenance.04",
+            Lane::Writes,
+        ));
+    }
+    for spec in sagas.specs() {
+        expected.push(Worker::expected(
+            format!("saga:{}:{}", spec.domain(), spec.contract_id()),
+            Lane::Writes,
+        ));
+    }
+    bootstrap::ExpectedWorkerInventory::closed(expected).map_err(Into::into)
 }
 
 fn listener_execution_plan_from_typed(

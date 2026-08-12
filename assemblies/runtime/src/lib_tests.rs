@@ -469,7 +469,7 @@ fn worker_names(workers: Vec<bootstrap::WorkerSpec>) -> Vec<String> {
         .into_iter()
         .map(|worker| match worker {
             bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
-                make(token.clone()).name().to_owned()
+                make.into_factory()(token.clone()).name().to_owned()
             }
         })
         .collect()
@@ -488,7 +488,10 @@ fn harness_worker(name: &'static str) -> bootstrap::WorkerSpec {
 }
 
 fn harness_worker_owned(name: String) -> bootstrap::WorkerSpec {
-    bootstrap::WorkerSpec::phase_one(move |_token| harness_resource_owned(name.clone()))
+    bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.runtime.src.lib_tests.01",
+        move |_token| harness_resource_owned(name.clone()),
+    )
 }
 
 fn phase_order_transcript_for_harness() -> String {
@@ -1263,6 +1266,7 @@ async fn assembled_admin_audit_read_uses_identity_authorizer_and_masks_sensitive
     let domains: [&dyn bootstrap::Domain; 2] = [&identity_domain, &audit_domain];
     let mut registry = bootstrap::compose(&domains)?;
     registry.register_primary_authorizer(authorizer)?;
+    registry.install_write_admission(primitives::prepare_dr_admission_controls().into_parts().3)?;
     let providers =
         routes::TokenProviderBindings::new(None, None, Some(runtime_test_provider()), None);
     let snapshot = crate::config::test_snapshot(&[
@@ -1404,8 +1408,10 @@ fn identity_maintenance_module_emits_auth_grant_sweeper_probe_and_worker() {
     }
 
     let health = Arc::new(SweeperHealth::starting());
-    let worker =
-        bootstrap::WorkerSpec::phase_one(|_| diport::DynManagedResource::new_box(NoopResource));
+    let worker = bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.runtime.src.lib_tests.02",
+        |_| diport::DynManagedResource::new_box(NoopResource),
+    );
     let result = sweeper_module_result(worker, health, AUTH_GRANT_SWEEPER_PROBE_NAME)
         .expect("auth-grant sweeper module result");
     assert_eq!(result.probes.len(), 1);
@@ -1422,8 +1428,11 @@ fn identity_maintenance_module_emits_auth_grant_sweeper_probe_and_worker() {
 #[allow(clippy::expect_used)]
 async fn revocation_provider_module_registers_exact_probe_and_managed_worker() {
     let pg = ::postgres::PgRuntimeHandle::for_module_test();
-    let mut result =
-        wire_revocation_sweeper(&pg).expect("receipt-backed revocation sweeper module result");
+    let mut result = wire_revocation_sweeper(
+        &pg,
+        &primitives::prepare_dr_admission_controls().into_parts().3,
+    )
+    .expect("receipt-backed revocation sweeper module result");
     assert_eq!(result.probes.len(), 1);
     assert_eq!(result.probes[0].0.as_str(), REVOCATION_SWEEPER_PROBE_NAME);
     assert!(result.resources.is_empty());
@@ -1433,7 +1442,7 @@ async fn revocation_provider_module_registers_exact_probe_and_managed_worker() {
     let root = CancellationToken::new();
     let resource = match worker {
         bootstrap::WorkerSpec::PhaseOne(make) | bootstrap::WorkerSpec::Deferred(make) => {
-            make(root.clone())
+            make.into_factory()(root.clone())
         }
     };
     assert_eq!(resource.name(), REVOCATION_SWEEPER_WORKER_NAME);
@@ -1544,6 +1553,7 @@ async fn auth_grant_sweeper_health_tracks_first_success_error_and_exit() {
         Duration::from_secs(100),
         token.clone(),
         Arc::clone(&health),
+        primitives::prepare_dr_admission_controls().into_parts().3,
     ));
 
     wait_for_sweeper_calls(&calls, 1).await;
@@ -1587,6 +1597,7 @@ async fn auth_grant_sweeper_delays_missed_ticks_instead_of_bursting() {
         Duration::from_secs(100),
         token.clone(),
         Arc::clone(&health),
+        primitives::prepare_dr_admission_controls().into_parts().3,
     ));
 
     wait_for_sweeper_calls(&calls, 1).await;
@@ -1628,6 +1639,7 @@ async fn revocation_sweeper_health_tracks_success_error_recovery_and_exit() {
         Duration::from_secs(100),
         token.clone(),
         Arc::clone(&health),
+        primitives::prepare_dr_admission_controls().into_parts().3,
     ));
 
     wait_for_sweeper_calls(&calls, 1).await;
@@ -1678,6 +1690,7 @@ async fn revocation_sweeper_delays_missed_ticks_instead_of_bursting() {
         Duration::from_secs(100),
         token.clone(),
         Arc::clone(&health),
+        primitives::prepare_dr_admission_controls().into_parts().3,
     ));
 
     wait_for_sweeper_calls(&calls, 1).await;

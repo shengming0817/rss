@@ -190,6 +190,11 @@ pub async fn run_fixture(config: FixtureConfig) -> anyhow::Result<()> {
 /// this helper substitutes only the worker implementation for component-level lifecycle evidence.
 pub fn projection_lifecycle_output() -> anyhow::Result<bootstrap::DomainModuleResult> {
     let plan = crate::plan::SettingsOnlyPlan::bundled()?.bind_fixture_projection()?;
-    crate::projection::ProjectionLifecycleBatch::from_runtime_plan(plan.workflow_runtime())
-        .map(crate::projection::ProjectionLifecycleBatch::into_output)
+    let (_control, _relay, _consumer, write_admission) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    crate::projection::ProjectionLifecycleBatch::from_runtime_plan(
+        plan.workflow_runtime(),
+        &write_admission,
+    )
+    .map(crate::projection::ProjectionLifecycleBatch::into_output)
 }

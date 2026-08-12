@@ -68,15 +68,19 @@ impl diport::DiPortEffect for diport::DynAckableSubscriber<'_>
 pub type diport::DynAckableSubscriber<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynAckableSubscriber<'_>::Privilege = diport::LocalPrivilege
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for &diport::DynAckableSubscriber<'dynosaur_struct> where Self: core::marker::Send
+pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for &mut diport::DynAckableSubscriber<'dynosaur_struct> where Self: core::marker::Send
+pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>> where Self: core::marker::Send
+pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for diport::DynAckableSubscriber<'dynosaur_struct>
+pub fn diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynAckableSubscriber<'dynosaur_struct>
@@ -117,24 +121,31 @@ impl<'dynosaur_struct> !core::marker::UnsafeUnpin for diport::DynAcker<'dynosaur
 impl<'dynosaur_struct> !core::panic::unwind_safe::RefUnwindSafe for diport::DynAcker<'dynosaur_struct>
 impl<'dynosaur_struct> !core::panic::unwind_safe::UnwindSafe for diport::DynAcker<'dynosaur_struct>
 pub trait diport::acker::AckableSubscriber: core::marker::Send
+pub fn diport::acker::AckableSubscriber::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::acker::AckableSubscriber::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::acker::AckableSubscriber::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for &diport::DynAckableSubscriber<'dynosaur_struct> where Self: core::marker::Send
+pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for &mut diport::DynAckableSubscriber<'dynosaur_struct> where Self: core::marker::Send
+pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>> where Self: core::marker::Send
+pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for diport::DynAckableSubscriber<'dynosaur_struct>
+pub fn diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 pub trait diport::acker::AckableSubscriberLocal
+pub fn diport::acker::AckableSubscriberLocal::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>>
 pub async fn diport::acker::AckableSubscriberLocal::shutdown(&self) -> core::result::Result<(), diport::subscriber::SubscriberError>
 pub async fn diport::acker::AckableSubscriberLocal::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>
 impl<TraitVariantBlanketType: diport::acker::AckableSubscriber> diport::acker::AckableSubscriberLocal for TraitVariantBlanketType
+pub fn TraitVariantBlanketType::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>>
 pub async fn TraitVariantBlanketType::shutdown(&self) -> core::result::Result<(), diport::subscriber::SubscriberError>
 pub async fn TraitVariantBlanketType::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>
 pub trait diport::acker::Acker: core::marker::Send
@@ -7578,15 +7589,19 @@ impl diport::DiPortEffect for diport::DynAckableSubscriber<'_>
 pub type diport::DynAckableSubscriber<'_>::Effect = diport::WorkflowEffect
 pub type diport::DynAckableSubscriber<'_>::Privilege = diport::LocalPrivilege
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for &diport::DynAckableSubscriber<'dynosaur_struct> where Self: core::marker::Send
+pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for &mut diport::DynAckableSubscriber<'dynosaur_struct> where Self: core::marker::Send
+pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>> where Self: core::marker::Send
+pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for diport::DynAckableSubscriber<'dynosaur_struct>
+pub fn diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> !core::marker::Freeze for diport::DynAckableSubscriber<'dynosaur_struct>
@@ -10265,18 +10280,23 @@ pub const diport::MAX_RATE_LIMIT_QUOTA: u32
 pub const diport::RESERVED_METADATA_KEYS: [&str; 10]
 pub const diport::SERVICE_TOKEN_TENANT_HEADER: &str
 pub trait diport::AckableSubscriber: core::marker::Send
+pub fn diport::AckableSubscriber::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::AckableSubscriber::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::AckableSubscriber::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for &diport::DynAckableSubscriber<'dynosaur_struct> where Self: core::marker::Send
+pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for &mut diport::DynAckableSubscriber<'dynosaur_struct> where Self: core::marker::Send
+pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn &mut diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>> where Self: core::marker::Send
+pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn alloc::boxed::Box<diport::DynAckableSubscriber<'dynosaur_struct>>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 impl<'dynosaur_struct> diport::acker::AckableSubscriber for diport::DynAckableSubscriber<'dynosaur_struct>
+pub fn diport::DynAckableSubscriber<'dynosaur_struct>::prepare_ackable(&self, diport::publisher::Topic) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::shutdown(&self) -> impl core::future::future::Future<Output = core::result::Result<(), diport::subscriber::SubscriberError>> + core::marker::Send
 pub fn diport::DynAckableSubscriber<'dynosaur_struct>::subscribe_ackable(&self, diport::publisher::Topic, tokio_util::sync::cancellation_token::CancellationToken) -> impl core::future::future::Future<Output = core::result::Result<diport::acker::DeliveryStream, diport::subscriber::SubscriberError>> + core::marker::Send
 pub trait diport::Acker: core::marker::Send

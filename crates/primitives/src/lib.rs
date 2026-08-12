@@ -1,4 +1,4 @@
-//! primitives — RSS 引擎层纯计算原语（crypto / authplan / healthz / circuitbreaker）。
+//! primitives — RSS 引擎层原语（crypto / authplan / healthz / circuitbreaker / DR admission）。
 //!
 //! 引擎层 L0：trait 均 sync 静态分发、非 DI port（ADR-004 C1）；值类型字段私有、不 derive serde（C6）。
 //! DI port（`Clock` 位参禁默认系统时钟、`ManagedResource` LIFO，ADR-001/ADR-003）**不在此**——
@@ -10,6 +10,7 @@
 pub mod authplan;
 pub mod circuitbreaker;
 pub mod crypto;
+pub mod dr_admission;
 pub mod healthz;
 
 pub use authplan::{
@@ -22,6 +23,11 @@ pub use circuitbreaker::{
 };
 pub use crypto::{
     Digest, DigestAlgorithm, Digester, Mac, MacAlgorithm, MacKey, MacVerifier, constant_time_eq,
+};
+pub use dr_admission::{
+    AdmissionEpochId, AdmissionError, AdmissionPermit, AdmissionSnapshot, ConsumerAdmission,
+    ConsumerLane, LocalAdmissionPhase, PreparedAdmissionControls, ProcessAdmissionControl,
+    RelayAdmission, RelayLane, WriteAdmission, WriteLane, prepare_dr_admission_controls,
 };
 pub use healthz::{HealthCheck, HealthReport, HealthStatus, ProbeName, ProbeNameError};
 

@@ -520,6 +520,7 @@ async fn run_sweeper_loop(
     timeout: Duration,
     worker_token: CancellationToken,
     health: Arc<SweeperHealth>,
+    admission: primitives::WriteAdmission,
 ) {
     let _stopped = SweeperStoppedGuard(Arc::clone(&health));
     let mut ticker = tokio::time::interval(period);
@@ -529,6 +530,9 @@ async fn run_sweeper_loop(
             biased;
             () = worker_token.cancelled() => break,
             _ = ticker.tick() => {
+                let Ok(_permit) = admission.try_enter() else {
+                    continue;
+                };
                 let started = tokio::time::Instant::now();
                 let result = tokio::select! {
                     biased;
@@ -568,6 +572,7 @@ pub(crate) async fn run_auth_grant_sweeper_loop(
     timeout: Duration,
     worker_token: CancellationToken,
     health: Arc<SweeperHealth>,
+    admission: primitives::WriteAdmission,
 ) {
     run_sweeper_loop(
         AuthGrantSweepTask { runner: sweeper },
@@ -575,6 +580,7 @@ pub(crate) async fn run_auth_grant_sweeper_loop(
         timeout,
         worker_token,
         health,
+        admission,
     )
     .await;
 }
@@ -585,6 +591,7 @@ pub(crate) async fn run_revocation_sweeper_loop(
     timeout: Duration,
     worker_token: CancellationToken,
     health: Arc<SweeperHealth>,
+    admission: primitives::WriteAdmission,
 ) {
     run_sweeper_loop(
         RevocationSweepTask { runner: sweeper },
@@ -592,6 +599,7 @@ pub(crate) async fn run_revocation_sweeper_loop(
         timeout,
         worker_token,
         health,
+        admission,
     )
     .await;
 }
@@ -601,6 +609,7 @@ fn spawn_auth_grant_sweeper(
     period: Duration,
     token: CancellationToken,
     health: Arc<SweeperHealth>,
+    admission: primitives::WriteAdmission,
 ) -> SweeperWorker {
     let child = token.child_token();
     let worker_token = child.clone();
@@ -610,6 +619,7 @@ fn spawn_auth_grant_sweeper(
         AUTH_GRANT_SWEEP_TIMEOUT,
         worker_token,
         health,
+        admission,
     ));
     SweeperWorker {
         name: AUTH_GRANT_SWEEPER_WORKER_NAME,
@@ -640,18 +650,25 @@ pub(crate) fn sweeper_module_result(
 pub(crate) fn wire_auth_grant_sweeper(
     pg: &PgRuntimeHandle,
     period: Duration,
+    write_admission: &primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
     let sweeper = pg.infra().auth_grant_sweeper();
     let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
-    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(spawn_auth_grant_sweeper(
-            sweeper,
-            period,
-            token,
-            worker_health,
-        ))
-    });
+    let worker_admission = write_admission.clone();
+    let worker = bootstrap::WorkerSpec::writes_phase_one(
+        "assemblies.runtime.src.phase.maintenance.01",
+        write_admission,
+        move |token, _write_admission| {
+            DynManagedResource::new_box(spawn_auth_grant_sweeper(
+                sweeper,
+                period,
+                token,
+                worker_health,
+                worker_admission,
+            ))
+        },
+    );
     tracing::info!(
         interval_ms = period.as_millis(),
         "auth-grant sweeper interval configured"
@@ -661,52 +678,68 @@ pub(crate) fn wire_auth_grant_sweeper(
 
 pub(crate) fn wire_service_token_replay_sweeper(
     pg: &PgRuntimeHandle,
+    write_admission: &primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
     let sweeper = pg.infra().service_token_replay_sweeper();
     let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
-    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
-        let child = token.child_token();
-        let worker_token = child.clone();
-        let health = worker_health;
-        let handle = tokio::spawn(run_sweeper_loop(
-            ServiceTokenReplaySweepTask { sweeper },
-            SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL,
-            SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT,
-            worker_token,
-            health,
-        ));
-        DynManagedResource::new_box(SweeperWorker {
-            name: SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            token: child,
-        })
-    });
+    let worker_admission = write_admission.clone();
+    let worker = bootstrap::WorkerSpec::writes_phase_one(
+        "assemblies.runtime.src.phase.maintenance.02",
+        write_admission,
+        move |token, _write_admission| {
+            let child = token.child_token();
+            let worker_token = child.clone();
+            let health = worker_health;
+            let handle = tokio::spawn(run_sweeper_loop(
+                ServiceTokenReplaySweepTask { sweeper },
+                SERVICE_TOKEN_REPLAY_SWEEP_INTERVAL,
+                SERVICE_TOKEN_REPLAY_SWEEP_TIMEOUT,
+                worker_token,
+                health,
+                worker_admission,
+            ));
+            DynManagedResource::new_box(SweeperWorker {
+                name: SERVICE_TOKEN_REPLAY_SWEEPER_WORKER_NAME,
+                handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
+                token: child,
+            })
+        },
+    );
     sweeper_module_result(worker, health, SERVICE_TOKEN_REPLAY_SWEEPER_PROBE_NAME)
 }
 
 /// Wire the receipt-backed, fixed certificate-revocation retention function into one real probe
 /// and one managed worker. There is no runtime batch/grace override: both remain migration-owned.
-pub(crate) fn wire_revocation_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<DomainModuleResult> {
+pub(crate) fn wire_revocation_sweeper(
+    pg: &PgRuntimeHandle,
+    write_admission: &primitives::WriteAdmission,
+) -> anyhow::Result<DomainModuleResult> {
     let sweeper = pg.infra().revocation_sweeper();
     let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
-    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
-        let child = token.child_token();
-        let worker_token = child.clone();
-        let handle = tokio::spawn(run_revocation_sweeper_loop(
-            sweeper,
-            REVOCATION_SWEEP_INTERVAL,
-            REVOCATION_SWEEP_TIMEOUT,
-            worker_token,
-            worker_health,
-        ));
-        DynManagedResource::new_box(SweeperWorker {
-            name: REVOCATION_SWEEPER_WORKER_NAME,
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            token: child,
-        })
-    });
+    let worker_admission = write_admission.clone();
+    let worker = bootstrap::WorkerSpec::writes_phase_one(
+        "assemblies.runtime.src.phase.maintenance.03",
+        write_admission,
+        move |token, _write_admission| {
+            let child = token.child_token();
+            let worker_token = child.clone();
+            let handle = tokio::spawn(run_revocation_sweeper_loop(
+                sweeper,
+                REVOCATION_SWEEP_INTERVAL,
+                REVOCATION_SWEEP_TIMEOUT,
+                worker_token,
+                worker_health,
+                worker_admission,
+            ));
+            DynManagedResource::new_box(SweeperWorker {
+                name: REVOCATION_SWEEPER_WORKER_NAME,
+                handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
+                token: child,
+            })
+        },
+    );
     sweeper_module_result(worker, health, REVOCATION_SWEEPER_PROBE_NAME)
 }
 
@@ -715,6 +748,7 @@ pub(crate) fn wire_revocation_sweeper(pg: &PgRuntimeHandle) -> anyhow::Result<Do
 pub(crate) fn wire_saga_terminal_sweeper(
     pg: &PgRuntimeHandle,
     active_saga_count: usize,
+    write_admission: &primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
     if active_saga_count == 0 {
         return Ok(DomainModuleResult::default());
@@ -722,22 +756,28 @@ pub(crate) fn wire_saga_terminal_sweeper(
     let sweeper = pg.infra().saga_terminal_sweeper();
     let health = Arc::new(SweeperHealth::starting());
     let worker_health = Arc::clone(&health);
-    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
-        let child = token.child_token();
-        let worker_token = child.clone();
-        let handle = tokio::spawn(run_sweeper_loop(
-            SagaTerminalSweepTask { runner: sweeper },
-            SAGA_TERMINAL_SWEEP_INTERVAL,
-            SAGA_TERMINAL_SWEEP_TIMEOUT,
-            worker_token,
-            worker_health,
-        ));
-        DynManagedResource::new_box(SweeperWorker {
-            name: SAGA_TERMINAL_SWEEPER_WORKER_NAME,
-            handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
-            token: child,
-        })
-    });
+    let worker_admission = write_admission.clone();
+    let worker = bootstrap::WorkerSpec::writes_phase_one(
+        "assemblies.runtime.src.phase.maintenance.04",
+        write_admission,
+        move |token, _write_admission| {
+            let child = token.child_token();
+            let worker_token = child.clone();
+            let handle = tokio::spawn(run_sweeper_loop(
+                SagaTerminalSweepTask { runner: sweeper },
+                SAGA_TERMINAL_SWEEP_INTERVAL,
+                SAGA_TERMINAL_SWEEP_TIMEOUT,
+                worker_token,
+                worker_health,
+                worker_admission,
+            ));
+            DynManagedResource::new_box(SweeperWorker {
+                name: SAGA_TERMINAL_SWEEPER_WORKER_NAME,
+                handle: tokio::sync::Mutex::new(Some(diport::OwnedTask::new(handle))),
+                token: child,
+            })
+        },
+    );
     sweeper_module_result(worker, health, SAGA_TERMINAL_SWEEPER_PROBE_NAME)
 }
 
@@ -818,8 +858,12 @@ mod saga_terminal_tests {
     async fn omitted_or_disabled_sagas_register_no_retention_and_many_register_one() {
         let pg = postgres::PgRuntimeHandle::for_module_test();
         for active_saga_count in [0, 1, 3] {
-            let result = wire_saga_terminal_sweeper(&pg, active_saga_count)
-                .expect("terminal Saga retention module result");
+            let result = wire_saga_terminal_sweeper(
+                &pg,
+                active_saga_count,
+                &primitives::prepare_dr_admission_controls().into_parts().3,
+            )
+            .expect("terminal Saga retention module result");
             let expected = usize::from(active_saga_count > 0);
             assert_eq!(result.probes.len(), expected);
             assert_eq!(result.workers.len(), expected);

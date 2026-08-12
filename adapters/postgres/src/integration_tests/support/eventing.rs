@@ -2093,6 +2093,11 @@ pub(in super::super) fn conf_lease_cfg() -> LeaseConfig {
     ))
 }
 
+pub(in super::super) fn conf_consumer_admission() -> primitives::ConsumerAdmission {
+    let (_, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+    consumer
+}
+
 pub(in super::super) fn conf_requeue_handler(
     calls: Arc<AtomicU32>,
 ) -> impl Fn(Message) -> futures::future::BoxFuture<'static, HandleResult> + Send + Sync {
@@ -2230,6 +2235,7 @@ pub(in super::super) async fn conf_duplicate_delivery(
         &(meta),
         &(conf_ack_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
+        conf_consumer_admission(),
     )
     .await;
 
@@ -2263,6 +2269,7 @@ pub(in super::super) async fn conf_poison_delivery(
         &(conf_consumer_meta(&group)),
         &(conf_requeue_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
+        conf_consumer_admission(),
     )
     .await;
 
@@ -2298,6 +2305,7 @@ pub(in super::super) async fn conf_dlx_failure(
         &(conf_consumer_meta(&group)),
         &(conf_requeue_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
+        conf_consumer_admission(),
     )
     .await;
 
@@ -2336,6 +2344,7 @@ pub(in super::super) async fn conf_malformed_delivery(
         &(conf_consumer_meta(&group)),
         &(conf_ack_handler(Arc::clone(&calls))),
         conf_lease_cfg(),
+        conf_consumer_admission(),
     )
     .await;
 

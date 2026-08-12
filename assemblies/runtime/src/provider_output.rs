@@ -36,9 +36,10 @@ pub(crate) fn build_pg_runtime_module(
     period: Duration,
 ) -> DomainModuleResult {
     let (resources, sampler_factory) = owner.into_runtime_parts(period);
-    let readiness_sampler = WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(sampler_factory.spawn(token))
-    });
+    let readiness_sampler = WorkerSpec::observational_phase_one(
+        "assemblies.runtime.src.provider_output.01",
+        move |token| DynManagedResource::new_box(sampler_factory.spawn(token)),
+    );
     DomainModuleResult {
         resources,
         workers: vec![readiness_sampler],
@@ -63,15 +64,18 @@ pub(crate) async fn identity_signer_module(
         .context("parse identity signer readiness probe")?;
     let worker_signer = Arc::clone(&signer);
     let worker_health = Arc::clone(&health);
-    let worker = WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(IdentitySignerReadinessWorker::spawn(
-            token,
-            worker_signer,
-            binding,
-            jwks,
-            worker_health,
-        ))
-    });
+    let worker = WorkerSpec::observational_phase_one(
+        "assemblies.runtime.src.provider_output.02",
+        move |token| {
+            DynManagedResource::new_box(IdentitySignerReadinessWorker::spawn(
+                token,
+                worker_signer,
+                binding,
+                jwks,
+                worker_health,
+            ))
+        },
+    );
     Ok(DomainModuleResult {
         probes: vec![(
             probe_name.clone(),
@@ -225,8 +229,9 @@ impl BuiltDeviceRevocationProvider {
     pub(crate) fn build(
         pg: &PgRuntimeHandle,
         permit: DeviceRevocationStorePermit,
+        write_admission: &primitives::WriteAdmission,
     ) -> anyhow::Result<Self> {
-        let module = crate::phase::wire_revocation_sweeper(pg)
+        let module = crate::phase::wire_revocation_sweeper(pg, write_admission)
             .context("wire certificate revocation sweeper")?;
         Self::from_module(pg, permit, module).map_err(anyhow::Error::new)
     }
@@ -1233,10 +1238,14 @@ impl CompletedProviderBuild {
         Ok(())
     }
 
-    pub(crate) fn into_launch_batches(self) -> runtimeexec::LaunchLifecycleBatches {
+    pub(crate) fn into_launch_batches(
+        self,
+        expected_workers: bootstrap::ExpectedWorkerInventory,
+    ) -> runtimeexec::LaunchLifecycleBatches {
         runtimeexec::LaunchLifecycleBatches::new(
             runtimeexec::ProviderLifecycleBatch::from_provider_output(self.provider_module),
             runtimeexec::DomainLifecycleBatch::from_domain_output(self.domain_module),
+            Some(expected_workers),
         )
     }
 
@@ -1869,14 +1878,20 @@ mod tests {
     }
 
     fn worker(name: &'static str) -> WorkerSpec {
-        WorkerSpec::phase_one(move |_| resource(name))
+        WorkerSpec::observational_phase_one(
+            "assemblies.runtime.src.provider_output.03",
+            move |_| resource(name),
+        )
     }
 
     fn counting_worker(name: &'static str, starts: Arc<AtomicUsize>) -> WorkerSpec {
-        WorkerSpec::phase_one(move |_| {
-            starts.fetch_add(1, Ordering::SeqCst);
-            resource(name)
-        })
+        WorkerSpec::observational_phase_one(
+            "assemblies.runtime.src.provider_output.04",
+            move |_| {
+                starts.fetch_add(1, Ordering::SeqCst);
+                resource(name)
+            },
+        )
     }
 
     #[allow(clippy::expect_used)]
@@ -1946,6 +1961,7 @@ mod tests {
             dispatch
                 .device_revocation_store()
                 .expect("device revocation-store permit"),
+            &primitives::prepare_dr_admission_controls().into_parts().3,
         )
         .expect("typed device revocation provider");
         let (_store, revocation_output) = built_revocation.into_parts();
@@ -2093,7 +2109,7 @@ mod tests {
             .into_iter()
             .map(|worker| match worker {
                 WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => {
-                    make(token.clone()).name().to_owned()
+                    make.into_factory()(token.clone()).name().to_owned()
                 }
             })
             .collect()

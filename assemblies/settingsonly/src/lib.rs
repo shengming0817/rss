@@ -384,6 +384,14 @@ mod tests {
         assert!(output.probes.is_empty());
         assert!(output.resources.is_empty());
         assert!(output.workers.is_empty());
+        let (control, _relay, _consumer, writes) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        control
+            .start_running()
+            .expect("test durable lineage is clear");
+        registry
+            .install_write_admission(writes)
+            .expect("install test write admission");
         let routes = registry
             .finalize_routes()
             .expect("settingsonly config CUD routes finalize");

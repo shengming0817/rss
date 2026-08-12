@@ -557,6 +557,9 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
         dlx_payload_protector()?,
     );
     let relay_health = Arc::new(WorkerHealth::healthy());
+    let (control, relay_admission, _consumer, _writes) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    control.start_running()?;
     let relay = eventexec::spawn_relay(
         "settings-durable-e2e-relay".to_string(),
         outbox,
@@ -565,6 +568,7 @@ async fn settings_config_publish_durable_e2e() -> TestResult {
         CancellationToken::new(),
         Arc::clone(&relay_health),
         Arc::clone(&telemetry) as Arc<dyn OutboxMetrics>,
+        relay_admission,
     );
 
     wait_until(Duration::from_secs(10), || {

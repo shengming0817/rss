@@ -3333,6 +3333,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "vault",
  "vocab",
  "zeroize",
@@ -4712,6 +4713,8 @@ version = "0.0.0"
 dependencies = [
  "subtle",
  "thiserror",
+ "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -6114,6 +6117,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-subscriber",
+ "uuid",
  "vault",
  "vocab",
  "wiremock",

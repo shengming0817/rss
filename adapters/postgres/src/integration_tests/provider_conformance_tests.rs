@@ -207,6 +207,7 @@ async fn postgres_consumer_commit_ack_behavior() -> TestResult {
         &(conf_consumer_meta(&group)),
         &(conf_ack_handler(Arc::new(AtomicU32::new(0)))),
         conf_lease_cfg(),
+        conf_consumer_admission(),
     )
     .await;
 
@@ -228,6 +229,7 @@ async fn postgres_consumer_commit_ack_behavior() -> TestResult {
         &(conf_consumer_meta(&group)),
         &(conf_requeue_handler(Arc::new(AtomicU32::new(0)))),
         conf_lease_cfg(),
+        conf_consumer_admission(),
     )
     .await;
 

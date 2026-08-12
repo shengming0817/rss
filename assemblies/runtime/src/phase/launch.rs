@@ -28,7 +28,8 @@ impl Finalized<'_> {
                 // This is the only Finalized consumer and the only phase allowed to construct the
                 // shared kernel's single-use launch plan.
                 let trace_exporter = context.take_trace_export().map(DynManagedResource::new_box);
-                let lifecycle_batches = provider_build.into_launch_batches();
+                let expected_workers = context.take_expected_workers()?;
+                let lifecycle_batches = provider_build.into_launch_batches(expected_workers);
                 let config = context.config();
                 let adapter = crate::launch::RuntimeLaunchAdapter::new(
                     listeners,

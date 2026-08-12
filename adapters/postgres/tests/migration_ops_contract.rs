@@ -1581,10 +1581,12 @@ fn l2_dr_recovery_role_provisioning_is_file_only_fail_closed_and_exact() {
     );
     for required in [
         "rss_l2_dr_recovery_owner:false:true",
-        "provision must fail when 0098 L2 DR roles are absent",
+        "provision must fail when L2 DR roles are absent",
         "provision must fail when L2 DR role membership has drifted",
         "rss_l2_dr_recovery_auditor_absent",
         "GRANT rss_app TO rss_l2_dr_recovery_auditor",
+        "106:true:48:106",
+        "passed through 0106",
     ] {
         assert!(
             READER_UPGRADE_SMOKE.contains(required),

@@ -205,12 +205,13 @@ pub(crate) async fn run_consumer_ackable_tx<S, P, H>(
     meta: &ConsumerMeta,
     handler: Arc<H>,
     lease_cfg: LeaseConfig,
+    admission: primitives::ConsumerAdmission,
 ) where
     S: consistency::InboxStore + Send + Sync + 'static,
     P: policy::Policy,
     H: ConsumerTxHandler<P>,
 {
-    while let Some(d) = stream.next().await {
+    while let Some((d, _permit)) = next_admitted_delivery(&mut stream, &admission).await {
         let diport::Delivery { message, acker } = d;
         consume_one_tx(
             &idempotency,
@@ -222,6 +223,39 @@ pub(crate) async fn run_consumer_ackable_tx<S, P, H>(
             lease_cfg,
         )
         .await;
+    }
+}
+
+async fn next_admitted_delivery(
+    stream: &mut diport::DeliveryStream,
+    admission: &primitives::ConsumerAdmission,
+) -> Option<(
+    diport::Delivery,
+    primitives::AdmissionPermit<primitives::ConsumerLane>,
+)> {
+    loop {
+        if admission.wait_open().await.is_err() {
+            return None;
+        }
+        let permit = match admission.try_enter() {
+            Ok(permit) => permit,
+            Err(primitives::AdmissionError::Paused) => continue,
+            Err(primitives::AdmissionError::Stopped) => return None,
+            Err(error) => {
+                tracing::error!(error = %error, "consumer-tx: admission invariant failed");
+                return None;
+            }
+        };
+        tokio::select! {
+            biased;
+            closed = admission.wait_closed() => {
+                drop(permit);
+                if matches!(closed, Err(primitives::AdmissionError::Stopped)) {
+                    return None;
+                }
+            }
+            delivery = stream.next() => return delivery.map(|delivery| (delivery, permit)),
+        }
     }
 }
 
@@ -705,6 +739,7 @@ pub(crate) fn spawn_consumer_ackable_tx_subscriber<S, P, H>(
     token: tokio_util::sync::CancellationToken,
     health: Arc<eventexec::WorkerHealth>,
     backoff: eventexec::BackoffPolicy,
+    admission: primitives::ConsumerAdmission,
 ) -> eventexec::ManagedBlockingWorker
 where
     S: consistency::InboxStore + Send + Sync + 'static,
@@ -732,7 +767,8 @@ where
                     token_run,
                     health_run,
                     backoff,
-                    async |stream| {
+                    admission,
+                    async |stream, admission| {
                         run_consumer_ackable_tx(
                             stream,
                             Arc::clone(&idempotency),
@@ -740,6 +776,7 @@ where
                             &meta,
                             Arc::clone(&handler),
                             lease_cfg,
+                            admission,
                         )
                         .await;
                     },
@@ -1241,6 +1278,11 @@ mod tests {
         LeaseConfig::from_ttl(Duration::from_secs(60))
     }
 
+    fn consumer_admission() -> primitives::ConsumerAdmission {
+        let (_, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+        consumer
+    }
+
     #[allow(clippy::expect_used)]
     // reason: 测试 tiny backoff 构造失败即参数写错；item-level carve-out。
     fn tiny_backoff() -> eventexec::BackoffPolicy {
@@ -1269,6 +1311,7 @@ mod tests {
             &(meta()?),
             Arc::new(handler),
             lease_cfg(),
+            consumer_admission(),
         )
         .await;
 
@@ -1314,6 +1357,7 @@ mod tests {
             &meta,
             Arc::new(handler),
             LeaseConfig::from_ttl(Duration::from_millis(3)),
+            consumer_admission(),
         );
         tokio::pin!(run);
 
@@ -1371,6 +1415,7 @@ mod tests {
             &meta,
             Arc::new(handler),
             LeaseConfig::from_ttl(Duration::from_millis(3)),
+            consumer_admission(),
         );
         tokio::pin!(run);
 
@@ -1418,6 +1463,7 @@ mod tests {
             &(meta()?),
             Arc::new(handler),
             lease_cfg(),
+            consumer_admission(),
         )
         .await;
 
@@ -1453,6 +1499,7 @@ mod tests {
             &(meta()?),
             Arc::new(handler),
             LeaseConfig::from_ttl(Duration::from_millis(15)),
+            consumer_admission(),
         )
         .await;
 
@@ -1488,6 +1535,7 @@ mod tests {
             &(meta()?),
             Arc::new(handler),
             lease_cfg(),
+            consumer_admission(),
         )
         .await;
 
@@ -1523,6 +1571,7 @@ mod tests {
             &(meta()?),
             Arc::new(handler),
             lease_cfg(),
+            consumer_admission(),
         )
         .await;
 
@@ -1560,6 +1609,7 @@ mod tests {
             &(meta()?),
             Arc::new(handler),
             lease_cfg(),
+            consumer_admission(),
         )
         .await;
 
@@ -1597,6 +1647,7 @@ mod tests {
             &(meta()?),
             Arc::new(handler),
             lease_cfg(),
+            consumer_admission(),
         )
         .await;
 
@@ -1631,6 +1682,7 @@ mod tests {
             &(meta()?),
             Arc::new(handler),
             lease_cfg(),
+            consumer_admission(),
         )
         .await;
 
@@ -1668,6 +1720,7 @@ mod tests {
                 &(meta()?),
                 Arc::new(handler),
                 lease_cfg(),
+                consumer_admission(),
             )
             .await;
 
@@ -1813,6 +1866,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             Arc::new(eventexec::WorkerHealth::starting()),
             tiny_backoff(),
+            consumer_admission(),
         );
 
         assert_eq!(observed_receiver.await?, assembly_runtime);
@@ -1838,6 +1892,7 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             tiny_backoff(),
+            consumer_admission(),
         );
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -1880,6 +1935,7 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             tiny_backoff(),
+            consumer_admission(),
         );
 
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -1922,6 +1978,7 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             tiny_backoff(),
+            consumer_admission(),
         );
 
         // tiny_backoff（1ms base）注入后无需 wall-clock 1s 等待二次订阅。
@@ -1991,6 +2048,7 @@ mod tests {
             tokio_util::sync::CancellationToken::new(),
             Arc::new(eventexec::WorkerHealth::starting()),
             tiny_backoff(),
+            consumer_admission(),
         );
 
         tokio::time::timeout(Duration::from_secs(1), handler_started.notified()).await?;

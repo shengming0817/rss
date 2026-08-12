@@ -2303,6 +2303,17 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
     provision_runtime_logins(&fixture).await?;
     let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
     let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
+    let legacy_apply: (Option<String>,) = sqlx::query_as(
+        "SELECT pg_catalog.to_regprocedure(\
+         'public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)'\
+         )::text",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert_eq!(
+        legacy_apply.0, None,
+        "legacy unfenced apply overload must not exist"
+    );
     let tenant = test_tenant();
     let epoch_id = uuid::Uuid::new_v4();
     let start_audit_id = uuid::Uuid::new_v4();
@@ -2384,7 +2395,8 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
         sqlx::query(
             "SELECT * FROM public.rss_l2_dr_recovery_apply(\
              gen_random_uuid(),gen_random_uuid(),'database_ahead_broker_earlier',2000,1000,\
-             'CHG-1837-PG',ARRAY['event'],decode(repeat('00',32),'hex'),'subject',gen_random_uuid())",
+             'CHG-1837-PG',ARRAY['event'],decode(repeat('00',32),'hex'),'subject',gen_random_uuid(),\
+             gen_random_uuid())",
         )
         .execute(&auditor.store_arc().pool)
         .await
@@ -2398,7 +2410,7 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
         let result = sqlx::query(
             "SELECT * FROM public.rss_l2_dr_recovery_apply(\
              $1::uuid, $2::uuid, 'database_ahead_broker_earlier', 2000, 1000, \
-             'CHG-1837-PG', $3::text[], $4::bytea, $5, $6::uuid)",
+             'CHG-1837-PG', $3::text[], $4::bytea, $5, $6::uuid, $7::uuid)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(tenant.as_uuid().to_string())
@@ -2406,6 +2418,7 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
         .bind(vec![0_u8; 32])
         .bind(vocab::ServiceCallerDomain::MaintenanceOperator.as_str())
         .bind(start_audit_id.to_string())
+        .bind(uuid::Uuid::new_v4().to_string())
         .execute(&mut *tx)
         .await;
         tx.rollback().await?;
@@ -2414,9 +2427,9 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
     assert!(
         matches!(
             wrong_tenant_result,
-            Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P1831")
+            Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P2004")
         ),
-        "tenant mismatch must be rejected by the function boundary: {wrong_tenant_result:?}",
+        "missing admission fence must precede recovery mutation: {wrong_tenant_result:?}",
     );
     let nil_epoch_result = {
         let mut tx = executor.store_arc().pool.begin().await?;
@@ -2425,12 +2438,13 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
             "SELECT * FROM public.rss_l2_dr_recovery_apply(\
              '00000000-0000-0000-0000-000000000000'::uuid, $1::uuid, \
              'database_ahead_broker_earlier', 2000, 1000, 'CHG-1837-PG', \
-             $2::text[], $3::bytea, $4, $5::uuid)",
+             $2::text[], $3::bytea, $4, $5::uuid, $6::uuid)",
         )
         .bind(tenant.as_uuid().to_string())
         .bind(vec![unique_event_id("l2-dr-nil-epoch")])
         .bind(vec![0_u8; 32])
         .bind("service:l2-dr-test")
+        .bind(uuid::Uuid::new_v4().to_string())
         .bind(uuid::Uuid::new_v4().to_string())
         .execute(&mut *tx)
         .await;
@@ -2440,9 +2454,9 @@ async fn l2_dr_recovery_operator_lane_is_function_only_and_exact() -> TestResult
     assert!(
         matches!(
             nil_epoch_result,
-            Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P1832")
+            Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P2004")
         ),
-        "nil epoch must be rejected as an invalid durable plan: {nil_epoch_result:?}",
+        "missing admission fence must reject before plan validation: {nil_epoch_result:?}",
     );
 
     sqlx::query(
@@ -2567,7 +2581,7 @@ async fn l2_dr_recovery_pg_ahead_is_atomic_and_deadline_bound() -> TestResult {
     )?;
     assert_eq!(
         deps.apply_l2_dr_recovery(
-            authorize_l2_dr_recovery(&deps, state_plan, uuid::Uuid::new_v4()).await?,
+            authorize_l2_dr_recovery(&owner, &deps, state_plan, uuid::Uuid::new_v4()).await?,
         )
         .await,
         Err(eventexec::L2DrRecoveryError::FactNotPublished)
@@ -2588,7 +2602,7 @@ async fn l2_dr_recovery_pg_ahead_is_atomic_and_deadline_bound() -> TestResult {
     )?;
     assert_eq!(
         deps.apply_l2_dr_recovery(
-            authorize_l2_dr_recovery(&deps, missing_plan, uuid::Uuid::new_v4()).await?,
+            authorize_l2_dr_recovery(&owner, &deps, missing_plan, uuid::Uuid::new_v4()).await?,
         )
         .await,
         Err(eventexec::L2DrRecoveryError::FactNotFound)
@@ -2603,7 +2617,7 @@ async fn l2_dr_recovery_pg_ahead_is_atomic_and_deadline_bound() -> TestResult {
     )?;
     assert_eq!(
         deps.apply_l2_dr_recovery(
-            authorize_l2_dr_recovery(&deps, expired_plan, uuid::Uuid::new_v4()).await?,
+            authorize_l2_dr_recovery(&owner, &deps, expired_plan, uuid::Uuid::new_v4()).await?,
         )
         .await,
         Err(eventexec::L2DrRecoveryError::DeadlineExpired)
@@ -2645,7 +2659,7 @@ async fn l2_dr_recovery_pg_ahead_is_atomic_and_deadline_bound() -> TestResult {
     )?;
     let receipt = deps
         .apply_l2_dr_recovery(
-            authorize_l2_dr_recovery(&deps, apply_plan, uuid::Uuid::new_v4()).await?,
+            authorize_l2_dr_recovery(&owner, &deps, apply_plan, uuid::Uuid::new_v4()).await?,
         )
         .await?;
     assert_eq!(receipt.outcome(), eventexec::L2DrRecoveryOutcome::Applied);
@@ -2715,18 +2729,21 @@ async fn l2_dr_recovery_epoch_is_idempotent_conflict_safe_and_receipt_immutable(
     let first_operator_subject = "service:l2-dr-first-operator";
     let retry_start_audit_id = uuid::Uuid::new_v4();
     let retry_operator_subject = "service:l2-dr-retry-operator";
-    let first_authorized = authorize_l2_dr_recovery_as(
+    let admission_epoch = arm_l2_dr_admission(&owner, &first_deps, &plan).await?;
+    let first_authorized = authorize_l2_dr_recovery_as_with_admission(
         &first_deps,
         plan.clone(),
         first_operator_subject,
         start_audit_id,
+        admission_epoch,
     )
     .await?;
-    let retry_authorized = authorize_l2_dr_recovery_as(
+    let retry_authorized = authorize_l2_dr_recovery_as_with_admission(
         &retry_deps,
         plan.clone(),
         retry_operator_subject,
         retry_start_audit_id,
+        admission_epoch,
     )
     .await?;
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
@@ -2819,6 +2836,126 @@ async fn l2_dr_recovery_epoch_is_idempotent_conflict_safe_and_receipt_immutable(
     .await?;
     assert_eq!(receipt_count, 1);
 
+    // A failure after relay has reopened must use a fresh epoch and return directly to the
+    // already-applied paused state. It must never recreate an apply-capable drained fence.
+    first_deps
+        .request_l2_dr_admission_resume(admission_epoch, tenant, "relay")
+        .await?;
+    let (assembly_identity, runtime_plan_fingerprint, instance_id, boot_id): (
+        String,
+        String,
+        String,
+        String,
+    ) = sqlx::query_as(
+        "SELECT assembly_identity, runtime_plan_fingerprint, instance_id::text, boot_id::text \
+         FROM public.event_l2_dr_admission_phase_receipt \
+         WHERE admission_epoch_id = $1::uuid AND phase = 'drained'",
+    )
+    .bind(admission_epoch.as_uuid().to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    let relay_authorized: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_authorize_resume(\
+         $1::uuid, $2, $3, $4::uuid, $5::uuid, 'relay_running')",
+    )
+    .bind(admission_epoch.as_uuid().to_string())
+    .bind(&assembly_identity)
+    .bind(&runtime_plan_fingerprint)
+    .bind(&instance_id)
+    .bind(&boot_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(relay_authorized);
+    let relay_acknowledged: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_ack(\
+         $1::uuid, $2, $3, $4::uuid, $5::uuid, 'relay_running', $1::uuid)",
+    )
+    .bind(admission_epoch.as_uuid().to_string())
+    .bind(&assembly_identity)
+    .bind(&runtime_plan_fingerprint)
+    .bind(&instance_id)
+    .bind(&boot_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(relay_acknowledged);
+    let re_pause_epoch = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4())?;
+    let declared = serde_json::json!([{
+        "assemblyIdentity": assembly_identity,
+        "runtimePlanFingerprint": runtime_plan_fingerprint,
+        "instanceId": instance_id,
+    }]);
+    first_deps
+        .request_l2_dr_admission_pause(re_pause_epoch, &plan, &declared, true)
+        .await?;
+    let re_pause_acknowledged: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_ack(\
+         $1::uuid, $2, $3, $4::uuid, $5::uuid, 'drained', $1::uuid)",
+    )
+    .bind(re_pause_epoch.as_uuid().to_string())
+    .bind(&assembly_identity)
+    .bind(&runtime_plan_fingerprint)
+    .bind(&instance_id)
+    .bind(&boot_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(re_pause_acknowledged);
+    let re_pause_phase: String =
+        sqlx::query_scalar("SELECT phase FROM public.event_l2_dr_admission_epoch WHERE singleton")
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(re_pause_phase, "applied_paused");
+    first_deps
+        .request_l2_dr_admission_resume(re_pause_epoch, tenant, "relay")
+        .await?;
+    let original_boot_authorized: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_authorize_resume(\
+         $1::uuid, $2, $3, $4::uuid, $5::uuid, 'relay_running')",
+    )
+    .bind(re_pause_epoch.as_uuid().to_string())
+    .bind(&assembly_identity)
+    .bind(&runtime_plan_fingerprint)
+    .bind(&instance_id)
+    .bind(&boot_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(original_boot_authorized);
+    let changed_boot_acknowledged: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_authorize_resume(\
+         $1::uuid, $2, $3, $4::uuid, $5::uuid, 'relay_running')",
+    )
+    .bind(re_pause_epoch.as_uuid().to_string())
+    .bind(&assembly_identity)
+    .bind(&runtime_plan_fingerprint)
+    .bind(&instance_id)
+    .bind(uuid::Uuid::new_v4().to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(
+        !changed_boot_acknowledged,
+        "a boot change in any later phase must fence the active epoch"
+    );
+    let invalidated: bool = sqlx::query_scalar(
+        "SELECT invalidated FROM public.event_l2_dr_admission_epoch WHERE singleton",
+    )
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(invalidated);
+    let invalidated_replay_authorized: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_authorize_resume(\
+         $1::uuid, $2, $3, $4::uuid, $5::uuid, 'relay_running')",
+    )
+    .bind(re_pause_epoch.as_uuid().to_string())
+    .bind(&assembly_identity)
+    .bind(&runtime_plan_fingerprint)
+    .bind(&instance_id)
+    .bind(&boot_id)
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(
+        !invalidated_replay_authorized,
+        "an authorization issued before invalidation must never reopen a lane"
+    );
+
     let reader_config = rss_app_read_config(&fixture, &owner).await?;
     let reader = crate::PgStore::connect_verified_read(&reader_config).await?;
     let visible_to_tenant: i64 = {
@@ -2876,7 +3013,8 @@ async fn l2_dr_recovery_epoch_is_idempotent_conflict_safe_and_receipt_immutable(
     assert_eq!(
         first_deps
             .apply_l2_dr_recovery(
-                authorize_l2_dr_recovery(&first_deps, conflicting, uuid::Uuid::new_v4()).await?,
+                authorize_l2_dr_recovery(&owner, &first_deps, conflicting, uuid::Uuid::new_v4())
+                    .await?,
             )
             .await,
         Err(eventexec::L2DrRecoveryError::EpochConflict)
@@ -2906,9 +3044,188 @@ async fn l2_dr_recovery_epoch_is_idempotent_conflict_safe_and_receipt_immutable(
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn l2_dr_recovery_different_epochs_do_not_share_a_global_lock() -> TestResult {
-    use eventexec::L2DrRecoveryStore as _;
+async fn l2_dr_admission_requires_bootstrap_witness_and_scopes_every_transition() -> TestResult {
+    let (fixture, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    provision_runtime_logins(&fixture).await?;
+    let (audit_config, executor_config) = l2_dr_lane_configs(fixture.owner_params());
+    let deps = crate::PgL2DrRecoveryDeps::connect(&audit_config, &executor_config).await?;
+    let tenant = test_tenant();
+    let other_tenant = vocab::TenantId::parse(COTX_TENANT_B)?;
+    let event_id = unique_event_id("l2-dr-bootstrap-witness");
+    let recovery_epoch = uuid::Uuid::new_v4();
+    let plan = l2_dr_recovery_plan(
+        recovery_epoch,
+        tenant,
+        2_000,
+        1_000,
+        std::slice::from_ref(&event_id),
+    )?;
+    let admission_epoch = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4())?;
+    let instance_id = uuid::Uuid::new_v4();
+    let boot_id = uuid::Uuid::new_v4();
+    let declared = serde_json::json!([{
+        "assemblyIdentity": "runtime",
+        "runtimePlanFingerprint": "sha256:test-runtime-plan",
+        "instanceId": instance_id.to_string(),
+    }]);
+    let audit_subject =
+        eventexec::L2DrRecoveryOperatorSubject::parse("service:l2-dr-admission-test")?;
+    let audit_request_id = uuid::Uuid::new_v4();
+    deps.record_l2_dr_admission_start_audit(
+        &audit_subject,
+        tenant,
+        admission_epoch,
+        "pause",
+        audit_request_id,
+    )
+    .await?;
+    deps.record_l2_dr_admission_finish_audit(
+        &audit_subject,
+        tenant,
+        admission_epoch,
+        "pause",
+        crate::MaintenanceAuditOutcome::Success,
+        audit_request_id,
+    )
+    .await?;
+    let audit_actions: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM public.auth_audit_events WHERE request_id = $1 ORDER BY action",
+    )
+    .bind(audit_request_id.to_string())
+    .fetch_all(&owner.pool)
+    .await?;
+    assert_eq!(
+        audit_actions,
+        vec![
+            "eventing.l2-dr-admission.pause.finish",
+            "eventing.l2-dr-admission.pause.start",
+        ]
+    );
+    deps.request_l2_dr_admission_pause(admission_epoch, &plan, &declared, true)
+        .await?;
 
+    let future_phase: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_ack(\
+         $1::uuid, 'runtime', 'sha256:test-runtime-plan', $2::uuid, $3::uuid, \
+         'relay_running', $1::uuid)",
+    )
+    .bind(admission_epoch.as_uuid().to_string())
+    .bind(instance_id.to_string())
+    .bind(boot_id.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(
+        !future_phase,
+        "future-phase acknowledgements must be rejected"
+    );
+
+    sqlx::query(
+        "INSERT INTO public.event_l2_dr_recovery_receipt (\
+         epoch_id, tenant_id, direction, pg_restore_point_epoch_micros, \
+         rabbitmq_restore_point_epoch_micros, change_ticket, event_ids, plan_digest, \
+         policy_revision, operator_subject, start_audit_id, outcome, applied_at, \
+         protocol_revision, admission_epoch_id) VALUES (\
+         $1::uuid, $2::uuid, 'database_ahead_broker_earlier', 2000, 1000, \
+         'CHG-1837-PG', $3::text[], $4::bytea, 'same-id-delivery-v1', \
+         'service:l2-dr-v1-audit', $5::uuid, 'same_id_redrive_armed', clock_timestamp(), 1, NULL)",
+    )
+    .bind(recovery_epoch.to_string())
+    .bind(tenant.as_uuid().to_string())
+    .bind(vec![event_id.clone()])
+    .bind(plan.digest().as_bytes().as_slice())
+    .bind(uuid::Uuid::new_v4().to_string())
+    .execute(&owner.pool)
+    .await?;
+
+    let pre_restore_ack: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_ack(\
+         $1::uuid, 'runtime', 'sha256:test-runtime-plan', $2::uuid, $3::uuid, \
+         'drained', NULL::uuid)",
+    )
+    .bind(admission_epoch.as_uuid().to_string())
+    .bind(instance_id.to_string())
+    .bind(boot_id.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(
+        !pre_restore_ack,
+        "an E2 pause must reject a process without the exact startup witness"
+    );
+    let phase: String =
+        sqlx::query_scalar("SELECT phase FROM public.event_l2_dr_admission_epoch WHERE singleton")
+            .fetch_one(&owner.pool)
+            .await?;
+    assert_eq!(
+        phase, "pause_requested",
+        "missing E2 startup witness must not produce a drained receipt"
+    );
+
+    let apply_without_witness = sqlx::query(
+        "SELECT * FROM public.rss_l2_dr_recovery_apply(\
+         $1::uuid, $2::uuid, 'database_ahead_broker_earlier', 2000, 1000, \
+         'CHG-1837-PG', $3::text[], $4::bytea, 'service:l2-dr-test', $5::uuid, $6::uuid)",
+    )
+    .bind(recovery_epoch.to_string())
+    .bind(tenant.as_uuid().to_string())
+    .bind(vec![event_id])
+    .bind(plan.digest().as_bytes().as_slice())
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(admission_epoch.as_uuid().to_string())
+    .execute(&owner.pool)
+    .await;
+    assert!(matches!(
+        apply_without_witness,
+        Err(sqlx::Error::Database(ref error)) if error.code().as_deref() == Some("P2004")
+    ));
+
+    assert!(
+        deps.l2_dr_admission_status(admission_epoch, other_tenant)
+            .await?
+            .is_none()
+    );
+    sqlx::query(
+        "UPDATE public.event_l2_dr_admission_epoch SET phase = 'applied_paused', \
+         drained_at = clock_timestamp(), expires_at = clock_timestamp() + interval '15 minutes' \
+         WHERE singleton",
+    )
+    .execute(&owner.pool)
+    .await?;
+    assert!(
+        deps.request_l2_dr_admission_resume(admission_epoch, other_tenant, "relay")
+            .await
+            .is_err()
+    );
+    deps.request_l2_dr_admission_resume(admission_epoch, tenant, "relay")
+        .await?;
+    sqlx::query(
+        "UPDATE public.event_l2_dr_admission_epoch SET expires_at = clock_timestamp() - interval '1 second' \
+         WHERE singleton",
+    )
+    .execute(&owner.pool)
+    .await?;
+    let late_ack: bool = sqlx::query_scalar(
+        "SELECT public.rss_l2_dr_admission_authorize_resume(\
+         $1::uuid, 'runtime', 'sha256:test-runtime-plan', $2::uuid, $3::uuid, \
+         'relay_running')",
+    )
+    .bind(admission_epoch.as_uuid().to_string())
+    .bind(instance_id.to_string())
+    .bind(boot_id.to_string())
+    .fetch_one(&owner.pool)
+    .await?;
+    assert!(
+        !late_ack,
+        "expired resume acknowledgements must fail closed"
+    );
+
+    deps.shutdown().await?;
+    owner.shutdown().await?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn l2_dr_recovery_singleton_rejects_a_second_active_epoch() -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     provision_runtime_logins(&fixture).await?;
@@ -2918,8 +3235,6 @@ async fn l2_dr_recovery_different_epochs_do_not_share_a_global_lock() -> TestRes
     let tenant = test_tenant();
     let first_event_id = unique_event_id("l2-dr-independent-epoch-first");
     let second_event_id = unique_event_id("l2-dr-independent-epoch-second");
-    insert_l2_dr_published_fact(&owner, tenant, &first_event_id, 3_600).await?;
-    insert_l2_dr_published_fact(&owner, tenant, &second_event_id, 3_600).await?;
     let first_epoch_id = uuid::Uuid::new_v4();
     let second_epoch_id = uuid::Uuid::new_v4();
     let first_plan = l2_dr_recovery_plan(
@@ -2936,80 +3251,36 @@ async fn l2_dr_recovery_different_epochs_do_not_share_a_global_lock() -> TestRes
         1_000,
         std::slice::from_ref(&second_event_id),
     )?;
-    let first_authorized =
-        authorize_l2_dr_recovery(&first_deps, first_plan, uuid::Uuid::new_v4()).await?;
-    let second_authorized =
-        authorize_l2_dr_recovery(&second_deps, second_plan, uuid::Uuid::new_v4()).await?;
-
-    let first_lock_key: i64 = sqlx::query_scalar("SELECT pg_catalog.hashtextextended($1, 1837)")
-        .bind(first_epoch_id.to_string())
-        .fetch_one(&owner.pool)
+    let first_admission = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4())?;
+    let second_admission = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4())?;
+    let declared = serde_json::json!([{
+        "assemblyIdentity": "runtime",
+        "runtimePlanFingerprint": "sha256:test-runtime-plan",
+        "instanceId": uuid::Uuid::new_v4().to_string(),
+    }]);
+    first_deps
+        .request_l2_dr_admission_pause(first_admission, &first_plan, &declared, true)
         .await?;
-    let mut first_epoch_blocker = owner.pool.begin().await?;
-    sqlx::query("SELECT pg_catalog.pg_advisory_xact_lock($1)")
-        .bind(first_lock_key)
-        .execute(&mut *first_epoch_blocker)
-        .await?;
-
-    let first_task = tokio::spawn(async move {
-        let result = first_deps.apply_l2_dr_recovery(first_authorized).await;
-        (first_deps, result)
-    });
-    let first_is_waiting = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        loop {
-            if first_task.is_finished() {
-                return Ok::<bool, sqlx::Error>(false);
-            }
-            let waiting: bool = sqlx::query_scalar(
-                "SELECT pg_catalog.count(*) > 0 FROM pg_catalog.pg_stat_activity \
-                 WHERE usename = $1 AND wait_event_type = 'Lock' AND wait_event = 'advisory' \
-                 AND query LIKE '%rss_l2_dr_recovery_apply%'",
-            )
-            .bind(TEST_L2_DR_RECOVERY_EXECUTOR_ROLE)
-            .fetch_one(&owner.pool)
-            .await?;
-            if waiting {
-                return Ok(true);
-            }
-            tokio::task::yield_now().await;
-        }
-    })
-    .await
-    .map_err(|_| std::io::Error::other("first L2 DR epoch did not reach its advisory lock"))??;
-    assert!(
-        first_is_waiting,
-        "first L2 DR apply must block on its exact epoch key before the independence assertion"
-    );
-
-    let second_observed = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        second_deps.apply_l2_dr_recovery(second_authorized),
+    assert!(matches!(
+        second_deps
+            .request_l2_dr_admission_pause(second_admission, &second_plan, &declared, true)
+            .await,
+        Err(PgError::L2DrAdmission(ref error))
+            if error.as_database_error().and_then(|db| db.code()).as_deref() == Some("P2002")
+    ));
+    let active: (String, String) = sqlx::query_as(
+        "SELECT admission_epoch_id::text, recovery_epoch_id::text \
+         FROM public.event_l2_dr_admission_epoch WHERE singleton",
     )
-    .await;
-    first_epoch_blocker.commit().await?;
-    let (first_deps, first_result) = first_task.await?;
-    let first_receipt = first_result?;
-    let second_receipt = second_observed.map_err(|_| {
-        std::io::Error::other("a different L2 DR epoch was serialized behind the first epoch")
-    })??;
-    assert_eq!(
-        first_receipt.outcome(),
-        eventexec::L2DrRecoveryOutcome::Applied
-    );
-    assert_eq!(
-        second_receipt.outcome(),
-        eventexec::L2DrRecoveryOutcome::Applied
-    );
-    let receipt_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM event_l2_dr_recovery_receipt WHERE epoch_id = ANY($1::uuid[])",
-    )
-    .bind(vec![
-        first_epoch_id.to_string(),
-        second_epoch_id.to_string(),
-    ])
     .fetch_one(&owner.pool)
     .await?;
-    assert_eq!(receipt_count, 2);
+    assert_eq!(
+        active,
+        (
+            first_admission.as_uuid().to_string(),
+            first_epoch_id.to_string()
+        )
+    );
 
     second_deps.shutdown().await?;
     first_deps.shutdown().await?;
@@ -3018,10 +3289,7 @@ async fn l2_dr_recovery_different_epochs_do_not_share_a_global_lock() -> TestRes
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn l2_dr_recovery_concurrent_same_epoch_different_digest_has_one_atomic_winner() -> TestResult
-{
-    use eventexec::L2DrRecoveryStore as _;
-
+async fn l2_dr_recovery_same_epoch_different_digest_conflicts_before_apply() -> TestResult {
     let (fixture, owner) = connect_pg().await?;
     owner.run_migrations().await?;
     provision_runtime_logins(&fixture).await?;
@@ -3031,23 +3299,7 @@ async fn l2_dr_recovery_concurrent_same_epoch_different_digest_has_one_atomic_wi
     let tenant = test_tenant();
     let first_event_id = unique_event_id("l2-dr-conflict-first");
     let second_event_id = unique_event_id("l2-dr-conflict-second");
-    insert_l2_dr_published_fact(&owner, tenant, &first_event_id, 3_600).await?;
-    insert_l2_dr_published_fact(&owner, tenant, &second_event_id, 3_600).await?;
-    let first_before: String =
-        sqlx::query_scalar("SELECT to_jsonb(outbox)::text FROM outbox WHERE event_id = $1")
-            .bind(&first_event_id)
-            .fetch_one(&owner.pool)
-            .await?;
-    let second_before: String =
-        sqlx::query_scalar("SELECT to_jsonb(outbox)::text FROM outbox WHERE event_id = $1")
-            .bind(&second_event_id)
-            .fetch_one(&owner.pool)
-            .await?;
     let epoch_id = uuid::Uuid::new_v4();
-    let first_subject = "service:l2-dr-conflict-first";
-    let second_subject = "service:l2-dr-conflict-second";
-    let first_start_audit_id = uuid::Uuid::new_v4();
-    let second_start_audit_id = uuid::Uuid::new_v4();
     let first_plan = l2_dr_recovery_plan(
         epoch_id,
         tenant,
@@ -3062,129 +3314,23 @@ async fn l2_dr_recovery_concurrent_same_epoch_different_digest_has_one_atomic_wi
         1_000,
         std::slice::from_ref(&second_event_id),
     )?;
-    let first_authorized =
-        authorize_l2_dr_recovery_as(&first_deps, first_plan, first_subject, first_start_audit_id)
-            .await?;
-    let second_authorized = authorize_l2_dr_recovery_as(
-        &second_deps,
-        second_plan,
-        second_subject,
-        second_start_audit_id,
-    )
-    .await?;
-    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
-    let first_barrier = std::sync::Arc::clone(&barrier);
-    let second_barrier = std::sync::Arc::clone(&barrier);
-    let first_apply = async {
-        first_barrier.wait().await;
-        first_deps.apply_l2_dr_recovery(first_authorized).await
-    };
-    let second_apply = async {
-        second_barrier.wait().await;
-        second_deps.apply_l2_dr_recovery(second_authorized).await
-    };
-    let (first_result, second_result) = tokio::join!(first_apply, second_apply);
-    let first_observation = ConcurrentL2DrApplyObservation::from_result(first_result)?;
-    let second_observation = ConcurrentL2DrApplyObservation::from_result(second_result)?;
+    let admission = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4())?;
+    let declared = serde_json::json!([{
+        "assemblyIdentity": "runtime",
+        "runtimePlanFingerprint": "sha256:test-runtime-plan",
+        "instanceId": uuid::Uuid::new_v4().to_string(),
+    }]);
     first_deps
-        .record_l2_dr_recovery_finish_audit_subject(
-            &eventexec::L2DrRecoveryOperatorSubject::parse(first_subject)?,
-            tenant,
-            epoch_id,
-            first_start_audit_id,
-            if matches!(
-                &first_observation,
-                ConcurrentL2DrApplyObservation::Applied { .. }
-            ) {
-                crate::MaintenanceAuditOutcome::Success
-            } else {
-                crate::MaintenanceAuditOutcome::Failure {
-                    reason: "epoch_conflict",
-                }
-            },
-        )
+        .request_l2_dr_admission_pause(admission, &first_plan, &declared, true)
         .await?;
-    second_deps
-        .record_l2_dr_recovery_finish_audit_subject(
-            &eventexec::L2DrRecoveryOperatorSubject::parse(second_subject)?,
-            tenant,
-            epoch_id,
-            second_start_audit_id,
-            if matches!(
-                &second_observation,
-                ConcurrentL2DrApplyObservation::Applied { .. }
-            ) {
-                crate::MaintenanceAuditOutcome::Success
-            } else {
-                crate::MaintenanceAuditOutcome::Failure {
-                    reason: "epoch_conflict",
-                }
-            },
-        )
-        .await?;
-    let first_won = matches!(
-        &first_observation,
-        ConcurrentL2DrApplyObservation::Applied { .. }
-    );
-    let (winner_event_id, loser_event_id, loser_before) = if first_won {
-        (&first_event_id, &second_event_id, &second_before)
-    } else {
-        (&second_event_id, &first_event_id, &first_before)
-    };
-    let mut observations = [first_observation, second_observation];
-    observations.sort_by_key(ConcurrentL2DrApplyObservation::label);
-    assert_eq!(
-        observations.map(|observation| observation.label()),
-        ["applied", "epoch_conflict"]
-    );
-
-    let receipt: (Vec<String>, String, String) = sqlx::query_as(
-        "SELECT event_ids, operator_subject, start_audit_id::text \
-         FROM event_l2_dr_recovery_receipt WHERE epoch_id = $1::uuid",
-    )
-    .bind(epoch_id.to_string())
-    .fetch_one(&owner.pool)
-    .await?;
-    assert_eq!(receipt.0, vec![winner_event_id.to_owned()]);
-    let expected_receipt_provenance = if first_won {
-        (first_subject, first_start_audit_id)
-    } else {
-        (second_subject, second_start_audit_id)
-    };
-    assert_eq!(receipt.1, expected_receipt_provenance.0);
-    assert_eq!(receipt.2, expected_receipt_provenance.1.to_string());
-    let receipt_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM event_l2_dr_recovery_receipt WHERE epoch_id = $1::uuid",
-    )
-    .bind(epoch_id.to_string())
-    .fetch_one(&owner.pool)
-    .await?;
-    assert_eq!(receipt_count, 1);
-    let winner_state: (String, String, bool) = sqlx::query_as(
-        "SELECT status, same_id_delivery_phase, published_at IS NULL \
-         FROM outbox WHERE event_id = $1",
-    )
-    .bind(winner_event_id)
-    .fetch_one(&owner.pool)
-    .await?;
-    assert_eq!(
-        winner_state,
-        ("pending".to_owned(), "redrive".to_owned(), true)
-    );
-    let loser_after: String =
-        sqlx::query_scalar("SELECT to_jsonb(outbox)::text FROM outbox WHERE event_id = $1")
-            .bind(loser_event_id)
-            .fetch_one(&owner.pool)
-            .await?;
-    assert_eq!(&loser_after, loser_before);
-    let redriven_count: i64 = sqlx::query_scalar(
-        "SELECT count(*) FROM outbox WHERE event_id = ANY($1) \
-         AND status = 'pending' AND same_id_delivery_phase = 'redrive'",
-    )
-    .bind(vec![first_event_id, second_event_id])
-    .fetch_one(&owner.pool)
-    .await?;
-    assert_eq!(redriven_count, 1);
+    assert!(matches!(
+        second_deps
+            .request_l2_dr_admission_pause(admission, &second_plan, &declared, true)
+            .await,
+        Err(PgError::L2DrAdmission(ref error))
+            if error.as_database_error().and_then(|db| db.code()).as_deref() == Some("P2002")
+    ));
+    assert_eq!(l2_dr_receipt_count(&owner, epoch_id).await?, 0);
 
     second_deps.shutdown().await?;
     first_deps.shutdown().await?;
@@ -3237,7 +3383,9 @@ async fn l2_dr_recovery_rabbit_ahead_preserves_outbox_and_inbox_exactly() -> Tes
         std::slice::from_ref(&event_id),
     )?;
     let receipt = deps
-        .apply_l2_dr_recovery(authorize_l2_dr_recovery(&deps, plan, uuid::Uuid::new_v4()).await?)
+        .apply_l2_dr_recovery(
+            authorize_l2_dr_recovery(&owner, &deps, plan, uuid::Uuid::new_v4()).await?,
+        )
         .await?;
     assert_eq!(receipt.outcome(), eventexec::L2DrRecoveryOutcome::Applied);
     assert_eq!(
@@ -3289,8 +3437,13 @@ async fn l2_dr_recovery_rejects_forged_auth_audit_start_proof() -> TestResult {
     )?;
     let outbox_before = l2_dr_outbox_snapshot(&owner, &event_id).await?;
     forge_l2_dr_start_audit_as_rss_app(&app, &plan, "service:l2-dr-test", start_audit_id).await?;
-    let forged =
-        mint_l2_dr_authorized_without_durable_start(plan, "service:l2-dr-test", start_audit_id)?;
+    let admission_epoch = arm_l2_dr_admission(&owner, &deps, &plan).await?;
+    let forged = mint_l2_dr_authorized_without_durable_start(
+        plan,
+        "service:l2-dr-test",
+        start_audit_id,
+        admission_epoch,
+    )?;
 
     assert_eq!(
         deps.apply_l2_dr_recovery(forged).await,
@@ -3339,10 +3492,12 @@ async fn l2_dr_recovery_rejects_missing_and_mismatched_start_proof_without_mutat
         1_000,
         std::slice::from_ref(&event_id),
     )?;
+    let missing_admission = arm_l2_dr_admission(&owner, &deps, &missing_plan).await?;
     let missing = mint_l2_dr_authorized_without_durable_start(
         missing_plan,
         "service:l2-dr-test",
         uuid::Uuid::new_v4(),
+        missing_admission,
     )?;
     assert_eq!(
         deps.apply_l2_dr_recovery(missing).await,
@@ -3363,7 +3518,7 @@ async fn l2_dr_recovery_rejects_missing_and_mismatched_start_proof_without_mutat
         1_000,
         std::slice::from_ref(&event_id),
     )?;
-    let _ = authorize_l2_dr_recovery(&deps, recorded_plan.clone(), recorded_start).await?;
+    let _ = authorize_l2_dr_recovery(&owner, &deps, recorded_plan.clone(), recorded_start).await?;
     let mismatched_plan = l2_dr_recovery_plan(
         recorded_epoch,
         tenant,
@@ -3371,10 +3526,12 @@ async fn l2_dr_recovery_rejects_missing_and_mismatched_start_proof_without_mutat
         1_000,
         &[unique_event_id("l2-dr-p1839-mismatch")],
     )?;
+    let mismatched_admission = arm_l2_dr_admission(&owner, &deps, &mismatched_plan).await?;
     let mismatched = mint_l2_dr_authorized_without_durable_start(
         mismatched_plan,
         "service:l2-dr-test",
         recorded_start,
+        mismatched_admission,
     )?;
     assert_eq!(
         deps.apply_l2_dr_recovery(mismatched).await,
@@ -3412,7 +3569,7 @@ async fn l2_dr_recovery_rejects_policy_mismatch_without_mutation() -> TestResult
         1_000,
         std::slice::from_ref(&event_id),
     )?;
-    let authorized = authorize_l2_dr_recovery(&deps, plan, uuid::Uuid::new_v4()).await?;
+    let authorized = authorize_l2_dr_recovery(&owner, &deps, plan, uuid::Uuid::new_v4()).await?;
 
     sqlx::query("DELETE FROM public.event_delivery_policy WHERE singleton")
         .execute(&owner.pool)
@@ -3463,7 +3620,9 @@ async fn l2_dr_recovery_broker_ahead_allows_absent_outbox_events_as_noop_receipt
         std::slice::from_ref(&absent_event_id),
     )?;
     let receipt = deps
-        .apply_l2_dr_recovery(authorize_l2_dr_recovery(&deps, plan, uuid::Uuid::new_v4()).await?)
+        .apply_l2_dr_recovery(
+            authorize_l2_dr_recovery(&owner, &deps, plan, uuid::Uuid::new_v4()).await?,
+        )
         .await?;
     assert_eq!(receipt.outcome(), eventexec::L2DrRecoveryOutcome::Applied);
     assert_eq!(

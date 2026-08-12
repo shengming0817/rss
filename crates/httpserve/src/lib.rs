@@ -156,6 +156,8 @@ pub enum RouteGroupError {
     },
     #[error("route registration failed")]
     RegistrationFailed,
+    #[error("generated mutation route was finalized without process write admission")]
+    MissingWriteAdmission,
     #[error(
         "generated route method is invalid or unsupported: contract={contract_id}, method={method}, path={path}"
     )]

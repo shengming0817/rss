@@ -83,6 +83,7 @@ toml = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing = { workspace = true }
 url = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 vault = { path = "../../adapters/vault", features = ["backend"] }
 vocab = { path = "../../crates/vocab" }
 zeroize = { workspace = true }

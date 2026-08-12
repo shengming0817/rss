@@ -164,8 +164,12 @@ async fn compose_generated_domain(
     }
     for worker in output.workers {
         match worker {
-            bootstrap::WorkerSpec::PhaseOne(make) => shutdown.register_with_token(make),
-            bootstrap::WorkerSpec::Deferred(make) => shutdown.register_deferred_with_token(make),
+            bootstrap::WorkerSpec::PhaseOne(make) => {
+                shutdown.register_with_token(make.into_factory())
+            }
+            bootstrap::WorkerSpec::Deferred(make) => {
+                shutdown.register_deferred_with_token(make.into_factory())
+            }
         }
     }
     Ok((registry, shutdown))
@@ -178,8 +182,12 @@ async fn shutdown_output(output: bootstrap::DomainModuleResult) -> anyhow::Resul
     }
     for worker in output.workers {
         match worker {
-            bootstrap::WorkerSpec::PhaseOne(make) => shutdown.register_with_token(make),
-            bootstrap::WorkerSpec::Deferred(make) => shutdown.register_deferred_with_token(make),
+            bootstrap::WorkerSpec::PhaseOne(make) => {
+                shutdown.register_with_token(make.into_factory())
+            }
+            bootstrap::WorkerSpec::Deferred(make) => {
+                shutdown.register_deferred_with_token(make.into_factory())
+            }
         }
     }
     let errors = shutdown.shutdown().await;

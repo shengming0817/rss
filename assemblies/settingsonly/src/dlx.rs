@@ -36,10 +36,13 @@ pub(crate) struct DlxInputs {
     archive_key_provider: Arc<vault::VaultKeyProvider>,
     archive_key: DlxArchiveKeyName,
     readiness_interval: Duration,
+    write_admission: primitives::WriteAdmission,
 }
 
 impl DlxInputs {
     #[must_use]
+    #[allow(clippy::too_many_arguments)]
+    // reason: sealed assembly input owns the exact DLX providers and its required write lane.
     pub(crate) fn new(
         pg_owner: postgres::PgDlxLifecycleRuntime,
         archive_store: s3::VerifiedS3DlxArchiveStore,
@@ -48,6 +51,7 @@ impl DlxInputs {
         archive_key_provider: Arc<vault::VaultKeyProvider>,
         archive_key: DlxArchiveKeyName,
         readiness_interval: Duration,
+        write_admission: primitives::WriteAdmission,
     ) -> Self {
         Self {
             pg_owner,
@@ -57,6 +61,7 @@ impl DlxInputs {
             archive_key_provider,
             archive_key,
             readiness_interval,
+            write_admission,
         }
     }
 }
@@ -102,7 +107,11 @@ pub(crate) fn wire(inputs: DlxInputs) -> anyhow::Result<DlxRoleOutputs> {
             )),
         )],
         resources: vec![DynManagedResource::new_box(inputs.pg_owner)],
-        workers: vec![lifecycle_worker(lifecycle, lifecycle_health)],
+        workers: vec![lifecycle_worker(
+            lifecycle,
+            lifecycle_health,
+            inputs.write_admission,
+        )],
     };
     let dlx_archive_store = DomainModuleResult {
         probes: vec![(
@@ -167,30 +176,35 @@ fn lifecycle_worker(
         SharedKeyProvider,
     >,
     health: Arc<WorkerHealth>,
+    write_admission: primitives::WriteAdmission,
 ) -> WorkerSpec {
-    WorkerSpec::phase_one(move |token| {
-        let build_failure_health = Arc::clone(&health);
-        DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
-            DLX_LIFECYCLE_WORKER_NAME,
-            token,
-            Arc::clone(&health),
-            DLX_WORKER_SHUTDOWN_TIMEOUT,
-            move |_error| {
-                record_health_transition(
-                    &build_failure_health,
-                    DlxLifecycleHealth::Unhealthy,
-                    "dlx-lifecycle",
-                    "runtime",
-                    "runtime-build",
-                    "runtime_build",
-                );
-            },
-            move |thread_token| async move {
-                lifecycle_loop(lifecycle, thread_token, health).await;
-                Ok(())
-            },
-        ))
-    })
+    WorkerSpec::writes_phase_one(
+        "assemblies.settingsonly.src.dlx.01",
+        &write_admission,
+        move |token, worker_admission| {
+            let build_failure_health = Arc::clone(&health);
+            DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
+                DLX_LIFECYCLE_WORKER_NAME,
+                token,
+                Arc::clone(&health),
+                DLX_WORKER_SHUTDOWN_TIMEOUT,
+                move |_error| {
+                    record_health_transition(
+                        &build_failure_health,
+                        DlxLifecycleHealth::Unhealthy,
+                        "dlx-lifecycle",
+                        "runtime",
+                        "runtime-build",
+                        "runtime_build",
+                    );
+                },
+                move |thread_token| async move {
+                    lifecycle_loop(lifecycle, thread_token, health, worker_admission).await;
+                    Ok(())
+                },
+            ))
+        },
+    )
 }
 
 async fn lifecycle_loop(
@@ -201,6 +215,7 @@ async fn lifecycle_loop(
     >,
     token: tokio_util::sync::CancellationToken,
     health: Arc<WorkerHealth>,
+    write_admission: primitives::WriteAdmission,
 ) {
     let mut ticker = tokio::time::interval(DLX_LIFECYCLE_INTERVAL);
     loop {
@@ -208,6 +223,9 @@ async fn lifecycle_loop(
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
+                let Ok(_permit) = write_admission.try_enter() else {
+                    continue;
+                };
                 let now = epoch_seconds(crate::SystemClock.now());
                 match tokio::time::timeout(DLX_LIFECYCLE_TICK_TIMEOUT, lifecycle.tick(now)).await {
                     Ok(report) => record_health_transition(
@@ -311,29 +329,32 @@ fn key_readiness_worker(
     health: Arc<WorkerHealth>,
 ) -> anyhow::Result<WorkerSpec> {
     let aad = key_canary_aad(spec.aad_scope)?;
-    Ok(WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
-            spec.worker_name,
-            token,
-            Arc::clone(&health),
-            DLX_WORKER_SHUTDOWN_TIMEOUT,
-            move |_error| {
-                tracing::error!(
-                    event = "settingsonly.readiness",
-                    component = "dlx-key",
-                    operation = "runtime",
-                    outcome = "unhealthy",
-                    reason = "runtime-build",
-                    error_type = "runtime_build",
-                    "settingsonly readiness worker failed"
-                );
-            },
-            move |thread_token| async move {
-                key_readiness_loop(provider, key, aad, thread_token, health).await;
-                Ok(())
-            },
-        ))
-    }))
+    Ok(WorkerSpec::observational_phase_one(
+        "assemblies.settingsonly.src.dlx.02",
+        move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
+                spec.worker_name,
+                token,
+                Arc::clone(&health),
+                DLX_WORKER_SHUTDOWN_TIMEOUT,
+                move |_error| {
+                    tracing::error!(
+                        event = "settingsonly.readiness",
+                        component = "dlx-key",
+                        operation = "runtime",
+                        outcome = "unhealthy",
+                        reason = "runtime-build",
+                        error_type = "runtime_build",
+                        "settingsonly readiness worker failed"
+                    );
+                },
+                move |thread_token| async move {
+                    key_readiness_loop(provider, key, aad, thread_token, health).await;
+                    Ok(())
+                },
+            ))
+        },
+    ))
 }
 
 fn key_canary_aad(scope: &'static str) -> anyhow::Result<secure::DerivedAad> {
@@ -442,7 +463,7 @@ fn archive_readiness_worker(
     health: Arc<WorkerHealth>,
     readiness_interval: Duration,
 ) -> WorkerSpec {
-    WorkerSpec::phase_one(move |token| {
+    WorkerSpec::observational_phase_one("assemblies.settingsonly.src.dlx.03", move |token| {
         let build_failure_health = Arc::clone(&health);
         DynManagedResource::new_box(spawn_on_dedicated_runtime_with_build_failure(
             DLX_ARCHIVE_READINESS_WORKER_NAME,

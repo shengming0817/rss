@@ -163,6 +163,7 @@ pub fn spawn_consumer<S, H>(
     lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
+    admission: primitives::ConsumerAdmission,
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
@@ -177,7 +178,16 @@ where
         move |token| async move {
             health.mark_healthy();
             let stream = Box::pin(stream.take_until(token.cancelled_owned()));
-            run_consumer(stream, idempotency, dlx, meta, handler, lease_cfg).await;
+            run_consumer(
+                stream,
+                idempotency,
+                dlx,
+                meta,
+                handler,
+                lease_cfg,
+                admission,
+            )
+            .await;
             Ok(())
         },
     )
@@ -197,7 +207,7 @@ where
 /// 返回的 [`ManagedBlockingWorker`] 持同一 `health` + `token`，shutdown 取消 token → relay_loop break →
 /// 线程退出 → completion → Ok（健康态翻 Unhealthy）。
 #[allow(clippy::too_many_arguments)]
-// reason: relay spawn 7 参数是最小必要集（name/store/config/clock/token/health/metrics 各自语义独立），
+// reason: relay spawn 参数是唯一 production relay 所需的完整 dependency set；admission 必填，
 // 同 spawn_consumer_ackable item-level carve-out（error-handling.md §Carve-out）。
 pub fn spawn_relay<A>(
     name: String,
@@ -207,6 +217,7 @@ pub fn spawn_relay<A>(
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     metrics: Arc<dyn crate::OutboxMetrics>,
+    admission: primitives::RelayAdmission,
 ) -> ManagedBlockingWorker
 where
     A: OutboxRelay + Send + 'static,
@@ -219,7 +230,7 @@ where
         move |token| async move {
             // Arc::new(store) 在线程内构建：Arc<A>(!Send) 不跨线程；store: A (Send) 跨线程移入。
             let store = Arc::new(store);
-            crate::relay::relay_loop(store, config, clock, token, health, metrics).await;
+            crate::relay::relay_loop(store, config, clock, token, health, metrics, admission).await;
             Ok(())
         },
     )
@@ -248,6 +259,7 @@ pub fn spawn_consumer_ackable<S, H>(
     lease_cfg: LeaseConfig,
     token: CancellationToken,
     health: Arc<WorkerHealth>,
+    admission: primitives::ConsumerAdmission,
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
@@ -269,6 +281,7 @@ where
                 &meta,
                 &handler,
                 lease_cfg,
+                admission,
             )
             .await;
             Ok(())
@@ -290,6 +303,11 @@ where
 ///
 /// ref: ThreeDotsLabs/watermill message/router.go@master（受监督消费循环）
 ///      kube-rs/kube kube-runtime controller backoff（until-cancel）
+#[allow(
+    clippy::cognitive_complexity,
+    clippy::too_many_arguments,
+    reason = "the canonical supervised subscriber loop keeps subscribe, pause, health, retry, and shutdown ordering in one closed state machine"
+)]
 pub async fn run_ackable_subscription_loop<D>(
     subscriber: Box<DynAckableSubscriber<'static>>,
     topic: Topic,
@@ -297,24 +315,49 @@ pub async fn run_ackable_subscription_loop<D>(
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     backoff: BackoffPolicy,
+    admission: primitives::ConsumerAdmission,
     mut run_once: D,
 ) where
-    D: AsyncFnMut(DeliveryStream),
+    D: AsyncFnMut(DeliveryStream, primitives::ConsumerAdmission),
 {
     let mut attempts = 0_u32;
     loop {
         if token.is_cancelled() {
             return;
         }
-        match subscriber
-            .subscribe_ackable(topic.clone(), token.clone())
-            .await
-        {
+        if admission.wait_open().await.is_err() {
+            return;
+        }
+        let subscribe_permit = match admission.try_enter() {
+            Ok(permit) => permit,
+            Err(primitives::AdmissionError::Paused) => continue,
+            Err(primitives::AdmissionError::Stopped) => return,
+            Err(error) => {
+                tracing::error!(error = %error, "consumer: subscribe admission invariant failed");
+                health.mark_invariant();
+                return;
+            }
+        };
+        let subscribe_token = token.child_token();
+        let subscribe = tokio::select! {
+            biased;
+            () = token.cancelled() => return,
+            _ = admission.wait_closed() => {
+                subscribe_token.cancel();
+                None
+            }
+            result = subscriber.subscribe_ackable(topic.clone(), subscribe_token.clone()) => Some(result),
+        };
+        drop(subscribe_permit);
+        let Some(subscribe) = subscribe else {
+            continue;
+        };
+        match subscribe {
             Ok(stream) => {
                 attempts = 0;
                 health.mark_subscription_recovered();
                 let stream = Box::pin(stream.take_until(token.clone().cancelled_owned()));
-                run_once(stream).await;
+                run_once(stream, admission.clone()).await;
                 if token.is_cancelled() {
                     return;
                 }
@@ -446,6 +489,7 @@ pub fn spawn_consumer_ackable_subscriber<S, H>(
     token: CancellationToken,
     health: Arc<WorkerHealth>,
     backoff: BackoffPolicy,
+    admission: primitives::ConsumerAdmission,
 ) -> ManagedBlockingWorker
 where
     S: InboxStore + Send + Sync + 'static,
@@ -466,7 +510,8 @@ where
                 token,
                 health,
                 backoff,
-                async |stream| {
+                admission,
+                async |stream, admission| {
                     run_consumer_ackable(
                         stream,
                         Arc::clone(&idempotency),
@@ -474,6 +519,7 @@ where
                         &meta,
                         &handler,
                         lease_cfg,
+                        admission,
                     )
                     .await;
                 },
@@ -523,6 +569,18 @@ mod tests {
     /// 测试用 lease 配置（续租间隔大，worker happy-path 测试中续租不触发）。
     fn lease_cfg() -> LeaseConfig {
         LeaseConfig::from_ttl(std::time::Duration::from_secs(60))
+    }
+
+    fn consumer_admission() -> primitives::ConsumerAdmission {
+        let (control, _, consumer, _) = primitives::prepare_dr_admission_controls().into_parts();
+        assert!(control.start_running().is_ok());
+        consumer
+    }
+
+    fn relay_admission() -> primitives::RelayAdmission {
+        let (control, relay, _, _) = primitives::prepare_dr_admission_controls().into_parts();
+        assert!(control.start_running().is_ok());
+        relay
     }
 
     // ── fakes / stream factories ───────────────────────────────────────────────
@@ -902,6 +960,7 @@ mod tests {
             lease_cfg(),
             CancellationToken::new(),
             health(),
+            consumer_admission(),
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while counter.load(Ordering::Acquire) != 3 {
@@ -934,6 +993,7 @@ mod tests {
             lease_cfg(),
             token,
             health(),
+            consumer_admission(),
         );
         // 运行中：health 初始 Healthy，worker 阻塞在 pending stream 未退出。
         assert_eq!(worker.health().status(), HealthStatus::Healthy);
@@ -956,6 +1016,7 @@ mod tests {
             lease_cfg(),
             CancellationToken::new(),
             health(),
+            consumer_admission(),
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while !polled.load(Ordering::Acquire) {
@@ -984,6 +1045,7 @@ mod tests {
             lease_cfg(),
             CancellationToken::new(),
             health(),
+            consumer_admission(),
         );
         assert_eq!(
             ManagedResource::shutdown_timeout(&worker),
@@ -1035,6 +1097,7 @@ mod tests {
                     lease_cfg(),
                     CancellationToken::new(),
                     health(),
+                    consumer_admission(),
                 );
                 tokio::time::timeout(std::time::Duration::from_secs(1), async {
                     while !started.load(Ordering::Acquire) {
@@ -1084,6 +1147,7 @@ mod tests {
             lease_cfg(),
             CancellationToken::new(),
             health(),
+            consumer_admission(),
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while worker.health().detail() != "stopped" {
@@ -1120,6 +1184,7 @@ mod tests {
             lease_cfg(),
             CancellationToken::new(),
             health(),
+            consumer_admission(),
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while counter.load(Ordering::Acquire) != 1 {
@@ -1152,6 +1217,7 @@ mod tests {
             lease_cfg(),
             CancellationToken::new(),
             health(),
+            consumer_admission(),
         );
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             while !polled.load(Ordering::Acquire) {
@@ -1188,6 +1254,7 @@ mod tests {
             stack_child.clone(),
             health(),
             tiny_backoff(),
+            consumer_admission(),
         );
 
         let subscribed_token = match rx.recv_timeout(std::time::Duration::from_secs(1)) {
@@ -1216,7 +1283,8 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             tiny_backoff(),
-            async |mut stream| while stream.next().await.is_some() {},
+            consumer_admission(),
+            async |mut stream, _admission| while stream.next().await.is_some() {},
         );
         let watchdog = async {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
@@ -1269,7 +1337,8 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             tiny_backoff(),
-            async |mut stream| while stream.next().await.is_some() {},
+            consumer_admission(),
+            async |mut stream, _admission| while stream.next().await.is_some() {},
         );
         let watchdog = async {
             while health.status() != HealthStatus::Healthy {
@@ -1318,7 +1387,8 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             tiny_backoff(),
-            async |mut stream| while stream.next().await.is_some() {},
+            consumer_admission(),
+            async |mut stream, _admission| while stream.next().await.is_some() {},
         );
         let watchdog = async {
             while subscribe_calls.load(Ordering::Acquire) < 2
@@ -1343,7 +1413,8 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             tiny_backoff(),
-            async |mut stream| while stream.next().await.is_some() {},
+            consumer_admission(),
+            async |mut stream, _admission| while stream.next().await.is_some() {},
         );
         let watchdog = async {
             tokio::time::sleep(std::time::Duration::from_millis(3)).await;
@@ -1393,7 +1464,8 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             tiny_backoff(),
-            async |mut stream| while stream.next().await.is_some() {},
+            consumer_admission(),
+            async |mut stream, _admission| while stream.next().await.is_some() {},
         );
         let watchdog = async {
             while subscribe_calls.load(Ordering::Acquire) < 2 {
@@ -1552,6 +1624,7 @@ mod tests {
             token.clone(),
             Arc::clone(&health),
             Arc::new(NoopRelayMetrics),
+            relay_admission(),
         );
 
         // 运行中 Healthy（relay_loop 跑在线程内，未退出）。
@@ -1612,6 +1685,7 @@ mod tests {
                     CancellationToken::new(),
                     health(),
                     Arc::new(NoopRelayMetrics),
+                    relay_admission(),
                 );
                 tokio::time::timeout(std::time::Duration::from_secs(1), async {
                     while !started.load(Ordering::Acquire) {

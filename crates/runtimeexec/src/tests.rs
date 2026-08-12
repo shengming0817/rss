@@ -223,7 +223,7 @@ fn failing_resource(
 
 fn worker(name: &'static str, transcript: &Transcript) -> bootstrap::WorkerSpec {
     let transcript = transcript.clone();
-    bootstrap::WorkerSpec::deferred(move |token: CancellationToken| {
+    bootstrap::WorkerSpec::observational_deferred(name, move |token: CancellationToken| {
         assert!(
             !token.is_cancelled(),
             "worker token must be live at registration"
@@ -514,9 +514,19 @@ fn lifecycle_batches(
     provider: DomainModuleResult,
     domain: DomainModuleResult,
 ) -> LaunchLifecycleBatches {
+    let expected = bootstrap::ExpectedWorkerInventory::closed(
+        provider
+            .workers
+            .iter()
+            .chain(domain.workers.iter())
+            .map(bootstrap::WorkerSpec::descriptor)
+            .filter(|descriptor| descriptor.lane != bootstrap::WorkerAdmissionLane::Observational),
+    )
+    .expect("test worker inventory is closed");
     LaunchLifecycleBatches::new(
         ProviderLifecycleBatch::from_provider_output(provider),
         DomainLifecycleBatch::from_domain_output(domain),
+        Some(expected),
     )
 }
 
@@ -612,19 +622,23 @@ async fn module_worker_cancellation_waits_for_listener_lifo_drain() {
         lifecycle_batches(
             module(
                 Vec::new(),
-                vec![bootstrap::WorkerSpec::deferred(move |token| {
-                    *worker_token_capture.lock().expect("worker token capture") =
-                        Some(token.clone());
-                    DynManagedResource::new_box(CancellationObservedResource {
-                        token,
-                        shutdowns: worker_shutdowns_capture,
-                        cancelled_at_shutdown: worker_cancelled_capture,
-                        shutdown_done: worker_done_capture,
-                    })
-                })],
+                vec![bootstrap::WorkerSpec::observational_deferred(
+                    "crates.runtimeexec.src.tests.02",
+                    move |token| {
+                        *worker_token_capture.lock().expect("worker token capture") =
+                            Some(token.clone());
+                        DynManagedResource::new_box(CancellationObservedResource {
+                            token,
+                            shutdowns: worker_shutdowns_capture,
+                            cancelled_at_shutdown: worker_cancelled_capture,
+                            shutdown_done: worker_done_capture,
+                        })
+                    },
+                )],
             ),
             DomainModuleResult::default(),
         ),
+        true,
     )
     .expect("register module worker");
     stack.register_with_token({
@@ -678,23 +692,27 @@ async fn phase_one_module_worker_cancels_before_listener_lifo_drain() {
         lifecycle_batches(
             module(
                 Vec::new(),
-                vec![bootstrap::WorkerSpec::phase_one({
-                    let shutdowns = Arc::clone(&worker_shutdowns);
-                    let cancelled_at_shutdown = Arc::clone(&worker_cancelled_at_shutdown);
-                    move |token| {
-                        *worker_token_capture.lock().expect("worker token capture") =
-                            Some(token.clone());
-                        DynManagedResource::new_box(CancellationObservedResource {
-                            token,
-                            shutdowns,
-                            cancelled_at_shutdown,
-                            shutdown_done: Arc::new(Notify::new()),
-                        })
-                    }
-                })],
+                vec![bootstrap::WorkerSpec::observational_phase_one(
+                    "crates.runtimeexec.src.tests.03",
+                    {
+                        let shutdowns = Arc::clone(&worker_shutdowns);
+                        let cancelled_at_shutdown = Arc::clone(&worker_cancelled_at_shutdown);
+                        move |token| {
+                            *worker_token_capture.lock().expect("worker token capture") =
+                                Some(token.clone());
+                            DynManagedResource::new_box(CancellationObservedResource {
+                                token,
+                                shutdowns,
+                                cancelled_at_shutdown,
+                                shutdown_done: Arc::new(Notify::new()),
+                            })
+                        }
+                    },
+                )],
             ),
             DomainModuleResult::default(),
         ),
+        true,
     )
     .expect("register phase-one module worker");
     stack.register_with_token({

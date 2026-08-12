@@ -23,14 +23,18 @@ use audit::ports::{
     AuditChainHasher, AuditListTenantAppend, AuditListTenantAppender, DynAuditReadRepo,
 };
 use audit::test_support::InMemAuditRepo;
+use axum::body::Body;
+use axum::http::{Method, Request, StatusCode, header};
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64_URL;
 use consistency::IdemKey;
 use diport::{
-    DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName, KeyProvider,
-    KeyProviderError, KeyRef, KeyVersion, ManagedResource as _, MessageId, OpaqueActorId,
-    OutboxActor, PublishRequest, Publisher, RedactedBytes, SecretCoordinate, SecretMaterial,
-    SecretResolver, SecretResolverError, Topic,
+    Clock as _, DynKeyProvider, EncryptOutput, EnvelopeMetadata, EnvelopeSubjectId, KeyName,
+    KeyProvider, KeyProviderError, KeyRef, KeyVersion, ManagedResource as _, MessageId,
+    OpaqueActorId, OutboxActor, PublishRequest, Publisher, RedactedBytes, SecretCoordinate,
+    SecretMaterial, SecretResolver, SecretResolverError, Topic,
 };
-use eventexec::TenantAuthorityBinding;
+use eventexec::{L2DrRecoveryStore as _, TenantAuthorityBinding};
 use generated::event::identity_v1::{
     policy_updated::{self, IdentityPolicyUpdatedPayload},
     session_created::{self, IdentitySessionCreatedPayload},
@@ -40,7 +44,7 @@ use generated::http::identity_v1::{
     login::{IdentityLoginRequest, PRODUCER as LOGIN_PRODUCER},
     policies_create::PRODUCER as POLICIES_CREATE_PRODUCER,
 };
-use generated::http::settings_v1::SettingsConfigPublishRequest;
+use generated::http::settings_v1::{SPEC as SETTINGS_CONFIG_SPEC, SettingsConfigPublishRequest};
 use httpserve::ProducerMarker;
 use httpserve::{RouteAuthorizationDecision, RouteAuthorizationRequest, RouteResource};
 use identity::ports::{
@@ -53,19 +57,24 @@ use identity::ports::{
     ScalarOperandInput, TenantId, TenantRepoScope, TypedPolicyValueInput,
 };
 use identity::{IdentityDomain, IdentityDomainDeps, LoginService};
-use postgres::{PgConfig, PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps};
+use p256::ecdsa::{Signature, SigningKey, signature::Signer as _};
+use postgres::{
+    PgConfig, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryDeps, PgL2DrRecoveryExecutorConfig,
+    PgPassword, PgRuntimeDeps, PgSslMode, PgTenantReadConfig, caps,
+};
 use primitives::{Mac, MacAlgorithm, MacKey, MacVerifier};
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use tokio_util::sync::CancellationToken;
+use tower::ServiceExt as _;
 
 use runtime::event_transport::{
     EventTransportTestValues, EventWorkerTestValues, bridge_generated_subscriptions,
 };
-use runtime::support::SystemClock;
+use runtime::support::{SystemClock, TracingAuthAuditSink};
 use runtime::test_support::{
     build_redis_runtime_deps_from_values, build_s3_runtime_deps_from_values,
-    build_shared_runtime_deps, build_vault_runtime_from_values, wire_distributed,
-    wire_event_transport,
+    build_shared_runtime_deps, build_vault_runtime_from_values, finalize_federated_listener,
+    wire_distributed, wire_event_transport, wire_event_transport_with_admission,
 };
 use settings::{SecretResolveService, SettingsDomain, SettingsService};
 
@@ -85,6 +94,86 @@ const TEST_APP_ROLE: &str = "rss_app";
 const TEST_APP_PASSWORD: &str = "rss_app_test_pw";
 const TEST_READ_ROLE: &str = "rss_app_read";
 const TEST_READ_PASSWORD: &str = "rss_app_read_test_pw";
+const TEST_L2_DR_AUDITOR_PASSWORD: &str = "rss_l2_dr_recovery_auditor_test_pw";
+const TEST_L2_DR_EXECUTOR_PASSWORD: &str = "rss_l2_dr_recovery_executor_test_pw";
+
+#[allow(clippy::expect_used)]
+fn federated_signing_key() -> SigningKey {
+    let bytes: [u8; 32] = std::array::from_fn(|index| (index + 1) as u8);
+    SigningKey::from_slice(&bytes).expect("valid P-256 scalar")
+}
+
+fn federated_provider() -> Result<oidc::OidcProvider<diport::FederatedAccessProfile>> {
+    let keys = oidc::AccessStaticKeySource::builder()
+        .add_es256_sec1(
+            "federated-jwt-es256",
+            federated_signing_key()
+                .verifying_key()
+                .to_encoded_point(false)
+                .as_bytes(),
+        )?
+        .build();
+    let permissions = oidc::FederatedPermissionUniverse::try_new([vocab::GrantPermission::route(
+        vocab::RoutePermissionId::SettingsConfigPublish,
+    )])?;
+    let config = oidc::VerifierConfigBuilder::<diport::FederatedAccessProfile>::new(
+        "https://issuer.test",
+        "rss",
+        permissions,
+    )
+    .keys_static(keys)
+    .trust_kind("admin")
+    .build()?;
+    Ok(oidc::OidcProvider::new(config, Box::new(SystemClock)))
+}
+
+fn settings_admin_jwt() -> String {
+    let now = SystemClock
+        .now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let payload = serde_json::json!({
+        "sub": CANON_USER,
+        "iat": now,
+        "exp": now + 900,
+        "iss": "https://issuer.test",
+        "aud": "rss",
+        "kind": "admin",
+        "tenant_id": CANON_TENANT,
+        "token_use": "access",
+        "permissions": [vocab::RoutePermissionId::SettingsConfigPublish.as_str()],
+    });
+    let header = B64_URL.encode(br#"{"alg":"ES256","typ":"at+jwt","kid":"federated-jwt-es256"}"#);
+    let body = B64_URL.encode(payload.to_string().as_bytes());
+    let signing_input = format!("{header}.{body}");
+    let signature: Signature = federated_signing_key().sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", B64_URL.encode(signature.to_bytes()))
+}
+
+async fn publish_settings_over_generated_http(
+    router: &axum::Router,
+    key: &str,
+    value: &str,
+) -> Result<StatusCode> {
+    let response = router
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(SETTINGS_CONFIG_SPEC.route.path())
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", settings_admin_jwt()),
+                )
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    serde_json::json!({ "key": key, "value": value }).to_string(),
+                ))?,
+        )
+        .await?;
+    Ok(response.status())
+}
 
 fn test_password_blocklist() -> Result<Arc<secure::DigestPasswordBlocklist>> {
     let blocklist = crypto::load_password_blocklist_from_reader(std::io::Cursor::new(
@@ -338,6 +427,73 @@ async fn connect_pg() -> Result<(testkit::OwnedPgFixture, PgRuntimeDeps)> {
     Ok((fixture, deps))
 }
 
+async fn connect_l2_dr_operator(
+    owner_pool: &sqlx::PgPool,
+    params: &testkit::PgConnParams,
+) -> Result<PgL2DrRecoveryDeps> {
+    sqlx::query(
+        "ALTER ROLE rss_l2_dr_recovery_auditor LOGIN \
+         PASSWORD 'rss_l2_dr_recovery_auditor_test_pw'",
+    )
+    .execute(owner_pool)
+    .await?;
+    sqlx::query(
+        "ALTER ROLE rss_l2_dr_recovery_executor LOGIN \
+         PASSWORD 'rss_l2_dr_recovery_executor_test_pw'",
+    )
+    .execute(owner_pool)
+    .await?;
+    let auditor = PgL2DrRecoveryAuditConfig::new(pg_config(
+        params,
+        "rss_l2_dr_recovery_auditor",
+        TEST_L2_DR_AUDITOR_PASSWORD,
+    ));
+    let executor = PgL2DrRecoveryExecutorConfig::new(pg_config(
+        params,
+        "rss_l2_dr_recovery_executor",
+        TEST_L2_DR_EXECUTOR_PASSWORD,
+    ));
+    Ok(PgL2DrRecoveryDeps::connect(&auditor, &executor).await?)
+}
+
+fn broker_ahead_recovery_plan(
+    recovery_epoch: uuid::Uuid,
+    tenant: TenantId,
+    event_id: &str,
+) -> Result<eventexec::L2DrRecoveryPlan> {
+    Ok(eventexec::L2DrRecoveryPlan::new(
+        eventexec::RecoveryEpochId::new(recovery_epoch)?,
+        tenant,
+        eventexec::UtcEpochMicros::new(1_000)?,
+        eventexec::UtcEpochMicros::new(2_000)?,
+        eventexec::RecoveryEventSet::new(vec![IdemKey::parse(event_id)?])?,
+        eventexec::RecoveryChangeTicket::parse("CHG-2009-RUNTIME-T2")?,
+    )?)
+}
+
+async fn apply_fenced_recovery(
+    operator: &PgL2DrRecoveryDeps,
+    plan: eventexec::L2DrRecoveryPlan,
+    admission_epoch: primitives::AdmissionEpochId,
+) -> Result<()> {
+    let subject = eventexec::L2DrRecoveryOperatorSubject::parse("service:runtime-dr-t2")?;
+    let proof = operator
+        .record_l2_dr_recovery_start_audit_subject(&subject, &plan, uuid::Uuid::new_v4())
+        .await?;
+    let capability = eventexec::OperatorL2DrRecoveryCapability::issue_for_authorized_operator();
+    let authorized = eventexec::AuthorizedL2DrRecoveryPlan::from_authenticated_and_authorized(
+        plan, proof, capability,
+    )?;
+    let receipt = operator
+        .apply_l2_dr_recovery(authorized.require_admission(admission_epoch))
+        .await?;
+    anyhow::ensure!(
+        receipt.outcome() == eventexec::L2DrRecoveryOutcome::Applied,
+        "runtime T2 fenced recovery must apply exactly once"
+    );
+    Ok(())
+}
+
 fn pg_config(p: &testkit::PgConnParams, username: &str, password: &str) -> PgConfig {
     PgConfig::new(
         p.host.clone(),
@@ -407,6 +563,41 @@ async fn wait_inbox_done(pool: &sqlx::PgPool, event_id: &str, group: &str) -> Re
     .with_context(|| format!("等待 event {event_id} 被 consumer group {group} 消费失败"))
 }
 
+async fn wait_admission_phase(pool: &sqlx::PgPool, expected: &str) -> Result<()> {
+    testkit::await_try(Duration::from_secs(20), async || {
+        let phase: Option<String> = sqlx::query_scalar(
+            "SELECT phase FROM public.event_l2_dr_admission_epoch WHERE singleton",
+        )
+        .fetch_optional(pool)
+        .await?;
+        Ok::<Option<()>, anyhow::Error>((phase.as_deref() == Some(expected)).then_some(()))
+    })
+    .await
+    .with_context(|| format!("等待 DR admission phase={expected} 失败"))
+}
+
+async fn wait_outbox_status(pool: &sqlx::PgPool, event_id: &str, expected: &str) -> Result<()> {
+    let result = testkit::await_try(Duration::from_secs(20), async || {
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status FROM public.outbox WHERE event_id = $1")
+                .bind(event_id)
+                .fetch_optional(pool)
+                .await?;
+        Ok::<Option<()>, anyhow::Error>((status.as_deref() == Some(expected)).then_some(()))
+    })
+    .await;
+    if result.is_err() {
+        let actual: Option<(String, i32, Option<String>)> = sqlx::query_as(
+            "SELECT status, retry_count, lease_token::text FROM public.outbox WHERE event_id = $1",
+        )
+        .bind(event_id)
+        .fetch_optional(pool)
+        .await?;
+        anyhow::bail!("等待 outbox event {event_id} status={expected} 失败; actual={actual:?}");
+    }
+    Ok(())
+}
+
 async fn latest_outbox_event_id(pool: &sqlx::PgPool, domain: &str, topic: &str) -> Result<String> {
     let (event_id,): (String,) = sqlx::query_as(
         r#"
@@ -422,6 +613,26 @@ async fn latest_outbox_event_id(pool: &sqlx::PgPool, domain: &str, topic: &str) 
     .fetch_one(pool)
     .await?;
     Ok(event_id)
+}
+
+async fn settings_http_write_counts(pool: &sqlx::PgPool, key: &str) -> Result<(i64, i64)> {
+    let config_count = sqlx::query_scalar(
+        "SELECT count(*) FROM public.config_entries \
+         WHERE tenant_id = $1::uuid AND config_key = $2",
+    )
+    .bind(CANON_TENANT)
+    .bind(key)
+    .fetch_one(pool)
+    .await?;
+    let outbox_count = sqlx::query_scalar(
+        "SELECT count(*) FROM public.outbox \
+         WHERE tenant_id = $1::uuid AND domain = 'settings' AND topic = $2",
+    )
+    .bind(CANON_TENANT)
+    .bind(settings_v1::TOPIC)
+    .fetch_one(pool)
+    .await?;
+    Ok((config_count, outbox_count))
 }
 
 /// 测试专用只读观察：不经过生产 outbox API，因此不会夺取后台 relay 的租约。
@@ -728,8 +939,6 @@ async fn event_transport_durable_e2e() -> Result<()> {
             },
         )
         .await?;
-    let initial_settings_event_id =
-        latest_outbox_event_id(&assertion_pool, "settings", settings_v1::TOPIC).await?;
     assert_eq!(
         subscriber_settings_service
             .config_query_service()
@@ -743,10 +952,28 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 4：compose + drain subscribers（generated event topology 对应的订阅绑定）────────────
 
+    let admission_epoch = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4())?;
+    let (admission_control, relay_admission, consumer_admission, write_admission) =
+        primitives::prepare_dr_admission_controls().into_parts();
     let mut registry =
         bootstrap::compose(&[&identity_domain, &settings_domain, &audit_domain_inst])?;
+    registry.register_primary_authorizer(identity_composition::root_contract_authorizer(
+        &id,
+        Arc::new(FixedClock::at_unix_secs(NOW_SECS)),
+    ))?;
     let subscribers = bridge_generated_subscriptions(registry.drain_subscribers())?;
     let route_authorizer = registry.take_primary_authorizer()?;
+    let mut http_registry = bootstrap::compose(&[&settings_domain])?;
+    http_registry.install_write_admission(write_admission.clone())?;
+    http_registry.register_primary_authorizer(Arc::clone(&route_authorizer))?;
+    let settings_router = finalize_federated_listener(
+        &mut http_registry,
+        Arc::new(federated_provider()?),
+        httpserve::AuditSinkHandle::new(TracingAuthAuditSink),
+        Arc::new(SystemClock),
+        assembly_schema::AssemblyListenerKind::Primary,
+    )?
+    .into_plaintext_router_for_test();
     let generated_group = |contract_id: &str, consumer: &str| {
         generated::event::EVENTS
             .iter()
@@ -842,15 +1069,27 @@ async fn event_transport_durable_e2e() -> Result<()> {
     assert!(demo_module.workers.is_empty());
 
     let distributed = wire_distributed(&deps)?;
-    let event_module = wire_event_transport(
+    let event_module = wire_event_transport_with_admission(
         &pg,
         distributed,
         subscribers,
         cfg,
         worker,
         MacKey::from_bytes(AUDIT_KEY.to_vec()),
+        (
+            admission_control,
+            relay_admission,
+            consumer_admission,
+            write_admission,
+        ),
+        Some(admission_epoch),
     )
     .await?;
+    assert_eq!(
+        rmq.broker_queue_total_depth(settings_v1::TOPIC).await?,
+        0,
+        "consumer topology must exist before the paused worker is spawned"
+    );
     let resource_names = event_module
         .resources
         .iter()
@@ -870,7 +1109,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
         .iter()
         .map(|event| event.subscriptions().len())
         .sum::<usize>();
-    let expected_worker_count = generated_subscription_count + 5;
+    let expected_worker_count = generated_subscription_count + 6;
     assert_eq!(
         event_module.workers.len(),
         expected_worker_count,
@@ -895,6 +1134,7 @@ async fn event_transport_durable_e2e() -> Result<()> {
             "event_consumer:identity_policy-updated__audit__audit_policy-updated",
             "event_consumer:identity_security-event__audit__audit_security-event",
             "inbox_sweeper",
+            "dr_admission",
         ],
         "durable event probes must preserve generated topology order"
     );
@@ -907,8 +1147,10 @@ async fn event_transport_durable_e2e() -> Result<()> {
     }
     for worker in event_module.workers {
         match worker {
-            bootstrap::WorkerSpec::PhaseOne(make) => stack.register_with_token(make),
-            bootstrap::WorkerSpec::Deferred(make) => stack.register_deferred_with_token(make),
+            bootstrap::WorkerSpec::PhaseOne(make) => stack.register_with_token(make.into_factory()),
+            bootstrap::WorkerSpec::Deferred(make) => {
+                stack.register_deferred_with_token(make.into_factory())
+            }
         }
     }
     assert_eq!(
@@ -929,18 +1171,116 @@ async fn event_transport_durable_e2e() -> Result<()> {
             "event-consumer:audit:identity.policy-updated",
             "event-consumer:audit:identity.security-event",
             "inbox-sweeper",
+            "runtime-dr-admission-owner",
         ],
         "resources must register before workers so LIFO drains workers first"
     );
 
-    // ── 步骤 8a：settings active event 走生产 relay + AMQP consumer bridge ───────────────────
+    // ── 步骤 8a：post-restore required epoch 在任何 durable work admission 前先 pause/drain ─────
 
+    // Drive the generated BusinessWrite + BusinessTransaction route and all durable workers
+    // through the same process gate. Apply uses the function-only eleven-argument executor lane.
+    let l2_operator = connect_l2_dr_operator(&assertion_pool, pgfix.owner_params()).await?;
+    let recovery_epoch = uuid::Uuid::new_v4();
+    let recovery_fixture_event = format!("runtime-dr-recovery-{}", uuid::Uuid::new_v4());
+    let recovery_plan =
+        broker_ahead_recovery_plan(recovery_epoch, tenant, &recovery_fixture_event)?;
+    let declared_instances = serde_json::json!([{
+        "assemblyIdentity": "runtime",
+        "runtimePlanFingerprint": "sha256:runtime-integration-plan",
+        "instanceId": uuid::Uuid::from_u128(0x2009).to_string(),
+    }]);
+    l2_operator
+        .request_l2_dr_admission_pause(admission_epoch, &recovery_plan, &declared_instances, true)
+        .await?;
+    wait_admission_phase(&assertion_pool, "drained").await?;
+
+    let paused_http_key = format!("app.runtime-dr-http-{}", uuid::Uuid::new_v4());
+    let paused_http_before = settings_http_write_counts(&assertion_pool, &paused_http_key).await?;
+    assert_eq!(
+        publish_settings_over_generated_http(&settings_router, &paused_http_key, "paused").await?,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "the generated write route must fail closed while the process is drained"
+    );
+    assert_eq!(
+        settings_http_write_counts(&assertion_pool, &paused_http_key).await?,
+        paused_http_before,
+        "HTTP 503 must leave config state and the durable outbox unchanged"
+    );
+
+    // Fixture-only staging isolates the relay/consumer joins. The preceding request proves that
+    // the production HTTP path cannot create this row while Writes is closed.
+    publisher_settings_service
+        .publish_config(
+            settings::config_publish_receipt_for_test(),
+            tenant,
+            settings_actor.clone(),
+            SettingsConfigPublishRequest {
+                key: settings_key.to_string(),
+                value: "relay-only".to_string(),
+            },
+        )
+        .await?;
+    let staged_event_id =
+        latest_outbox_event_id(&assertion_pool, "settings", settings_v1::TOPIC).await?;
+    tokio::time::sleep(Duration::from_millis(2_500)).await;
+    wait_outbox_status(&assertion_pool, &staged_event_id, "pending").await?;
+    assert_eq!(
+        inbox_done_count(&assertion_pool, &staged_event_id, &settings_consumer_group).await?,
+        0,
+        "a drained process must not consume a newly persisted event",
+    );
+
+    apply_fenced_recovery(&l2_operator, recovery_plan, admission_epoch).await?;
+    wait_admission_phase(&assertion_pool, "applied_paused").await?;
+    l2_operator
+        .request_l2_dr_admission_resume(admission_epoch, tenant, "relay")
+        .await?;
+    wait_admission_phase(&assertion_pool, "relay_running").await?;
+    wait_outbox_status(&assertion_pool, &staged_event_id, "published").await?;
+    assert_eq!(
+        inbox_done_count(&assertion_pool, &staged_event_id, &settings_consumer_group).await?,
+        0,
+        "relay-only recovery must leave the consumer lane closed",
+    );
+    l2_operator
+        .request_l2_dr_admission_resume(admission_epoch, tenant, "consumer")
+        .await?;
+    wait_admission_phase(&assertion_pool, "consumer_running").await?;
+    wait_inbox_done(&assertion_pool, &staged_event_id, &settings_consumer_group).await?;
+    l2_operator
+        .request_l2_dr_admission_resume(admission_epoch, tenant, "writes")
+        .await?;
+    wait_admission_phase(&assertion_pool, "running").await?;
+
+    let resumed_http_before = settings_http_write_counts(&assertion_pool, &paused_http_key).await?;
+    assert_eq!(
+        publish_settings_over_generated_http(&settings_router, &paused_http_key, "running").await?,
+        StatusCode::CREATED,
+        "the same generated route must reopen only after the Writes receipt"
+    );
+    let resumed_http_after = settings_http_write_counts(&assertion_pool, &paused_http_key).await?;
+    assert_eq!(resumed_http_after.0, resumed_http_before.0 + 1);
+    assert_eq!(resumed_http_after.1, resumed_http_before.1 + 1);
+    let resumed_http_event_id =
+        latest_outbox_event_id(&assertion_pool, "settings", settings_v1::TOPIC).await?;
     wait_inbox_done(
         &assertion_pool,
-        &initial_settings_event_id,
+        &resumed_http_event_id,
         &settings_consumer_group,
     )
     .await?;
+    assert_eq!(
+        inbox_done_count(
+            &assertion_pool,
+            &resumed_http_event_id,
+            &settings_consumer_group,
+        )
+        .await?,
+        1,
+        "the resumed HTTP outbox fact must settle through ConsumerTx exactly once"
+    );
+
     publisher_settings_service
         .publish_config(
             settings::config_publish_receipt_for_test(),
@@ -1326,8 +1666,9 @@ async fn event_transport_durable_e2e() -> Result<()> {
 
     // ── 步骤 12：关停（LIFO：workers 先 drain，infra_guards 后断连）────────────────────────────
 
-    let failures = stack.shutdown().await;
+    let failures = stack.shutdown_within(Duration::from_secs(60)).await;
     assert!(failures.is_empty(), "shutdown 存在失败项: {failures:?}");
+    l2_operator.shutdown().await?;
 
     // fixture guard drop：停两个容器（pg / rmq）。
     drop(id);

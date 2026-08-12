@@ -44,6 +44,36 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>,
     > {
         let plan = crate::plan::IdentityAuditPlan::bundled()?;
+        let expected_workers = plan.expected_workers()?;
+        transaction.expect_workers(expected_workers)?;
+        #[allow(clippy::disallowed_methods)]
+        // reason: assembly-root boot identity is captured before any serving worker exists.
+        let instance_id = uuid::Uuid::parse_str(
+            &std::env::var("RSS_RUNTIME_INSTANCE_ID")
+                .context("RSS_RUNTIME_INSTANCE_ID is required")?,
+        )
+        .context("RSS_RUNTIME_INSTANCE_ID must be a UUID")?;
+        #[allow(clippy::disallowed_methods)]
+        // reason: assembly-root optional post-restore startup fence.
+        let required_admission_epoch = std::env::var("RSS_DR_REQUIRED_ADMISSION_EPOCH_ID")
+            .ok()
+            .map(|raw| primitives::AdmissionEpochId::parse(&raw))
+            .transpose()
+            .context("RSS_DR_REQUIRED_ADMISSION_EPOCH_ID must be a canonical UUID")?;
+        let admission_identity = eventexec::DrAdmissionProcessIdentity::new(
+            "identityaudit",
+            plan.as_typed().runtime_plan_fingerprint().as_str(),
+            instance_id,
+            uuid::Uuid::new_v4(),
+            required_admission_epoch,
+        )?;
+        let (admission_control, relay_admission, consumer_admission, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        if let Some(epoch) = required_admission_epoch {
+            admission_control
+                .pause_all(epoch)
+                .context("arm identityaudit required DR admission epoch")?;
+        }
         let (config, secrets, build_metadata, frontend) = self.captured.into_runtime_inputs();
         let build = crate::providers::build(
             plan.provider_build()?,
@@ -95,6 +125,9 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             &pg.for_domain::<postgres::caps::Identity>(),
             Arc::new(crate::SystemClock),
         ))?;
+        registry
+            .install_write_admission(write_admission.clone())
+            .context("install identityaudit process write admission")?;
 
         let event_outputs = crate::eventing::wire(
             &pg,
@@ -104,6 +137,11 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             &audit_chain_key,
             tenant_authority,
             dlx_payload_protector,
+            admission_identity,
+            admission_control,
+            relay_admission,
+            consumer_admission,
+            write_admission,
         )
         .await?;
         let completed_roles = roles.finish(event_outputs, transaction.provider_output_mut())?;

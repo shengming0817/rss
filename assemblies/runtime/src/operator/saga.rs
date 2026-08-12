@@ -104,7 +104,7 @@ impl SagaOperatorCliAction {
 }
 
 #[derive(Debug)]
-struct SagaCliRequest {
+pub(super) struct SagaCliRequest {
     action: SagaOperatorCliAction,
     operator_tenant: vocab::TenantId,
     identity: diport::SagaWorkerIdentity,
@@ -116,7 +116,7 @@ struct SagaCliRequest {
 }
 
 #[derive(Debug)]
-struct SagaCliArgs {
+pub(super) struct SagaCliArgs {
     request: SagaCliRequest,
     operator_service_token: OperatorServiceToken,
 }
@@ -586,7 +586,8 @@ impl SagaCommandRuntime for ProductionSagaCommandRuntime<'_> {
         )
         .await
         .context("setup plan-selected Saga operator serving capabilities")?;
-        crate::saga_runtime::bind_and_wire_selected_sagas(&mut plan)?;
+        plan.bind_workflow_runtime(std::iter::empty())
+            .context("bind plan-selected Saga operator targets")?;
         let target =
             select_saga_operator_target(plan.workflow_runtime().sagas(), &parsed.identity)?;
         let (resources, _sampler) = serving.into_runtime_parts(std::time::Duration::from_secs(30));

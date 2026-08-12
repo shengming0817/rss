@@ -91,13 +91,39 @@ impl IdentityAuditPlan {
         .context("seal identityaudit runtime inventory seed")
     }
 
-    #[cfg(test)]
     pub(crate) const fn as_typed(&self) -> &TypedRuntimePlan {
         &self.typed
     }
 
     pub(crate) const fn workflow_runtime(&self) -> &eventexec::WorkflowRuntimePlan {
         &self.workflow_runtime
+    }
+
+    pub(crate) fn expected_workers(&self) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
+        use bootstrap::{WorkerAdmissionLane as Lane, WorkerDescriptor as Worker};
+
+        let mut expected = vec![
+            Worker::expected("assemblies.identityaudit.src.eventing.01", Lane::Relay),
+            Worker::expected("assemblies.identityaudit.src.eventing.02", Lane::Writes),
+            Worker::expected("assemblies.identityaudit.src.eventing.04", Lane::Writes),
+        ];
+        for event in generated::event::EVENTS {
+            for subscription in event
+                .subscriptions()
+                .iter()
+                .filter(|subscription| subscription.consumer() == "audit")
+            {
+                expected.push(Worker::expected(
+                    format!(
+                        "event-consumer:identityaudit-event-consumer:{}:{}",
+                        subscription.consumer(),
+                        event.topic()
+                    ),
+                    Lane::Consumer,
+                ));
+            }
+        }
+        bootstrap::ExpectedWorkerInventory::closed(expected).map_err(Into::into)
     }
 }
 

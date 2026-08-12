@@ -424,6 +424,7 @@ pub(crate) async fn serve_inventory_journey(
             runtimeexec::DomainLifecycleBatch::from_domain_output(
                 bootstrap::DomainModuleResult::default(),
             ),
+            Some(bootstrap::ExpectedWorkerInventory::closed([])?),
         ),
         crate::runtime::total_drain_budget()?,
     );

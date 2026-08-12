@@ -2532,7 +2532,7 @@ mod tests {
         let green = syn::parse_file(
             r#"
             fn worker_spec() -> WorkerSpec {
-                WorkerSpec::deferred(move |token| {
+                WorkerSpec::observational_deferred(move |token| {
                     spawn_consumer_ackable_tx_subscriber(token)
                 })
             }
@@ -2549,7 +2549,7 @@ mod tests {
         for red in [
             r#"
             fn worker_spec() -> WorkerSpec {
-                WorkerSpec::phase_one(move |token| {
+                WorkerSpec::observational_phase_one(move |token| {
                     spawn_consumer_ackable_tx_subscriber(token)
                 })
             }

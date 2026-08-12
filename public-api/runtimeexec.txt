@@ -496,7 +496,7 @@ impl !core::panic::unwind_safe::RefUnwindSafe for runtimeexec::DomainLifecycleBa
 impl !core::panic::unwind_safe::UnwindSafe for runtimeexec::DomainLifecycleBatch
 pub struct runtimeexec::LaunchLifecycleBatches
 impl runtimeexec::LaunchLifecycleBatches
-pub fn runtimeexec::LaunchLifecycleBatches::new(runtimeexec::ProviderLifecycleBatch, runtimeexec::DomainLifecycleBatch) -> Self
+pub fn runtimeexec::LaunchLifecycleBatches::new(runtimeexec::ProviderLifecycleBatch, runtimeexec::DomainLifecycleBatch, core::option::Option<bootstrap::module::ExpectedWorkerInventory>) -> Self
 impl core::marker::Freeze for runtimeexec::LaunchLifecycleBatches
 impl core::marker::Send for runtimeexec::LaunchLifecycleBatches
 impl !core::marker::Sync for runtimeexec::LaunchLifecycleBatches
@@ -575,6 +575,7 @@ impl<Startup> core::panic::unwind_safe::RefUnwindSafe for runtimeexec::StartupPl
 impl<Startup> core::panic::unwind_safe::UnwindSafe for runtimeexec::StartupPlan<Startup> where Startup: core::panic::unwind_safe::UnwindSafe
 pub struct runtimeexec::StartupTransaction<'stack>
 impl<'stack> runtimeexec::StartupTransaction<'stack>
+pub fn runtimeexec::StartupTransaction<'stack>::expect_workers(&mut self, bootstrap::module::ExpectedWorkerInventory) -> anyhow::Result<()>
 pub fn runtimeexec::StartupTransaction<'stack>::outputs_mut(&mut self) -> (&mut bootstrap::module::DomainModuleResult, &mut bootstrap::module::DomainModuleResult)
 pub fn runtimeexec::StartupTransaction<'stack>::provider_output_mut(&mut self) -> &mut bootstrap::module::DomainModuleResult
 pub fn runtimeexec::StartupTransaction<'stack>::stage_domain_output(&mut self, bootstrap::module::DomainModuleResult)

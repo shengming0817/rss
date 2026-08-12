@@ -17,7 +17,9 @@
 //! 编译期路由类型边（ADR-009）构造 [`UnfinalizedRoutes`]，再由组合根按 listener 选择
 //! [`finalize_auth`] 或 [`finalize_primary_auth`] 产 [`AuthenticatedRoutes`]。
 
-use crate::auth::{AuditSinkHandle, AuthAudit, RouteAuthorizer, enforce_layer};
+use crate::auth::{
+    AuditSinkHandle, AuthAudit, RouteAuthorizer, RouteWriteAdmission, enforce_layer,
+};
 use crate::{
     PrimaryRouteAuthz, RouteGroupError, RoutePermission, RouteResourceScope, RouteTenantBinding,
     ServiceCallerPolicy,
@@ -1010,6 +1012,7 @@ pub struct ListenerRouter<L: Listener> {
     inner: axum::Router,
     prefix: &'static str,
     mounted: MountedRoutes,
+    write_admission: RouteAdmissionContext,
     _l: PhantomData<fn() -> L>,
 }
 
@@ -1020,11 +1023,16 @@ impl<L: Listener> ListenerRouter<L> {
     /// 域 crate 只在 `route_group` register 闭包里**收到** builder，仅能 mount typed endpoint（无
     /// raw-bypass）。构造与裸 Router erase 只发生在 httpserve 内（[`UnfinalizedRoutes::nest_group`]），
     /// 故无任何 public API 交出可 bind 的裸 `axum::Router`（#1103/#1113 Hard 闭环）。
-    pub(crate) fn new(router: axum::Router, prefix: &'static str) -> Self {
+    pub(crate) fn new(
+        router: axum::Router,
+        prefix: &'static str,
+        write_admission: RouteAdmissionContext,
+    ) -> Self {
         Self {
             inner: router,
             prefix,
             mounted: MountedRoutes::default(),
+            write_admission,
             _l: PhantomData,
         }
     }
@@ -1059,11 +1067,18 @@ impl<L: Listener> ListenerRouter<L> {
         let mut mounted = self.mounted;
         mounted.push_raw(evidence);
         Ok(Self {
-            inner: self
-                .inner
-                .route(path, handler.layer(enforce_layer(authz, method, evidence))),
+            inner: self.inner.route(
+                path,
+                handler.layer(enforce_layer(
+                    authz,
+                    method,
+                    evidence,
+                    route_write_admission(evidence, &self.write_admission)?,
+                )),
+            ),
             prefix: self.prefix,
             mounted,
+            write_admission: self.write_admission,
             _l: PhantomData,
         })
     }
@@ -1085,10 +1100,16 @@ impl ListenerRouter<Primary> {
         Ok(Self {
             inner: self.inner.route(
                 path,
-                handler.layer(enforce_layer(Some(route.authz), method, route.evidence)),
+                handler.layer(enforce_layer(
+                    Some(route.authz),
+                    method,
+                    route.evidence,
+                    route_write_admission(route.evidence, &self.write_admission)?,
+                )),
             ),
             prefix: self.prefix,
             mounted,
+            write_admission: self.write_admission,
             _l: PhantomData,
         })
     }
@@ -1126,10 +1147,12 @@ impl ListenerRouter<Internal> {
                     Some(PrimaryRouteAuthz::ServiceCaller(policy)),
                     method,
                     evidence,
+                    route_write_admission(evidence, &self.write_admission)?,
                 )),
             ),
             prefix: self.prefix,
             mounted,
+            write_admission: self.write_admission,
             _l: PhantomData,
         })
     }
@@ -1153,11 +1176,18 @@ impl ListenerRouter<Admin> {
         let mut mounted = self.mounted;
         mounted.push_generated(evidence, identity);
         Ok(Self {
-            inner: self
-                .inner
-                .route(path, handler.layer(enforce_layer(authz, method, evidence))),
+            inner: self.inner.route(
+                path,
+                handler.layer(enforce_layer(
+                    authz,
+                    method,
+                    evidence,
+                    route_write_admission(evidence, &self.write_admission)?,
+                )),
+            ),
             prefix: self.prefix,
             mounted,
+            write_admission: self.write_admission,
             _l: PhantomData,
         })
     }
@@ -1190,10 +1220,12 @@ impl ListenerRouter<Internal> {
                     Some(PrimaryRouteAuthz::ServiceCaller(policy)),
                     method,
                     evidence,
+                    route_write_admission(evidence, &self.write_admission)?,
                 )),
             ),
             prefix: self.prefix,
             mounted,
+            write_admission: self.write_admission,
             _l: PhantomData,
         })
     }
@@ -1218,10 +1250,16 @@ impl ListenerRouter<Primary> {
         Ok(Self {
             inner: self.inner.route(
                 path,
-                handler.layer(enforce_layer(Some(authz), method, evidence)),
+                handler.layer(enforce_layer(
+                    Some(authz),
+                    method,
+                    evidence,
+                    route_write_admission(evidence, &self.write_admission)?,
+                )),
             ),
             prefix: self.prefix,
             mounted,
+            write_admission: self.write_admission,
             _l: PhantomData,
         })
     }
@@ -1237,6 +1275,7 @@ impl ListenerRouter<Health> {
             inner: self.inner.route(path, handler),
             prefix: self.prefix,
             mounted: self.mounted,
+            write_admission: self.write_admission,
             _l: PhantomData,
         }
     }
@@ -1376,6 +1415,32 @@ pub struct UnfinalizedRoutes {
     mounted: MountedRoutes,
     listener: Option<ListenerKind>,
     conflicting_listener: Option<ListenerKind>,
+    write_admission: RouteAdmissionContext,
+}
+
+#[derive(Clone)]
+pub(crate) enum RouteAdmissionContext {
+    ReadOnly,
+    Mutation(primitives::WriteAdmission),
+}
+
+fn route_write_admission(
+    evidence: HttpRouteEvidence,
+    context: &RouteAdmissionContext,
+) -> Result<RouteWriteAdmission, RouteGroupError> {
+    let mutating = evidence.effect_profile().effects().iter().any(|effect| {
+        matches!(
+            effect,
+            vocab::HttpEffectKind::BusinessWrite | vocab::HttpEffectKind::BusinessTransaction
+        )
+    });
+    match (mutating, context) {
+        (false, _) => Ok(RouteWriteAdmission::ReadOnly),
+        (true, RouteAdmissionContext::Mutation(admission)) => {
+            Ok(RouteWriteAdmission::Mutation(admission.clone()))
+        }
+        (true, RouteAdmissionContext::ReadOnly) => Err(RouteGroupError::MissingWriteAdmission),
+    }
 }
 
 impl UnfinalizedRoutes {
@@ -1386,6 +1451,18 @@ impl UnfinalizedRoutes {
             mounted: MountedRoutes::default(),
             listener: None,
             conflicting_listener: None,
+            write_admission: RouteAdmissionContext::ReadOnly,
+        }
+    }
+
+    /// Construct a route accumulator whose generated mutation endpoints share the process gate.
+    pub fn with_mutation_admission(write_admission: primitives::WriteAdmission) -> Self {
+        Self {
+            router: axum::Router::new(),
+            mounted: MountedRoutes::default(),
+            listener: None,
+            conflicting_listener: None,
+            write_admission: RouteAdmissionContext::Mutation(write_admission),
         }
     }
 
@@ -1402,8 +1479,12 @@ impl UnfinalizedRoutes {
     where
         L: Listener,
     {
-        let (group, group_routes) =
-            register(ListenerRouter::<L>::new(axum::Router::new(), prefix))?.into_parts();
+        let (group, group_routes) = register(ListenerRouter::<L>::new(
+            axum::Router::new(),
+            prefix,
+            self.write_admission.clone(),
+        ))?
+        .into_parts();
         let listener = self.listener.or(Some(L::KIND));
         let conflicting_listener = self.conflicting_listener.or_else(|| {
             self.listener
@@ -1417,6 +1498,7 @@ impl UnfinalizedRoutes {
             mounted,
             listener,
             conflicting_listener,
+            write_admission: self.write_admission,
         })
     }
 
@@ -1971,12 +2053,18 @@ fn listener_mismatch(routes: &UnfinalizedRoutes, finalized: ListenerKind) -> Rou
 pub fn unfinalized_for_test<L: Listener>(
     build: impl FnOnce(ListenerRouter<L>) -> Result<ListenerRouter<L>, RouteGroupError>,
 ) -> Result<UnfinalizedRoutes, RouteGroupError> {
-    let (router, mounted) = build(ListenerRouter::<L>::new(axum::Router::new(), ""))?.into_parts();
+    let (router, mounted) = build(ListenerRouter::<L>::new(
+        axum::Router::new(),
+        "",
+        RouteAdmissionContext::ReadOnly,
+    ))?
+    .into_parts();
     Ok(UnfinalizedRoutes {
         router,
         mounted,
         listener: Some(L::KIND),
         conflicting_listener: None,
+        write_admission: RouteAdmissionContext::ReadOnly,
     })
 }
 

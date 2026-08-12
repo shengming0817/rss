@@ -1764,6 +1764,9 @@ mod tests {
             capture: capture.clone(),
         };
         let mut registry = bootstrap::compose(&[&domain]).expect("compose evidence domain");
+        registry
+            .install_write_admission(primitives::prepare_dr_admission_controls().into_parts().3)
+            .expect("install test write admission");
         let mut listeners = registry
             .finalize_routes()
             .expect("finalize registry routes");

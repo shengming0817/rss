@@ -40,8 +40,8 @@ mod worker_control;
 pub mod relay;
 pub use relay::{
     OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayWorker,
-    RelayWorkerControl, SWEEPER_WORKER_NAME, SamplerWorker, SweeperWorker, WorkerHealth,
-    WorkerStoppedGuard, backlog_sampler_loop, relay_loop, relay_loop_controlled, sweeper_loop,
+    SWEEPER_WORKER_NAME, SamplerWorker, SweeperWorker, WorkerHealth, WorkerStoppedGuard,
+    backlog_sampler_loop, relay_loop, sweeper_loop,
 };
 
 // #1209 outbox relay 配置护栏（构造期 fail-fast）+ 可观测性发射端口（注入式）。
@@ -70,12 +70,18 @@ pub use dlq::{
     record_outbox_expired_resolution,
 };
 
+pub mod dr_admission_runtime;
 pub mod dr_recovery;
+pub use dr_admission_runtime::{
+    DrAdmissionCommand, DrAdmissionCommandPhase, DrAdmissionCommandStore,
+    DrAdmissionProcessIdentity, DrAdmissionRuntimeError, run_dr_admission_controller,
+};
 pub use dr_recovery::{
     AuthorizedL2DrRecoveryPlan, L2DrRecoveryDurableReceipt, L2DrRecoveryDurableStartProof,
     L2DrRecoveryError, L2DrRecoveryOperatorSubject, L2DrRecoveryOutcome, L2DrRecoveryPlan,
     L2DrRecoveryPlanDigest, L2DrRecoveryReceipt, L2DrRecoveryStore, OperatorL2DrRecoveryCapability,
-    RecoveryChangeTicket, RecoveryDirection, RecoveryEpochId, RecoveryEventSet, UtcEpochMicros,
+    RecoveryChangeTicket, RecoveryDirection, RecoveryEpochId, RecoveryEventSet,
+    RequiredAdmissionFence, UtcEpochMicros,
 };
 
 pub mod dlx_lifecycle;

@@ -542,6 +542,7 @@ pub struct WorkerInputs {
     meta: ConsumerMeta,
     lease_cfg: LeaseConfig,
     health: Arc<WorkerHealth>,
+    admission: primitives::ConsumerAdmission,
 }
 
 impl WorkerInputs {
@@ -557,6 +558,7 @@ impl WorkerInputs {
         meta: ConsumerMeta,
         lease_cfg: LeaseConfig,
         health: Arc<WorkerHealth>,
+        admission: primitives::ConsumerAdmission,
     ) -> Self {
         Self {
             worker_name,
@@ -567,6 +569,7 @@ impl WorkerInputs {
             meta,
             lease_cfg,
             health,
+            admission,
         }
     }
 }
@@ -710,22 +713,29 @@ where
         meta,
         lease_cfg,
         health,
+        admission,
     } = inputs;
-    WorkerSpec::deferred(move |token| {
-        diport::DynManagedResource::new_box(spawn_consumer_ackable_tx_subscriber(
-            worker_name,
-            subscriber,
-            topic,
-            idempotency,
-            dlx,
-            meta,
-            handler,
-            lease_cfg,
-            token,
-            health,
-            eventexec::BackoffPolicy::default(),
-        ))
-    })
+    let worker_identity = format!("event-consumer:{worker_name}");
+    WorkerSpec::consumer_deferred(
+        worker_identity,
+        &admission,
+        move |token, _consumer_admission| {
+            diport::DynManagedResource::new_box(spawn_consumer_ackable_tx_subscriber(
+                worker_name,
+                subscriber,
+                topic,
+                idempotency,
+                dlx,
+                meta,
+                handler,
+                lease_cfg,
+                token,
+                health,
+                eventexec::BackoffPolicy::default(),
+                _consumer_admission,
+            ))
+        },
+    )
 }
 
 #[cfg(test)]

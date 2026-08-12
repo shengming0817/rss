@@ -666,14 +666,17 @@ pub(crate) fn wire_s3_canary(
     let probe_ready = Arc::clone(&ready);
     let worker_ready = Arc::clone(&ready);
     let s3 = deps.s3.clone();
-    let worker = bootstrap::WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(spawn_s3_canary_sampler(
-            s3.clone(),
-            config,
-            token,
-            worker_ready,
-        ))
-    });
+    let worker = bootstrap::WorkerSpec::observational_phase_one(
+        "assemblies.runtime.src.infra.s3.01",
+        move |token| {
+            DynManagedResource::new_box(spawn_s3_canary_sampler(
+                s3.clone(),
+                config,
+                token,
+                worker_ready,
+            ))
+        },
+    );
     Ok(DomainModuleResult {
         probes: vec![(probe_name, Box::new(S3ReadyProbe::new(probe_ready)))],
         resources: Vec::new(),

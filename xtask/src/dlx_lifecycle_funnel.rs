@@ -34,7 +34,7 @@ const RUNTIME_INFRA_REQUIRED: &[&str] = &[
     "PgRuntimeDeps::connect_serving(",
     "PgDlxLifecycleRuntime::setup(&dlx_archiver_pg_config,&dlx_verifier_pg_config,&dlx_purger_pg_config,hot_payload_protector,)",
     "DlxLifecycleRuntimeDeps::new(dlx_pg_owner,archive_store,archive_vault_provider,archive_key",
-    "wire_dlx_lifecycle(dlx_lifecycle,dlx_worker)",
+    "wire_dlx_lifecycle(dlx_lifecycle,dlx_worker,",
 ];
 
 pub(crate) const FIXED_FUNCTIONS: &[&str] = &[

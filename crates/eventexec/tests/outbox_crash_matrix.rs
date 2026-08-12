@@ -25,6 +25,12 @@ const PAYLOAD: &[u8] = br#"{"sessionId":"session-01"}"#;
 const START_EPOCH_MICROS: i64 = 1_000_000;
 const LEASE_TTL_MICROS: i64 = 60_000_000;
 
+fn relay_admission() -> primitives::RelayAdmission {
+    let (control, relay, _, _) = primitives::prepare_dr_admission_controls().into_parts();
+    assert!(control.start_running().is_ok());
+    relay
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DurableStatus {
     Pending,
@@ -371,6 +377,7 @@ async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
         CancellationToken::new(),
         Arc::new(WorkerHealth::healthy()),
         Arc::new(NoopMetrics),
+        relay_admission(),
     ));
     tokio::time::timeout(
         Duration::from_secs(5),
@@ -402,6 +409,7 @@ async fn publish_then_crash_recovers_with_stable_identity_and_consumer_dedup() {
         token.clone(),
         Arc::new(WorkerHealth::healthy()),
         Arc::new(NoopMetrics),
+        relay_admission(),
     ));
     tokio::time::timeout(Duration::from_secs(5), store.settled.notified())
         .await

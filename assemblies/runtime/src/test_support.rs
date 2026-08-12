@@ -67,12 +67,20 @@ pub fn bind_saga_provider_integration(
         worker_config,
     )?;
     plan.bind_workflow_runtime([capability])?;
+    let (control, _relay, _consumer, write_admission) =
+        primitives::prepare_dr_admission_controls().into_parts();
+    control.start_running()?;
     let mut module = bootstrap::DomainModuleResult::default();
-    crate::saga_runtime::wire_saga_worker(plan.workflow_runtime().sagas(), &mut module)?;
+    crate::saga_runtime::wire_saga_worker(
+        plan.workflow_runtime().sagas(),
+        &write_admission,
+        &mut module,
+    )?;
     let active_count = plan.workflow_runtime().sagas().entries().len();
     module.merge(crate::phase::maintenance::wire_saga_terminal_sweeper(
         pg,
         active_count,
+        &write_admission,
     )?);
     let mut entries = plan.workflow_runtime().sagas().entries();
     let entry = entries
@@ -193,6 +201,13 @@ where
         httpserve::ServerRequestBudget::from_millis(std::num::NonZeroU64::MIN),
         |_, _| "127.0.0.1:0".parse().map_err(anyhow::Error::from),
     );
+    let expected_workers = bootstrap::ExpectedWorkerInventory::closed(
+        module
+            .workers
+            .iter()
+            .map(bootstrap::WorkerSpec::descriptor)
+            .filter(|descriptor| descriptor.lane != bootstrap::WorkerAdmissionLane::Observational),
+    )?;
     let (completion, controlled) = runtimeexec::test_support::controlled();
     let launch = runtimeexec::LaunchPlan::new(
         adapter,
@@ -207,6 +222,7 @@ where
                 bootstrap::DomainModuleResult::default(),
             ),
             runtimeexec::DomainLifecycleBatch::from_domain_output(module),
+            Some(expected_workers),
         ),
         crate::launch::total_drain_budget()?,
     );
@@ -535,15 +551,70 @@ pub async fn wire_event_transport(
     worker: crate::event_transport::EventWorkerConfig,
     audit_key: primitives::MacKey,
 ) -> anyhow::Result<bootstrap::DomainModuleResult> {
-    crate::event_transport::wire_event_transport(
+    wire_event_transport_with_admission(
+        pg,
+        distributed,
+        subscribers,
+        cfg,
+        worker,
+        audit_key,
+        primitives::prepare_dr_admission_controls().into_parts(),
+        None,
+    )
+    .await
+}
+
+/// Wires the production event transport with one caller-owned process admission authority.
+///
+/// This integration-only seam lets a T2 route fixture and the durable workers share the exact
+/// three production lanes. Production composition still obtains the bundle from its sealed
+/// provider phase and does not consume this helper.
+#[allow(clippy::too_many_arguments)]
+pub async fn wire_event_transport_with_admission(
+    pg: &postgres::PgRuntimeHandle,
+    distributed: DistributedRuntimeDeps,
+    subscribers: Vec<crate::event_transport::BridgedSubscription>,
+    cfg: crate::event_transport::EventTransportConfig,
+    worker: crate::event_transport::EventWorkerConfig,
+    audit_key: primitives::MacKey,
+    admission: (
+        primitives::ProcessAdmissionControl,
+        primitives::RelayAdmission,
+        primitives::ConsumerAdmission,
+        primitives::WriteAdmission,
+    ),
+    required_admission_epoch: Option<primitives::AdmissionEpochId>,
+) -> anyhow::Result<bootstrap::DomainModuleResult> {
+    let (admission_control, relay_admission, consumer_admission, write_admission) = admission;
+    let retain_controller = cfg.topology() != bootstrap::Topology::Demo;
+    let identity = eventexec::DrAdmissionProcessIdentity::new(
+        "runtime",
+        "sha256:runtime-integration-plan",
+        uuid::Uuid::from_u128(0x2009),
+        uuid::Uuid::new_v4(),
+        required_admission_epoch,
+    )?;
+    let mut module = crate::event_transport::wire_event_transport(
         pg,
         distributed,
         subscribers,
         cfg,
         worker,
         Some(audit_key),
+        relay_admission,
+        consumer_admission,
+        write_admission,
     )
-    .await
+    .await?;
+    if retain_controller {
+        crate::event_transport::retain_admission_authority(
+            pg.clone(),
+            admission_control,
+            identity,
+            &mut module,
+        )?;
+    }
+    Ok(module)
 }
 
 /// Wires distributed providers with the canonical non-configurable worker timing.

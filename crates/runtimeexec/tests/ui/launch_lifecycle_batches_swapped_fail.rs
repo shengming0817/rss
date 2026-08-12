@@ -6,5 +6,9 @@ fn main() {
         bootstrap::DomainModuleResult::default(),
     );
 
-    let _swapped = runtimeexec::LaunchLifecycleBatches::new(domain, provider);
+    let _swapped = runtimeexec::LaunchLifecycleBatches::new(
+        domain,
+        provider,
+        Some(bootstrap::ExpectedWorkerInventory::closed([]).unwrap()),
+    );
 }

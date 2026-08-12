@@ -1229,9 +1229,10 @@ impl DeviceIdentityPilotAdoption {
         Ok(bootstrap::DomainModuleResult {
             probes: vec![(name.clone(), Box::new(PilotReadinessProbe { name, pilot }))],
             resources: Vec::new(),
-            workers: vec![bootstrap::WorkerSpec::deferred(move |_token| {
-                DynManagedResource::new_box(resource)
-            })],
+            workers: vec![bootstrap::WorkerSpec::observational_deferred(
+                "composition.identity.src.pilot.01",
+                move |_token| DynManagedResource::new_box(resource),
+            )],
         })
     }
 

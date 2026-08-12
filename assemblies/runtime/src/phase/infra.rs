@@ -203,6 +203,11 @@ impl<'a> ProvidersBuilt<'a> {
             serving_config,
             runtime_rss_access,
             runtime_federated_access,
+            admission_identity,
+            admission_control,
+            relay_admission,
+            consumer_admission,
+            write_admission,
         } = self;
         let mut uncommitted_provider_module = UncommittedModule::new(PG_MODULE_COMMITTED_ONCE);
         let result = async {
@@ -311,6 +316,7 @@ impl<'a> ProvidersBuilt<'a> {
             let revocation_provider = crate::provider_output::BuiltDeviceRevocationProvider::build(
                 &pg,
                 device_revocation_store_permit,
+                &write_admission,
             )
             .context("build typed device revocation provider")?;
             let (revocation_store, revocation_output) = revocation_provider.into_parts();
@@ -331,7 +337,7 @@ impl<'a> ProvidersBuilt<'a> {
                     .resources
                     .push(provider.managed_resource());
             }
-            let replay_sweeper_module = wire_service_token_replay_sweeper(&pg)
+            let replay_sweeper_module = wire_service_token_replay_sweeper(&pg, &write_admission)
                 .context("wire service-token replay sweeper")?;
             uncommitted_provider_module
                 .get_mut()
@@ -361,15 +367,18 @@ impl<'a> ProvidersBuilt<'a> {
                 archive_vault_provider,
                 archive_key,
             );
-            let dlx_outputs =
-                match crate::event_transport::wire_dlx_lifecycle(dlx_lifecycle, dlx_worker) {
-                    Ok(module) => module,
-                    Err(failure) => {
-                        let (module, error) = failure.into_rollback();
-                        uncommitted_provider_module.restore(module);
-                        return Err(error.context("wire DLX lifecycle"));
-                    }
-                };
+            let dlx_outputs = match crate::event_transport::wire_dlx_lifecycle(
+                dlx_lifecycle,
+                dlx_worker,
+                write_admission.clone(),
+            ) {
+                Ok(module) => module,
+                Err(failure) => {
+                    let (module, error) = failure.into_rollback();
+                    uncommitted_provider_module.restore(module);
+                    return Err(error.context("wire DLX lifecycle"));
+                }
+            };
             provider_build
                 .record(crate::provider_output::ProviderOutput::dlx(
                     dlx_outputs.lifecycle_repository,
@@ -460,6 +469,11 @@ impl<'a> ProvidersBuilt<'a> {
                 runtime_rss_access,
                 runtime_federated_access,
                 runtime_service_token: built.runtime_service_token,
+                admission_identity,
+                admission_control,
+                relay_admission,
+                consumer_admission,
+                write_admission,
             }),
             Err(error) => {
                 let module = uncommitted_provider_module.take_or_default();
@@ -609,14 +623,17 @@ impl<'a> ProvidersBuilt<'a> {
             .context("parse redis_ready probe name")?;
         let redis_for_sampler = redis.clone();
         let redis_worker_ready = Arc::clone(&redis_ready);
-        let redis_readiness_worker = bootstrap::WorkerSpec::phase_one(move |token| {
-            diport::DynManagedResource::new_box(spawn_redis_readiness_sampler(
-                redis_for_sampler.clone(),
-                redis_readiness_period,
-                token,
-                Arc::clone(&redis_worker_ready),
-            ))
-        });
+        let redis_readiness_worker = bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.runtime.src.phase.infra.01",
+            move |token| {
+                diport::DynManagedResource::new_box(spawn_redis_readiness_sampler(
+                    redis_for_sampler.clone(),
+                    redis_readiness_period,
+                    token,
+                    Arc::clone(&redis_worker_ready),
+                ))
+            },
+        );
         provider_build
             .record(crate::provider_output::ProviderOutput::redis(
                 DomainModuleResult {

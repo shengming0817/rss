@@ -554,6 +554,7 @@ pub(crate) async fn serve_inventory_journey(
             runtimeexec::DomainLifecycleBatch::from_domain_output(
                 bootstrap::DomainModuleResult::default(),
             ),
+            Some(bootstrap::ExpectedWorkerInventory::closed([])?),
         ),
         crate::runtime::total_drain_budget()?,
     );
@@ -766,6 +767,7 @@ mod tests {
             runtimeexec::LaunchLifecycleBatches::new(
                 runtimeexec::ProviderLifecycleBatch::from_provider_output(provider_output),
                 runtimeexec::DomainLifecycleBatch::from_domain_output(domain_output),
+                Some(bootstrap::ExpectedWorkerInventory::closed([]).expect("empty inventory")),
             ),
             crate::runtime::total_drain_budget()?,
         );

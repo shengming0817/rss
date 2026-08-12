@@ -366,6 +366,200 @@ pub trait primitives::crypto::MacVerifier
 pub fn primitives::crypto::MacVerifier::sign(&self, &primitives::crypto::MacKey, primitives::crypto::MacAlgorithm, &[u8]) -> primitives::crypto::Mac
 pub fn primitives::crypto::MacVerifier::verify(&self, &primitives::crypto::MacKey, primitives::crypto::MacAlgorithm, &[u8], &primitives::crypto::Mac) -> bool
 pub fn primitives::crypto::constant_time_eq(&[u8], &[u8]) -> bool
+pub mod primitives::dr_admission
+pub enum primitives::dr_admission::AdmissionError
+pub primitives::dr_admission::AdmissionError::CounterOverflow
+pub primitives::dr_admission::AdmissionError::EpochConflict
+pub primitives::dr_admission::AdmissionError::InvalidEpoch
+pub primitives::dr_admission::AdmissionError::InvalidTransition
+pub primitives::dr_admission::AdmissionError::NotDrained
+pub primitives::dr_admission::AdmissionError::Paused
+pub primitives::dr_admission::AdmissionError::Stopped
+impl core::clone::Clone for primitives::dr_admission::AdmissionError
+pub fn primitives::dr_admission::AdmissionError::clone(&self) -> primitives::dr_admission::AdmissionError
+impl core::cmp::Eq for primitives::dr_admission::AdmissionError
+impl core::cmp::PartialEq for primitives::dr_admission::AdmissionError
+pub fn primitives::dr_admission::AdmissionError::eq(&self, &primitives::dr_admission::AdmissionError) -> bool
+impl core::error::Error for primitives::dr_admission::AdmissionError
+impl core::fmt::Debug for primitives::dr_admission::AdmissionError
+pub fn primitives::dr_admission::AdmissionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for primitives::dr_admission::AdmissionError
+pub fn primitives::dr_admission::AdmissionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for primitives::dr_admission::AdmissionError
+impl core::marker::StructuralPartialEq for primitives::dr_admission::AdmissionError
+impl core::marker::Freeze for primitives::dr_admission::AdmissionError
+impl core::marker::Send for primitives::dr_admission::AdmissionError
+impl core::marker::Sync for primitives::dr_admission::AdmissionError
+impl core::marker::Unpin for primitives::dr_admission::AdmissionError
+impl core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionError
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionError
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionError
+pub enum primitives::dr_admission::LocalAdmissionPhase
+pub primitives::dr_admission::LocalAdmissionPhase::ConsumerRunning
+pub primitives::dr_admission::LocalAdmissionPhase::Initializing
+pub primitives::dr_admission::LocalAdmissionPhase::Paused
+pub primitives::dr_admission::LocalAdmissionPhase::RelayRunning
+pub primitives::dr_admission::LocalAdmissionPhase::Running
+impl core::clone::Clone for primitives::dr_admission::LocalAdmissionPhase
+pub fn primitives::dr_admission::LocalAdmissionPhase::clone(&self) -> primitives::dr_admission::LocalAdmissionPhase
+impl core::cmp::Eq for primitives::dr_admission::LocalAdmissionPhase
+impl core::cmp::PartialEq for primitives::dr_admission::LocalAdmissionPhase
+pub fn primitives::dr_admission::LocalAdmissionPhase::eq(&self, &primitives::dr_admission::LocalAdmissionPhase) -> bool
+impl core::fmt::Debug for primitives::dr_admission::LocalAdmissionPhase
+pub fn primitives::dr_admission::LocalAdmissionPhase::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::StructuralPartialEq for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::Freeze for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::Send for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::Sync for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::Unpin for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::UnsafeUnpin for primitives::dr_admission::LocalAdmissionPhase
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::LocalAdmissionPhase
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::LocalAdmissionPhase
+pub struct primitives::dr_admission::AdmissionEpochId(_)
+impl primitives::dr_admission::AdmissionEpochId
+pub const fn primitives::dr_admission::AdmissionEpochId::as_uuid(self) -> uuid::Uuid
+pub fn primitives::dr_admission::AdmissionEpochId::new(uuid::Uuid) -> core::result::Result<Self, primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::AdmissionEpochId::parse(&str) -> core::result::Result<Self, primitives::dr_admission::AdmissionError>
+impl core::clone::Clone for primitives::dr_admission::AdmissionEpochId
+pub fn primitives::dr_admission::AdmissionEpochId::clone(&self) -> primitives::dr_admission::AdmissionEpochId
+impl core::cmp::Eq for primitives::dr_admission::AdmissionEpochId
+impl core::cmp::PartialEq for primitives::dr_admission::AdmissionEpochId
+pub fn primitives::dr_admission::AdmissionEpochId::eq(&self, &primitives::dr_admission::AdmissionEpochId) -> bool
+impl core::fmt::Debug for primitives::dr_admission::AdmissionEpochId
+pub fn primitives::dr_admission::AdmissionEpochId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for primitives::dr_admission::AdmissionEpochId
+pub fn primitives::dr_admission::AdmissionEpochId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for primitives::dr_admission::AdmissionEpochId
+impl core::marker::StructuralPartialEq for primitives::dr_admission::AdmissionEpochId
+impl core::marker::Freeze for primitives::dr_admission::AdmissionEpochId
+impl core::marker::Send for primitives::dr_admission::AdmissionEpochId
+impl core::marker::Sync for primitives::dr_admission::AdmissionEpochId
+impl core::marker::Unpin for primitives::dr_admission::AdmissionEpochId
+impl core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionEpochId
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionEpochId
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionEpochId
+pub struct primitives::dr_admission::AdmissionGate<L: primitives::dr_admission::AdmissionLane>
+impl<L: primitives::dr_admission::AdmissionLane> primitives::dr_admission::AdmissionGate<L>
+pub fn primitives::dr_admission::AdmissionGate<L>::try_enter(&self) -> core::result::Result<primitives::dr_admission::AdmissionPermit<L>, primitives::dr_admission::AdmissionError>
+pub async fn primitives::dr_admission::AdmissionGate<L>::wait_closed(&self) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub async fn primitives::dr_admission::AdmissionGate<L>::wait_open(&self) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+impl<L: primitives::dr_admission::AdmissionLane> core::clone::Clone for primitives::dr_admission::AdmissionGate<L>
+pub fn primitives::dr_admission::AdmissionGate<L>::clone(&self) -> Self
+impl<L: primitives::dr_admission::AdmissionLane> core::fmt::Debug for primitives::dr_admission::AdmissionGate<L>
+pub fn primitives::dr_admission::AdmissionGate<L>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<L> core::marker::Freeze for primitives::dr_admission::AdmissionGate<L>
+impl<L> core::marker::Send for primitives::dr_admission::AdmissionGate<L>
+impl<L> core::marker::Sync for primitives::dr_admission::AdmissionGate<L>
+impl<L> core::marker::Unpin for primitives::dr_admission::AdmissionGate<L>
+impl<L> core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionGate<L>
+impl<L> core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionGate<L>
+impl<L> core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionGate<L>
+pub struct primitives::dr_admission::AdmissionPermit<L: primitives::dr_admission::AdmissionLane>
+impl<L: primitives::dr_admission::AdmissionLane> core::fmt::Debug for primitives::dr_admission::AdmissionPermit<L>
+pub fn primitives::dr_admission::AdmissionPermit<L>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<L: primitives::dr_admission::AdmissionLane> core::ops::drop::Drop for primitives::dr_admission::AdmissionPermit<L>
+pub fn primitives::dr_admission::AdmissionPermit<L>::drop(&mut self)
+impl<L> core::marker::Freeze for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::marker::Send for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::marker::Sync for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::marker::Unpin for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionPermit<L>
+pub struct primitives::dr_admission::AdmissionSnapshot
+impl primitives::dr_admission::AdmissionSnapshot
+pub const fn primitives::dr_admission::AdmissionSnapshot::active_epoch(self) -> core::option::Option<primitives::dr_admission::AdmissionEpochId>
+pub const fn primitives::dr_admission::AdmissionSnapshot::in_flight(self) -> [usize; 3]
+pub const fn primitives::dr_admission::AdmissionSnapshot::is_stopped(self) -> bool
+pub const fn primitives::dr_admission::AdmissionSnapshot::phase(self) -> primitives::dr_admission::LocalAdmissionPhase
+impl core::clone::Clone for primitives::dr_admission::AdmissionSnapshot
+pub fn primitives::dr_admission::AdmissionSnapshot::clone(&self) -> primitives::dr_admission::AdmissionSnapshot
+impl core::cmp::Eq for primitives::dr_admission::AdmissionSnapshot
+impl core::cmp::PartialEq for primitives::dr_admission::AdmissionSnapshot
+pub fn primitives::dr_admission::AdmissionSnapshot::eq(&self, &primitives::dr_admission::AdmissionSnapshot) -> bool
+impl core::fmt::Debug for primitives::dr_admission::AdmissionSnapshot
+pub fn primitives::dr_admission::AdmissionSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::StructuralPartialEq for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::Freeze for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::Send for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::Sync for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::Unpin for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionSnapshot
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionSnapshot
+pub struct primitives::dr_admission::ConsumerLane
+impl core::fmt::Debug for primitives::dr_admission::ConsumerLane
+pub fn primitives::dr_admission::ConsumerLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::ConsumerLane
+impl core::marker::Freeze for primitives::dr_admission::ConsumerLane
+impl core::marker::Send for primitives::dr_admission::ConsumerLane
+impl core::marker::Sync for primitives::dr_admission::ConsumerLane
+impl core::marker::Unpin for primitives::dr_admission::ConsumerLane
+impl core::marker::UnsafeUnpin for primitives::dr_admission::ConsumerLane
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::ConsumerLane
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::ConsumerLane
+pub struct primitives::dr_admission::PreparedAdmissionControls
+impl primitives::dr_admission::PreparedAdmissionControls
+pub fn primitives::dr_admission::PreparedAdmissionControls::into_parts(self) -> (primitives::dr_admission::ProcessAdmissionControl, primitives::dr_admission::RelayAdmission, primitives::dr_admission::ConsumerAdmission, primitives::dr_admission::WriteAdmission)
+impl core::marker::Freeze for primitives::dr_admission::PreparedAdmissionControls
+impl core::marker::Send for primitives::dr_admission::PreparedAdmissionControls
+impl core::marker::Sync for primitives::dr_admission::PreparedAdmissionControls
+impl core::marker::Unpin for primitives::dr_admission::PreparedAdmissionControls
+impl core::marker::UnsafeUnpin for primitives::dr_admission::PreparedAdmissionControls
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::PreparedAdmissionControls
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::PreparedAdmissionControls
+pub struct primitives::dr_admission::ProcessAdmissionControl
+impl primitives::dr_admission::ProcessAdmissionControl
+pub fn primitives::dr_admission::ProcessAdmissionControl::fail_closed_initializing(&self) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::pause_all(&self, primitives::dr_admission::AdmissionEpochId) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::resume_consumer(&self, primitives::dr_admission::AdmissionEpochId) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::resume_relay(&self, primitives::dr_admission::AdmissionEpochId) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::resume_writes(&self, primitives::dr_admission::AdmissionEpochId) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::snapshot(&self) -> primitives::dr_admission::AdmissionSnapshot
+pub fn primitives::dr_admission::ProcessAdmissionControl::start_running(&self) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::stop(&self)
+pub async fn primitives::dr_admission::ProcessAdmissionControl::wait_drained(&self) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+impl core::fmt::Debug for primitives::dr_admission::ProcessAdmissionControl
+pub fn primitives::dr_admission::ProcessAdmissionControl::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for primitives::dr_admission::ProcessAdmissionControl
+impl core::marker::Send for primitives::dr_admission::ProcessAdmissionControl
+impl core::marker::Sync for primitives::dr_admission::ProcessAdmissionControl
+impl core::marker::Unpin for primitives::dr_admission::ProcessAdmissionControl
+impl core::marker::UnsafeUnpin for primitives::dr_admission::ProcessAdmissionControl
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::ProcessAdmissionControl
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::ProcessAdmissionControl
+pub struct primitives::dr_admission::RelayLane
+impl core::fmt::Debug for primitives::dr_admission::RelayLane
+pub fn primitives::dr_admission::RelayLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::RelayLane
+impl core::marker::Freeze for primitives::dr_admission::RelayLane
+impl core::marker::Send for primitives::dr_admission::RelayLane
+impl core::marker::Sync for primitives::dr_admission::RelayLane
+impl core::marker::Unpin for primitives::dr_admission::RelayLane
+impl core::marker::UnsafeUnpin for primitives::dr_admission::RelayLane
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::RelayLane
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::RelayLane
+pub struct primitives::dr_admission::WriteLane
+impl core::fmt::Debug for primitives::dr_admission::WriteLane
+pub fn primitives::dr_admission::WriteLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::WriteLane
+impl core::marker::Freeze for primitives::dr_admission::WriteLane
+impl core::marker::Send for primitives::dr_admission::WriteLane
+impl core::marker::Sync for primitives::dr_admission::WriteLane
+impl core::marker::Unpin for primitives::dr_admission::WriteLane
+impl core::marker::UnsafeUnpin for primitives::dr_admission::WriteLane
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::WriteLane
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::WriteLane
+pub trait primitives::dr_admission::AdmissionLane: primitives::dr_admission::lane_seal::Sealed + core::marker::Send + core::marker::Sync + 'static
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::ConsumerLane
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::RelayLane
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::WriteLane
+pub fn primitives::dr_admission::prepare_dr_admission_controls() -> primitives::dr_admission::PreparedAdmissionControls
+pub type primitives::dr_admission::ConsumerAdmission = primitives::dr_admission::AdmissionGate<primitives::dr_admission::ConsumerLane>
+pub type primitives::dr_admission::RelayAdmission = primitives::dr_admission::AdmissionGate<primitives::dr_admission::RelayLane>
+pub type primitives::dr_admission::WriteAdmission = primitives::dr_admission::AdmissionGate<primitives::dr_admission::WriteLane>
 pub mod primitives::healthz
 #[non_exhaustive] pub enum primitives::healthz::HealthStatus
 pub primitives::healthz::HealthStatus::Degraded
@@ -470,6 +664,33 @@ impl core::marker::Unpin for primitives::healthz::ProbeName
 impl core::marker::UnsafeUnpin for primitives::healthz::ProbeName
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::ProbeName
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::ProbeName
+pub enum primitives::AdmissionError
+pub primitives::AdmissionError::CounterOverflow
+pub primitives::AdmissionError::EpochConflict
+pub primitives::AdmissionError::InvalidEpoch
+pub primitives::AdmissionError::InvalidTransition
+pub primitives::AdmissionError::NotDrained
+pub primitives::AdmissionError::Paused
+pub primitives::AdmissionError::Stopped
+impl core::clone::Clone for primitives::dr_admission::AdmissionError
+pub fn primitives::dr_admission::AdmissionError::clone(&self) -> primitives::dr_admission::AdmissionError
+impl core::cmp::Eq for primitives::dr_admission::AdmissionError
+impl core::cmp::PartialEq for primitives::dr_admission::AdmissionError
+pub fn primitives::dr_admission::AdmissionError::eq(&self, &primitives::dr_admission::AdmissionError) -> bool
+impl core::error::Error for primitives::dr_admission::AdmissionError
+impl core::fmt::Debug for primitives::dr_admission::AdmissionError
+pub fn primitives::dr_admission::AdmissionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for primitives::dr_admission::AdmissionError
+pub fn primitives::dr_admission::AdmissionError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for primitives::dr_admission::AdmissionError
+impl core::marker::StructuralPartialEq for primitives::dr_admission::AdmissionError
+impl core::marker::Freeze for primitives::dr_admission::AdmissionError
+impl core::marker::Send for primitives::dr_admission::AdmissionError
+impl core::marker::Sync for primitives::dr_admission::AdmissionError
+impl core::marker::Unpin for primitives::dr_admission::AdmissionError
+impl core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionError
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionError
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionError
 #[non_exhaustive] pub enum primitives::AuthPlanError
 pub primitives::AuthPlanError::NoAuthOnControlPlane
 impl core::error::Error for primitives::authplan::AuthPlanError
@@ -669,6 +890,28 @@ impl core::marker::Unpin for primitives::authplan::ListenerKind
 impl core::marker::UnsafeUnpin for primitives::authplan::ListenerKind
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::ListenerKind
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::ListenerKind
+pub enum primitives::LocalAdmissionPhase
+pub primitives::LocalAdmissionPhase::ConsumerRunning
+pub primitives::LocalAdmissionPhase::Initializing
+pub primitives::LocalAdmissionPhase::Paused
+pub primitives::LocalAdmissionPhase::RelayRunning
+pub primitives::LocalAdmissionPhase::Running
+impl core::clone::Clone for primitives::dr_admission::LocalAdmissionPhase
+pub fn primitives::dr_admission::LocalAdmissionPhase::clone(&self) -> primitives::dr_admission::LocalAdmissionPhase
+impl core::cmp::Eq for primitives::dr_admission::LocalAdmissionPhase
+impl core::cmp::PartialEq for primitives::dr_admission::LocalAdmissionPhase
+pub fn primitives::dr_admission::LocalAdmissionPhase::eq(&self, &primitives::dr_admission::LocalAdmissionPhase) -> bool
+impl core::fmt::Debug for primitives::dr_admission::LocalAdmissionPhase
+pub fn primitives::dr_admission::LocalAdmissionPhase::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::StructuralPartialEq for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::Freeze for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::Send for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::Sync for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::Unpin for primitives::dr_admission::LocalAdmissionPhase
+impl core::marker::UnsafeUnpin for primitives::dr_admission::LocalAdmissionPhase
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::LocalAdmissionPhase
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::LocalAdmissionPhase
 #[non_exhaustive] pub enum primitives::MacAlgorithm
 pub primitives::MacAlgorithm::HmacSha256
 pub primitives::MacAlgorithm::HmacSha384
@@ -744,6 +987,63 @@ impl core::marker::Unpin for primitives::authplan::RouteAuthOptOut
 impl core::marker::UnsafeUnpin for primitives::authplan::RouteAuthOptOut
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::authplan::RouteAuthOptOut
 impl core::panic::unwind_safe::UnwindSafe for primitives::authplan::RouteAuthOptOut
+pub struct primitives::AdmissionEpochId(_)
+impl primitives::dr_admission::AdmissionEpochId
+pub const fn primitives::dr_admission::AdmissionEpochId::as_uuid(self) -> uuid::Uuid
+pub fn primitives::dr_admission::AdmissionEpochId::new(uuid::Uuid) -> core::result::Result<Self, primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::AdmissionEpochId::parse(&str) -> core::result::Result<Self, primitives::dr_admission::AdmissionError>
+impl core::clone::Clone for primitives::dr_admission::AdmissionEpochId
+pub fn primitives::dr_admission::AdmissionEpochId::clone(&self) -> primitives::dr_admission::AdmissionEpochId
+impl core::cmp::Eq for primitives::dr_admission::AdmissionEpochId
+impl core::cmp::PartialEq for primitives::dr_admission::AdmissionEpochId
+pub fn primitives::dr_admission::AdmissionEpochId::eq(&self, &primitives::dr_admission::AdmissionEpochId) -> bool
+impl core::fmt::Debug for primitives::dr_admission::AdmissionEpochId
+pub fn primitives::dr_admission::AdmissionEpochId::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::hash::Hash for primitives::dr_admission::AdmissionEpochId
+pub fn primitives::dr_admission::AdmissionEpochId::hash<__H: core::hash::Hasher>(&self, &mut __H)
+impl core::marker::Copy for primitives::dr_admission::AdmissionEpochId
+impl core::marker::StructuralPartialEq for primitives::dr_admission::AdmissionEpochId
+impl core::marker::Freeze for primitives::dr_admission::AdmissionEpochId
+impl core::marker::Send for primitives::dr_admission::AdmissionEpochId
+impl core::marker::Sync for primitives::dr_admission::AdmissionEpochId
+impl core::marker::Unpin for primitives::dr_admission::AdmissionEpochId
+impl core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionEpochId
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionEpochId
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionEpochId
+pub struct primitives::AdmissionPermit<L: primitives::dr_admission::AdmissionLane>
+impl<L: primitives::dr_admission::AdmissionLane> core::fmt::Debug for primitives::dr_admission::AdmissionPermit<L>
+pub fn primitives::dr_admission::AdmissionPermit<L>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl<L: primitives::dr_admission::AdmissionLane> core::ops::drop::Drop for primitives::dr_admission::AdmissionPermit<L>
+pub fn primitives::dr_admission::AdmissionPermit<L>::drop(&mut self)
+impl<L> core::marker::Freeze for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::marker::Send for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::marker::Sync for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::marker::Unpin for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionPermit<L>
+impl<L> core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionPermit<L>
+pub struct primitives::AdmissionSnapshot
+impl primitives::dr_admission::AdmissionSnapshot
+pub const fn primitives::dr_admission::AdmissionSnapshot::active_epoch(self) -> core::option::Option<primitives::dr_admission::AdmissionEpochId>
+pub const fn primitives::dr_admission::AdmissionSnapshot::in_flight(self) -> [usize; 3]
+pub const fn primitives::dr_admission::AdmissionSnapshot::is_stopped(self) -> bool
+pub const fn primitives::dr_admission::AdmissionSnapshot::phase(self) -> primitives::dr_admission::LocalAdmissionPhase
+impl core::clone::Clone for primitives::dr_admission::AdmissionSnapshot
+pub fn primitives::dr_admission::AdmissionSnapshot::clone(&self) -> primitives::dr_admission::AdmissionSnapshot
+impl core::cmp::Eq for primitives::dr_admission::AdmissionSnapshot
+impl core::cmp::PartialEq for primitives::dr_admission::AdmissionSnapshot
+pub fn primitives::dr_admission::AdmissionSnapshot::eq(&self, &primitives::dr_admission::AdmissionSnapshot) -> bool
+impl core::fmt::Debug for primitives::dr_admission::AdmissionSnapshot
+pub fn primitives::dr_admission::AdmissionSnapshot::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Copy for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::StructuralPartialEq for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::Freeze for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::Send for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::Sync for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::Unpin for primitives::dr_admission::AdmissionSnapshot
+impl core::marker::UnsafeUnpin for primitives::dr_admission::AdmissionSnapshot
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::AdmissionSnapshot
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::AdmissionSnapshot
 pub struct primitives::AuthPlan
 impl primitives::authplan::AuthPlan
 pub fn primitives::authplan::AuthPlan::listener(self) -> primitives::authplan::ListenerKind
@@ -817,6 +1117,17 @@ impl core::marker::Unpin for primitives::circuitbreaker::CircuitCounts
 impl core::marker::UnsafeUnpin for primitives::circuitbreaker::CircuitCounts
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::circuitbreaker::CircuitCounts
 impl core::panic::unwind_safe::UnwindSafe for primitives::circuitbreaker::CircuitCounts
+pub struct primitives::ConsumerLane
+impl core::fmt::Debug for primitives::dr_admission::ConsumerLane
+pub fn primitives::dr_admission::ConsumerLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::ConsumerLane
+impl core::marker::Freeze for primitives::dr_admission::ConsumerLane
+impl core::marker::Send for primitives::dr_admission::ConsumerLane
+impl core::marker::Sync for primitives::dr_admission::ConsumerLane
+impl core::marker::Unpin for primitives::dr_admission::ConsumerLane
+impl core::marker::UnsafeUnpin for primitives::dr_admission::ConsumerLane
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::ConsumerLane
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::ConsumerLane
 pub struct primitives::Digest(_)
 impl primitives::crypto::Digest
 pub fn primitives::crypto::Digest::as_bytes(&self) -> &[u8]
@@ -907,6 +1218,16 @@ impl core::marker::Unpin for primitives::crypto::MacKey
 impl core::marker::UnsafeUnpin for primitives::crypto::MacKey
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::crypto::MacKey
 impl core::panic::unwind_safe::UnwindSafe for primitives::crypto::MacKey
+pub struct primitives::PreparedAdmissionControls
+impl primitives::dr_admission::PreparedAdmissionControls
+pub fn primitives::dr_admission::PreparedAdmissionControls::into_parts(self) -> (primitives::dr_admission::ProcessAdmissionControl, primitives::dr_admission::RelayAdmission, primitives::dr_admission::ConsumerAdmission, primitives::dr_admission::WriteAdmission)
+impl core::marker::Freeze for primitives::dr_admission::PreparedAdmissionControls
+impl core::marker::Send for primitives::dr_admission::PreparedAdmissionControls
+impl core::marker::Sync for primitives::dr_admission::PreparedAdmissionControls
+impl core::marker::Unpin for primitives::dr_admission::PreparedAdmissionControls
+impl core::marker::UnsafeUnpin for primitives::dr_admission::PreparedAdmissionControls
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::PreparedAdmissionControls
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::PreparedAdmissionControls
 pub struct primitives::ProbeName(_)
 impl primitives::healthz::ProbeName
 pub fn primitives::healthz::ProbeName::as_str(&self) -> &str
@@ -928,6 +1249,48 @@ impl core::marker::Unpin for primitives::healthz::ProbeName
 impl core::marker::UnsafeUnpin for primitives::healthz::ProbeName
 impl core::panic::unwind_safe::RefUnwindSafe for primitives::healthz::ProbeName
 impl core::panic::unwind_safe::UnwindSafe for primitives::healthz::ProbeName
+pub struct primitives::ProcessAdmissionControl
+impl primitives::dr_admission::ProcessAdmissionControl
+pub fn primitives::dr_admission::ProcessAdmissionControl::fail_closed_initializing(&self) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::pause_all(&self, primitives::dr_admission::AdmissionEpochId) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::resume_consumer(&self, primitives::dr_admission::AdmissionEpochId) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::resume_relay(&self, primitives::dr_admission::AdmissionEpochId) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::resume_writes(&self, primitives::dr_admission::AdmissionEpochId) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::snapshot(&self) -> primitives::dr_admission::AdmissionSnapshot
+pub fn primitives::dr_admission::ProcessAdmissionControl::start_running(&self) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+pub fn primitives::dr_admission::ProcessAdmissionControl::stop(&self)
+pub async fn primitives::dr_admission::ProcessAdmissionControl::wait_drained(&self) -> core::result::Result<(), primitives::dr_admission::AdmissionError>
+impl core::fmt::Debug for primitives::dr_admission::ProcessAdmissionControl
+pub fn primitives::dr_admission::ProcessAdmissionControl::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for primitives::dr_admission::ProcessAdmissionControl
+impl core::marker::Send for primitives::dr_admission::ProcessAdmissionControl
+impl core::marker::Sync for primitives::dr_admission::ProcessAdmissionControl
+impl core::marker::Unpin for primitives::dr_admission::ProcessAdmissionControl
+impl core::marker::UnsafeUnpin for primitives::dr_admission::ProcessAdmissionControl
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::ProcessAdmissionControl
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::ProcessAdmissionControl
+pub struct primitives::RelayLane
+impl core::fmt::Debug for primitives::dr_admission::RelayLane
+pub fn primitives::dr_admission::RelayLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::RelayLane
+impl core::marker::Freeze for primitives::dr_admission::RelayLane
+impl core::marker::Send for primitives::dr_admission::RelayLane
+impl core::marker::Sync for primitives::dr_admission::RelayLane
+impl core::marker::Unpin for primitives::dr_admission::RelayLane
+impl core::marker::UnsafeUnpin for primitives::dr_admission::RelayLane
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::RelayLane
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::RelayLane
+pub struct primitives::WriteLane
+impl core::fmt::Debug for primitives::dr_admission::WriteLane
+pub fn primitives::dr_admission::WriteLane::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl primitives::dr_admission::AdmissionLane for primitives::dr_admission::WriteLane
+impl core::marker::Freeze for primitives::dr_admission::WriteLane
+impl core::marker::Send for primitives::dr_admission::WriteLane
+impl core::marker::Sync for primitives::dr_admission::WriteLane
+impl core::marker::Unpin for primitives::dr_admission::WriteLane
+impl core::marker::UnsafeUnpin for primitives::dr_admission::WriteLane
+impl core::panic::unwind_safe::RefUnwindSafe for primitives::dr_admission::WriteLane
+impl core::panic::unwind_safe::UnwindSafe for primitives::dr_admission::WriteLane
 pub trait primitives::Digester
 pub fn primitives::Digester::digest(&self, primitives::crypto::DigestAlgorithm, &[u8]) -> primitives::crypto::Digest
 pub trait primitives::MacVerifier
@@ -936,4 +1299,8 @@ pub fn primitives::MacVerifier::verify(&self, &primitives::crypto::MacKey, primi
 pub fn primitives::allows_request(primitives::circuitbreaker::CircuitState, primitives::circuitbreaker::CircuitCounts, primitives::circuitbreaker::BreakerConfig) -> bool
 pub fn primitives::constant_time_eq(&[u8], &[u8]) -> bool
 pub fn primitives::next_state(primitives::circuitbreaker::CircuitState, primitives::circuitbreaker::CircuitCounts, primitives::circuitbreaker::BreakerConfig, primitives::circuitbreaker::BreakerEvent) -> primitives::circuitbreaker::CircuitState
+pub fn primitives::prepare_dr_admission_controls() -> primitives::dr_admission::PreparedAdmissionControls
 pub fn primitives::resolve_requirement(primitives::authplan::AuthPlan, core::option::Option<primitives::authplan::RouteAuthOptOut>) -> primitives::authplan::AuthRequirement
+pub type primitives::ConsumerAdmission = primitives::dr_admission::AdmissionGate<primitives::dr_admission::ConsumerLane>
+pub type primitives::RelayAdmission = primitives::dr_admission::AdmissionGate<primitives::dr_admission::RelayLane>
+pub type primitives::WriteAdmission = primitives::dr_admission::AdmissionGate<primitives::dr_admission::WriteLane>

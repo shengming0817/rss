@@ -23,8 +23,13 @@ mod sealed {
     pub trait SagaRuntimeFactory {}
 }
 
-type ProjectionSpawn =
-    dyn Fn(CancellationToken, Arc<WorkerHealth>) -> Box<DynManagedResource<'static>> + Send + Sync;
+type ProjectionSpawn = dyn Fn(
+        CancellationToken,
+        Arc<WorkerHealth>,
+        primitives::WriteAdmission,
+    ) -> Box<DynManagedResource<'static>>
+    + Send
+    + Sync;
 
 /// One immutable, plan-issued Projection runtime.
 ///
@@ -45,8 +50,9 @@ impl ProjectionRuntime {
         &self,
         token: CancellationToken,
         health: Arc<WorkerHealth>,
+        admission: primitives::WriteAdmission,
     ) -> Box<DynManagedResource<'static>> {
-        (self.spawn)(token, health)
+        (self.spawn)(token, health, admission)
     }
 }
 
@@ -84,6 +90,7 @@ trait SagaRuntimeFactory: sealed::SagaRuntimeFactory + Send + Sync {
         &self,
         token: CancellationToken,
         health: Arc<WorkerHealth>,
+        admission: primitives::WriteAdmission,
     ) -> Box<DynManagedResource<'static>>;
 }
 
@@ -302,6 +309,7 @@ impl ProjectionRuntimeBinding {
                 Arc<dyn ProjectionTarget>,
                 CancellationToken,
                 Arc<WorkerHealth>,
+                primitives::WriteAdmission,
             ) -> Box<DynManagedResource<'static>>
             + Send
             + Sync
@@ -320,7 +328,9 @@ impl ProjectionRuntimeBinding {
         let worker_target = Arc::clone(&target);
         Ok(ProjectionRuntime {
             target,
-            spawn: Arc::new(move |token, health| spawn(Arc::clone(&worker_target), token, health)),
+            spawn: Arc::new(move |token, health, admission| {
+                spawn(Arc::clone(&worker_target), token, health, admission)
+            }),
         })
     }
 }
@@ -620,6 +630,7 @@ where
         &self,
         token: CancellationToken,
         health: Arc<WorkerHealth>,
+        admission: primitives::WriteAdmission,
     ) -> Box<DynManagedResource<'static>> {
         DynManagedResource::new_box(
             crate::SagaWorkerRuntime::new(
@@ -629,6 +640,7 @@ where
                 Arc::clone(&self.executor),
                 Arc::clone(&self.clock),
                 self.config,
+                admission,
             )
             .spawn(token, health),
         )
@@ -1332,8 +1344,9 @@ impl SagaRuntimeSpawner {
         &self,
         token: CancellationToken,
         health: Arc<WorkerHealth>,
+        admission: primitives::WriteAdmission,
     ) -> Box<DynManagedResource<'static>> {
-        self.runtime.spawn(token, health)
+        self.runtime.spawn(token, health, admission)
     }
 }
 
@@ -1831,7 +1844,7 @@ mod tests {
     fn projection_runtime_for(target: Arc<dyn ProjectionTarget>) -> Arc<ProjectionRuntime> {
         Arc::new(ProjectionRuntime {
             target,
-            spawn: Arc::new(|_, _| panic!("test runtime must not spawn")),
+            spawn: Arc::new(|_, _, _| panic!("test runtime must not spawn")),
         })
     }
 
@@ -2356,13 +2369,16 @@ mod tests {
                     .all(|input| input.projection_id() == definition.contract_id())
             );
             assert_eq!(binding.target_generation().as_str(), "materialized-v7");
-            binding.issue_runtime(Arc::clone(&expected_target), move |worker_target, _, _| {
-                worker_received_exact_target_for_spawn.store(
-                    Arc::ptr_eq(&worker_target, &expected_worker_target),
-                    Ordering::SeqCst,
-                );
-                DynManagedResource::new_box(NoopManagedResource)
-            })
+            binding.issue_runtime(
+                Arc::clone(&expected_target),
+                move |worker_target, _, _, _| {
+                    worker_received_exact_target_for_spawn.store(
+                        Arc::ptr_eq(&worker_target, &expected_worker_target),
+                        Ordering::SeqCst,
+                    );
+                    DynManagedResource::new_box(NoopManagedResource)
+                },
+            )
         })?;
         let plan = selection.bind([capability], std::iter::empty())?;
         let entry = plan
@@ -2371,9 +2387,16 @@ mod tests {
             .next()
             .expect("shadow projection target");
         assert!(Arc::ptr_eq(&entry.target(), &expected_target));
-        let _resource = entry
-            .runtime_factory()
-            .spawn(CancellationToken::new(), Arc::new(WorkerHealth::starting()));
+        let (admission_control, _, _, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        admission_control
+            .start_running()
+            .expect("test admission starts running");
+        let _resource = entry.runtime_factory().spawn(
+            CancellationToken::new(),
+            Arc::new(WorkerHealth::starting()),
+            write_admission,
+        );
         assert!(worker_received_exact_target.load(Ordering::SeqCst));
         let tenant = vocab::TenantId::parse("00000000-0000-4000-8000-000000001920")?;
         let replay = entry.operator_execution_context(tenant);
@@ -2392,7 +2415,7 @@ mod tests {
         let capability = ProjectionRuntimeCapability::bind_active(
             permit,
             |binding| {
-                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _| {
+                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _| {
                     DynManagedResource::new_box(NoopManagedResource)
                 })
             },
@@ -2428,7 +2451,7 @@ mod tests {
                 crate::ProjectionMetricActivation::Shadow
             );
             assert_eq!(binding.metric_scope().activation().as_label(), "shadow");
-            binding.issue_runtime(Arc::clone(&expected_target), |_, _, _| {
+            binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _| {
                 DynManagedResource::new_box(NoopManagedResource)
             })
         })?;
@@ -2457,7 +2480,7 @@ mod tests {
                     crate::ProjectionMetricActivation::Active
                 );
                 assert_eq!(binding.metric_scope().activation().as_label(), "active");
-                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _| {
+                binding.issue_runtime(Arc::clone(&expected_target), |_, _, _, _| {
                     DynManagedResource::new_box(NoopManagedResource)
                 })
             },

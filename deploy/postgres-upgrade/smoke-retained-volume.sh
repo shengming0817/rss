@@ -2,7 +2,7 @@
 # Docker-gated upgrade smoke: the nearest ancestor artifact containing 0084 but not 0085 runs its
 # real `postgres migrate-all` completion path, including the predecessor generated Projection
 # registry. The current release then applies 0085 through HEAD and provisions the serving-reader
-# plus Projection, Saga, and split L2 DR credentials through HEAD (0098).
+# plus Projection, Saga, and split L2 DR credentials through HEAD (0106).
 # Postgres serves TLS (VerifyFull + private CA); RSS_PG_SSL_MODE is banned (#1710).
 set -euo pipefail
 
@@ -184,13 +184,13 @@ run_l2_dr_provision() {
     "${repo_root}/deploy/postgres-upgrade/provision-l2-dr-recovery-roles.sh"
 }
 
-# Fail-closed: renamed-away roles simulate a database that never applied 0098.
+# Fail-closed: renamed-away roles simulate a database that never applied the L2 DR migrations.
 owner_psql <<'EOSQL' >/dev/null
 ALTER ROLE rss_l2_dr_recovery_auditor RENAME TO rss_l2_dr_recovery_auditor_absent;
 ALTER ROLE rss_l2_dr_recovery_executor RENAME TO rss_l2_dr_recovery_executor_absent;
 EOSQL
 if run_l2_dr_provision; then
-  echo "provision must fail when 0098 L2 DR roles are absent" >&2
+  echo "provision must fail when L2 DR roles are absent" >&2
   exit 1
 fi
 l2_dr_absent_login="$(owner_psql -Atqc "
@@ -224,7 +224,7 @@ run_l2_dr_provision
 marker="$(owner_psql -Atqc 'SELECT value FROM upgrade_reader_smoke_marker')"
 [[ "${marker}" == "retained" ]]
 ledger="$(owner_psql -Atqc "SELECT max(version) || ':' || bool_and(success) || ':' || min(octet_length(checksum)) || ':' || count(*) FROM _sqlx_migrations")"
-[[ "${ledger}" == "98:true:48:98" || "${ledger}" == "98:t:48:98" ]]
+[[ "${ledger}" == "106:true:48:106" || "${ledger}" == "106:t:48:106" ]]
 projection_roles="$(owner_psql -Atqc "SELECT string_agg(rolname || ':' || rolcanlogin || ':' || rolinherit, ',' ORDER BY rolname) FROM pg_roles WHERE rolname IN ('rss_projection_reader', 'rss_projection_operator')")"
 [[ "${projection_roles}" == "rss_projection_operator:true:false,rss_projection_reader:true:false" || "${projection_roles}" == "rss_projection_operator:t:f,rss_projection_reader:t:f" ]]
 saga_operator_role="$(owner_psql -Atqc "SELECT rolname || ':' || rolcanlogin || ':' || rolinherit FROM pg_roles WHERE rolname = 'rss_saga_operator'")"
@@ -283,13 +283,73 @@ SELECT
     )
     AND NOT pg_catalog.has_function_privilege(
         'rss_l2_dr_recovery_auditor',
-        'public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)',
+        'public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid,uuid)',
         'EXECUTE'
     )
     AND pg_catalog.has_function_privilege(
         'rss_l2_dr_recovery_executor',
-        'public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)',
+        'public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid,uuid)',
         'EXECUTE'
+    )
+    AND pg_catalog.to_regprocedure(
+        'public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)'
+    ) IS NULL
+    AND pg_catalog.to_regprocedure(
+        'public.rss_l2_dr_recovery_apply_mutation(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)'
+    ) IS NOT NULL
+    AND NOT pg_catalog.has_function_privilege(
+        'rss_l2_dr_recovery_executor',
+        'public.rss_l2_dr_recovery_apply_mutation(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)',
+        'EXECUTE'
+    )
+    AND NOT pg_catalog.has_function_privilege(
+        'rss_l2_dr_recovery_auditor',
+        'public.rss_l2_dr_recovery_apply_mutation(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)',
+        'EXECUTE'
+    )
+    AND NOT pg_catalog.has_function_privilege(
+        'rss_app',
+        'public.rss_l2_dr_recovery_apply_mutation(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)',
+        'EXECUTE'
+    )
+    AND pg_catalog.has_function_privilege(
+        'rss_l2_dr_recovery_executor',
+        'public.rss_l2_dr_admission_pause(uuid,uuid,uuid,bytea,jsonb,boolean)', 'EXECUTE'
+    )
+    AND pg_catalog.has_function_privilege(
+        'rss_l2_dr_recovery_executor',
+        'public.rss_l2_dr_admission_request_resume(uuid,uuid,text)', 'EXECUTE'
+    )
+    AND pg_catalog.has_function_privilege(
+        'rss_l2_dr_recovery_executor',
+        'public.rss_l2_dr_admission_observe(uuid,uuid)', 'EXECUTE'
+    )
+    AND NOT pg_catalog.has_function_privilege(
+        'rss_l2_dr_recovery_auditor',
+        'public.rss_l2_dr_admission_pause(uuid,uuid,uuid,bytea,jsonb,boolean)', 'EXECUTE'
+    )
+    AND NOT pg_catalog.has_function_privilege(
+        'rss_app',
+        'public.rss_l2_dr_admission_pause(uuid,uuid,uuid,bytea,jsonb,boolean)', 'EXECUTE'
+    )
+    AND pg_catalog.has_function_privilege(
+        'rss_app',
+        'public.rss_l2_dr_admission_ack(uuid,text,text,uuid,uuid,text,uuid)', 'EXECUTE'
+    )
+    AND pg_catalog.has_function_privilege(
+        'rss_app',
+        'public.rss_l2_dr_admission_authorize_resume(uuid,text,text,uuid,uuid,text)', 'EXECUTE'
+    )
+    AND pg_catalog.has_function_privilege(
+        'rss_app', 'public.rss_l2_dr_admission_observe()', 'EXECUTE'
+    )
+    AND NOT pg_catalog.has_function_privilege(
+        'rss_l2_dr_recovery_executor',
+        'public.rss_l2_dr_admission_ack(uuid,text,text,uuid,uuid,text,uuid)', 'EXECUTE'
+    )
+    AND NOT pg_catalog.has_function_privilege(
+        'rss_l2_dr_recovery_executor',
+        'public.rss_l2_dr_admission_authorize_resume(uuid,text,text,uuid,uuid,text)', 'EXECUTE'
     )
     AND NOT pg_catalog.has_function_privilege(
         'rss_l2_dr_recovery_executor',
@@ -307,4 +367,4 @@ SELECT
         'EXECUTE'
     )")"
 [[ "${l2_dr_recovery_separation}" == "t" ]]
-echo "retained-volume PostgreSQL privilege-boundary upgrade smoke passed through 0098"
+echo "retained-volume PostgreSQL privilege-boundary upgrade smoke passed through 0106"

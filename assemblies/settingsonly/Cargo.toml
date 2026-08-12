@@ -73,6 +73,7 @@ tracing-subscriber = { workspace = true }
 vault = { path = "../../adapters/vault", features = ["backend"] }
 vocab = { path = "../../crates/vocab" }
 zeroize = { workspace = true }
+uuid = { workspace = true, features = ["v4"] }
 
 [dev-dependencies]
 ratelimit = { path = "../../adapters/ratelimit" }

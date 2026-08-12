@@ -1016,6 +1016,13 @@ impl PendingScopeCtx {
 pub(crate) struct EnforceLayer {
     authz: Option<PrimaryRouteAuthz>,
     meta: RouteMeta,
+    write_admission: RouteWriteAdmission,
+}
+
+#[derive(Clone)]
+pub(crate) enum RouteWriteAdmission {
+    ReadOnly,
+    Mutation(primitives::WriteAdmission),
 }
 
 /// 返回每路由 enforce layer，可直接用于 `MethodRouter::layer()`。
@@ -1023,10 +1030,12 @@ pub(crate) fn enforce_layer(
     authz: Option<PrimaryRouteAuthz>,
     method: axum::http::Method,
     evidence: vocab::HttpRouteEvidence,
+    write_admission: RouteWriteAdmission,
 ) -> EnforceLayer {
     EnforceLayer {
         authz,
         meta: RouteMeta { evidence, method },
+        write_admission,
     }
 }
 
@@ -1035,6 +1044,7 @@ pub(crate) struct EnforceService<S> {
     inner: S,
     authz: Option<PrimaryRouteAuthz>,
     meta: RouteMeta,
+    write_admission: RouteWriteAdmission,
 }
 
 impl<S: Clone> Clone for EnforceService<S> {
@@ -1043,6 +1053,7 @@ impl<S: Clone> Clone for EnforceService<S> {
             inner: self.inner.clone(),
             authz: self.authz.clone(),
             meta: self.meta.clone(),
+            write_admission: self.write_admission.clone(),
         }
     }
 }
@@ -1055,6 +1066,7 @@ impl<S> Layer<S> for EnforceLayer {
             inner,
             authz: self.authz.clone(),
             meta: self.meta.clone(),
+            write_admission: self.write_admission.clone(),
         }
     }
 }
@@ -1349,6 +1361,7 @@ where
 
         let authz = self.authz.clone();
         let meta = self.meta.clone();
+        let write_admission = self.write_admission.clone();
         let plan = req.extensions().get::<primitives::AuthPlan>().copied();
         let audit = req.extensions().get::<AuthAudit>().cloned();
         // 验签桥（组合根外层 layer）校验通过后注入的认证证据；enforce 据其**已验证方案**放行 Require 路由。
@@ -1554,6 +1567,19 @@ where
                 );
                 return Ok(crate::error::internal_error(&rid));
             }
+            let _write_permit = if let RouteWriteAdmission::Mutation(admission) = write_admission {
+                match admission.try_enter() {
+                    Ok(permit) => Some(permit),
+                    Err(
+                        primitives::AdmissionError::Paused | primitives::AdmissionError::Stopped,
+                    ) => {
+                        return Ok(crate::error::provider_unavailable(&rid));
+                    }
+                    Err(_) => return Ok(crate::error::internal_error(&rid)),
+                }
+            } else {
+                None
+            };
             // ambient scope 绑定 handler（+ 下游 diport emit）：scoped 认证主体（有 tenant）才建，跨租户 /
             // Public ⇒ 下游 `runctx::try_current()` fail-closed `MissingCtx`（#1105 F2）。
             let response = match scope_ctx {
@@ -1639,6 +1665,22 @@ mod tests {
         vocab::http::HttpResourceSharing::TenantScoped,
         vocab::HttpConsistencyLevel::LocalOnly,
         vocab::HttpEffectProfile::new(TEST_EFFECTS),
+    );
+    const TEST_WRITE_EFFECTS: &[vocab::HttpEffectKind] = &[vocab::HttpEffectKind::BusinessWrite];
+    const TEST_WRITE_EVIDENCE: vocab::HttpRouteEvidence = vocab::HttpRouteEvidence::from_static(
+        vocab::HttpContractOwner::domain("test"),
+        TEST_BINDING,
+        "/write",
+        "POST",
+        &[],
+        vocab::HttpSuccessStatus::new(200),
+        vocab::HttpIdempotency::Idempotent,
+        vocab::HttpRouteAuth::Public,
+        None,
+        false,
+        vocab::http::HttpResourceSharing::TenantScoped,
+        vocab::HttpConsistencyLevel::LocalOnly,
+        vocab::HttpEffectProfile::new(TEST_WRITE_EFFECTS),
     );
     const TEST_TENANT: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
 
@@ -2120,6 +2162,7 @@ mod tests {
                 opt_out.map(PrimaryRouteAuthz::OptOut),
                 Method::GET,
                 TEST_EVIDENCE,
+                RouteWriteAdmission::ReadOnly,
             )),
         );
         if let Some(p) = plan {
@@ -2153,7 +2196,12 @@ mod tests {
                         "ok"
                     }
                 })
-                .layer(enforce_layer(None, Method::GET, TEST_EVIDENCE)),
+                .layer(enforce_layer(
+                    None,
+                    Method::GET,
+                    TEST_EVIDENCE,
+                    RouteWriteAdmission::ReadOnly,
+                )),
             )
             .layer(Extension(audit_ext(sink)));
         if let Some(plan) = plan {
@@ -2173,6 +2221,55 @@ mod tests {
             .unwrap();
         let resp = router.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[allow(clippy::unwrap_used)]
+    #[tokio::test]
+    async fn write_admission_runs_after_auth_and_blocks_handler_while_paused() {
+        let (control, _, _, writes) = primitives::prepare_dr_admission_controls().into_parts();
+        let epoch = primitives::AdmissionEpochId::new(uuid::Uuid::new_v4()).unwrap();
+        control.pause_all(epoch).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let handler_calls = Arc::clone(&calls);
+        let router = Router::new().route(
+            "/write",
+            axum::routing::post(move || {
+                let handler_calls = Arc::clone(&handler_calls);
+                async move {
+                    handler_calls.fetch_add(1, Ordering::SeqCst);
+                    "ok"
+                }
+            })
+            .layer(enforce_layer(
+                Some(PrimaryRouteAuthz::OptOut(RouteAuthOptOut::Public)),
+                Method::POST,
+                TEST_WRITE_EVIDENCE,
+                RouteWriteAdmission::Mutation(writes),
+            )),
+        );
+
+        let unauthenticated = Request::builder()
+            .method(Method::POST)
+            .uri("/write")
+            .body(Body::empty())
+            .unwrap();
+        let response = router.clone().oneshot(unauthenticated).await.unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let authenticated = Request::builder()
+            .method(Method::POST)
+            .uri("/write")
+            .body(Body::empty())
+            .unwrap();
+        let response = router
+            .layer(Extension(
+                AuthPlan::new(ListenerKind::Primary, AuthScheme::RssAccessToken).unwrap(),
+            ))
+            .oneshot(authenticated)
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
     #[allow(clippy::unwrap_used)]

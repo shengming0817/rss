@@ -295,6 +295,10 @@ pub struct RabbitTlsFixture {
 }
 
 impl RabbitTlsFixture {
+    /// Managed-fixture queue depth for integration diagnostics and phase assertions.
+    pub async fn broker_queue_total_depth(&self, queue: &str) -> Result<u32> {
+        broker_queue_total_depth(&self.container, TLS_VHOST, queue).await
+    }
     pub fn publisher_url(&self) -> &str {
         &self.publisher_url
     }
@@ -376,6 +380,27 @@ impl RabbitTlsFixture {
                     == [TLS_VHOST, "amq.topic", write_pattern, read_pattern]
         }))
     }
+}
+
+async fn broker_queue_total_depth<I: testcontainers::Image>(
+    container: &ContainerAsync<I>,
+    vhost: &str,
+    queue: &str,
+) -> Result<u32> {
+    let output =
+        run_rabbitmqctl_output(container, &["list_queues", "-p", vhost, "name", "messages"])
+            .await?;
+    for line in output.lines() {
+        let mut fields = line.split_whitespace();
+        if fields.next() == Some(queue) {
+            return fields
+                .next()
+                .ok_or_else(|| anyhow::anyhow!("RabbitMQ queue depth was absent"))?
+                .parse()
+                .map_err(Into::into);
+        }
+    }
+    Err(anyhow::anyhow!("RabbitMQ queue observation was absent"))
 }
 
 pub(super) async fn provision_adjacent_rabbit_queue<I: testcontainers::Image>(

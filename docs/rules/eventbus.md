@@ -175,7 +175,8 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
 - 恢复前应由外部 owner 暂停业务流量与 RSS serving，阻止新的 relay claim、consumer subscription 与应用写入，
   并冻结 exact tenant、recovery epoch、数据库与 broker restore point、选中的 durable event ID 以及原
   absolute deadline。这是 Soft/process 运维前置，不是本能力的机器 gate：当前 apply 路径不校验 pause
-  evidence。进程内 pause/drain 与分阶段 resume 的后续闭环由 #2009 跟踪，不得把该 backlog 当作已具备能力。
+  evidence。#2009 已用 ADR-027 的 process-local typed admission fence 闭环：每个 declared instance
+  必须提交 boot-scoped drained ack；RSS 不把 declared set 解释为 deployment 全集。
 - restore point 只作 operator 决策证据，不得反向生成、替换或扩展 event identity；两个 restore point 必须
   严格不等，相等时 plan 构造以 `equal_restore_points` fail-closed。
 - broker ahead / PostgreSQL earlier 只允许原消息按 at-least-once 语义重新投递；计划中的 event set 是
@@ -185,7 +186,9 @@ Outbox relay transport 是 **at-least-once**：durable fact 使用稳定 event I
   绕过既有 external-effect policy。
 - apply 成功必须原子形成 tenant-scoped、operator-authorized、append-only durable receipt；缺 receipt、
   receipt 与 frozen plan 不一致或任一 event 已过 deadline 时 fail-closed，并保持外部暂停直至核对完成。
-  核对 receipt 后按 relay、consumer 的顺序恢复 admission（分阶段 resume 控制面见 #2009）。
+  `apply` 只消费 restore 后新 epoch 的未过期 drained fence；随后按 relay、consumer、writes 顺序恢复，
+  且每一步必须等待 declared instances 的 phase ack exact-equality。TTL 过期只使 proof 不可消费，
+  不会自动开放任何 lane。
 - 本能力是 T1/T2 correctness proof；真实后端 target 只属于 `ReleaseCheck`，不进入普通 PR 的
   `integration-critical`、required selector 或 T3。它不新增 dashboard、alert 或 Prometheus counter。
 - 运维顺序与失败处置见

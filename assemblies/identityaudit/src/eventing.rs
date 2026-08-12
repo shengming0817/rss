@@ -7,7 +7,7 @@ use anyhow::Context as _;
 use bootstrap::{DomainModuleResult, WorkerSpec};
 #[cfg(test)]
 use diport::ShutdownError;
-use diport::{DynDeadLetterStore, DynManagedResource, Topic};
+use diport::{AckableSubscriber as _, DynDeadLetterStore, DynManagedResource, Topic};
 #[cfg(test)]
 use eventexec::ManagedBlockingWorker;
 use eventexec::{
@@ -32,6 +32,8 @@ const OUTBOX_MAINTENANCE_TTL: Duration = Duration::from_secs(30);
 const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 type LifecycleProbe = (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>);
 
+#[allow(clippy::too_many_arguments)]
+// reason: assembly composition takes the exact generated transport capabilities plus three typed lanes.
 pub(crate) async fn wire(
     pg: &postgres::PgRuntimeHandle,
     redis: &redis::RedisRuntimeDeps,
@@ -40,6 +42,11 @@ pub(crate) async fn wire(
     audit_key: &primitives::MacKey,
     tenant_authority: Arc<eventexec::TenantAuthority>,
     dlx_payload_protector: postgres::DlxPayloadProtector,
+    admission_identity: eventexec::DrAdmissionProcessIdentity,
+    admission_control: primitives::ProcessAdmissionControl,
+    relay_admission: primitives::RelayAdmission,
+    consumer_admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
 ) -> anyhow::Result<crate::providers::EventingRoleOutputs> {
     let subscriptions = eventing_composition::bridge_generated_audit_subscriptions(bindings)
         .context("bridge identityaudit generated subscriptions")?;
@@ -79,7 +86,13 @@ pub(crate) async fn wire(
         budget,
         publisher_resource,
         subscriber_resource,
-    );
+        admission_control,
+        relay_admission,
+        consumer_admission,
+        write_admission,
+        admission_identity,
+    )
+    .await;
     match result {
         Ok(outputs) => Ok(outputs),
         Err(error) => {
@@ -105,7 +118,7 @@ async fn rollback_resources(resources: Vec<Box<DynManagedResource<'static>>>) {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wire_connected(
+async fn wire_connected(
     pg: &postgres::PgRuntimeHandle,
     redis: &redis::RedisRuntimeDeps,
     subscriptions: Vec<eventing_composition::BridgedSubscription>,
@@ -116,6 +129,11 @@ fn wire_connected(
     budget: RelayBudget,
     publisher_resource: Box<DynManagedResource<'static>>,
     subscriber_resource: Box<DynManagedResource<'static>>,
+    admission_control: primitives::ProcessAdmissionControl,
+    relay_admission: primitives::RelayAdmission,
+    consumer_admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
+    admission_identity: eventexec::DrAdmissionProcessIdentity,
 ) -> anyhow::Result<crate::providers::EventingRoleOutputs> {
     let event_publisher = wire_publisher(
         pg,
@@ -124,6 +142,7 @@ fn wire_connected(
         Arc::clone(&tenant_authority),
         dlx_payload_protector.clone(),
         publisher_resource,
+        relay_admission,
     )?;
     let event_subscriber = wire_subscribers(
         pg,
@@ -133,8 +152,17 @@ fn wire_connected(
         tenant_authority,
         dlx_payload_protector,
         subscriber_resource,
+        consumer_admission,
+        write_admission.clone(),
+    )
+    .await?;
+    let mut distributed_cas = wire_distributed_maintenance(pg, redis, write_admission)?;
+    retain_admission_authority(
+        pg.clone(),
+        admission_control,
+        admission_identity,
+        &mut distributed_cas,
     )?;
-    let distributed_cas = wire_distributed_maintenance(pg, redis)?;
     Ok(assemble_role_outputs(
         distributed_cas,
         event_publisher,
@@ -171,6 +199,7 @@ fn wire_publisher(
     tenant_authority: Arc<eventexec::TenantAuthority>,
     dlx_payload_protector: postgres::DlxPayloadProtector,
     resource: Box<DynManagedResource<'static>>,
+    admission: primitives::RelayAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
     let (relay, probe_name) = publisher_plan()?;
     let outbox = pg.for_domain::<postgres::caps::Identity>().outbox(
@@ -181,17 +210,22 @@ fn wire_publisher(
     );
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let worker = WorkerSpec::deferred(move |token| {
-        DynManagedResource::new_box(spawn_relay(
-            "identityaudit-outbox-relay-identity".to_owned(),
-            outbox,
-            relay,
-            Arc::new(crate::SystemClock),
-            token,
-            worker_health,
-            Arc::new(MetricsOutboxMetrics),
-        ))
-    });
+    let worker = WorkerSpec::relay_deferred(
+        "assemblies.identityaudit.src.eventing.01",
+        &admission,
+        move |token, relay_admission| {
+            DynManagedResource::new_box(spawn_relay(
+                "identityaudit-outbox-relay-identity".to_owned(),
+                outbox,
+                relay,
+                Arc::new(crate::SystemClock),
+                token,
+                worker_health,
+                Arc::new(MetricsOutboxMetrics),
+                relay_admission,
+            ))
+        },
+    );
     Ok(DomainModuleResult {
         probes: vec![(
             probe_name.clone(),
@@ -211,7 +245,7 @@ fn publisher_plan() -> anyhow::Result<(RelayConfig, primitives::ProbeName)> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn wire_subscribers(
+async fn wire_subscribers(
     pg: &postgres::PgRuntimeHandle,
     subscriptions: Vec<eventing_composition::BridgedSubscription>,
     amqp: &amqp::AmqpInfraDeps,
@@ -219,12 +253,24 @@ fn wire_subscribers(
     tenant_authority: Arc<eventexec::TenantAuthority>,
     dlx_payload_protector: postgres::DlxPayloadProtector,
     resource: Box<DynManagedResource<'static>>,
+    admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
     let mut output = DomainModuleResult {
         resources: vec![resource],
         ..Default::default()
     };
     for subscription in subscriptions {
+        let topic = Topic::new(subscription.topic());
+        amqp.subscriber()
+            .prepare_ackable(topic.clone())
+            .await
+            .with_context(|| {
+                format!(
+                    "prepare identityaudit durable consumer topology for '{}'",
+                    subscription.topic()
+                )
+            })?;
         let inbox = pg.infra().inbox();
         let lease = LeaseConfig::from_ttl(inbox.lease_ttl());
         let health = Arc::new(WorkerHealth::starting());
@@ -234,12 +280,13 @@ fn wire_subscribers(
             eventing_composition::WorkerInputs::new(
                 worker_name,
                 amqp.subscriber(),
-                Topic::new(subscription.topic()),
+                topic,
                 Arc::new(inbox),
                 DynDeadLetterStore::new_box(pg.infra().dead_letter(dlx_payload_protector.clone())),
                 subscription.consumer_meta(Arc::clone(&tenant_authority)),
                 lease,
                 Arc::clone(&health),
+                admission.clone(),
             ),
         )?;
         match subscription.readiness() {
@@ -252,7 +299,7 @@ fn wire_subscribers(
             }
         }
     }
-    wire_inbox_sweeper(pg, &mut output)?;
+    wire_inbox_sweeper(pg, write_admission, &mut output)?;
     Ok(output)
 }
 
@@ -274,34 +321,40 @@ fn consumer_plan(
 
 fn wire_inbox_sweeper(
     pg: &postgres::PgRuntimeHandle,
+    admission: primitives::WriteAdmission,
     output: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let sweeper = pg.infra().inbox_sweeper();
     let (config, name) = inbox_sweeper_plan(sweeper.retention_seconds())?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    output.workers.push(WorkerSpec::phase_one(move |token| {
-        let loop_health = Arc::clone(&worker_health);
-        let loop_token = token.clone();
-        let handle = tokio::spawn(async move {
-            let _stopped = loop_health.stopped_on_exit();
-            sweeper_loop(
-                Arc::new(sweeper),
-                config,
-                Arc::new(crate::SystemClock),
-                loop_token,
-                Arc::clone(&loop_health),
-                RetentionTarget::InboxReceipts,
-            )
-            .await;
-        });
-        DynManagedResource::new_box(SweeperWorker::adopt(
-            INBOX_SWEEPER_NAME,
-            handle,
-            worker_health,
-            token,
-        ))
-    }));
+    output.workers.push(WorkerSpec::writes_phase_one(
+        "assemblies.identityaudit.src.eventing.02",
+        &admission,
+        move |token, write_admission| {
+            let loop_health = Arc::clone(&worker_health);
+            let loop_token = token.clone();
+            let handle = tokio::spawn(async move {
+                let _stopped = loop_health.stopped_on_exit();
+                sweeper_loop(
+                    Arc::new(sweeper),
+                    config,
+                    Arc::new(crate::SystemClock),
+                    loop_token,
+                    Arc::clone(&loop_health),
+                    RetentionTarget::InboxReceipts,
+                    write_admission,
+                )
+                .await;
+            });
+            DynManagedResource::new_box(SweeperWorker::adopt(
+                INBOX_SWEEPER_NAME,
+                handle,
+                worker_health,
+                token,
+            ))
+        },
+    ));
     output
         .probes
         .push((name.clone(), Box::new(WorkerProbe::new(name, health))));
@@ -321,6 +374,7 @@ fn inbox_sweeper_plan(
 fn wire_distributed_maintenance(
     pg: &postgres::PgRuntimeHandle,
     redis: &redis::RedisRuntimeDeps,
+    admission: primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
     let coordinator = distributed::OutboxMaintenanceCoordinator::from_ports(
         redis.infra().lock_store(),
@@ -335,48 +389,56 @@ fn wire_distributed_maintenance(
 
     let sampler_health = Arc::new(WorkerHealth::healthy());
     let sampler_worker_health = Arc::clone(&sampler_health);
-    let sampler_worker = WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(spawn_on_dedicated_runtime(
-            "identityaudit-outbox-sampler",
-            token,
-            Arc::clone(&sampler_worker_health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
-            move |thread_token| async move {
-                backlog_sampler_loop(
-                    Arc::new(sampler),
-                    sampler_config,
-                    thread_token,
-                    Arc::clone(&sampler_worker_health),
-                    Arc::new(MetricsOutboxMetrics),
-                )
-                .await;
-                Ok(())
-            },
-        ))
-    });
+    let sampler_worker = WorkerSpec::observational_phase_one(
+        "assemblies.identityaudit.src.eventing.03",
+        move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "identityaudit-outbox-sampler",
+                token,
+                Arc::clone(&sampler_worker_health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    backlog_sampler_loop(
+                        Arc::new(sampler),
+                        sampler_config,
+                        thread_token,
+                        Arc::clone(&sampler_worker_health),
+                        Arc::new(MetricsOutboxMetrics),
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    );
 
     let sweeper_health = Arc::new(WorkerHealth::healthy());
     let sweeper_worker_health = Arc::clone(&sweeper_health);
-    let sweeper_worker = WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(spawn_on_dedicated_runtime(
-            "identityaudit-outbox-sweeper",
-            token,
-            Arc::clone(&sweeper_worker_health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
-            move |thread_token| async move {
-                sweeper_loop(
-                    Arc::new(sweeper),
-                    sweeper_config,
-                    Arc::new(crate::SystemClock),
-                    thread_token,
-                    Arc::clone(&sweeper_worker_health),
-                    RetentionTarget::OutboxPublished,
-                )
-                .await;
-                Ok(())
-            },
-        ))
-    });
+    let sweeper_worker = WorkerSpec::writes_phase_one(
+        "assemblies.identityaudit.src.eventing.04",
+        &admission,
+        move |token, write_admission| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "identityaudit-outbox-sweeper",
+                token,
+                Arc::clone(&sweeper_worker_health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    sweeper_loop(
+                        Arc::new(sweeper),
+                        sweeper_config,
+                        Arc::new(crate::SystemClock),
+                        thread_token,
+                        Arc::clone(&sweeper_worker_health),
+                        RetentionTarget::OutboxPublished,
+                        write_admission,
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    );
     let probes: Vec<LifecycleProbe> = vec![
         (
             sampler_name.clone(),
@@ -409,6 +471,44 @@ fn maintenance_plan() -> anyhow::Result<(
     let sweeper_name = primitives::ProbeName::parse("identityaudit_outbox_sweeper")
         .context("build identityaudit outbox sweeper probe name")?;
     Ok((sampler_config, sweeper_config, sampler_name, sweeper_name))
+}
+
+fn retain_admission_authority(
+    pg: postgres::PgRuntimeHandle,
+    control: primitives::ProcessAdmissionControl,
+    identity: eventexec::DrAdmissionProcessIdentity,
+    output: &mut DomainModuleResult,
+) -> anyhow::Result<()> {
+    let health = Arc::new(WorkerHealth::starting());
+    let probe_name = primitives::ProbeName::parse("identityaudit_dr_admission")
+        .context("build identityaudit DR admission probe name")?;
+    output.probes.push((
+        probe_name.clone(),
+        Box::new(WorkerProbe::new(probe_name, Arc::clone(&health))),
+    ));
+    output.workers.push(WorkerSpec::observational_phase_one(
+        "assemblies.identityaudit.src.eventing.05",
+        move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "identityaudit-dr-admission-owner",
+                token,
+                Arc::clone(&health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    eventexec::run_dr_admission_controller(
+                        pg,
+                        control,
+                        identity,
+                        thread_token,
+                        health,
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    ));
+    Ok(())
 }
 
 fn validate_audit_closure(

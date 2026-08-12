@@ -125,6 +125,7 @@ pub struct StartupTransaction<'stack> {
     stack: &'stack mut ShutdownStack,
     provider: DomainModuleResult,
     domain: DomainModuleResult,
+    expected_workers: Option<bootstrap::ExpectedWorkerInventory>,
     armed: bool,
 }
 
@@ -134,6 +135,7 @@ impl<'stack> StartupTransaction<'stack> {
             stack,
             provider: DomainModuleResult::default(),
             domain: DomainModuleResult::default(),
+            expected_workers: None,
             armed: true,
         }
     }
@@ -161,6 +163,18 @@ impl<'stack> StartupTransaction<'stack> {
         (&mut self.provider, &mut self.domain)
     }
 
+    /// Install the plan-derived, closed mutating-worker inventory exactly once.
+    pub fn expect_workers(
+        &mut self,
+        expected: bootstrap::ExpectedWorkerInventory,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.expected_workers.replace(expected).is_none(),
+            "expected worker inventory was installed more than once"
+        );
+        Ok(())
+    }
+
     fn discard_unregistered_probes(&mut self) {
         self.provider.probes.clear();
         self.domain.probes.clear();
@@ -171,6 +185,7 @@ impl<'stack> StartupTransaction<'stack> {
         LaunchLifecycleBatches::new(
             ProviderLifecycleBatch::from_provider_output(std::mem::take(&mut self.provider)),
             DomainLifecycleBatch::from_domain_output(std::mem::take(&mut self.domain)),
+            self.expected_workers.take(),
         )
     }
 
@@ -192,7 +207,7 @@ impl Drop for StartupTransaction<'_> {
         }
         self.discard_unregistered_probes();
         let batches = self.take_lifecycle_batches();
-        if let Err(error) = register_lifecycle_outputs(self.stack, None, batches) {
+        if let Err(error) = register_lifecycle_outputs(self.stack, None, batches, false) {
             tracing::error!(
                 error = %secure::redact_error(error.as_ref()),
                 "cancelled startup failed to transfer lifecycle outputs"
@@ -276,6 +291,7 @@ impl DomainLifecycleBatch {
 pub struct LaunchLifecycleBatches {
     provider: ProviderLifecycleBatch,
     domain: DomainLifecycleBatch,
+    expected_workers: Option<bootstrap::ExpectedWorkerInventory>,
 }
 
 /// Validated total budget for the complete LIFO drain.
@@ -304,8 +320,16 @@ struct LaunchLifecycle {
 
 impl LaunchLifecycleBatches {
     /// Preserve provider-before-domain registration order with non-interchangeable role types.
-    pub fn new(provider: ProviderLifecycleBatch, domain: DomainLifecycleBatch) -> Self {
-        Self { provider, domain }
+    pub fn new(
+        provider: ProviderLifecycleBatch,
+        domain: DomainLifecycleBatch,
+        expected_workers: Option<bootstrap::ExpectedWorkerInventory>,
+    ) -> Self {
+        Self {
+            provider,
+            domain,
+            expected_workers,
+        }
     }
 }
 
@@ -339,6 +363,7 @@ impl LaunchLifecycleBatches {
 ///         runtimeexec::DomainLifecycleBatch::from_domain_output(
 ///             bootstrap::DomainModuleResult::default(),
 ///         ),
+///         Some(bootstrap::ExpectedWorkerInventory::closed([])?),
 ///     ),
 ///     runtimeexec::TotalDrainBudget::new(std::time::Duration::from_secs(20))?,
 /// );
@@ -527,12 +552,12 @@ where
     let launch_result = match race {
         StartupRace::Shutdown(signal_result) => {
             let batches = transaction.into_lifecycle_batches(true);
-            let transfer = register_lifecycle_outputs(owner.stack_mut(), None, batches);
+            let transfer = register_lifecycle_outputs(owner.stack_mut(), None, batches, false);
             preserve_startup_result(signal_result, transfer)
         }
         StartupRace::Startup(Err(startup_error)) => {
             let batches = transaction.into_lifecycle_batches(true);
-            let transfer = register_lifecycle_outputs(owner.stack_mut(), None, batches);
+            let transfer = register_lifecycle_outputs(owner.stack_mut(), None, batches, false);
             preserve_startup_result(Err(startup_error), transfer)
         }
         StartupRace::Startup(Ok(prepared)) => {
@@ -728,7 +753,7 @@ where
     InstallShutdown: FnOnce() -> anyhow::Result<Shutdown>,
     Shutdown: Future<Output = anyhow::Result<()>>,
 {
-    register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches)?;
+    register_lifecycle_outputs(stack, trace_exporter, lifecycle_batches, true)?;
     // The complete provider/domain lifecycle is accepted by the cancellation-safe owner before a
     // platform signal constructor can fail. Installation still precedes listener preparation and
     // readiness publication, so no ready -> signal race is reintroduced.
@@ -751,19 +776,54 @@ fn register_lifecycle_outputs(
     stack: &mut ShutdownStack,
     trace_exporter: Option<Box<DynManagedResource<'static>>>,
     lifecycle_batches: LaunchLifecycleBatches,
+    require_exact_inventory: bool,
 ) -> anyhow::Result<()> {
     // Register trace first so LIFO drains it last, after all shutdown-period spans stop.
     if let Some(exporter) = trace_exporter {
         stack.register_detached(exporter);
     }
-    let LaunchLifecycleBatches { provider, domain } = lifecycle_batches;
+    let LaunchLifecycleBatches {
+        mut provider,
+        mut domain,
+        expected_workers,
+    } = lifecycle_batches;
+    let workers = || provider.0.workers.iter().chain(domain.0.workers.iter());
+    let validation: anyhow::Result<bootstrap::WorkerInventory> = match expected_workers.as_ref() {
+        Some(expected) => bootstrap::validate_worker_inventory_exact(workers(), expected)
+            .map_err(anyhow::Error::from),
+        None if require_exact_inventory => Err(anyhow::anyhow!(
+            "successful launch requires a plan-derived exact mutating-worker inventory"
+        )),
+        None => {
+            let inventory = bootstrap::validate_worker_inventory(workers()).map_err(Into::into);
+            provider.0.workers.clear();
+            domain.0.workers.clear();
+            inventory
+        }
+    };
+    let inventory = match validation {
+        Ok(inventory) => inventory,
+        Err(error) => {
+            register_module_resources(stack, &mut provider.0);
+            register_module_resources(stack, &mut domain.0);
+            return Err(error.into());
+        }
+    };
+    tracing::info!(
+        worker_count = inventory.descriptors.len(),
+        worker_inventory_digest = format_args!("{:016x}", inventory.digest),
+        "validated exact lifecycle worker inventory before spawn"
+    );
     let provider_result = register_module_output(stack, provider.0);
     let domain_result = register_module_output(stack, domain.0);
-
-    // Both owned batches must cross into the async shutdown stack before either validation error is
-    // propagated; otherwise the later batch would be synchronously dropped.
     provider_result?;
     domain_result
+}
+
+fn register_module_resources(stack: &mut ShutdownStack, output: &mut DomainModuleResult) {
+    for resource in std::mem::take(&mut output.resources) {
+        stack.register_detached(resource);
+    }
 }
 
 fn register_module_output(
@@ -780,8 +840,10 @@ fn register_module_output(
     }
     for worker in workers {
         match worker {
-            WorkerSpec::PhaseOne(worker) => stack.register_with_token(worker),
-            WorkerSpec::Deferred(worker) => stack.register_deferred_with_token(worker),
+            WorkerSpec::PhaseOne(worker) => stack.register_with_token(worker.into_factory()),
+            WorkerSpec::Deferred(worker) => {
+                stack.register_deferred_with_token(worker.into_factory())
+            }
         }
     }
     anyhow::ensure!(

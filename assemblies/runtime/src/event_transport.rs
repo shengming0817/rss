@@ -35,8 +35,8 @@ use crypto::RustCryptoMacVerifier;
 #[cfg(test)]
 use diport::ManagedResource as _;
 use diport::{
-    Clock, DlxArchiveBacklog, DlxLifecycleError, DlxLifecycleRepository, DynDeadLetterStore,
-    DynKeyProvider, DynManagedResource, KeyProvider as _, RedactedBytes, Topic,
+    AckableSubscriber as _, Clock, DlxArchiveBacklog, DlxLifecycleError, DlxLifecycleRepository,
+    DynDeadLetterStore, DynKeyProvider, DynManagedResource, KeyProvider as _, RedactedBytes, Topic,
 };
 #[cfg(test)]
 use eventexec::ManagedBlockingWorker;
@@ -400,6 +400,33 @@ const DLX_LIFECYCLE_TICK_TIMEOUT: Duration = Duration::from_secs(25);
 const DLX_ARCHIVE_READINESS_INTERVAL: Duration = Duration::from_secs(60);
 const DLX_ARCHIVE_READINESS_TIMEOUT: Duration = Duration::from_secs(5);
 const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
+pub(crate) const RUNTIME_INSTANCE_ID_ENV: &str = "RSS_RUNTIME_INSTANCE_ID";
+pub(crate) const REQUIRED_ADMISSION_EPOCH_ENV: &str = "RSS_DR_REQUIRED_ADMISSION_EPOCH_ID";
+
+pub(crate) fn production_dr_admission_identity(
+    config: crate::config::SnapshotConfig<'_>,
+    runtime_plan_fingerprint: &str,
+) -> anyhow::Result<eventexec::DrAdmissionProcessIdentity> {
+    let instance_raw = config
+        .value(RUNTIME_INSTANCE_ID_ENV)
+        .with_context(|| format!("{RUNTIME_INSTANCE_ID_ENV} is required"))?;
+    let instance_id =
+        uuid::Uuid::parse_str(&instance_raw).context("RSS_RUNTIME_INSTANCE_ID must be a UUID")?;
+    let required = config
+        .value(REQUIRED_ADMISSION_EPOCH_ENV)
+        .map(|raw| primitives::AdmissionEpochId::parse(&raw))
+        .transpose()
+        .context("RSS_DR_REQUIRED_ADMISSION_EPOCH_ID must be a canonical UUID")?;
+    let identity = eventexec::DrAdmissionProcessIdentity::new(
+        "runtime",
+        runtime_plan_fingerprint,
+        instance_id,
+        uuid::Uuid::new_v4(),
+        required,
+    )
+    .context("build runtime DR admission process identity")?;
+    Ok(identity)
+}
 const AMQP_CA_CERT_PEM_PATH_ENV: &str = "RSS_AMQP_CA_CERT_PEM_PATH";
 #[cfg(any(test, feature = "integration"))]
 use crate::infra::TEST_PRIVATE_CA_PEM as TEST_AMQP_CA_PEM;
@@ -784,6 +811,9 @@ pub(crate) async fn wire_event_transport(
     cfg: EventTransportConfig,
     worker: EventWorkerConfig,
     audit_key: Option<MacKey>,
+    relay_admission: primitives::RelayAdmission,
+    consumer_admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
     let local_producers = cfg.local_producers.clone();
     let timing = worker.relay;
@@ -817,6 +847,9 @@ pub(crate) async fn wire_event_transport(
                 timing,
                 security,
                 audit_key,
+                relay_admission,
+                consumer_admission,
+                write_admission,
             )
             .await
         }
@@ -828,6 +861,7 @@ pub(crate) async fn wire_event_transport(
 pub(crate) fn wire_dlx_lifecycle(
     deps: DlxLifecycleRuntimeDeps,
     worker: DlxWorkerConfig,
+    write_admission: primitives::WriteAdmission,
 ) -> Result<DlxRoleOutputs, DlxLifecycleWireFailure> {
     let probe_name =
         match ProbeName::parse(DLX_LIFECYCLE_PROBE).context("parse DLX lifecycle probe name") {
@@ -870,8 +904,13 @@ pub(crate) fn wire_dlx_lifecycle(
         lifecycle,
     } = deps;
     let health = Arc::new(WorkerHealth::starting());
-    let lifecycle_worker =
-        build_dlx_lifecycle_worker(lifecycle, backlog_repository, Arc::clone(&health), worker);
+    let lifecycle_worker = build_dlx_lifecycle_worker(
+        lifecycle,
+        backlog_repository,
+        Arc::clone(&health),
+        worker,
+        write_admission,
+    );
     let probe = build_dlx_lifecycle_probe(probe_name.clone(), health);
     let archive_health = Arc::new(WorkerHealth::starting());
     let archive_worker = build_dlx_archive_readiness_worker(
@@ -975,7 +1014,7 @@ fn build_dlx_archive_readiness_worker<S>(
 where
     S: DlxArchiveReadiness + Send + 'static,
 {
-    WorkerSpec::phase_one(move |token| {
+    WorkerSpec::observational_phase_one("assemblies.runtime.src.event_transport.01", move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             DLX_ARCHIVE_READINESS_WORKER_NAME,
             token,
@@ -1019,7 +1058,7 @@ fn build_dlx_archive_key_readiness_worker(
     health: Arc<WorkerHealth>,
     config: DlxWorkerConfig,
 ) -> WorkerSpec {
-    WorkerSpec::phase_one(move |token| {
+    WorkerSpec::observational_phase_one("assemblies.runtime.src.event_transport.02", move |token| {
         DynManagedResource::new_box(spawn_on_dedicated_runtime(
             DLX_ARCHIVE_KEY_READINESS_WORKER_NAME,
             token,
@@ -1189,32 +1228,38 @@ fn build_dlx_lifecycle_worker<L, B>(
     backlog_repository: B,
     health: Arc<WorkerHealth>,
     config: DlxWorkerConfig,
+    write_admission: primitives::WriteAdmission,
 ) -> WorkerSpec
 where
     L: DlxTickRunner + Send + 'static,
     B: DlxBacklogReader + Send + 'static,
 {
-    WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(spawn_on_dedicated_runtime(
-            DLX_LIFECYCLE_WORKER_NAME,
-            token,
-            Arc::clone(&health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
-            move |thread_token| async move {
-                dlx_lifecycle_loop(
-                    lifecycle,
-                    backlog_repository,
-                    thread_token,
-                    Arc::clone(&health),
-                    Arc::new(MetricsRetentionMetrics),
-                    Arc::new(SystemClock),
-                    config,
-                )
-                .await;
-                Ok(())
-            },
-        ))
-    })
+    WorkerSpec::writes_phase_one(
+        "assemblies.runtime.src.event_transport.03",
+        &write_admission,
+        move |token, worker_admission| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                DLX_LIFECYCLE_WORKER_NAME,
+                token,
+                Arc::clone(&health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    dlx_lifecycle_loop(
+                        lifecycle,
+                        backlog_repository,
+                        thread_token,
+                        Arc::clone(&health),
+                        Arc::new(MetricsRetentionMetrics),
+                        Arc::new(SystemClock),
+                        config,
+                        worker_admission,
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    )
 }
 
 fn build_dlx_lifecycle_probe(
@@ -1289,6 +1334,7 @@ async fn dlx_lifecycle_loop<L, B>(
     metrics: Arc<dyn RetentionMetrics>,
     clock: Arc<dyn Clock>,
     config: DlxWorkerConfig,
+    write_admission: primitives::WriteAdmission,
 ) where
     L: DlxTickRunner,
     B: DlxBacklogReader,
@@ -1299,6 +1345,9 @@ async fn dlx_lifecycle_loop<L, B>(
             biased;
             () = token.cancelled() => break,
             _ = ticker.tick() => {
+                let Ok(_permit) = write_admission.try_enter() else {
+                    continue;
+                };
                 if run_bounded_dlx_lifecycle_tick(
                     &lifecycle,
                     &backlog_repository,
@@ -1570,6 +1619,9 @@ async fn wire_durable(
     timing: RelayTiming,
     security: EventSecurity,
     audit_key: Option<MacKey>,
+    relay_admission: primitives::RelayAdmission,
+    consumer_admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
     let DurableEventExecution {
         per_domain,
@@ -1633,11 +1685,23 @@ async fn wire_durable(
                 security.dlx_payload_protector.clone(),
             ),
         };
-        if let Err(primary) = wire_domain_relay(domain, outbox, &timing, &mut module) {
+        if let Err(primary) = wire_domain_relay(
+            domain,
+            outbox,
+            &timing,
+            relay_admission.clone(),
+            &mut module,
+        ) {
             return Err(crate::provider_output::abort_uncommitted(module, primary).await);
         }
     }
-    if let Err(primary) = wire_outbox_maintenance(pg, distributed, &timing, &mut module) {
+    if let Err(primary) = wire_outbox_maintenance(
+        pg,
+        distributed,
+        &timing,
+        write_admission.clone(),
+        &mut module,
+    ) {
         return Err(crate::provider_output::abort_uncommitted(module, primary).await);
     }
 
@@ -1649,8 +1713,12 @@ async fn wire_durable(
         &security,
         &timing,
         audit_key.as_ref(),
+        consumer_admission,
+        write_admission,
         &mut module,
-    ) {
+    )
+    .await
+    {
         return Err(crate::provider_output::abort_uncommitted(module, primary).await);
     }
 
@@ -1669,6 +1737,43 @@ fn relay_publisher(
         .publisher())
 }
 
+pub(crate) fn retain_admission_authority(
+    pg: PgRuntimeHandle,
+    control: primitives::ProcessAdmissionControl,
+    identity: eventexec::DrAdmissionProcessIdentity,
+    module: &mut DomainModuleResult,
+) -> anyhow::Result<()> {
+    let health = Arc::new(WorkerHealth::starting());
+    let probe_name = ProbeName::parse("dr_admission").context("parse DR admission probe name")?;
+    module.probes.push((
+        probe_name.clone(),
+        Box::new(WorkerHealthProbe::new(probe_name, Arc::clone(&health))),
+    ));
+    module.workers.push(WorkerSpec::observational_phase_one(
+        "assemblies.runtime.src.event_transport.04",
+        move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "runtime-dr-admission-owner",
+                token,
+                Arc::clone(&health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    eventexec::run_dr_admission_controller(
+                        pg,
+                        control,
+                        identity,
+                        thread_token,
+                        health,
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    ));
+    Ok(())
+}
+
 /// 为单个 L2 发布域声明一个 outbox relay worker（`eventexec::spawn_relay`：专用 OS 线程 + `WorkerStoppedGuard`
 /// panic-safety 守卫，与 ConsumerWorker 对称）+ 一个 per-domain readyz 探针，收进 module。
 ///
@@ -1679,23 +1784,30 @@ fn wire_domain_relay(
     domain: &str,
     outbox: postgres::PgOutbox,
     timing: &RelayTiming,
+    admission: primitives::RelayAdmission,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let relay_cfg = timing.relay.clone();
     let health = Arc::new(WorkerHealth::healthy());
     let worker_name = format!("outbox-relay-{domain}");
+    let worker_identity = format!("outbox-relay:{domain}");
     let worker_health = Arc::clone(&health);
-    let worker = WorkerSpec::deferred(move |token| {
-        DynManagedResource::new_box(spawn_relay(
-            worker_name,
-            outbox,
-            relay_cfg,
-            Arc::new(SystemClock),
-            token,
-            worker_health,
-            Arc::new(MetricsOutboxMetrics),
-        ))
-    });
+    let worker = WorkerSpec::relay_deferred(
+        worker_identity,
+        &admission,
+        move |token, relay_admission| {
+            DynManagedResource::new_box(spawn_relay(
+                worker_name,
+                outbox,
+                relay_cfg,
+                Arc::new(SystemClock),
+                token,
+                worker_health,
+                Arc::new(MetricsOutboxMetrics),
+                relay_admission,
+            ))
+        },
+    );
     module.workers.push(worker);
     // per-domain 探针名（多 relay 各自唯一）：`{OUTBOX_RELAY_PROBE}_{domain}`。
     let probe_name = ProbeName::parse(&format!("{OUTBOX_RELAY_PROBE}_{domain}"))
@@ -1719,6 +1831,7 @@ fn wire_outbox_maintenance(
     pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
     timing: &RelayTiming,
+    admission: primitives::WriteAdmission,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let sampler_cfg = timing.sampler.clone();
@@ -1737,6 +1850,7 @@ fn wire_outbox_maintenance(
         SWEEPER_WORKER_NAME,
         OUTBOX_SWEEPER_PROBE,
         RetentionTarget::OutboxPublished,
+        admission,
         module,
     )?;
 
@@ -1750,25 +1864,28 @@ fn wire_sampler_worker(
 ) -> anyhow::Result<()> {
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let worker = WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(spawn_on_dedicated_runtime(
-            "outbox-sampler",
-            token,
-            Arc::clone(&worker_health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
-            move |thread_token| async move {
-                backlog_sampler_loop(
-                    Arc::new(maintenance),
-                    config,
-                    thread_token,
-                    Arc::clone(&worker_health),
-                    Arc::new(MetricsOutboxMetrics),
-                )
-                .await;
-                Ok(())
-            },
-        ))
-    });
+    let worker = WorkerSpec::observational_phase_one(
+        "assemblies.runtime.src.event_transport.06",
+        move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "outbox-sampler",
+                token,
+                Arc::clone(&worker_health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    backlog_sampler_loop(
+                        Arc::new(maintenance),
+                        config,
+                        thread_token,
+                        Arc::clone(&worker_health),
+                        Arc::new(MetricsOutboxMetrics),
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    );
     module.workers.push(worker);
 
     let probe_name =
@@ -1789,6 +1906,7 @@ fn wire_sweeper_worker<S>(
     worker_name: &'static str,
     probe_name: &'static str,
     target: RetentionTarget,
+    admission: primitives::WriteAdmission,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()>
 where
@@ -1796,26 +1914,31 @@ where
 {
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let worker = WorkerSpec::phase_one(move |token| {
-        DynManagedResource::new_box(spawn_on_dedicated_runtime(
-            worker_name,
-            token,
-            Arc::clone(&worker_health),
-            EVENT_WORKER_SHUTDOWN_TIMEOUT,
-            move |thread_token| async move {
-                sweeper_loop(
-                    Arc::new(maintenance),
-                    config,
-                    Arc::new(SystemClock),
-                    thread_token,
-                    Arc::clone(&worker_health),
-                    target,
-                )
-                .await;
-                Ok(())
-            },
-        ))
-    });
+    let worker = WorkerSpec::writes_phase_one(
+        "assemblies.runtime.src.event_transport.07",
+        &admission,
+        move |token, worker_admission| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                worker_name,
+                token,
+                Arc::clone(&worker_health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    sweeper_loop(
+                        Arc::new(maintenance),
+                        config,
+                        Arc::new(SystemClock),
+                        thread_token,
+                        Arc::clone(&worker_health),
+                        target,
+                        worker_admission,
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    );
     module.workers.push(worker);
 
     let probe_name = ProbeName::parse(probe_name).context("parse sweeper probe name")?;
@@ -1830,13 +1953,15 @@ where
 }
 
 /// Consumer resource bundle 接线（PG inbox + DLX + subscriber + worker + probe + inbox sweeper）。
-fn wire_consumer_resource_bundle(
+async fn wire_consumer_resource_bundle(
     pg: &PgRuntimeHandle,
     subscribers: Vec<BridgedSubscription>,
     amqp_map: &BTreeMap<String, amqp::AmqpRuntimeDeps>,
     security: &EventSecurity,
     timing: &RelayTiming,
     audit_key: Option<&MacKey>,
+    admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let binding_count = subscribers.len();
@@ -1850,6 +1975,12 @@ fn wire_consumer_resource_bundle(
         let contract_id = subscription.contract_id();
         let topic_name = subscription.topic();
         let topic = Topic::new(topic_name);
+        amqp_conn
+            .infra()
+            .subscriber()
+            .prepare_ackable(topic.clone())
+            .await
+            .with_context(|| format!("prepare durable consumer topology for '{topic_name}'"))?;
         let meta =
             consumer_meta_for_subscription(&subscription, Arc::clone(&security.tenant_authority));
         let inbox = pg.infra().inbox();
@@ -1876,6 +2007,7 @@ fn wire_consumer_resource_bundle(
                 meta,
                 lease_cfg,
                 Arc::clone(&consumer_health),
+                admission.clone(),
             ),
         )?;
         tracing::info!(
@@ -1894,7 +2026,7 @@ fn wire_consumer_resource_bundle(
             }
         }
     }
-    wire_inbox_sweeper(pg, timing, module)?;
+    wire_inbox_sweeper(pg, timing, write_admission, module)?;
     Ok(())
 }
 
@@ -1951,6 +2083,7 @@ fn consumer_tx_worker_for_subscription(
 fn wire_inbox_sweeper(
     pg: &PgRuntimeHandle,
     timing: &RelayTiming,
+    admission: primitives::WriteAdmission,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
     let sweeper = pg.infra().inbox_sweeper();
@@ -1961,28 +2094,33 @@ fn wire_inbox_sweeper(
     .context("build inbox sweeper config")?;
     let health = Arc::new(WorkerHealth::healthy());
     let worker_health = Arc::clone(&health);
-    let worker = WorkerSpec::phase_one(move |token| {
-        let loop_health = Arc::clone(&worker_health);
-        let loop_token = token.clone();
-        let handle = tokio::spawn(async move {
-            let _stopped = loop_health.stopped_on_exit();
-            sweeper_loop(
-                Arc::new(sweeper),
-                config,
-                Arc::new(SystemClock),
-                loop_token,
-                Arc::clone(&loop_health),
-                RetentionTarget::InboxReceipts,
-            )
-            .await;
-        });
-        DynManagedResource::new_box(SweeperWorker::adopt(
-            INBOX_SWEEPER_WORKER_NAME,
-            handle,
-            worker_health,
-            token,
-        ))
-    });
+    let worker = WorkerSpec::writes_phase_one(
+        "assemblies.runtime.src.event_transport.08",
+        &admission,
+        move |token, worker_admission| {
+            let loop_health = Arc::clone(&worker_health);
+            let loop_token = token.clone();
+            let handle = tokio::spawn(async move {
+                let _stopped = loop_health.stopped_on_exit();
+                sweeper_loop(
+                    Arc::new(sweeper),
+                    config,
+                    Arc::new(SystemClock),
+                    loop_token,
+                    Arc::clone(&loop_health),
+                    RetentionTarget::InboxReceipts,
+                    worker_admission,
+                )
+                .await;
+            });
+            DynManagedResource::new_box(SweeperWorker::adopt(
+                INBOX_SWEEPER_WORKER_NAME,
+                handle,
+                worker_health,
+                token,
+            ))
+        },
+    );
     module.workers.push(worker);
 
     let probe_name =
@@ -2294,6 +2432,11 @@ mod tests {
     use super::*;
     use bootstrap::SubscriberBinding;
     use diport::{DlxLifecycleOperation, DlxLifecycleReason};
+
+    fn open_write_admission() -> primitives::WriteAdmission {
+        let (_, _, _, writes) = primitives::prepare_dr_admission_controls().into_parts();
+        writes
+    }
 
     struct WideSettingsWrapper {
         _service: Option<Arc<settings::SettingsService>>,
@@ -3480,6 +3623,7 @@ mod tests {
             metrics,
             Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH; 2])),
             DlxWorkerConfig::canonical(),
+            open_write_admission(),
         )
         .await;
 
@@ -3505,6 +3649,7 @@ mod tests {
             Arc::new(RecordingDlxMetrics::default()),
             Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
             DlxWorkerConfig::canonical(),
+            open_write_admission(),
         ));
         tokio::task::yield_now().await;
         token.cancel();
@@ -3526,6 +3671,7 @@ mod tests {
             Arc::clone(&metrics) as Arc<dyn RetentionMetrics>,
             Arc::new(SequenceClock::new([SystemTime::UNIX_EPOCH])),
             DlxWorkerConfig::canonical(),
+            open_write_admission(),
         ));
         tokio::task::yield_now().await;
         tokio::time::advance(DLX_LIFECYCLE_TICK_TIMEOUT).await;
@@ -3695,10 +3841,11 @@ mod tests {
             FakeDlxBacklogReader(Ok(DlxArchiveBacklog::new(0, 0))),
             Arc::clone(&health),
             DlxWorkerConfig::canonical(),
+            open_write_admission(),
         );
 
         let resource = match worker {
-            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => make(token),
+            WorkerSpec::PhaseOne(make) | WorkerSpec::Deferred(make) => make.into_factory()(token),
         };
         assert!(tick_observed.recv_timeout(Duration::from_secs(2)).is_ok());
         assert!(resource.shutdown().await.is_ok());

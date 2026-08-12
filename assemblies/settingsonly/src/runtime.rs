@@ -49,6 +49,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         runtimeexec::PreparedLaunch<Self::Adapter, Self::ProbeReceipt, Self::ReadyHook>,
     > {
         let compiled_plan = crate::plan::SettingsOnlyPlan::bundled()?;
+        transaction.expect_workers(compiled_plan.expected_workers()?)?;
         let (config, secrets, build_metadata, frontend) = self.captured.into_runtime_inputs();
         let completed = crate::providers::build(
             compiled_plan.provider_build()?,
@@ -94,8 +95,33 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         )?;
         let lifecycle = crate::projection::ProjectionLifecycleBatch::from_runtime_plan(
             compiled_plan.workflow_runtime(),
+            &providers.eventing.write_admission(),
         )?;
         transaction.stage_domain_output(lifecycle.into_output());
+        #[allow(clippy::disallowed_methods)]
+        // reason: assembly-root boot identity is captured before event workers are constructed.
+        let instance_id = uuid::Uuid::parse_str(
+            &std::env::var("RSS_RUNTIME_INSTANCE_ID")
+                .context("RSS_RUNTIME_INSTANCE_ID is required")?,
+        )
+        .context("RSS_RUNTIME_INSTANCE_ID must be a UUID")?;
+        #[allow(clippy::disallowed_methods)]
+        // reason: assembly-root optional post-restore startup fence.
+        let required_admission_epoch = std::env::var("RSS_DR_REQUIRED_ADMISSION_EPOCH_ID")
+            .ok()
+            .map(|raw| primitives::AdmissionEpochId::parse(&raw))
+            .transpose()
+            .context("RSS_DR_REQUIRED_ADMISSION_EPOCH_ID must be a canonical UUID")?;
+        let admission_identity = eventexec::DrAdmissionProcessIdentity::new(
+            "settingsonly",
+            compiled_plan.runtime_plan_fingerprint(),
+            instance_id,
+            uuid::Uuid::new_v4(),
+            required_admission_epoch,
+        )?;
+        let eventing = providers
+            .eventing
+            .bind_admission_identity(admission_identity)?;
         let settings_v3_serving = compiled_plan.take_settings_v3_serving()?;
         let module_inputs =
             crate::domains::DomainModuleInputs::active_settings(settings_v3_serving);
@@ -110,7 +136,7 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         prepare_assembly(
             AssemblyStartupInputs::production(
                 bindings,
-                providers.eventing,
+                eventing,
                 providers.role_closer,
                 compiled_plan,
                 build_metadata,
@@ -292,7 +318,10 @@ where
             plan,
             build_metadata,
         } => {
-            let outputs = crate::eventing::wire(eventing, registry.drain_subscribers())?;
+            registry
+                .install_write_admission(eventing.write_admission())
+                .context("install settingsonly process write admission")?;
+            let outputs = crate::eventing::wire(eventing, registry.drain_subscribers()).await?;
             let completed_roles = role_closer.finish(outputs, transaction.provider_output_mut())?;
             let seed = plan.into_inventory_seed(completed_roles)?;
             match build_metadata {
@@ -301,7 +330,10 @@ where
             }
         }
         #[cfg(feature = "test-support")]
-        ProviderActivation::Fixture(seed) => seed,
+        ProviderActivation::Fixture(seed) => {
+            transaction.expect_workers(bootstrap::ExpectedWorkerInventory::closed([])?)?;
+            seed
+        }
     };
     let (provider_output, domain_output) = transaction.outputs_mut();
     register_probes(&mut registry, provider_output)?;

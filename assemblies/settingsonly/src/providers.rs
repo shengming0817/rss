@@ -126,6 +126,8 @@ pub(crate) async fn build(
     rate_limit_quota: diport::RateLimitQuota,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
 ) -> anyhow::Result<CompletedProviderBuild> {
+    let (admission_control, relay_admission, consumer_admission, write_admission) =
+        primitives::prepare_dr_admission_controls().into_parts();
     let config::SettingsOnlyConfigSections {
         listeners,
         federated,
@@ -166,9 +168,10 @@ pub(crate) async fn build(
     pg_output.resources.extend(pg_resources);
     pg_output
         .workers
-        .push(bootstrap::WorkerSpec::phase_one(move |token| {
-            DynManagedResource::new_box(pg_sampler.spawn(token))
-        }));
+        .push(bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.settingsonly.src.providers.01",
+            move |token| DynManagedResource::new_box(pg_sampler.spawn(token)),
+        ));
     let audit_sink = httpserve::AuditSinkHandle::new(pg_handle.auth_audit_sink());
 
     let vault = build_vault(
@@ -240,6 +243,10 @@ pub(crate) async fn build(
         dlx_lifecycle_constructor,
         listener_rate_limiter,
         rate_limit_quota,
+        admission_control,
+        relay_admission,
+        consumer_admission,
+        write_admission.clone(),
         transaction,
     )
     .await?;
@@ -300,6 +307,10 @@ async fn build_production_infra(
     dlx_lifecycle_constructor: crate::providers_gen::DlxLifecycleRepositoryConstructor,
     listener_rate_limiter_constructor: crate::providers_gen::ListenerRateLimiterConstructor,
     rate_limit_quota: diport::RateLimitQuota,
+    admission_control: primitives::ProcessAdmissionControl,
+    relay_admission: primitives::RelayAdmission,
+    consumer_admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
 ) -> anyhow::Result<SettingsOnlyProductionInfra> {
     let config::ProductionInfraConfig {
@@ -348,14 +359,17 @@ async fn build_production_infra(
                 ready: Arc::clone(&redis_ready),
             }),
         )],
-        workers: vec![bootstrap::WorkerSpec::phase_one(move |token| {
-            DynManagedResource::new_box(RedisReadinessWorker::spawn(
-                redis_sampler,
-                redis_readiness,
-                token,
-                sampler_ready,
-            ))
-        })],
+        workers: vec![bootstrap::WorkerSpec::observational_phase_one(
+            "assemblies.settingsonly.src.providers.02",
+            move |token| {
+                DynManagedResource::new_box(RedisReadinessWorker::spawn(
+                    redis_sampler,
+                    redis_readiness,
+                    token,
+                    sampler_ready,
+                ))
+            },
+        )],
         resources: redis.runtime_resources(),
     };
     let distributed_lock_store = distributed_lock_constructor
@@ -508,6 +522,7 @@ async fn build_production_infra(
         archive_provider,
         archive_key,
         dlx.readiness_interval,
+        write_admission.clone(),
     ))?;
     hot_output.merge(dlx_outputs.dlx_hot_key_provider);
     archive_output.merge(dlx_outputs.dlx_archive_key_provider);
@@ -534,6 +549,10 @@ async fn build_production_infra(
             amqp_resources,
             tenant_authority,
             dlx_payload_protector,
+            admission_control,
+            relay_admission,
+            consumer_admission,
+            write_admission,
         ),
         distributed_lock_store,
         dlx_archive_key_provider,
@@ -1540,9 +1559,10 @@ mod tests {
                 LifecycleChannel::Workers => {
                     output
                         .workers
-                        .push(bootstrap::WorkerSpec::phase_one(|_token| {
-                            DynManagedResource::new_box(TestResource)
-                        }));
+                        .push(bootstrap::WorkerSpec::observational_phase_one(
+                            "assemblies.settingsonly.src.providers.03",
+                            |_token| DynManagedResource::new_box(TestResource),
+                        ));
                 }
             }
         }

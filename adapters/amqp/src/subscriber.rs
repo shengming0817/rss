@@ -839,6 +839,21 @@ impl diport::Acker for AmqpAcker {
 // ── impl AckableSubscriber for AmqpSubscriber（P7 manual-ack）──────────────
 
 impl AckableSubscriber for AmqpSubscriber {
+    async fn prepare_ackable(&self, topic: Topic) -> Result<(), SubscriberError> {
+        let channel = self
+            .conn
+            .create_channel()
+            .await
+            .map_err(SubscriberError::new)?;
+        let topology = self.broker_queue_topology(&topic)?;
+        declare_broker_queue_topology(&channel, &topology, &self.name).await?;
+        channel
+            .close(REPLY_SUCCESS, "durable topology prepared".into())
+            .await
+            .map_err(SubscriberError::new)?;
+        Ok(())
+    }
+
     async fn subscribe_ackable(
         &self,
         topic: Topic,

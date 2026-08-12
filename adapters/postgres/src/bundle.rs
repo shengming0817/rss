@@ -501,6 +501,23 @@ pub struct PgL2DrRecoveryDeps {
     clock: Arc<dyn Clock>,
 }
 
+/// Store-sourced admission state. `declared_instances` is the operator declaration, not a claim
+/// that PostgreSQL discovered the deployment's complete replica set.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PgL2DrAdmissionState {
+    pub admission_epoch_id: String,
+    pub recovery_epoch_id: String,
+    pub tenant_id: String,
+    pub phase: String,
+    pub declared_instances: serde_json::Value,
+    pub acknowledged_instances: serde_json::Value,
+    pub invalidation_evidence: serde_json::Value,
+    pub invalidated: bool,
+    pub expired: bool,
+    pub expires_at_epoch_micros: Option<i64>,
+}
+
 /// Independent Projection control-plane capability owner.
 ///
 /// The public surface contains only Projection operations. The control credential owns no raw
@@ -1183,6 +1200,108 @@ impl PgRuntimeDeps {
 }
 
 impl PgRuntimeHandle {
+    /// Observe the singleton DR command through the serving role's narrow function grant.
+    pub async fn observe_l2_dr_admission(&self) -> Result<Option<PgL2DrAdmissionState>, PgError> {
+        let row: Option<(
+            String,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+            bool,
+            bool,
+            Option<i64>,
+        )> = sqlx::query_as(
+            "SELECT admission_epoch_id::text, recovery_epoch_id::text, tenant_id::text, \
+                 phase, declared_instances, acknowledged_instances, invalidation_evidence, \
+                 invalidated, expired, \
+                 (EXTRACT(EPOCH FROM expires_at) * 1000000)::bigint \
+                 FROM public.rss_l2_dr_admission_observe()",
+        )
+        .fetch_optional(self.stores.writer_capability().pool())
+        .await
+        .map_err(PgError::L2DrAdmission)?;
+        Ok(row.map(
+            |(
+                admission_epoch_id,
+                recovery_epoch_id,
+                tenant_id,
+                phase,
+                declared_instances,
+                acknowledged_instances,
+                invalidation_evidence,
+                invalidated,
+                expired,
+                expires_at_epoch_micros,
+            )| PgL2DrAdmissionState {
+                admission_epoch_id,
+                recovery_epoch_id,
+                tenant_id,
+                phase,
+                declared_instances,
+                acknowledged_instances,
+                invalidation_evidence,
+                invalidated,
+                expired,
+                expires_at_epoch_micros,
+            },
+        ))
+    }
+
+    /// Append one process-local phase acknowledgement. A false result is a durable fence reject.
+    pub async fn acknowledge_l2_dr_admission(
+        &self,
+        admission_epoch: primitives::AdmissionEpochId,
+        assembly_identity: &str,
+        runtime_plan_fingerprint: &str,
+        instance_id: uuid::Uuid,
+        boot_id: uuid::Uuid,
+        phase: &str,
+        required_admission_epoch: Option<primitives::AdmissionEpochId>,
+    ) -> Result<bool, PgError> {
+        sqlx::query_scalar(
+            "SELECT public.rss_l2_dr_admission_ack(\
+             $1::uuid, $2, $3, $4::uuid, $5::uuid, $6, $7::uuid)",
+        )
+        .bind(admission_epoch.as_uuid().to_string())
+        .bind(assembly_identity)
+        .bind(runtime_plan_fingerprint)
+        .bind(instance_id.to_string())
+        .bind(boot_id.to_string())
+        .bind(phase)
+        .bind(required_admission_epoch.map(|epoch| epoch.as_uuid().to_string()))
+        .fetch_one(self.stores.writer_capability().pool())
+        .await
+        .map_err(PgError::L2DrAdmission)
+    }
+
+    /// Durably authorize one instance/boot before the corresponding local lane is opened.
+    pub async fn authorize_l2_dr_admission_resume(
+        &self,
+        admission_epoch: primitives::AdmissionEpochId,
+        assembly_identity: &str,
+        runtime_plan_fingerprint: &str,
+        instance_id: uuid::Uuid,
+        boot_id: uuid::Uuid,
+        phase: &str,
+    ) -> Result<bool, PgError> {
+        sqlx::query_scalar(
+            "SELECT public.rss_l2_dr_admission_authorize_resume(\
+             $1::uuid, $2, $3, $4::uuid, $5::uuid, $6)",
+        )
+        .bind(admission_epoch.as_uuid().to_string())
+        .bind(assembly_identity)
+        .bind(runtime_plan_fingerprint)
+        .bind(instance_id.to_string())
+        .bind(boot_id.to_string())
+        .bind(phase)
+        .fetch_one(self.stores.writer_capability().pool())
+        .await
+        .map_err(PgError::L2DrAdmission)
+    }
+
     /// Mint the only PostgreSQL provider receipt accepted by the DeviceLatent draft pilot.
     ///
     /// The projections share this handle's verified stores and readiness state. Callers cannot
@@ -1519,6 +1638,179 @@ impl PgSagaOperatorDeps {
 }
 
 impl PgL2DrRecoveryDeps {
+    async fn record_l2_dr_admission_audit(
+        &self,
+        operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
+        tenant: vocab::TenantId,
+        admission_epoch: primitives::AdmissionEpochId,
+        action: &str,
+        stage: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        request_id: uuid::Uuid,
+    ) -> Result<(), PgError> {
+        let (secs, nanos) = self.audit_timestamp()?;
+        let (outcome, failure_reason) = match outcome {
+            MaintenanceAuditOutcome::Success => ("success", None),
+            MaintenanceAuditOutcome::Failure { reason } => ("failure", Some(reason)),
+        };
+        sqlx::query(
+            "SELECT public.rss_l2_dr_admission_record_audit(\
+             $1, $2, $3, $4::uuid, $5::uuid, $6, $7, $8, $9, $10::uuid)",
+        )
+        .bind(secs)
+        .bind(nanos)
+        .bind(operator_subject.as_str())
+        .bind(tenant.as_uuid().to_string())
+        .bind(admission_epoch.as_uuid().to_string())
+        .bind(action)
+        .bind(stage)
+        .bind(outcome)
+        .bind(failure_reason)
+        .bind(request_id.to_string())
+        .execute(&self.auditor.store_arc().pool)
+        .await
+        .map_err(PgError::MaintenanceAudit)?;
+        Ok(())
+    }
+
+    /// Durably record an admission attempt before any control action executes.
+    pub async fn record_l2_dr_admission_start_audit(
+        &self,
+        operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
+        tenant: vocab::TenantId,
+        admission_epoch: primitives::AdmissionEpochId,
+        action: &str,
+        request_id: uuid::Uuid,
+    ) -> Result<(), PgError> {
+        self.record_l2_dr_admission_audit(
+            operator_subject,
+            tenant,
+            admission_epoch,
+            action,
+            "start",
+            MaintenanceAuditOutcome::Success,
+            request_id,
+        )
+        .await
+    }
+
+    /// Durably record the terminal outcome correlated to the admission attempt.
+    pub async fn record_l2_dr_admission_finish_audit(
+        &self,
+        operator_subject: &eventexec::L2DrRecoveryOperatorSubject,
+        tenant: vocab::TenantId,
+        admission_epoch: primitives::AdmissionEpochId,
+        action: &str,
+        outcome: MaintenanceAuditOutcome<'_>,
+        request_id: uuid::Uuid,
+    ) -> Result<(), PgError> {
+        self.record_l2_dr_admission_audit(
+            operator_subject,
+            tenant,
+            admission_epoch,
+            action,
+            "finish",
+            outcome,
+            request_id,
+        )
+        .await
+    }
+
+    /// Read the current store-sourced admission status through the exact executor function grant.
+    pub async fn l2_dr_admission_status(
+        &self,
+        admission_epoch: primitives::AdmissionEpochId,
+        tenant: vocab::TenantId,
+    ) -> Result<Option<PgL2DrAdmissionState>, PgError> {
+        let row: Option<(
+            String,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+            bool,
+            bool,
+            Option<i64>,
+        )> = sqlx::query_as(
+            "SELECT admission_epoch_id::text, recovery_epoch_id::text, tenant_id::text, phase, \
+             declared_instances, acknowledged_instances, invalidation_evidence, invalidated, expired, \
+             (EXTRACT(EPOCH FROM expires_at) * 1000000)::bigint \
+             FROM public.rss_l2_dr_admission_observe($1::uuid, $2::uuid)",
+        )
+        .bind(admission_epoch.as_uuid().to_string())
+        .bind(tenant.as_uuid().to_string())
+        .fetch_optional(&self.executor.store_arc().pool)
+        .await
+        .map_err(PgError::L2DrAdmission)?;
+        Ok(row.map(
+            |(
+                admission_epoch_id,
+                recovery_epoch_id,
+                tenant_id,
+                phase,
+                declared_instances,
+                acknowledged_instances,
+                invalidation_evidence,
+                invalidated,
+                expired,
+                expires_at_epoch_micros,
+            )| PgL2DrAdmissionState {
+                admission_epoch_id,
+                recovery_epoch_id,
+                tenant_id,
+                phase,
+                declared_instances,
+                acknowledged_instances,
+                invalidation_evidence,
+                invalidated,
+                expired,
+                expires_at_epoch_micros,
+            },
+        ))
+    }
+
+    /// Create or idempotently observe one singleton pause request.
+    pub async fn request_l2_dr_admission_pause(
+        &self,
+        admission_epoch: primitives::AdmissionEpochId,
+        plan: &eventexec::L2DrRecoveryPlan,
+        declared_instances: &serde_json::Value,
+        requires_startup_epoch_witness: bool,
+    ) -> Result<(), PgError> {
+        sqlx::query(
+            "SELECT public.rss_l2_dr_admission_pause(\
+             $1::uuid, $2::uuid, $3::uuid, $4::bytea, $5::jsonb, $6::boolean)",
+        )
+        .bind(admission_epoch.as_uuid().to_string())
+        .bind(plan.epoch_id().as_uuid().to_string())
+        .bind(plan.tenant().as_uuid().to_string())
+        .bind(plan.digest().as_bytes().as_slice())
+        .bind(sqlx::types::Json(declared_instances))
+        .bind(requires_startup_epoch_witness)
+        .execute(&self.executor.store_arc().pool)
+        .await
+        .map_err(PgError::L2DrAdmission)?;
+        Ok(())
+    }
+
+    /// Request the next closed resume lane; per-instance acknowledgements advance it.
+    pub async fn request_l2_dr_admission_resume(
+        &self,
+        admission_epoch: primitives::AdmissionEpochId,
+        tenant: vocab::TenantId,
+        lane: &str,
+    ) -> Result<(), PgError> {
+        sqlx::query("SELECT public.rss_l2_dr_admission_request_resume($1::uuid, $2::uuid, $3)")
+            .bind(admission_epoch.as_uuid().to_string())
+            .bind(tenant.as_uuid().to_string())
+            .bind(lane)
+            .execute(&self.executor.store_arc().pool)
+            .await
+            .map_err(PgError::L2DrAdmission)?;
+        Ok(())
+    }
     /// Connect the independently verified authentication/audit and apply-only credentials.
     pub async fn connect(
         audit_config: &PgL2DrRecoveryAuditConfig,
@@ -1636,6 +1928,8 @@ fn map_l2_dr_recovery_sqlstate(code: Option<&str>) -> eventexec::L2DrRecoveryErr
         Some("P1837") => eventexec::L2DrRecoveryError::DeadlineExpired,
         Some("P1838") => eventexec::L2DrRecoveryError::ApplyLostLock,
         Some("P1839") => eventexec::L2DrRecoveryError::StartAuditMismatch,
+        Some("P2004") => eventexec::L2DrRecoveryError::AdmissionFenceRejected,
+        Some("P2002" | "P2003" | "P2005") => eventexec::L2DrRecoveryError::AdmissionPhaseConflict,
         Some("23514" | "55000") => eventexec::L2DrRecoveryError::StoreInvariant,
         _ => eventexec::L2DrRecoveryError::StoreUnavailable,
     }
@@ -1669,8 +1963,9 @@ struct L2DrRecoveryReceiptRow {
 impl eventexec::L2DrRecoveryStore for PgL2DrRecoveryDeps {
     async fn apply_l2_dr_recovery(
         &self,
-        authorized: eventexec::AuthorizedL2DrRecoveryPlan,
+        required: eventexec::RequiredAdmissionFence,
     ) -> Result<eventexec::L2DrRecoveryReceipt, eventexec::L2DrRecoveryError> {
+        let (authorized, admission_epoch) = required.into_parts();
         let plan = authorized.plan();
         let event_ids: Vec<String> = plan
             .events()
@@ -1699,7 +1994,7 @@ impl eventexec::L2DrRecoveryStore for PgL2DrRecoveryDeps {
                     result_already_applied, result_outcome \
              FROM public.rss_l2_dr_recovery_apply(\
              $1::uuid, $2::uuid, $3, $4::bigint, $5::bigint, $6, $7::text[], \
-             $8::bytea, $9, $10::uuid)",
+             $8::bytea, $9, $10::uuid, $11::uuid)",
         )
         .bind(plan.epoch_id().as_uuid().to_string())
         .bind(plan.tenant().as_uuid().to_string())
@@ -1711,6 +2006,7 @@ impl eventexec::L2DrRecoveryStore for PgL2DrRecoveryDeps {
         .bind(plan.digest().as_bytes().as_slice())
         .bind(authorized.operator_subject().as_str())
         .bind(authorized.start_audit_id().to_string())
+        .bind(admission_epoch.as_uuid().to_string())
         .fetch_one(&mut *tx)
         .await
         .map_err(map_l2_dr_recovery_sqlx_error)?;
@@ -1765,6 +2061,61 @@ impl eventexec::L2DrRecoveryStore for PgL2DrRecoveryDeps {
             .map_err(|_| eventexec::L2DrRecoveryError::StoreInvariant)?;
         tx.commit().await.map_err(map_l2_dr_recovery_sqlx_error)?;
         Ok(receipt)
+    }
+}
+
+impl eventexec::DrAdmissionCommandStore for PgRuntimeHandle {
+    type Error = PgError;
+
+    async fn observe(&self) -> Result<Option<eventexec::DrAdmissionCommand>, Self::Error> {
+        self.observe_l2_dr_admission()
+            .await?
+            .map(|state| {
+                Ok(eventexec::DrAdmissionCommand {
+                    admission_epoch: primitives::AdmissionEpochId::parse(&state.admission_epoch_id)
+                        .map_err(|_| PgError::L2DrAdmissionInvariant)?,
+                    phase: eventexec::DrAdmissionCommandPhase::parse(&state.phase)
+                        .map_err(|_| PgError::L2DrAdmissionInvariant)?,
+                    invalidated: state.invalidated,
+                    expired: state.expired,
+                })
+            })
+            .transpose()
+    }
+
+    async fn acknowledge(
+        &self,
+        command: &eventexec::DrAdmissionCommand,
+        identity: &eventexec::DrAdmissionProcessIdentity,
+        phase: &'static str,
+    ) -> Result<bool, Self::Error> {
+        self.acknowledge_l2_dr_admission(
+            command.admission_epoch,
+            identity.assembly_identity(),
+            identity.runtime_plan_fingerprint(),
+            identity.instance_id(),
+            identity.boot_id(),
+            phase,
+            identity.required_admission_epoch(),
+        )
+        .await
+    }
+
+    async fn authorize_resume(
+        &self,
+        command: &eventexec::DrAdmissionCommand,
+        identity: &eventexec::DrAdmissionProcessIdentity,
+        phase: &'static str,
+    ) -> Result<bool, Self::Error> {
+        self.authorize_l2_dr_admission_resume(
+            command.admission_epoch,
+            identity.assembly_identity(),
+            identity.runtime_plan_fingerprint(),
+            identity.instance_id(),
+            identity.boot_id(),
+            phase,
+        )
+        .await
     }
 }
 

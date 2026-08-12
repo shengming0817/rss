@@ -145,6 +145,19 @@ pub type DeliveryStream = Pin<Box<dyn Stream<Item = Delivery> + Send>>;
 // reason: base trait 为非 Send native AFIT；Send 由 trait_variant 生成的 `AckableSubscriber` 变体 +
 // dynosaur `DynAckableSubscriber` 承载（DI 注入走 Send wrapper）。ADR-003 既定 dyn-port 范式。
 pub trait AckableSubscriberLocal {
+    /// Prepare durable broker topology without starting delivery dispatch.
+    ///
+    /// The default is deliberately fail-closed. Durable broker adapters must explicitly prove
+    /// topology preparation so relay-first recovery cannot publish into an unbound exchange.
+    fn prepare_ackable(
+        &self,
+        _topic: Topic,
+    ) -> impl std::future::Future<Output = Result<(), SubscriberError>> {
+        std::future::ready(Err(SubscriberError::new(std::io::Error::other(
+            "durable topology preparation is unsupported",
+        ))))
+    }
+
     /// 订阅 topic，返回 manual-ack 投递流；`token` 取消即流终止（与 [`crate::Subscriber::subscribe`] 对偶）。
     async fn subscribe_ackable(
         &self,

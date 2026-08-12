@@ -81,19 +81,34 @@ impl<'a> Planned<'a> {
             events: local_event_execution_plan,
             security: security_execution_plan,
             placement: placement_execution_plan,
+            expected_workers,
         } = placed.into_parts();
+        let runtime_config = self.runtime_inputs.config();
         let serving_config = RuntimeServingConfig::from_snapshot(
-            self.runtime_inputs.config(),
+            runtime_config,
             &domain_execution_plan,
             &local_event_execution_plan,
         )?
         .into_parts();
-        let context = DomainPhaseContext::new(
+        let admission_identity = crate::event_transport::production_dr_admission_identity(
+            runtime_config,
+            runtime_plan.as_typed().runtime_plan_fingerprint().as_str(),
+        )?;
+        let required_admission_epoch = admission_identity.required_admission_epoch();
+        let mut context = DomainPhaseContext::new(
             self.runtime_inputs,
             runtime_plan,
             domain_execution_plan,
             security_execution_plan,
         );
+        context.set_expected_workers(expected_workers)?;
+        let (admission_control, relay_admission, consumer_admission, write_admission) =
+            primitives::prepare_dr_admission_controls().into_parts();
+        if let Some(epoch) = required_admission_epoch {
+            admission_control
+                .pause_all(epoch)
+                .context("arm runtime required DR admission epoch")?;
+        }
         let typed_runtime_plan = context.runtime_plan.as_typed();
         let (mut provider_build, mut provider_factories) =
             crate::provider_output::ProviderBuild::from_execution_plan(provider_execution_plan)
@@ -174,6 +189,11 @@ impl<'a> Planned<'a> {
                     serving_config,
                     runtime_rss_access,
                     runtime_federated_access,
+                    admission_identity,
+                    admission_control,
+                    relay_admission,
+                    consumer_admission,
+                    write_admission,
                 })
             }
             Err(error) => {

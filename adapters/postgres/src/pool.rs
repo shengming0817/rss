@@ -50,8 +50,12 @@ const L2_DR_START_AUDIT_FUNCTION: &str =
     "public.rss_l2_dr_recovery_record_start_audit(bigint,integer,text,uuid,uuid,bytea,uuid)";
 const L2_DR_FINISH_AUDIT_FUNCTION: &str =
     "public.rss_l2_dr_recovery_record_finish_audit(bigint,integer,text,uuid,uuid,text,text,uuid)";
-const L2_DR_APPLY_FUNCTION: &str =
-    "public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)";
+const L2_DR_ADMISSION_AUDIT_FUNCTION: &str = "public.rss_l2_dr_admission_record_audit(bigint,integer,text,uuid,uuid,text,text,text,text,uuid)";
+const L2_DR_APPLY_FUNCTION: &str = "public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid,uuid)";
+const L2_DR_PAUSE_FUNCTION: &str =
+    "public.rss_l2_dr_admission_pause(uuid,uuid,uuid,bytea,jsonb,boolean)";
+const L2_DR_RESUME_FUNCTION: &str = "public.rss_l2_dr_admission_request_resume(uuid,uuid,text)";
+const L2_DR_STATUS_FUNCTION: &str = "public.rss_l2_dr_admission_observe(uuid,uuid)";
 const AUDIT_ADMIN_APPLICATION_NAME: &str = "rss-postgres-audit-admin";
 
 /// postgres adapter 错误（adapter-内部 `thiserror`；**不**映射 HTTP 状态码——域 / handler 才映射）。
@@ -292,6 +296,12 @@ pub enum PgError {
     /// A committed start audit could not be represented as the exact typed proof.
     #[error("postgres L2 DR recovery durable start proof is inconsistent")]
     L2DrRecoveryProofInvariant,
+    /// Serving admission observe/ack function failed; callers remain fail-closed.
+    #[error("postgres L2 DR admission control failed")]
+    L2DrAdmission(#[source] sqlx::Error),
+    /// Serving admission function returned a value outside the closed protocol.
+    #[error("postgres L2 DR admission state is inconsistent")]
+    L2DrAdmissionInvariant,
     /// audit admin 能力门：必须直连固定 `rss_audit_admin` 角色。
     #[error("postgres audit admin capability: role must be rss_audit_admin")]
     AuditAdminUnexpectedRole,
@@ -1129,7 +1139,7 @@ SELECT capability FROM capabilities ORDER BY capability
 // Byte-level golden of the complete effective capability catalog after the committed migration
 // head. Any migration that intentionally changes writer authority must update this reviewed value.
 const EXPECTED_WRITER_CAPABILITY_FINGERPRINT: &str =
-    "sha256:1b6004533cdbc851ca7a61703e5e166e1cfd865314f5cae62bec0e181c9da971";
+    "sha256:43d11f5e6a83f0a48a9054f9db05bb71ceb9932c4e98dc98c04488d29514b8ea";
 const EXPECTED_PROJECTION_SOURCE_CAPABILITY_FINGERPRINT: &str =
     "sha256:7f06edc9c68f4a6da2567d5ac74c3a382cf6f0af9629ef5d144908f405781125";
 const EXPECTED_PROJECTION_OPERATOR_CAPABILITY_FINGERPRINT: &str =
@@ -1374,10 +1384,18 @@ WITH reader AS (
            n.nspname AS schema_name,
            c.relname,
            n.nspname = 'public'
-               AND c.relname = 'settings_projection_active_pointer' AS denied_relation,
+               AND c.relname IN (
+                   'settings_projection_active_pointer',
+                   'event_l2_dr_admission_epoch',
+                   'event_l2_dr_admission_phase_receipt'
+               ) AS denied_relation,
            n.nspname = 'public'
                AND c.relkind IN ('r', 'p')
-               AND c.relname <> 'settings_projection_active_pointer'
+               AND c.relname NOT IN (
+                   'settings_projection_active_pointer',
+                   'event_l2_dr_admission_epoch',
+                   'event_l2_dr_admission_phase_receipt'
+               )
                AND EXISTS (
                    SELECT 1
                    FROM pg_attribute AS a
@@ -2443,11 +2461,19 @@ impl PgStore {
                      'rss_l2_dr_recovery_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[]),
                     ('public.rss_l2_dr_recovery_record_finish_audit(bigint,integer,text,uuid,uuid,text,text,uuid)',
                      'rss_l2_dr_recovery_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[]),
-                    ('public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid)',
+                    ('public.rss_l2_dr_admission_record_audit(bigint,integer,text,uuid,uuid,text,text,text,text,uuid)',
+                     'rss_l2_dr_recovery_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[]),
+                    ('public.rss_l2_dr_recovery_apply(uuid,uuid,text,bigint,bigint,text,text[],bytea,text,uuid,uuid)',
                      'rss_l2_dr_recovery_owner', ARRAY[
                          'search_path=pg_catalog, pg_temp', 'lock_timeout=5s',
                          'statement_timeout=5min'
-                     ]::text[])
+                     ]::text[]),
+                    ('public.rss_l2_dr_admission_pause(uuid,uuid,uuid,bytea,jsonb,boolean)',
+                     'rss_l2_dr_recovery_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[]),
+                    ('public.rss_l2_dr_admission_request_resume(uuid,uuid,text)',
+                     'rss_l2_dr_recovery_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[]),
+                    ('public.rss_l2_dr_admission_observe(uuid,uuid)',
+                     'rss_l2_dr_recovery_owner', ARRAY['search_path=pg_catalog, pg_temp']::text[])
             )
             SELECT session_user = $1
                AND current_user = $1
@@ -3528,6 +3554,7 @@ impl PgStore {
                 L2_DR_REPLAY_FUNCTION,
                 L2_DR_START_AUDIT_FUNCTION,
                 L2_DR_FINISH_AUDIT_FUNCTION,
+                L2_DR_ADMISSION_AUDIT_FUNCTION,
             ],
         )
         .await
@@ -3543,7 +3570,12 @@ impl PgStore {
             "l2-dr-recovery-executor",
             L2_DR_RECOVERY_EXECUTOR_APPLICATION_NAME,
             "rss_l2_dr_recovery_executor",
-            &[L2_DR_APPLY_FUNCTION],
+            &[
+                L2_DR_APPLY_FUNCTION,
+                L2_DR_PAUSE_FUNCTION,
+                L2_DR_RESUME_FUNCTION,
+                L2_DR_STATUS_FUNCTION,
+            ],
         )
         .await
         .map(VerifiedPgL2DrRecoveryExecutorStore)

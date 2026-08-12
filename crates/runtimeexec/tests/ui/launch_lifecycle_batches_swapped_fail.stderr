@@ -1,18 +1,23 @@
 error[E0308]: arguments to this function are incorrect
- --> tests/ui/launch_lifecycle_batches_swapped_fail.rs:9:20
-  |
-9 |     let _swapped = runtimeexec::LaunchLifecycleBatches::new(domain, provider);
-  |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ ------  -------- expected `DomainLifecycleBatch`, found `ProviderLifecycleBatch`
-  |                                                             |
-  |                                                             expected `ProviderLifecycleBatch`, found `DomainLifecycleBatch`
-  |
+  --> tests/ui/launch_lifecycle_batches_swapped_fail.rs:9:20
+   |
+ 9 |     let _swapped = runtimeexec::LaunchLifecycleBatches::new(
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+10 |         domain,
+   |         ------ expected `ProviderLifecycleBatch`, found `DomainLifecycleBatch`
+11 |         provider,
+   |         -------- expected `DomainLifecycleBatch`, found `ProviderLifecycleBatch`
+   |
 note: associated function defined here
- --> src/lib.rs
-  |
-  |     pub fn new(provider: ProviderLifecycleBatch, domain: DomainLifecycleBatch) -> Self {
-  |            ^^^
+  --> src/lib.rs
+   |
+   |     pub fn new(
+   |            ^^^
 help: swap these arguments
-  |
-9 -     let _swapped = runtimeexec::LaunchLifecycleBatches::new(domain, provider);
-9 +     let _swapped = runtimeexec::LaunchLifecycleBatches::new(provider, domain);
-  |
+   |
+ 9 ~     let _swapped = runtimeexec::LaunchLifecycleBatches::new(
+10 +         provider,
+11 +         domain,
+12 +         Some(bootstrap::ExpectedWorkerInventory::closed([]).unwrap()),
+13 ~     );
+   |

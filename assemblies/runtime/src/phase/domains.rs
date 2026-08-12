@@ -23,13 +23,14 @@ fn wire_runtime_security_root(
     pg: &postgres::PgRuntimeHandle,
     clock: Arc<dyn diport::Clock>,
     auth_grant_sweep_interval: std::time::Duration,
+    write_admission: &primitives::WriteAdmission,
 ) -> anyhow::Result<bootstrap::DomainModuleResult> {
     let identity_pg = pg.for_domain::<postgres::caps::Identity>();
     register_runtime_security_root(
         registry,
         identity_composition::root_contract_authorizer(&identity_pg, clock),
     )?;
-    wire_auth_grant_sweeper(pg, auth_grant_sweep_interval)
+    wire_auth_grant_sweeper(pg, auth_grant_sweep_interval, write_admission)
         .context("wire process-owned AuthGrant security maintenance")
 }
 
@@ -123,6 +124,11 @@ impl<'a> InfraBuilt<'a> {
             runtime_rss_access,
             runtime_federated_access,
             runtime_service_token,
+            admission_identity,
+            admission_control,
+            relay_admission,
+            consumer_admission,
+            write_admission,
         } = self;
         let (mut context, domain_execution_plan, security_execution_plan) = context.into_parts();
         let result = async {
@@ -170,6 +176,9 @@ impl<'a> InfraBuilt<'a> {
                     return Err(source).context("compose generated domains");
                 }
             };
+            registry
+                .install_write_admission(write_admission.clone())
+                .context("install runtime process write admission")?;
             provider_build.record_domain(domains_module);
             let security_root_module = wire_runtime_security_root(
                 security_execution_plan,
@@ -177,6 +186,7 @@ impl<'a> InfraBuilt<'a> {
                 &deps.pg,
                 Arc::new(crate::support::SystemClock),
                 auth_grant_sweep_interval,
+                &write_admission,
             )?;
             provider_build.record_domain(security_root_module);
             validate_domain_listener_evidence(
@@ -189,11 +199,15 @@ impl<'a> InfraBuilt<'a> {
                 wire_s3_canary(&deps, s3_canary_config).context("wire s3 canary")?;
             provider_build.record_domain(s3_canary_module);
             let (saga_module, active_saga_count) =
-                crate::saga_runtime::bind_and_wire_selected_sagas(&mut context.runtime_plan)
-                    .context("bind and wire plan-selected Saga providers")?;
+                crate::saga_runtime::bind_and_wire_selected_sagas(
+                    &mut context.runtime_plan,
+                    &write_admission,
+                )
+                .context("bind and wire plan-selected Saga providers")?;
             provider_build.record_domain(saga_module);
-            let saga_retention_module = wire_saga_terminal_sweeper(&deps.pg, active_saga_count)
-                .context("wire terminal Saga retention")?;
+            let saga_retention_module =
+                wire_saga_terminal_sweeper(&deps.pg, active_saga_count, &write_admission)
+                    .context("wire terminal Saga retention")?;
             provider_build.record_domain(saga_retention_module);
             let rls_probe_name =
                 ProbeName::parse(RLS_READY_PROBE_NAME).context("parse rls_ready probe name")?;
@@ -233,6 +247,9 @@ impl<'a> InfraBuilt<'a> {
                     event_transport,
                     event_worker.context("active local event execution lacks worker config")?,
                     audit_consumer_key,
+                    relay_admission.clone(),
+                    consumer_admission.clone(),
+                    write_admission.clone(),
                 )
                 .await
                 .context("wire event transport")?;
@@ -253,6 +270,14 @@ impl<'a> InfraBuilt<'a> {
                     "inactive local event execution retained subscriber bindings"
                 );
             }
+            let mut admission_module = bootstrap::DomainModuleResult::default();
+            crate::event_transport::retain_admission_authority(
+                deps.pg.clone(),
+                admission_control,
+                admission_identity,
+                &mut admission_module,
+            )?;
+            provider_build.record_domain(admission_module);
 
             Result::<_, anyhow::Error>::Ok(WiredDomains { registry })
         }
@@ -352,6 +377,7 @@ mod listener_plan_tests {
             &pg,
             std::sync::Arc::new(identity_composition::test_support::TestClock),
             std::time::Duration::from_secs(60),
+            &primitives::prepare_dr_admission_controls().into_parts().3,
         )
         .expect("production-shaped process security root");
         let authorizer = registry

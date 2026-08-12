@@ -299,6 +299,7 @@ pub struct Registry {
     subscribers: Vec<SubscriberDecl>,
     probes: Vec<ProbeDecl>,
     primary_authorizer: Option<Arc<dyn httpserve::RouteAuthorizer>>,
+    write_admission: Option<primitives::WriteAdmission>,
     current_domain: Option<&'static str>,
 }
 
@@ -310,8 +311,20 @@ impl Registry {
             subscribers: Vec::new(),
             probes: Vec::new(),
             primary_authorizer: None,
+            write_admission: None,
             current_domain: None,
         }
+    }
+
+    /// Install the sole process write-admission gate before route finalization.
+    pub fn install_write_admission(
+        &mut self,
+        admission: primitives::WriteAdmission,
+    ) -> Result<(), KernelError> {
+        if self.write_admission.replace(admission).is_some() {
+            return Err(KernelError::Invariant);
+        }
+        Ok(())
     }
 
     /// 声明路由组——**listener 由类型参数 `L` 携带**（#1103 typed per-listener route-group）。
@@ -537,12 +550,26 @@ impl Registry {
             let idx = match by_listener.iter().position(|(l, _)| *l == listener) {
                 Some(i) => i,
                 None => {
-                    by_listener.push((listener, UnfinalizedRoutes::empty()));
+                    by_listener.push((
+                        listener,
+                        match self.write_admission.clone() {
+                            Some(admission) => {
+                                UnfinalizedRoutes::with_mutation_admission(admission)
+                            }
+                            None => UnfinalizedRoutes::empty(),
+                        },
+                    ));
                     by_listener.len() - 1
                 }
             };
             // 本组路由 nest 进该 listener 累加器（声明 prefix 即实际挂载前缀）；闭包 Err 原样冒泡 + 记 listener/prefix/error。
-            let acc = std::mem::replace(&mut by_listener[idx].1, UnfinalizedRoutes::empty());
+            let acc = std::mem::replace(
+                &mut by_listener[idx].1,
+                match self.write_admission.clone() {
+                    Some(admission) => UnfinalizedRoutes::with_mutation_admission(admission),
+                    None => UnfinalizedRoutes::empty(),
+                },
+            );
             by_listener[idx].1 = (decl.register)(acc).inspect_err(|e| {
                 tracing::error!(
                     listener = ?listener,

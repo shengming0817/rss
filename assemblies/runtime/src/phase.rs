@@ -188,6 +188,7 @@ impl PreparedRuntimeInputs {
 pub struct ServingRuntimeInputs {
     prepared: PreparedRuntimeInputs,
     placed_runtime_plan: Option<crate::plan::PlacedRuntimePlan>,
+    expected_workers: Option<bootstrap::ExpectedWorkerInventory>,
 }
 
 impl ServingRuntimeInputs {
@@ -208,6 +209,7 @@ impl ServingRuntimeInputs {
         Ok(Self {
             prepared,
             placed_runtime_plan: Some(placed_runtime_plan),
+            expected_workers: None,
         })
     }
 
@@ -227,6 +229,23 @@ impl ServingRuntimeInputs {
     /// until `run()` exits.
     pub(crate) fn take_trace_export(&mut self) -> Option<otel::OtelExporter> {
         self.prepared.take_trace_export()
+    }
+
+    fn set_expected_workers(
+        &mut self,
+        expected: bootstrap::ExpectedWorkerInventory,
+    ) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.expected_workers.replace(expected).is_none(),
+            "runtime expected worker inventory was installed more than once"
+        );
+        Ok(())
+    }
+
+    fn take_expected_workers(&mut self) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
+        self.expected_workers
+            .take()
+            .context("runtime expected worker inventory was not installed")
     }
 
     pub(crate) fn prepared_mut(&mut self) -> &mut PreparedRuntimeInputs {
@@ -319,6 +338,13 @@ impl<'a> DomainPhaseContext<'a> {
         }
     }
 
+    fn set_expected_workers(
+        &mut self,
+        expected: bootstrap::ExpectedWorkerInventory,
+    ) -> anyhow::Result<()> {
+        self.context.runtime_inputs.set_expected_workers(expected)
+    }
+
     fn into_parts(
         self,
     ) -> (
@@ -350,6 +376,10 @@ impl PhaseContext<'_> {
     fn take_trace_export(&mut self) -> Option<otel::OtelExporter> {
         self.runtime_inputs.take_trace_export()
     }
+
+    fn take_expected_workers(&mut self) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
+        self.runtime_inputs.take_expected_workers()
+    }
 }
 
 /// INVARIANT: RUNTIME-PHASE-TRANSITION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private state fields, exact associated Next chain, consuming transition receivers, and non-Clone lifecycle owners" } -- production startup is representable only as the closed `Planned -> ProvidersBuilt -> InfraBuilt -> DomainsWired -> Finalized -> runtimeexec::RuntimeOutputs` chain; every transition consumes its predecessor and selects its phase label through this trait.
@@ -379,6 +409,11 @@ pub(crate) struct ProvidersBuilt<'a> {
     runtime_rss_access: Option<crate::infra::oidc::RuntimeAccessProvider<diport::RssAccessProfile>>,
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
+    admission_identity: eventexec::DrAdmissionProcessIdentity,
+    admission_control: primitives::ProcessAdmissionControl,
+    relay_admission: primitives::RelayAdmission,
+    consumer_admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
 }
 
 #[must_use]
@@ -402,6 +437,11 @@ pub(crate) struct InfraBuilt<'a> {
     runtime_federated_access:
         Option<crate::infra::oidc::RuntimeAccessProvider<diport::FederatedAccessProfile>>,
     runtime_service_token: Option<crate::infra::oidc::RuntimeServiceTokenProvider>,
+    admission_identity: eventexec::DrAdmissionProcessIdentity,
+    admission_control: primitives::ProcessAdmissionControl,
+    relay_admission: primitives::RelayAdmission,
+    consumer_admission: primitives::ConsumerAdmission,
+    write_admission: primitives::WriteAdmission,
 }
 
 #[must_use]
