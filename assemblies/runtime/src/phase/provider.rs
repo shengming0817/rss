@@ -81,7 +81,6 @@ impl<'a> Planned<'a> {
             events: local_event_execution_plan,
             security: security_execution_plan,
             placement: placement_execution_plan,
-            expected_workers,
         } = placed.into_parts();
         let runtime_config = self.runtime_inputs.config();
         let serving_config = RuntimeServingConfig::from_snapshot(
@@ -95,13 +94,12 @@ impl<'a> Planned<'a> {
             runtime_plan.as_typed().runtime_plan_fingerprint().as_str(),
         )?;
         let required_admission_epoch = admission_identity.required_admission_epoch();
-        let mut context = DomainPhaseContext::new(
+        let context = DomainPhaseContext::new(
             self.runtime_inputs,
             runtime_plan,
             domain_execution_plan,
             security_execution_plan,
         );
-        context.set_expected_workers(expected_workers)?;
         let (admission_control, relay_admission, consumer_admission, write_admission) =
             primitives::prepare_dr_admission_controls().into_parts();
         if let Some(epoch) = required_admission_epoch {

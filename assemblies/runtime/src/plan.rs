@@ -32,6 +32,7 @@ pub struct RuntimePlan {
     plan: TypedRuntimePlan,
     workflow_activation: Option<eventexec::WorkflowActivationPlan>,
     workflow_runtime: Option<eventexec::WorkflowRuntimePlan>,
+    pending_worker_descriptors: Option<Vec<bootstrap::WorkerDescriptor>>,
     assembly_identity: String,
     telemetry_resource: observ::TelemetryResource,
 }
@@ -48,7 +49,6 @@ pub(crate) struct PlacedRuntimePlan {
     events: LocalEventExecutionPlan,
     security: RuntimeSecurityExecutionPlan,
     placement: PlacementExecutionPlan,
-    expected_workers: bootstrap::ExpectedWorkerInventory,
 }
 
 /// Process-owned listener security capability minted only by placement.
@@ -151,7 +151,6 @@ pub(crate) struct PlacedRuntimeParts {
     pub(crate) events: LocalEventExecutionPlan,
     pub(crate) security: RuntimeSecurityExecutionPlan,
     pub(crate) placement: PlacementExecutionPlan,
-    pub(crate) expected_workers: bootstrap::ExpectedWorkerInventory,
 }
 
 impl PlacedRuntimePlan {
@@ -164,7 +163,6 @@ impl PlacedRuntimePlan {
             events: self.events,
             security: self.security,
             placement: self.placement,
-            expected_workers: self.expected_workers,
         }
     }
 }
@@ -276,6 +274,7 @@ impl RuntimePlan {
             plan,
             workflow_activation: Some(workflow_activation),
             workflow_runtime: None,
+            pending_worker_descriptors: None,
             assembly_identity,
             telemetry_resource,
         })
@@ -347,6 +346,7 @@ impl RuntimePlan {
             plan,
             workflow_activation: Some(workflow_activation),
             workflow_runtime: None,
+            pending_worker_descriptors: None,
             assembly_identity,
             telemetry_resource,
         })
@@ -356,6 +356,31 @@ impl RuntimePlan {
         self.workflow_runtime
             .as_ref()
             .unwrap_or_else(|| unreachable!("workflow runtime must be bound before consumption"))
+    }
+
+    pub(crate) fn take_expected_workers(
+        &mut self,
+    ) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
+        use bootstrap::{WorkerAdmissionLane as Lane, WorkerDescriptor as Worker};
+
+        let mut expected = self
+            .pending_worker_descriptors
+            .take()
+            .context("runtime worker descriptors were not prepared during placement")?;
+        let sagas = self.workflow_runtime().sagas();
+        if !sagas.is_empty() {
+            expected.push(Worker::expected(
+                "assemblies.runtime.src.phase.maintenance.04",
+                Lane::Writes,
+            ));
+        }
+        for spec in sagas.specs() {
+            expected.push(Worker::expected(
+                format!("saga:{}:{}", spec.domain(), spec.contract_id()),
+                Lane::Writes,
+            ));
+        }
+        bootstrap::ExpectedWorkerInventory::closed(expected).map_err(Into::into)
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -368,7 +393,7 @@ impl RuntimePlan {
     ///
     /// INVARIANT: RUNTIME-PLACEMENT-PLAN-EXECUTION-01 { level = "Hard", exec = "native-compile", source = "code", native = "private closed placement state with mandatory secure::DomainHttpEndpoint plus RuntimePlan-only fallible mint from typed topology" } -- this is the sole mint for [`PlacementExecutionPlan`].
     pub(crate) fn place(
-        self,
+        mut self,
         topology: bootstrap::Topology,
         config: SnapshotConfig<'_>,
     ) -> anyhow::Result<PlacedRuntimePlan> {
@@ -432,7 +457,8 @@ impl RuntimePlan {
             requires_audit_consumer_key,
             required_amqp_domains,
         };
-        let expected_workers = expected_runtime_workers(&self, &events, &local_domains)?;
+        self.pending_worker_descriptors =
+            Some(expected_runtime_worker_descriptors(&events, &local_domains));
         let mut plans = Vec::new();
         let mut catalog = Vec::new();
         anyhow::ensure!(
@@ -485,7 +511,6 @@ impl RuntimePlan {
             events,
             security: RuntimeSecurityExecutionPlan { _private: () },
             placement,
-            expected_workers,
         })
     }
 
@@ -522,11 +547,10 @@ impl RuntimePlan {
     }
 }
 
-fn expected_runtime_workers(
-    plan: &RuntimePlan,
+fn expected_runtime_worker_descriptors(
     events: &LocalEventExecutionPlan,
     local_domains: &[AssemblyDomain],
-) -> anyhow::Result<bootstrap::ExpectedWorkerInventory> {
+) -> Vec<bootstrap::WorkerDescriptor> {
     use bootstrap::{WorkerAdmissionLane as Lane, WorkerDescriptor as Worker};
 
     let mut expected = vec![
@@ -563,20 +587,7 @@ fn expected_runtime_workers(
             ));
         }
     }
-    let sagas = plan.workflow_runtime().sagas();
-    if !sagas.is_empty() {
-        expected.push(Worker::expected(
-            "assemblies.runtime.src.phase.maintenance.04",
-            Lane::Writes,
-        ));
-    }
-    for spec in sagas.specs() {
-        expected.push(Worker::expected(
-            format!("saga:{}:{}", spec.domain(), spec.contract_id()),
-            Lane::Writes,
-        ));
-    }
-    bootstrap::ExpectedWorkerInventory::closed(expected).map_err(Into::into)
+    expected
 }
 
 fn listener_execution_plan_from_typed(

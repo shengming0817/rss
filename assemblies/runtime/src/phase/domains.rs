@@ -204,6 +204,8 @@ impl<'a> InfraBuilt<'a> {
                     &write_admission,
                 )
                 .context("bind and wire plan-selected Saga providers")?;
+            let expected_workers = context.runtime_plan.take_expected_workers()?;
+            context.set_expected_workers(expected_workers)?;
             provider_build.record_domain(saga_module);
             let saga_retention_module =
                 wire_saga_terminal_sweeper(&deps.pg, active_saga_count, &write_admission)

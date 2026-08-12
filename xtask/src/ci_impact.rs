@@ -3541,6 +3541,7 @@ fn local_impact_domains(path: &str) -> BTreeSet<LocalImpactDomain> {
         "xtask/src/assembly_runtime_plan.rs",
         "xtask/src/graph.rs",
         ".gitattributes",
+        ".dockerignore",
         "Dockerfile",
     ];
     const CONSISTENCY_PREFIXES: &[&str] = &[
@@ -5750,6 +5751,10 @@ mod tests {
             ),
             (
                 "deploy/docker-compose.yml",
+                BTreeSet::from([Domain::AssemblyGeneration]),
+            ),
+            (
+                ".dockerignore",
                 BTreeSet::from([Domain::AssemblyGeneration]),
             ),
             ("Dockerfile", BTreeSet::from([Domain::AssemblyGeneration])),

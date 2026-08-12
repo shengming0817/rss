@@ -2489,6 +2489,30 @@ mod tests {
     }
 
     #[test]
+    fn docker_build_context_excludes_nested_frontend_artifacts() -> Result<()> {
+        let dockerignore = std::fs::read_to_string(crate::workspace_root()?.join(".dockerignore"))?;
+        let active_patterns = dockerignore
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .collect::<BTreeSet<_>>();
+
+        for required in [
+            "rss-web/",
+            "**/node_modules/",
+            "**/.next/",
+            "**/dist/",
+            "**/coverage/",
+        ] {
+            assert!(
+                active_patterns.contains(required),
+                ".dockerignore must exclude {required} from the backend image context"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
     #[allow(
         clippy::cognitive_complexity,
         reason = "one table-driven mutation test proves the complete compose policy closure"
