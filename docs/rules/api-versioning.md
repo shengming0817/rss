@@ -31,15 +31,22 @@ compensation effect scope、idempotency/compensation/retry class 或 retry polic
 package 不继承历史 internal `pub` 承诺；从清单显式移除 package 即终止其后续轴 A 承诺，不扫描其 internal
 历史、不生成 shim，也不引入双读或退出 metadata。仍在 base/current 交集内的 package 必须完成 SemVer 证明。
 
-Platform Application 当前 experimental 0.x 的单源是 `rss-platform` Release API 与 canonical contract
-codegen projection；具体 package 版本从 Cargo metadata 派生，不在规则文档复制。
-旧 #2045 executable contract 已原子删除，不构成 compatibility authority。`cargo xtask public-api release --check`
+Platform Application vNext 是明确授权、待 #2107 原子激活的 breaking 0.x cutover；具体 package 版本从 Cargo metadata 派生，
+不在规则文档复制。当前 v0.2 exported surface 仅是 cutover 前的历史 baseline，不构成 vNext compatibility
+authority。Foundation identity/context 提取、Platform async waist、Auth/RuntimeExec bridge 与旧 baseline 删除必须
+原子发生；禁止 alias、deprecated re-export、shim、`From`/`TryFrom`、feature flag、双读写、双 dispatch 或 v0.2
+fallback。旧 #2045 executable contract 已原子删除，同样不构成 compatibility authority。
+
+`cargo xtask public-api release --check`
 只验证 baseline exact-set；canonical ReleaseCheck 才聚合 default/all-features SemVer、publish closure、
 forbidden-type leakage，并在同一 release-only carrier 中执行 `cargo xtask package-proof`。后者从同一 revision 的
 每个 selected package 生成真实 `.crate`，验证 clean HEAD/VCS revision、结构化 package content、feature/MSRV/docs，
 再建立 local-registry、独立 Git/Cargo.lock 与 `--locked --offline` consumer proof。Release Surface 的 selected、
 planned 与 executed package 集合必须精确相等；package-specific behavior 只作闭合执行投影，不能另行选择 lifecycle。
 任何 internal path alias、deprecated re-export、shim 或 From/TryFrom 兼容入口都不允许作为迁移手段。
+publish closure 与顺序只由现有 Cargo dependency graph、`plan_publish_closure`/`stable_publish_order` 派生；
+package-proof 的 selected/planned/executed 必须保持 exact-set。不得另建 release group、registry、runner、schema
+或手写发布顺序作为第二真源。
 
 根 `Cargo.toml` 的 `[workspace.metadata.release-surface]` 是轴 A 唯一正向发布选择：只有被选 package 及其
 public API owner、API stability 和显式 official-profile artifact 归属进入 Release Surface；未选 package 默认

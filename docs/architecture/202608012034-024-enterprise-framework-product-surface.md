@@ -12,18 +12,61 @@ RSS 已具备 contract/codegen、静态 assembly、L0–L4 primitive、多租户
 
 ## Decision
 
-### 2026-08-09 amendment：Platform Public v0.1 真实 owner
+### 2026-08-11 amendment：Platform vNext 唯一 owner 与原子 cutover
 
-本 amendment 取代 Spec 012 旧版的 “thin façade / exact API frozen / 不改变 runtime” 实施解释。
-`rss-platform` 0.1.0 是 provider-free、进程内 typed application kernel，原子拥有 canonical contract
+本 amendment 取代 2026-08-09 Platform v0.2 实现 amendment 作为 vNext 规范；旧实现只作为迁移基线保留，
+不授予兼容入口。Platform vNext 是 breaking 0.x cutover，具体 package 版本从 Cargo metadata 派生。
+不得保留 alias、shim、`From`/`TryFrom`、feature flag、双读写、双 dispatch 或旧 baseline fallback。
+
+vNext 的唯一 owner 固定如下：
+
+| 语义 | 唯一 owner | 边界 |
+|------|------------|------|
+| contract/admission identity | Foundation `rss-contract` | 唯一定义 `ContractId`、`ContractVersion`、`SchemaDigest` 与 descriptor identity；零 internal workspace 依赖 |
+| request/security value vocabulary | Foundation `rss-request-context` | 唯一定义 tenant、request、principal reference/kind、deadline、cancellation、obligation 与只读视图；除公开 obligation 签名确需 contract identity 外不依赖 `rss-contract` |
+| JWT/JWS/JWKS authority | Official OIDC integration 与 AuthN/AuthZ funnel | OIDC integration 唯一验证签名、claims 与 JWKS freshness；funnel 通过私有 sealed mint capability 唯一构造 `TrustedRequestContext` |
+| application waist | Platform | descriptor admission、typed async `Handler<C>`、closed dispatch outcome/error semantics、module/dispatch 与稳定 host-view ports；消费并传播 Foundation deadline/cancellation，不重新定义其值类型；不接收 raw token/JWKS，不 mint identity |
+| process lifecycle 与 live inventory | RuntimeExec | startup、signal、readiness、admission stop、总 drain budget、shutdown、inventory mint/reader/publisher；Platform 只读取 internal bridge 投影 |
+| composition | assembly/composition root | 唯一接线 owner；RuntimePlan、provider catalog、constructors、inventory publisher 与第三方 SPI 保持 internal |
+
+分层记法是 Foundation ◁ Platform ◁ internal consumers（右侧依赖左侧）；Official Integration、RuntimeExec 和 assembly 只能经
+Platform/基础值面消费或实现端口，不能把 internal 类型反向泄漏进 Release API。安全 authority 与请求值类型分离：
+公共值类型不授予可信性，只有 AuthN/AuthZ funnel 的私有 mint 能力可以产生 trusted context。
+
+实施采用一个 RSS 原子 cutover：Foundation 提取、ID 迁移、async Platform API、Auth/RuntimeExec bridge、
+composition、Release API baseline 与 package proof 由 #2107 在同一次合并切换。外部 candidate receipt 是
+必填 merge gate；cutover 增量顺序见 [`Spec 012 plan.md`](../spec/012-platform-application-waist/plan.md)，跨仓
+first-green receipt shape 与 artifact lifecycle 继续唯一由
+[`ADR-026`](202608111253-026-rss-incubator-ownership-migration.md) 持有。
+任何 owner、proof 或 receipt 未闭合都禁止部分合并。
+
+回退遵循 ADR-026 的不可变 artifact lifecycle：未发布 candidate 可拒绝；发布后先阻断产品发布并将 incubator
+pin/lock 回上一已知绿色 artifact、重跑 canonical CI，再由 RSS 发布修复版本或按 registry 能力 yank。必要时才整体
+revert RSS cutover 到一致的 v0.2 revision/baseline；不得恢复 RSS-owned submodule，也不得在部分 vNext 中恢复旧 API、
+兼容层、双 authority 或双 baseline。
+完整 backlog 映射只由
+[`Spec 012 research.md`](../spec/012-platform-application-waist/research.md) 持有，cutover 增量 DAG 与 AI-HARD carrier
+handoff 只由 [`Spec 012 plan.md`](../spec/012-platform-application-waist/plan.md) 持有；它们都不复制 ADR-026 的
+canonical receipt schema 或 artifact rollback owner。
+
+四原则复核结论：**彻底**，一次切断重复 ID、Platform crypto/lifecycle 与伪 inventory owner；
+**不向后兼容**，旧 API 与 baseline 同步删除；**优雅简洁**，只引入两个必要 Foundation package 并复用既有
+Release Surface/package-proof；**AI-HARD**，永久约束交给 Cargo/rustc visibility、私有 mint、分层依赖、Release API
+与确定性 T1/T2 proof，Markdown 只记录决策和尚未激活的 carrier handoff。
+
+### 2026-08-09 amendment：Platform Public v0.2 历史实现（已被 vNext 取代）
+
+以下内容仅描述 v0.2 当前实现，不再是 vNext 规范，也不得被解释为兼容承诺。本 amendment 曾取代 Spec 012
+旧版的 “thin façade / exact API frozen / 不改变 runtime” 实施解释。
+`rss-platform` 0.2.0 是 provider-free、进程内 typed application kernel，原子拥有 canonical contract
 admission、静态 federated ES256 authority、typed handler dispatch 与 bounded drain/shutdown。它不是
 publish=false internals 的 wrapper，也不提供 DI container、Host/Provider SPI 或第二 composition root。
 
-`core`/`eventing` 仍是候选 official profile，但尚未激活，不进入 Platform v0.1 API；kernel conditions 只报告
+`core`/`eventing` 仍是候选 official profile，但尚未激活，不进入 Platform v0.2 API；kernel conditions 只报告
 自身真实 handler/dispatch/drain/stopped 状态，不映射 provider/runtime readiness。Platform crate 位于新的最低位
 `PlatformPublic` layer，无 workspace normal/build dependency；internal layers 只能反向消费其稳定值面。
 
-framework-owned active HTTP manifests 经同一 `cargo xtask codegen` 投影 sealed public contract set；v0.1 exact set
+framework-owned active HTTP manifests 经同一 `cargo xtask codegen` 投影 sealed public contract set；v0.2 exact set
 为 `runtime.inventory`。Release Surface、真实 `.crate` local-registry consumer 与 locked/offline T2 是同一合并门。
 旧 #2045 fixture、开放 Contract、core/eventing marker 与兼容 path 全部删除，不保留 shim/alias。
 
@@ -32,7 +75,7 @@ framework-owned active HTTP manifests 经同一 `cargo xtask codegen` 投影 sea
 | 产品面 | 版本承诺 | Owner |
 |--------|----------|-------|
 | Standalone Component | 独立 SemVer | 低依赖基础能力的公开 crate |
-| Platform Public | 协调版本 | contract/handler、可信 context、configuration、lifecycle 与 runtime façade |
+| Platform Public | 协调版本 | descriptor admission、typed async handler、module/dispatch 与稳定 host-view façade；消费 Foundation/security/runtime 投影，不拥有 contract identity、trusted mint 或 process lifecycle |
 | Official Integration | 封闭支持矩阵 | 成熟上游之上的 tenant、安全、一致性、health 与 lifecycle 适配 |
 | Reference Extension | 第一方纵向 consumer | Identity、Settings、Audit 与已接纳的 L3/L4 slice |
 | Internal Implementation | 仓内重构边界 | generated/runtime internals、provider catalog 与 composition detail |

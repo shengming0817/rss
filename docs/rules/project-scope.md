@@ -59,12 +59,19 @@ workspace 结构与分层仍以 [`architecture.md`](architecture.md) 为准，�
 本节细化上表的稳定语义，不建立第二套能力 taxonomy、package plane 或支持矩阵。具体 crate、provider、contract、
 profile 与公开符号仍从 Cargo metadata、manifest、schema、codegen 和 release surface 派生。
 
+以下 Platform vNext 条款是已接纳、待 #2107 原子激活的目标边界，不描述当前 v0.2 Cargo 图。#2107 必须在同一
+cutover 中同步替换 `architecture.md` 的当前 PlatformPublic 分层/公开命名、Cargo 依赖、Release API 与实现；在此之前
+current-head enforcement 仍以现有机器载体为准，不能把 planned carrier 当成 active。
+
 ### Domain Governance
 
 - **拥有**：Cargo/crate 依赖方向、visibility、contract-only 跨域通信、composition owner，以及公开面与内部面的隔离。
 - **不拥有**：组织级研发门户、团队/项目管理系统、动态模块市场、安装升级控制面，以及无真实 consumer 的公共扩展点。
 - **完成**：外部 Rust consumer 只经稳定 façade 或 contract 消费；依赖和构造边界无法由普通 import 绕过；
   修改一项架构事实不要求同步维护平行清单或 scanner 特例。
+- **Platform vNext 边界**：Foundation 位于 Platform 之下且不依赖 internal workspace；Platform 只定义 application
+  waist 与 host-view ports，assembly/composition 是唯一接线 owner。具体 package 集合与依赖闭包从 Cargo metadata
+  和 Release Surface 派生，本文不复制数量或实施 DAG。
 
 ### Contract / Codegen
 
@@ -74,6 +81,8 @@ profile 与公开符号仍从 Cargo metadata、manifest、schema、codegen 和 r
   以及手工 contract 数量或顺序清单。
 - **完成**：声明源可闭合到 compatibility/deprecation、deterministic artifact、runtime binding、真实 consumer、
   升级与 retirement；公开 wire 语义不依赖内部实现形状。
+- **公共 identity 边界**：contract ID、version、schema digest 与 descriptor/admission identity 只有一个 Foundation
+  定义 owner；Platform、generated 与 runtime 只能消费，不能镜像或重新 mint 同义类型。
 
 ### Runtime Assembly
 
@@ -83,6 +92,9 @@ profile 与公开符号仍从 Cargo metadata、manifest、schema、codegen 和 r
 - **完成**：production assembly 的 config、lock、plan、generated binding 与 inventory 身份闭合；不存在 demo/no-op
   fallback；已激活官方 profile 的 canonical production artifact 对 partial startup、readiness、drain、restart
   和故障恢复具有最低充分证据。
+- **lifecycle 边界**：RuntimeExec 唯一拥有 startup、signal、readiness、admission stop、总 drain budget、shutdown
+  与 live inventory。Platform 只能通过必填 internal bridge 读取投影，不公开 RuntimePlan、具体 runtime constructor、
+  inventory publisher 或 provider catalog。
 
 ### DI Port / Adapter
 
@@ -119,6 +131,10 @@ SPI 证明稳定共同语义前，不提取通用 provider vocabulary crate。
   ZTNA/SASE，以及自研 TLS/X.509/JWT/OAuth/密码学 primitive。
 - **完成**：authority 只能来自 verified context；缺失、过期、撤销、replay 或跨 tenant 输入默认失败；tenant、principal、
   device 与 audit 坐标在同步/异步路径连续，管理事实仍由 External owner 持有。
+- **mint 边界**：tenant/request/principal reference、deadline/cancellation/obligation 等公共值只有一个 Foundation
+  定义 owner，但这些值本身不授予可信性。Official OIDC integration 唯一拥有 JWT/JWS 验证和 JWKS
+  fetch/refresh/freshness；只有 AuthN/AuthZ funnel 持有的私有 sealed mint capability 可以构造 trusted context。
+  Platform 不接收 raw token/JWKS，不验证凭据，也不 mint identity。
 
 ### Observability / Health / Local CI
 

@@ -1,20 +1,43 @@
-# Research: Platform Public application kernel
+# Research: Platform vNext owner rebaseline
 
-## 结论
+This file is the single source for the complete RSS-CP disposition. ADR-024, rules, plan and issue comments may link
+here but must not copy this mapping.
 
-旧 executable contract 证明了 visibility，却无法证明真实 authority、dispatch 或 lifecycle；把它原样迁移会产生
-假 façade。Release publish closure 又禁止 façade 依赖 publish=false internals，因此合法 altitude 是一个
-零 workspace production dependency、provider-free 的进程内 kernel，由 internals 反向消费它。
+## Current-head findings
 
-canonical contract set 查询得到唯一 framework-owned active HTTP contract `runtime.inventory`。PlatformPublic
-leakage gate 禁止公开 external/workspace-qualified type，因此所有 DTO、authority view、错误和 diagnostics 都必须
-façade-owned，并把 crypto/serde 类型留在私有实现。
+The v0.2 implementation places static ES256/JWKS verification and a synchronous handler/drain state machine inside
+Platform, while contract and request identities are duplicated across public/internal vocabularies. RuntimeExec
+already has the authoritative inventory mint/reader path. Keeping the old Platform owners while extracting the new
+ones would create dual authority, dual IDs or a non-compiling intermediate revision.
 
-认证边界采用静态 ES256 JWKS，而非公开 SPI。动态刷新与 provider 资源生命周期仍属于 internal OIDC integration；
-Platform owner 负责 federated ES256 的唯一签名/claims 判定。
+Release topology is already complete: Cargo metadata feeds `release_surface::plan_publish_closure` and
+`stable_publish_order`; `publicapi::run_release_check` owns the release check; package-proof asserts exact equality of
+selected, planned and executed packages. A new release group, registry, runner, schema or order list would only create
+a second truth source.
 
-## 对标
+## Complete RSS-CP disposition
 
-参考 `oxidecomputer/omicron@35ee33351a2b8e49005dea8d4ec7d30cbeddc1a0` 的
-`nexus/src/context.rs` 与 `nexus/src/lib.rs`：认证/provider detail 保持 private，启动所有权使用显式阶段。
-只采用 ownership altitude，不复制其 broad context 或 String error。
+| External item | Final disposition | Reason / owner |
+|---------------|-------------------|----------------|
+| CP-001, CP-005 | Merge into #2102 | vNext architecture and owner decision |
+| CP-002 | Merge into #2096/#2099 | Existing domain-governance owners |
+| CP-003 | Absorbed by closed #2042/#2048 | Existing release topology and proof |
+| CP-004, CP-006, CP-007, CP-025–CP-028 | Architecture decided by #2102; implementation merged into #2107 | Must land in the atomic RSS cutover |
+| CP-030 composition subset | Architecture decided by #2102; implementation merged into #2107 | Assembly remains sole composition owner |
+| CP-029 | Keep as #2108 | Real external authoring/registry-only consumer |
+| CP-012 | Absorbed by closed #2053–#2056 | Existing implementation owners |
+| CP-034 | Keep as #2124 | Independent post-cutover T3 evidence plan |
+| CP-035 | Keep as #2127 | Independent post-cutover T3 evidence plan |
+| CP-036 | Keep as #2125 | Independent post-cutover T3 evidence plan |
+| CP-037 | Keep as #2128 | Independent post-cutover T3 evidence plan |
+| CP-008–CP-011, CP-013–CP-024, CP-031–CP-033, CP-038–CP-048 | Drop | No-consumer publicization, Eventing/TestKit, unauthorized relocation, unmet trigger or External capability |
+
+“Drop” means the external PBI is neither imported nor implemented. It does not authorize deletion of an existing
+internal capability.
+
+## Decision
+
+Use two minimal Foundation value packages below Platform, move verification/mint authority to Official
+OIDC/AuthN/AuthZ, retain RuntimeExec's lifecycle/inventory authority, and make assembly the only wiring owner. Execute
+the breaking change as the single cutover defined in [`plan.md`](plan.md). Reuse all existing release and package-proof
+carriers.
