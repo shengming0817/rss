@@ -454,7 +454,7 @@ async fn redis_harness() -> Result<RedisHarness> {
     let pool = RedisConfig::from_url(fixture.url()).create_pool(Some(RedisRuntime::Tokio1))?;
     Ok(RedisHarness {
         _fixture: fixture,
-        deps: RedisRuntimeDeps::setup(pool),
+        deps: RedisRuntimeDeps::setup_for_test(pool),
     })
 }
 
@@ -466,7 +466,7 @@ fn amqp_endpoint(url: &str) -> Result<secure::AmqpEndpoint> {
 }
 
 async fn connect_publisher(url: &str, name: &str) -> Result<AmqpPublisher> {
-    Ok(AmqpPublisher::connect(
+    Ok(AmqpPublisher::connect_with_webpki_for_test(
         &amqp_endpoint(url)?,
         name,
         fault_matrix_relay_budget()?.publish_timeout(),
@@ -475,7 +475,7 @@ async fn connect_publisher(url: &str, name: &str) -> Result<AmqpPublisher> {
 }
 
 async fn connect_subscriber(url: &str, name: &str) -> Result<AmqpSubscriber> {
-    Ok(AmqpSubscriber::connect(&amqp_endpoint(url)?, name).await?)
+    Ok(AmqpSubscriber::connect_with_webpki_for_test(&amqp_endpoint(url)?, name).await?)
 }
 
 #[derive(Clone)]

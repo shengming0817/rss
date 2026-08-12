@@ -1,7 +1,7 @@
-# identityaudit schemaVersion=1 sample. Export all fixed secret environment variables before
+# identityaudit schemaVersion=2 sample. Export all fixed secret environment variables before
 # launch; secret values are never stored in this document. Plaintext providers are accepted only
 # at literal loopback IP addresses.
-schemaVersion = 1
+schemaVersion = 2
 
 [listeners]
 requestBudgetMs = 30000
@@ -58,6 +58,10 @@ dlxPayloadKeyName = "identityaudit-dlx-payload"
 readinessSeconds = 10
 
 [eventing]
+amqpCaCertPemPath = "/run/rss/amqp-ca.pem"
 auditChainKeyId = 1
 tenantAuthorityTtlSeconds = 3600
 tenantAuthorityClockSkewSeconds = 60
+
+[redis]
+caCertPemPath = "/run/rss/redis-ca.pem"

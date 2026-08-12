@@ -845,7 +845,8 @@ impl AmqpPublisher {
     /// 从单个 per-domain AMQP URL 连接（URL 含 `user:pass@host/vhost`）。`name` 是 `ManagedResource`
     /// 可读名（kebab/snake 稳定标识）。`publish_timeout` 在任何网络连接前再次校验非零、整毫秒且可由
     /// 数据库/审计 `i64` 表示；连接失败日志只经 redaction funnel，URL 原文绝不进日志。
-    pub async fn connect(
+    #[cfg(any(test, feature = "integration-test-support"))]
+    pub async fn connect_with_webpki_for_test(
         endpoint: &secure::AmqpEndpoint,
         name: impl Into<String>,
         publish_timeout: Duration,
@@ -878,7 +879,10 @@ impl AmqpPublisher {
         let name = name.into();
         // confirm=true：启用 publisher confirms，使 publish 能检测 broker ack/nack（durable publish-ok）。
         let (conn, channel) = match &trust {
-            conn::AmqpTlsTrust::WebPki => conn::connect(endpoint, &name, true).await?,
+            #[cfg(any(test, feature = "integration-test-support"))]
+            conn::AmqpTlsTrust::WebPki => {
+                conn::connect_with_webpki_for_test(endpoint, &name, true).await?
+            }
             conn::AmqpTlsTrust::PrivateCa(ca) => {
                 conn::connect_with_private_ca(endpoint, &name, true, ca).await?
             }
@@ -2998,10 +3002,14 @@ mod publisher_transport_replacement_integration_tests {
         let url = rmq.vhost_url("rss_publisher_identity_roundtrip").await?;
         let endpoint =
             secure::AmqpEndpoint::parse(&url, secure::PlaintextEndpointPolicy::AllowLoopback)?;
-        let publisher =
-            AmqpPublisher::connect(&endpoint, "amqp-it-identity-pub", Duration::from_secs(6))
-                .await?;
-        let subscriber = AmqpSubscriber::connect(&endpoint, "amqp-it-identity-sub").await?;
+        let publisher = AmqpPublisher::connect_with_webpki_for_test(
+            &endpoint,
+            "amqp-it-identity-pub",
+            Duration::from_secs(6),
+        )
+        .await?;
+        let subscriber =
+            AmqpSubscriber::connect_with_webpki_for_test(&endpoint, "amqp-it-identity-sub").await?;
         let topic = Topic::new("rss.it.publisher.identity");
         let token = CancellationToken::new();
         let mut deliveries = subscriber
@@ -3040,10 +3048,15 @@ mod publisher_transport_replacement_integration_tests {
         let url = rmq.vhost_url("rss_confirm_rotation").await?;
         let endpoint =
             secure::AmqpEndpoint::parse(&url, secure::PlaintextEndpointPolicy::AllowLoopback)?;
-        let publisher =
-            AmqpPublisher::connect(&endpoint, "amqp-it-rotation", Duration::from_secs(6)).await?;
+        let publisher = AmqpPublisher::connect_with_webpki_for_test(
+            &endpoint,
+            "amqp-it-rotation",
+            Duration::from_secs(6),
+        )
+        .await?;
         let topic = Topic::new("rss.it.confirm.rotation");
-        let subscriber = AmqpSubscriber::connect(&endpoint, "amqp-it-rotation-sub").await?;
+        let subscriber =
+            AmqpSubscriber::connect_with_webpki_for_test(&endpoint, "amqp-it-rotation-sub").await?;
         let token = CancellationToken::new();
         let mut deliveries = subscriber
             .subscribe_ackable(topic.clone(), token.clone())
@@ -3141,8 +3154,12 @@ mod publisher_transport_replacement_integration_tests {
 
         // Provision the queue, then fully close the setup connection. At the forced-close instant
         // the vhost has exactly one AMQP connection: the publisher transport under test.
-        let (setup_connection, setup_channel) =
-            crate::conn::connect(&endpoint, "amqp-it-forced-close-setup", false).await?;
+        let (setup_connection, setup_channel) = crate::conn::connect_with_webpki_for_test(
+            &endpoint,
+            "amqp-it-forced-close-setup",
+            false,
+        )
+        .await?;
         setup_channel
             .queue_declare(
                 topic.as_str().into(),
@@ -3160,9 +3177,12 @@ mod publisher_transport_replacement_integration_tests {
             )
             .await?;
 
-        let publisher =
-            AmqpPublisher::connect(&endpoint, "amqp-it-forced-close", Duration::from_secs(6))
-                .await?;
+        let publisher = AmqpPublisher::connect_with_webpki_for_test(
+            &endpoint,
+            "amqp-it-forced-close",
+            Duration::from_secs(6),
+        )
+        .await?;
 
         let before = publisher
             .transport_snapshot()
@@ -3206,8 +3226,12 @@ mod publisher_transport_replacement_integration_tests {
         assert_eq!(replacement.generation, before_generation + 1);
         drop(replacement);
 
-        let (probe_connection, probe) =
-            crate::conn::connect(&endpoint, "amqp-it-forced-close-probe", false).await?;
+        let (probe_connection, probe) = crate::conn::connect_with_webpki_for_test(
+            &endpoint,
+            "amqp-it-forced-close-probe",
+            false,
+        )
+        .await?;
 
         publisher
             .publish(PublishRequest::new(

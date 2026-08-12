@@ -59,8 +59,8 @@ pub struct InvalidClaimTtl;
 impl RedisStore {
     /// 由连接池构造 redis store。
     ///
-    /// `pub(crate)`：唯一公开构造路径是 [`RedisRuntimeDeps::setup`]（funnel，REDIS-BUNDLE-FUNNEL-01）；
-    /// 外部 crate 不能直接 mint `RedisStore`，须经 bundle 装配出口。
+    /// `pub(crate)`：生产公开构造路径是 [`RedisRuntimeDeps::connect_with_private_ca`]
+    /// （funnel，REDIS-BUNDLE-FUNNEL-01）；外部 crate 不能直接 mint `RedisStore`，须经 bundle 装配出口。
     pub(crate) fn new(pool: deadpool_redis::Pool) -> Self {
         Self { pool }
     }

@@ -230,7 +230,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("JWKS path is not UTF-8"))?,
         );
         let config = crate::config::parse_for_test(&document)?;
-        let (_, _, oidc, _, _, _) = config.into_sections();
+        let (_, _, oidc, _, _, _, _) = config.into_sections();
         let provider = crate::providers::rss_access_provider_for_test(oidc)?;
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let observed = Arc::clone(&calls);

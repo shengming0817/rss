@@ -110,7 +110,9 @@ pub struct FixtureProviders {
     postgres_audit_admin_username: String,
     postgres_audit_admin_password: String,
     identity_amqp_url: String,
+    amqp_ca_pem: String,
     redis_url: String,
+    redis_ca_pem: String,
 }
 
 impl FixtureProviders {
@@ -120,7 +122,9 @@ impl FixtureProviders {
         reader: &testkit::PgConnParams,
         audit_admin: &testkit::PgConnParams,
         identity_amqp_url: impl Into<String>,
+        amqp_ca_pem: impl Into<String>,
         redis_url: impl Into<String>,
+        redis_ca_pem: impl Into<String>,
     ) -> anyhow::Result<Self> {
         ensure!(
             writer.host == reader.host
@@ -149,7 +153,9 @@ impl FixtureProviders {
             postgres_audit_admin_username: audit_admin.username.clone(),
             postgres_audit_admin_password: audit_admin.password.clone(),
             identity_amqp_url: literal_loopback_url(identity_amqp_url.into())?,
+            amqp_ca_pem: amqp_ca_pem.into(),
             redis_url: literal_loopback_url(redis_url.into())?,
+            redis_ca_pem: redis_ca_pem.into(),
         })
     }
 }
@@ -543,12 +549,16 @@ impl RuntimeFixture {
         let jwks_path = root.join("oidc.jwks.json");
         let blocklist_path = root.join("password-blocklist.sha256");
         let config_path = root.join("identityaudit.toml");
+        let amqp_ca_path = root.join("amqp-ca.pem");
+        let redis_ca_path = root.join("redis-ca.pem");
         fs::write(&jwks_path, jwks).context("write fixture JWKS")?;
         fs::write(
             &blocklist_path,
             include_bytes!("../../../deploy/password-blocklist.demo.sha256"),
         )
         .context("write fixture password blocklist")?;
+        fs::write(&amqp_ca_path, &providers.amqp_ca_pem).context("write fixture AMQP CA")?;
+        fs::write(&redis_ca_path, &providers.redis_ca_pem).context("write fixture Redis CA")?;
         let ca_path = system_ca_path()?;
         fs::write(
             &config_path,
@@ -561,6 +571,8 @@ impl RuntimeFixture {
                 &jwks_path,
                 &blocklist_path,
                 &ca_path,
+                &amqp_ca_path,
+                &redis_ca_path,
             )?,
         )
         .context("write fixture IdentityAudit config")?;
@@ -580,6 +592,10 @@ impl RuntimeFixture {
             .env(
                 "RSS_DECLARED_IMAGE_DIGEST",
                 "sha256:0dc0251564b714e89c8d098560ddfe69eb08c87fb85ac87323c54a7650126592",
+            )
+            .env(
+                "RSS_RUNTIME_INSTANCE_ID",
+                "00000000-0000-4000-8000-000000001953",
             )
             .env(
                 "RSS_IDENTITYAUDIT_TEST_SECRET_BUNDLE_PATH",
@@ -948,12 +964,16 @@ fn fixture_config(
     jwks: &Path,
     blocklist: &Path,
     ca: &Path,
+    amqp_ca: &Path,
+    redis_ca: &Path,
 ) -> anyhow::Result<String> {
     let jwks = jwks.to_str().context("JWKS path is not UTF-8")?;
     let blocklist = blocklist.to_str().context("blocklist path is not UTF-8")?;
     let ca = ca.to_str().context("CA path is not UTF-8")?;
+    let amqp_ca = amqp_ca.to_str().context("AMQP CA path is not UTF-8")?;
+    let redis_ca = redis_ca.to_str().context("Redis CA path is not UTF-8")?;
     Ok(format!(
-        r#"schemaVersion = 1
+        r#"schemaVersion = 2
 
 [listeners]
 requestBudgetMs = 5000
@@ -1003,9 +1023,13 @@ dlxPayloadKeyName = "{DLX_PAYLOAD_KEY_NAME}"
 readinessSeconds = 5
 
 [eventing]
+amqpCaCertPemPath = "{amqp_ca}"
 auditChainKeyId = 1
 tenantAuthorityTtlSeconds = 3600
 tenantAuthorityClockSkewSeconds = 60
+
+[redis]
+caCertPemPath = "{redis_ca}"
 "#,
         providers.postgres_host,
         providers.postgres_port,

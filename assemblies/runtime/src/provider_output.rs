@@ -1808,10 +1808,16 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn provider_resource_registration_names_stay_stable() {
-        let redis_pool = deadpool_redis::Config::from_url("redis://127.0.0.1:6379")
-            .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-            .expect("lazy redis pool construction does not connect");
-        let redis = redis::RedisRuntimeDeps::setup(redis_pool);
+        let redis_endpoint = secure::RedisEndpoint::parse(
+            "rediss://127.0.0.1:1",
+            secure::PlaintextEndpointPolicy::Deny,
+        )
+        .expect("typed test Redis endpoint");
+        let redis_ca =
+            redis::RedisPrivateCa::from_pem(crate::infra::TEST_PRIVATE_CA_PEM.as_bytes().to_vec())
+                .expect("typed test Redis CA");
+        let redis = redis::RedisRuntimeDeps::connect_with_private_ca(&redis_endpoint, redis_ca)
+            .expect("lazy typed Redis pool construction does not connect");
         let ca_path = {
             let path = std::env::temp_dir().join(format!(
                 "rss-provider-output-s3-ca-{}.pem",

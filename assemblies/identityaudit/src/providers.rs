@@ -38,7 +38,8 @@ pub(crate) struct IdentityInputs {
 pub(crate) struct BuildResult {
     pub(crate) providers: ProviderBundle,
     pub(crate) listeners: config::ListenersConfig,
-    pub(crate) amqp_url: secure::AmqpEndpoint,
+    pub(crate) amqp_endpoint: secure::AmqpEndpoint,
+    pub(crate) amqp_ca: amqp::AmqpPrivateCa,
     pub(crate) roles: ProviderRoleCloser,
 }
 
@@ -105,8 +106,10 @@ pub(crate) async fn build(
     rate_limit_quota: diport::RateLimitQuota,
     transaction: &mut runtimeexec::StartupTransaction<'_>,
 ) -> anyhow::Result<BuildResult> {
-    let (listeners, identity, oidc, postgres, vault, eventing) = config.into_sections();
+    let (listeners, identity, oidc, postgres, vault, eventing, redis) = config.into_sections();
     let eventing = eventing.into_eventing_inputs();
+    let amqp_ca = load_amqp_private_ca(&eventing.amqp_ca_cert_pem_path)?;
+    let redis_ca = load_redis_private_ca(&redis.into_ca_cert_pem_path())?;
     let (
         writer_password,
         reader_password,
@@ -188,7 +191,7 @@ pub(crate) async fn build(
 
     verify_audit_chain_key(&pg, eventing.audit_chain_key_id, &audit_chain_key).await?;
 
-    let redis = build_redis(redis_url).await?;
+    let redis = build_redis(redis_url, redis_ca).await?;
     let redis_ready = Arc::new(AtomicBool::new(true));
     let redis_probe_name = primitives::ProbeName::parse("identityaudit_redis_ready")
         .context("build identityaudit Redis probe name")?;
@@ -289,11 +292,9 @@ pub(crate) async fn build(
         eventing.tenant_authority_ttl,
         eventing.tenant_authority_clock_skew,
     )?;
-    let amqp_url = secure::AmqpEndpoint::parse(
-        amqp_url.to_string(),
-        secure::PlaintextEndpointPolicy::AllowLoopback,
-    )
-    .context("parse captured identity AMQP endpoint")?;
+    let amqp_endpoint =
+        secure::AmqpEndpoint::parse(amqp_url.to_string(), secure::PlaintextEndpointPolicy::Deny)
+            .context("parse captured identity AMQP endpoint")?;
     let audit_sink =
         httpserve::AuditSinkHandle::new(pg.for_domain::<postgres::caps::Audit>().auth_audit_sink());
 
@@ -313,7 +314,8 @@ pub(crate) async fn build(
             identity,
         },
         listeners,
-        amqp_url,
+        amqp_endpoint,
+        amqp_ca,
         roles: ProviderRoleCloser {
             roles,
             auth_audit_sink,
@@ -328,6 +330,16 @@ pub(crate) async fn build(
             cas_resource,
         },
     })
+}
+
+fn load_amqp_private_ca(path: &std::path::Path) -> anyhow::Result<amqp::AmqpPrivateCa> {
+    let pem = std::fs::read(path).context("read identityaudit AMQP CA certificate")?;
+    amqp::AmqpPrivateCa::from_pem(pem).context("parse identityaudit AMQP CA certificate")
+}
+
+fn load_redis_private_ca(path: &std::path::Path) -> anyhow::Result<redis::RedisPrivateCa> {
+    let pem = std::fs::read(path).context("read identityaudit Redis CA certificate")?;
+    redis::RedisPrivateCa::from_pem(pem).context("parse identityaudit Redis CA certificate")
 }
 
 async fn build_postgres(
@@ -401,19 +413,15 @@ fn postgres_setup_configs(
     (serving, reader, audit_admin)
 }
 
-async fn build_redis(url: zeroize::Zeroizing<String>) -> anyhow::Result<redis::RedisRuntimeDeps> {
-    let endpoint = secure::RedisEndpoint::parse(
-        url.to_string(),
-        secure::PlaintextEndpointPolicy::AllowLoopback,
-    )
-    .context("parse captured identityaudit Redis endpoint")?;
-    // reason: the only raw Redis credential exit feeds the pool constructor immediately after
-    // typed endpoint validation; it is never formatted or retained separately.
-    #[allow(clippy::disallowed_methods)]
-    let pool = deadpool_redis::Config::from_url(endpoint.expose())
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .context("build identityaudit Redis pool")?;
-    let deps = redis::RedisRuntimeDeps::setup(pool);
+async fn build_redis(
+    url: zeroize::Zeroizing<String>,
+    ca: redis::RedisPrivateCa,
+) -> anyhow::Result<redis::RedisRuntimeDeps> {
+    let endpoint =
+        secure::RedisEndpoint::parse(url.to_string(), secure::PlaintextEndpointPolicy::Deny)
+            .context("parse captured identityaudit Redis endpoint")?;
+    let deps = redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca)
+        .context("build identityaudit Redis TLS pool")?;
     deps.ping().await.context("verify identityaudit Redis")?;
     Ok(deps)
 }
@@ -1183,6 +1191,53 @@ mod tests {
     use p256::ecdsa::signature::Signer as _;
     use p256::ecdsa::{Signature as P256Signature, SigningKey};
 
+    #[test]
+    fn private_ca_loading_fails_closed_without_disclosing_input() -> anyhow::Result<()> {
+        let root = std::env::temp_dir().join(format!(
+            "rss-identityaudit-private-ca-test-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&root)?;
+        let secret_path = root.join("operator-secret-ca-name.pem");
+        for load in
+            [load_amqp_private_ca as fn(&std::path::Path) -> anyhow::Result<amqp::AmqpPrivateCa>]
+        {
+            let error = load(&secret_path).err().expect("missing AMQP CA must fail");
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains("read identityaudit AMQP CA certificate"));
+            assert!(!rendered.contains("operator-secret-ca-name"));
+        }
+
+        let directory = root.join("ca-directory");
+        std::fs::create_dir(&directory)?;
+        let error = load_redis_private_ca(&directory)
+            .err()
+            .expect("directory must fail");
+        let rendered = format!("{error:#}");
+        assert!(rendered.contains("read identityaudit Redis CA certificate"));
+        assert!(!rendered.contains("ca-directory"));
+
+        let malformed = root.join("malformed.pem");
+        std::fs::write(&malformed, b"private-ca-credential-sentinel")?;
+        let amqp_error = load_amqp_private_ca(&malformed)
+            .err()
+            .expect("malformed CA must fail");
+        let redis_error = load_redis_private_ca(&malformed)
+            .err()
+            .expect("malformed CA must fail");
+        for (error, context) in [
+            (amqp_error, "parse identityaudit AMQP CA certificate"),
+            (redis_error, "parse identityaudit Redis CA certificate"),
+        ] {
+            let rendered = format!("{error:#}");
+            assert!(rendered.contains(context));
+            assert!(!rendered.contains("private-ca-credential-sentinel"));
+            assert!(!rendered.contains("malformed.pem"));
+        }
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
     #[tokio::test]
     #[allow(clippy::expect_used, clippy::panic)]
     async fn readiness_workers_propagate_closed_join_failure_kinds() {
@@ -1699,7 +1754,7 @@ mod tests {
             )
             .replace("/run/rss/vault-ca.pem", system_ca()?);
         let config = crate::config::parse_for_test(&document)?;
-        let (_, _, _, _, vault_config, _) = config.into_sections();
+        let (_, _, _, _, vault_config, _, _) = config.into_sections();
         let jwks_file = TestJwksFile::new("identity-access-es256")?;
         let jwks_source = jwks_file.source()?;
         let products = build_vault(
@@ -1791,7 +1846,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("blocklist path is not UTF-8"))?,
         );
         let config = crate::config::parse_for_test(&document)?;
-        let (_, identity, _, _, _, _) = config.into_sections();
+        let (_, identity, _, _, _, _, _) = config.into_sections();
         let built = build_identity(identity)?;
         assert_eq!(built.runtime_config.jwt_key_id(), "identity-access-es256");
         assert_eq!(
@@ -1822,7 +1877,7 @@ mod tests {
             .replace("sslMode = \"verifyFull\"", "sslMode = \"disable\"")
             .replace("sslRootCertPath = \"/run/rss/postgres-ca.pem\"\n", "");
         let config = crate::config::parse_for_test(&document)?;
-        let (_, _, _, postgres, _, _) = config.into_sections();
+        let (_, _, _, postgres, _, _, _) = config.into_sections();
         let secret = || zeroize::Zeroizing::new("coverage-secret".to_owned());
         let configs = postgres_setup_configs(postgres, secret(), secret(), secret());
         let rendered = format!("{:?} {:?} {:?}", configs.0, configs.1, configs.2);
@@ -1830,10 +1885,14 @@ mod tests {
         assert!(rendered.contains("rss_identity_writer"));
         assert!(rendered.contains("rss_audit_admin"));
         assert!(!rendered.contains("coverage-secret"));
+        let ca = redis::RedisPrivateCa::from_pem(
+            b"-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n".to_vec(),
+        )?;
         assert!(
-            build_redis(zeroize::Zeroizing::new(
-                "redis://redis.example.test:6379/0".to_owned(),
-            ))
+            build_redis(
+                zeroize::Zeroizing::new("redis://redis.example.test:6379/0".to_owned()),
+                ca,
+            )
             .await
             .is_err()
         );
@@ -1858,7 +1917,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("JWKS path is not UTF-8"))?,
         );
         let config = crate::config::parse_for_test(&document)?;
-        let (_, _, oidc, _, _, _) = config.into_sections();
+        let (_, _, oidc, _, _, _, _) = config.into_sections();
         let (provider, name, probe, _) = build_rss_access_verifier(oidc)?;
         assert_eq!(name.as_str(), "identityaudit_rss_jwks_ready");
         assert_eq!(
@@ -1902,7 +1961,7 @@ mod tests {
                 .ok_or_else(|| anyhow::anyhow!("JWKS path is not UTF-8"))?,
         );
         let config = crate::config::parse_for_test(&document)?;
-        let (_, _, oidc, _, _, _) = config.into_sections();
+        let (_, _, oidc, _, _, _, _) = config.into_sections();
         let (provider, probe_name, probe, jwks) = build_rss_access_verifier(oidc)?;
         let products = OidcProducts {
             provider,

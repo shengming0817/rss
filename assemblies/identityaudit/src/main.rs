@@ -11,7 +11,7 @@ const HELP: &str = r#"Usage: identityaudit-server --config <path>
 Runs the closed Identity + Audit deployment closure.
 
 Options:
-  --config <path>  Closed schemaVersion=1 TOML document
+  --config <path>  Closed schemaVersion=2 TOML document
   -h, --help       Show this help
 
 Image schema: /usr/share/rss/identityaudit/config.schema.json

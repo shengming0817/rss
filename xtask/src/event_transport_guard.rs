@@ -1837,7 +1837,7 @@ fn identityaudit_closure_findings(path: &Path, content: &str) -> Vec<Finding<Rul
                 body.find("eventing_composition::bridge_generated_audit_subscriptions(bindings)");
             let validate = body.find("validate_audit_closure(&subscriptions)");
             let budget_gate = body.find("pg.validate_relay_budget(budget)");
-            let connect = body.find("amqp::AmqpRuntimeDeps::connect(");
+            let connect = body.find("amqp::AmqpRuntimeDeps::connect_with_private_ca(");
             bridge_and_budget = matches!(
                 (bridge, validate, budget_gate, connect),
                 (Some(bridge), Some(validate), Some(budget_gate), Some(connect))
@@ -3788,12 +3788,6 @@ fn scan_amqp_connection_recovery_owner(content: &str) -> Vec<Finding<Rule>> {
     findings.extend(validate_amqp_connection_entry(
         &facts,
         PATH,
-        "connect",
-        |context| context == "ConnectContext::Initial",
-    ));
-    findings.extend(validate_amqp_connection_entry(
-        &facts,
-        PATH,
         "connect_with_private_ca",
         |context| context == "ConnectContext::Initial",
     ));
@@ -4251,7 +4245,6 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
                 "connect_with_trust",
                 &[
                     "validate_publish_timeout(publish_timeout)",
-                    "conn::connect(endpoint, &name, true)",
                     "conn::connect_with_private_ca(endpoint, &name, true, ca)",
                     "endpoint: endpoint.clone()",
                     "PublisherTransport::new(conn, channel)",
@@ -4263,8 +4256,10 @@ fn scan_relay_budget_live_seams(sources: &BTreeMap<&Path, &str>) -> Vec<Finding<
             "adapters/amqp/src/bundle.rs",
             &[(
                 Some("AmqpRuntimeDeps"),
-                "connect",
-                &["AmqpPublisher::connect(endpoint, format!(\"{name}-pub\"), publish_timeout)"][..],
+                "connect_with_private_ca",
+                &[
+                    "AmqpPublisher::connect_with_private_ca(&publisher_endpoint.0,format!(\"{name}-pub\"),publish_timeout,&ca)",
+                ][..],
             )],
         ),
         (
@@ -4469,18 +4464,19 @@ impl RelayConstructorVisitor<'_> {
                     && call.args.get(4).is_some_and(|argument| {
                         normalized_tokens(argument) == "eventing_config.publisher_confirm_timeout"
                     }))
-        } else if callee.ends_with("amqp::AmqpRuntimeDeps::connect") {
-            // DEFER (PR #642 F2 / #1710): identityaudit still uses WebPki `connect` by design of the
-            // runtime-only egress closeout scope. Tracked as a follow-up backlog issue from /fix #642;
-            // do not expand this whitelist without closing that issue.
-            self.path == Path::new(IDENTITYAUDIT_EVENTING_TARGET)
-                && owner == "wire"
-                && call.args.get(2).is_some_and(|argument| {
-                    normalized_tokens(argument) == "budget.publish_timeout()"
-                })
-        } else if callee.ends_with("AmqpPublisher::connect") {
-            self.path == Path::new("adapters/amqp/src/bundle.rs")
-                && owner == "AmqpRuntimeDeps::connect"
+                || (self.path == Path::new(IDENTITYAUDIT_EVENTING_TARGET)
+                    && owner == "wire"
+                    && call.args.get(4).is_some_and(|argument| {
+                        normalized_tokens(argument) == "budget.publish_timeout()"
+                    }))
+        } else if callee.ends_with("amqp::AmqpRuntimeDeps::connect")
+            || callee.ends_with("AmqpRuntimeDeps::connect_with_webpki_for_test")
+            || callee.ends_with("AmqpPublisher::connect")
+            || callee.ends_with("AmqpPublisher::connect_with_webpki_for_test")
+            || callee.ends_with("AmqpSubscriber::connect")
+            || callee.ends_with("AmqpSubscriber::connect_with_webpki_for_test")
+        {
+            false
         } else if callee.ends_with("PgOutbox::new") {
             (self.path == Path::new("adapters/postgres/src/bundle.rs")
                 && matches!(
@@ -5806,6 +5802,20 @@ fn is_claim_test_only(attrs: &[syn::Attribute]) -> bool {
 fn cfg_meta_implies_test(meta: &syn::Meta) -> bool {
     match meta {
         syn::Meta::Path(path) => path.is_ident("test"),
+        syn::Meta::NameValue(value) if value.path.is_ident("feature") => {
+            matches!(
+                &value.value,
+                syn::Expr::Lit(literal)
+                    if matches!(
+                        &literal.lit,
+                        syn::Lit::Str(feature)
+                            if matches!(
+                                feature.value().as_str(),
+                                "integration-test-support" | "fault-matrix-test-support"
+                            )
+                    )
+            )
+        }
         syn::Meta::List(list) if list.path.is_ident("all") || list.path.is_ident("any") => {
             let Ok(children) = list.parse_args_with(
                 syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
@@ -7796,20 +7806,45 @@ mod tests {
 
         let green = vec![(
             PathBuf::from(IDENTITYAUDIT_EVENTING_TARGET),
-            "fn wire() { amqp::AmqpRuntimeDeps::connect(url, name, budget.publish_timeout()); }"
-                .to_string(),
+            "fn wire() { amqp::AmqpRuntimeDeps::connect_with_private_ca(&publisher, &subscriber, ca, name, budget.publish_timeout()); }".to_string(),
         )];
         assert!(scan_relay_budget_constructor_callsites(&green).is_empty());
-        let red = vec![(
-            PathBuf::from(IDENTITYAUDIT_EVENTING_TARGET),
-            "fn wire() { amqp::AmqpRuntimeDeps::connect(url, name, Duration::from_secs(40)); }"
-                .to_string(),
-        )];
-        assert!(
-            scan_relay_budget_constructor_callsites(&red)
+        for red in [
+            "fn wire() { amqp::AmqpRuntimeDeps::connect(url, name, budget.publish_timeout()); }",
+            "fn wire() { amqp::AmqpRuntimeDeps::connect_with_private_ca(&publisher, &subscriber, ca, name, Duration::from_secs(40)); }",
+        ] {
+            assert!(
+                scan_relay_budget_constructor_callsites(&[(
+                    PathBuf::from(IDENTITYAUDIT_EVENTING_TARGET),
+                    red.to_string(),
+                )])
                 .iter()
                 .any(|finding| finding.rule == Rule::OutboxRelayBudget)
-        );
+            );
+        }
+    }
+
+    #[test]
+    fn test_only_transport_constructors_require_a_closed_test_cfg() {
+        let path = PathBuf::from("crates/rogue/src/lib.rs");
+        let call = "amqp::AmqpRuntimeDeps::connect_with_webpki_for_test(url, name, timeout);";
+        for source in [
+            format!("fn production() {{ {call} }}"),
+            format!("#[cfg(feature = \"backend\")] fn disguised() {{ {call} }}"),
+            format!("#[cfg(any(test, feature = \"backend\"))] fn disguised() {{ {call} }}"),
+        ] {
+            assert!(
+                scan_relay_budget_constructor_callsites(&[(path.clone(), source)])
+                    .iter()
+                    .any(|finding| finding.rule == Rule::OutboxRelayBudget)
+            );
+        }
+        for source in [
+            format!("#[cfg(test)] fn test_only() {{ {call} }}"),
+            format!("#[cfg(feature = \"integration-test-support\")] fn test_only() {{ {call} }}"),
+        ] {
+            assert!(scan_relay_budget_constructor_callsites(&[(path.clone(), source)]).is_empty());
+        }
     }
 
     #[test]
@@ -9887,11 +9922,11 @@ $do$;
             RelayBudgetRedCase::replace(
                 "amqp bundle carrier",
                 "adapters/amqp/src/bundle.rs",
-                "publish_timeout).await?",
-                "Duration::ZERO).await?",
+                "publish_timeout,\n                &ca,",
+                "Duration::ZERO,\n                &ca,",
                 &[(
                     "adapters/amqp/src/bundle.rs",
-                    "OUTBOX-RELAY-BUDGET-01 live seam `AmqpRuntimeDeps::connect` 未消费 canonical typed budget/deadline: [\"AmqpPublisher::connect(endpoint,format!(\\\"{name}-pub\\\"),publish_timeout)\"]",
+                    "OUTBOX-RELAY-BUDGET-01 live seam `AmqpRuntimeDeps::connect_with_private_ca` 未消费 canonical typed budget/deadline: [\"AmqpPublisher::connect_with_private_ca(&publisher_endpoint.0,format!(\\\"{name}-pub\\\"),publish_timeout,&ca)\"]",
                 )],
             ),
             RelayBudgetRedCase::replace(

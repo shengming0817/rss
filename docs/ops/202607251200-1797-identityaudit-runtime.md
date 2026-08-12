@@ -41,11 +41,14 @@ docker build --target identityaudit-runtime -t rss-identityaudit:1797 .
 identityaudit-server --config /etc/rss/identityaudit.toml
 ```
 
-未知字段、未知 schema 版本、明文 secret、任意环境变量名和兼容别名均拒绝。所有 secret 只能使用 schema
+当前文档只接受 `schemaVersion = 2`；v1、未知字段、未知 schema 版本、明文 secret、任意环境变量名和兼容别名均拒绝。所有 secret 只能使用 schema
 列出的 typed reference，并由部署密管注入对应环境；不得把 secret 写入 TOML、argv、镜像层或日志。JWKS、
-密码 blocklist 与私有 CA 等文件按配置路径只读挂载，配置与这些文件必须作为同一 generation 原子发布。
+密码 blocklist 与私有 CA 等文件按配置路径只读挂载。`eventing.amqpCaCertPemPath` 和
+`redis.caCertPemPath` 均为必填、非空文件路径；对应 secret URL 必须分别使用 `amqps://` 和
+`rediss://`，loopback 也没有明文例外。缺失、不可读、畸形或错误 CA 在接流量前 fail closed。
+配置与这些文件必须作为同一 generation 原子发布。
 
-外部 delivery 系统必须将镜像、配置和 secret 作为同一 generation 发布与回滚。OCI provenance 与不可变
+外部 delivery 系统必须将镜像、配置、secret、AMQP CA 和 Redis CA 作为同一 generation 发布与回滚。OCI provenance 与不可变
 镜像选择由外部 builder/release 流程证明；应用不读取外部 delivery manifest，也不提供旧 schema 双读、别名
 或 fallback。
 

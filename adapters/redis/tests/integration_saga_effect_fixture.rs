@@ -19,7 +19,7 @@ fn unique_key() -> SagaIdempotencyKey {
 
 fn make_deps(url: &str) -> Result<RedisRuntimeDeps, FixtureError> {
     let pool = Config::from_url(url).create_pool(Some(Runtime::Tokio1))?;
-    Ok(RedisRuntimeDeps::setup(pool))
+    Ok(RedisRuntimeDeps::setup_for_test(pool))
 }
 
 #[tokio::test]

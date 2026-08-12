@@ -176,7 +176,9 @@ mod tests {
 
     #[tokio::test]
     async fn acquire_rejects_subms_ttl_before_pool_io() {
-        let lock = RedisRuntimeDeps::setup(lazy_pool()).infra().lock_store();
+        let lock = RedisRuntimeDeps::setup_for_test(lazy_pool())
+            .infra()
+            .lock_store();
         let result = lock
             .acquire(LockStoreKey::new("subms"), Duration::from_nanos(999_999))
             .await;
@@ -185,7 +187,9 @@ mod tests {
 
     #[tokio::test]
     async fn renew_rejects_zero_ttl_before_pool_io() {
-        let lock = RedisRuntimeDeps::setup(lazy_pool()).infra().lock_store();
+        let lock = RedisRuntimeDeps::setup_for_test(lazy_pool())
+            .infra()
+            .lock_store();
         let result = lock
             .renew(
                 LockStoreKey::new("zero"),

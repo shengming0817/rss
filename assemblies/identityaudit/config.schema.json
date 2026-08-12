@@ -8,6 +8,7 @@
     "listeners",
     "oidc",
     "postgres",
+    "redis",
     "schemaVersion",
     "vault"
   ],
@@ -27,9 +28,12 @@
     "postgres": {
       "$ref": "#/definitions/PostgresConfig"
     },
+    "redis": {
+      "$ref": "#/definitions/RedisConfig"
+    },
     "schemaVersion": {
       "type": "integer",
-      "const": 1
+      "const": 2
     },
     "vault": {
       "$ref": "#/definitions/VaultConfig"
@@ -40,11 +44,16 @@
     "EventingConfig": {
       "type": "object",
       "required": [
+        "amqpCaCertPemPath",
         "auditChainKeyId",
         "tenantAuthorityClockSkewSeconds",
         "tenantAuthorityTtlSeconds"
       ],
       "properties": {
+        "amqpCaCertPemPath": {
+          "type": "string",
+          "minLength": 1
+        },
         "auditChainKeyId": {
           "type": "integer",
           "const": 1
@@ -318,6 +327,19 @@
         },
         "writer": {
           "$ref": "#/definitions/PgWriterRoleConfig"
+        }
+      },
+      "additionalProperties": false
+    },
+    "RedisConfig": {
+      "type": "object",
+      "required": [
+        "caCertPemPath"
+      ],
+      "properties": {
+        "caCertPemPath": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false

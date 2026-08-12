@@ -104,7 +104,8 @@ where
 }
 
 /// 组合根级 amqp 能力包（**一个域 vhost**）：私有持 `Arc<AmqpPublisher>` + `Arc<AmqpSubscriber>`，派发
-/// transport 能力句柄并产出 shutdown 资源。经 [`AmqpRuntimeDeps::connect`] 构造。`Clone` 廉价（仅 `Arc` clone）。
+/// transport 能力句柄并产出 shutdown 资源。生产环境经
+/// [`AmqpRuntimeDeps::connect_with_private_ca`] 构造。`Clone` 廉价（仅 `Arc` clone）。
 #[derive(Clone)]
 pub struct AmqpRuntimeDeps {
     publisher: Arc<AmqpPublisher>,
@@ -145,28 +146,32 @@ impl AmqpRuntimeDeps {
         AmqpSubscriberReadinessSnapshot(self.subscriber.readiness_snapshot())
     }
 
-    /// 唯一公开装配路径：从单个 per-domain AMQP URL（`amqp://user:pass@host/vhost`）打开该域 vhost 的
-    /// publisher（confirm channel）+ subscriber（per-subscription channel 按需）连接。`name` 派生
-    /// `ManagedResource` 可读名（`<name>-pub` / `<name>-sub`）。连接失败经 redaction funnel 记日志，URL
-    /// 原文绝不进日志。`publish_timeout` 必填并由 publisher 在网络连接前再次校验。
+    /// Test-only default-root seam for local/plaintext fixtures. Production `backend` builds do not
+    /// contain this method; shipped feature graphs also reject `integration-test-support`.
     ///
     /// `name` 应使用该 vhost 所属**域名 kebab-case**（如 `"identity"` / `"settings"`），产生
     /// `<域>-pub` / `<域>-sub` 的稳定 `ManagedResource` 名，供 ShutdownStack 关停日志与告警规则建立
     /// 稳定标签（对比 redis 固定 `"redis"` / vault 固定 `"vault-secret-resolver"`）。
     ///
-    /// 沿用 per-vhost = per-connection 模型：publisher / subscriber 各持独立连接（与现有行为一致，无回归）。
-    pub async fn connect(
+    /// Publisher / subscriber each retain an independent connection and preserve rollback behavior.
+    #[cfg(any(test, feature = "integration-test-support"))]
+    pub async fn connect_with_webpki_for_test(
         endpoint: &secure::AmqpEndpoint,
         name: &str,
         publish_timeout: Duration,
     ) -> Result<Self, AmqpConnectError> {
         let publisher = Arc::new(
-            AmqpPublisher::connect(endpoint, format!("{name}-pub"), publish_timeout).await?,
+            AmqpPublisher::connect_with_webpki_for_test(
+                endpoint,
+                format!("{name}-pub"),
+                publish_timeout,
+            )
+            .await?,
         );
         let publisher_name = ManagedResource::name(publisher.as_ref()).to_owned();
         let (publisher, subscriber) = match connect_second_or_rollback(
             publisher,
-            AmqpSubscriber::connect(endpoint, format!("{name}-sub")),
+            AmqpSubscriber::connect_with_webpki_for_test(endpoint, format!("{name}-sub")),
             |publisher: Arc<AmqpPublisher>| async move {
                 ManagedResource::shutdown(publisher.as_ref()).await
             },

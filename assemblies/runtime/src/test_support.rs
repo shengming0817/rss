@@ -392,10 +392,15 @@ pub async fn build_redis_runtime_deps_from_values(
 /// Pool construction is hermetic and performs no network I/O; any accidental Redis use still
 /// fails closed when the caller attempts to check out a connection.
 pub fn build_unused_redis_runtime_deps() -> anyhow::Result<redis::RedisRuntimeDeps> {
-    let pool = deadpool_redis::Config::from_url("redis://127.0.0.1:1")
-        .create_pool(Some(deadpool_redis::Runtime::Tokio1))
-        .map_err(|_| anyhow::anyhow!("build unused Redis integration-test pool"))?;
-    Ok(redis::RedisRuntimeDeps::setup(pool))
+    let endpoint = secure::RedisEndpoint::parse(
+        "rediss://127.0.0.1:1",
+        secure::PlaintextEndpointPolicy::Deny,
+    )
+    .context("build unused typed Redis endpoint")?;
+    let ca = redis::RedisPrivateCa::from_pem(test_private_ca_pem())
+        .context("build unused typed Redis private CA")?;
+    redis::RedisRuntimeDeps::connect_with_private_ca(&endpoint, ca)
+        .context("build unused typed Redis integration-test pool")
 }
 
 /// Stable private CA bait for integration-only client construction which performs no I/O.

@@ -211,7 +211,7 @@ fn test_operator_subject() -> Result<L2DrRecoveryOperatorSubject> {
 }
 
 async fn connect_publisher(url: &str, name: &str) -> Result<AmqpPublisher> {
-    Ok(AmqpPublisher::connect(
+    Ok(AmqpPublisher::connect_with_webpki_for_test(
         &secure::AmqpEndpoint::parse(url, secure::PlaintextEndpointPolicy::AllowLoopback)?,
         name,
         fault_matrix_relay_budget()?.publish_timeout(),
@@ -220,7 +220,7 @@ async fn connect_publisher(url: &str, name: &str) -> Result<AmqpPublisher> {
 }
 
 async fn connect_subscriber(url: &str, name: &str) -> Result<AmqpSubscriber> {
-    Ok(AmqpSubscriber::connect(
+    Ok(AmqpSubscriber::connect_with_webpki_for_test(
         &secure::AmqpEndpoint::parse(url, secure::PlaintextEndpointPolicy::AllowLoopback)?,
         name,
     )

@@ -248,7 +248,7 @@ impl ProviderSetup {
                 .url(),
         )
         .create_pool(Some(RedisRuntime::Tokio1))?;
-        self.redis = Some(RedisRuntimeDeps::setup(pool));
+        self.redis = Some(RedisRuntimeDeps::setup_for_test(pool));
         let effects = self
             .redis
             .as_ref()
@@ -257,7 +257,7 @@ impl ProviderSetup {
             .saga_effect_fixture();
         let unavailable_pool =
             RedisConfig::from_url("redis://127.0.0.1:1").create_pool(Some(RedisRuntime::Tokio1))?;
-        self.unavailable_redis = Some(RedisRuntimeDeps::setup(unavailable_pool));
+        self.unavailable_redis = Some(RedisRuntimeDeps::setup_for_test(unavailable_pool));
         let unavailable_effects = self
             .unavailable_redis
             .as_ref()

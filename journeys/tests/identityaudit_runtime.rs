@@ -235,10 +235,22 @@ async fn wait_for_session_created_hash_chain(pool: &PgPool, login: &LoginReceipt
 
 #[tokio::test(flavor = "multi_thread")]
 async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
+    let network = testkit::bridge_network("rss-identityaudit-tls").await?;
+    let rabbit_dns = format!("{}-rabbit", network.name());
+    let redis_dns = format!("{}-redis", network.name());
     let (postgres, rabbit, redis) = tokio::try_join!(
         testkit::owned_postgres(),
-        testkit::env_or_rabbitmq(),
-        testkit::env_or_redis(),
+        testkit::rabbitmq_tls(
+            generated::event::identity_v1::session_created::TOPIC,
+            testkit::NetworkAttachment {
+                network: network.name(),
+                dns_name: &rabbit_dns,
+            },
+        ),
+        testkit::redis_tls(testkit::NetworkAttachment {
+            network: network.name(),
+            dns_name: &redis_dns,
+        }),
     )?;
     let owned = &postgres;
     let logins = identityaudit_fixture::postgres_serving_logins();
@@ -254,13 +266,14 @@ async fn identityaudit_login_audit_ready_sigterm_drain() -> Result<()> {
         .await
         .context("migrate IdentityAudit journey database")?;
     seed_runtime_inventory_grant(&pool).await?;
-    let amqp = rabbit.vhost_url("rss_identity").await?;
     let providers = FixtureProviders::new(
         writer.params(),
         reader.params(),
         audit_admin.params(),
-        amqp,
+        rabbit.shared_url(),
+        rabbit.ca_pem(),
         redis.url().to_owned(),
+        redis.ca_pem(),
     )?;
     let mut runtime = RuntimeFixture::start(providers).await?;
 

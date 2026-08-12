@@ -55,12 +55,12 @@ fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
 
 async fn connect_publisher(url: &str, name: &str) -> anyhow::Result<AmqpPublisher> {
     let endpoint = amqp_endpoint(url)?;
-    Ok(AmqpPublisher::connect(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
+    Ok(AmqpPublisher::connect_with_webpki_for_test(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
 }
 
 async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscriber> {
     let endpoint = amqp_endpoint(url)?;
-    Ok(AmqpSubscriber::connect(&endpoint, name).await?)
+    Ok(AmqpSubscriber::connect_with_webpki_for_test(&endpoint, name).await?)
 }
 
 /// dev-root 决策绑定构造 demo in-mem claimer（TOPO-INMEM-SEAL-01 dev-root discipline）：经

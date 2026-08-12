@@ -53,7 +53,6 @@ base64 = { workspace = true }
 bootstrap = { path = "../../crates/bootstrap" }
 crypto-adapter = { path = "../../adapters/crypto" }
 diport = { path = "../../crates/diport" }
-deadpool-redis = { workspace = true }
 distributed = { path = "../../crates/distributed" }
 eventexec = { path = "../../crates/eventexec" }
 eventing-composition = { path = "../../composition/eventing", features = ["audit-consumers"] }

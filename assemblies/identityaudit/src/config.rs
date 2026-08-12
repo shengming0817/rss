@@ -416,13 +416,8 @@ impl ResolvedSecrets {
         if self.vault_signer_token == self.vault_dlx_token {
             return Err(ConfigError::InvalidValue("vault.workloadTokens"));
         }
-        validate_tls_url(
-            &self.identity_amqp_url,
-            "amqps",
-            "amqp",
-            "eventing.identityAmqpUrl",
-        )?;
-        validate_tls_url(&self.redis_url, "rediss", "redis", "eventing.redisUrl")?;
+        validate_required_tls_url(&self.identity_amqp_url, "amqps", "eventing.identityAmqpUrl")?;
+        validate_required_tls_url(&self.redis_url, "rediss", "eventing.redisUrl")?;
         Ok(())
     }
 
@@ -462,21 +457,21 @@ impl fmt::Debug for ResolvedSecrets {
     }
 }
 
-struct SchemaVersionV1;
+struct SchemaVersionV2;
 
-impl JsonSchema for SchemaVersionV1 {
+impl JsonSchema for SchemaVersionV2 {
     fn is_referenceable() -> bool {
         false
     }
 
     fn schema_name() -> String {
-        "IdentityAuditSchemaVersionV1".to_owned()
+        "IdentityAuditSchemaVersionV2".to_owned()
     }
 
     fn json_schema(_generator: &mut schemars::r#gen::SchemaGenerator) -> schemars::schema::Schema {
         schemars::schema::Schema::Object(schemars::schema::SchemaObject {
             instance_type: Some(schemars::schema::InstanceType::Integer.into()),
-            const_value: Some(serde_json::json!(1)),
+            const_value: Some(serde_json::json!(2)),
             ..schemars::schema::SchemaObject::default()
         })
     }
@@ -485,7 +480,7 @@ impl JsonSchema for SchemaVersionV1 {
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct IdentityAuditConfig {
-    #[schemars(with = "SchemaVersionV1")]
+    #[schemars(with = "SchemaVersionV2")]
     schema_version: u32,
     listeners: ListenersConfig,
     identity: IdentityConfig,
@@ -493,11 +488,12 @@ pub(crate) struct IdentityAuditConfig {
     postgres: PostgresConfig,
     vault: VaultConfig,
     eventing: EventingConfig,
+    redis: RedisConfig,
 }
 
 impl IdentityAuditConfig {
     fn validate(&self) -> Result<(), ConfigError> {
-        if self.schema_version != 1 {
+        if self.schema_version != 2 {
             return Err(ConfigError::InvalidValue("schemaVersion"));
         }
         self.listeners.validate()?;
@@ -514,7 +510,8 @@ impl IdentityAuditConfig {
         if self.identity.key_id != self.vault.signing_key_name {
             return Err(ConfigError::InvalidValue("identity.keyId"));
         }
-        self.eventing.validate()
+        self.eventing.validate()?;
+        self.redis.validate()
     }
 
     #[allow(clippy::type_complexity)]
@@ -527,6 +524,7 @@ impl IdentityAuditConfig {
         PostgresConfig,
         VaultConfig,
         EventingConfig,
+        RedisConfig,
     ) {
         (
             self.listeners,
@@ -535,6 +533,7 @@ impl IdentityAuditConfig {
             self.postgres,
             self.vault,
             self.eventing,
+            self.redis,
         )
     }
 }
@@ -902,6 +901,8 @@ impl VaultConfig {
 #[derive(Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct EventingConfig {
+    #[schemars(length(min = 1))]
+    amqp_ca_cert_pem_path: PathBuf,
     audit_chain_key_id: AuditChainKeyId,
     #[schemars(range(min = 3600, max = 86_400))]
     tenant_authority_ttl_seconds: u64,
@@ -938,6 +939,7 @@ impl AuditChainKeyId {
 }
 
 pub(crate) struct EventingInputs {
+    pub(crate) amqp_ca_cert_pem_path: PathBuf,
     pub(crate) audit_chain_key_id: AuditChainKeyId,
     pub(crate) tenant_authority_ttl: Duration,
     pub(crate) tenant_authority_clock_skew: Duration,
@@ -945,6 +947,7 @@ pub(crate) struct EventingInputs {
 
 impl EventingConfig {
     fn validate(&self) -> Result<(), ConfigError> {
+        non_empty_path(&self.amqp_ca_cert_pem_path, "eventing.amqpCaCertPemPath")?;
         if self.audit_chain_key_id.get() != 1 {
             return Err(ConfigError::InvalidValue("eventing.auditChainKeyId"));
         }
@@ -965,12 +968,30 @@ impl EventingConfig {
 
     pub(crate) fn into_eventing_inputs(self) -> EventingInputs {
         EventingInputs {
+            amqp_ca_cert_pem_path: self.amqp_ca_cert_pem_path,
             audit_chain_key_id: self.audit_chain_key_id,
             tenant_authority_ttl: Duration::from_secs(self.tenant_authority_ttl_seconds),
             tenant_authority_clock_skew: Duration::from_secs(
                 self.tenant_authority_clock_skew_seconds,
             ),
         }
+    }
+}
+
+#[derive(Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RedisConfig {
+    #[schemars(length(min = 1))]
+    ca_cert_pem_path: PathBuf,
+}
+
+impl RedisConfig {
+    fn validate(&self) -> Result<(), ConfigError> {
+        non_empty_path(&self.ca_cert_pem_path, "redis.caCertPemPath")
+    }
+
+    pub(crate) fn into_ca_cert_pem_path(self) -> PathBuf {
+        self.ca_cert_pem_path
     }
 }
 
@@ -1013,6 +1034,17 @@ fn validate_tls_url(
         return Ok(());
     }
     Err(ConfigError::InvalidValue(field))
+}
+
+fn validate_required_tls_url(
+    value: &str,
+    tls_scheme: &str,
+    field: &'static str,
+) -> Result<(), ConfigError> {
+    let parsed = Url::parse(value).map_err(|_| ConfigError::InvalidValue(field))?;
+    (parsed.scheme() == tls_scheme && parsed.host().is_some())
+        .then_some(())
+        .ok_or(ConfigError::InvalidValue(field))
 }
 
 fn url_host_is_loopback(url: &Url) -> bool {
@@ -1079,7 +1111,7 @@ mod tests {
     const SECRET_SENTINEL: &str = "do-not-leak-identityaudit-secret";
     const VALID_KEY: &str = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY";
     const VALID_CONFIG: &str = r#"
-schemaVersion = 1
+schemaVersion = 2
 
 [listeners]
 requestBudgetMs = 30000
@@ -1130,9 +1162,13 @@ dlxPayloadKeyName = "identityaudit-dlx-payload"
 readinessSeconds = 10
 
 [eventing]
+amqpCaCertPemPath = "/run/rss/amqp-ca.pem"
 auditChainKeyId = 1
 tenantAuthorityTtlSeconds = 3600
 tenantAuthorityClockSkewSeconds = 60
+
+[redis]
+caCertPemPath = "/run/rss/redis-ca.pem"
 "#;
 
     struct TestSource {
@@ -1276,7 +1312,7 @@ tenantAuthorityClockSkewSeconds = 60
     #[test]
     fn parser_and_schema_reject_unknown_fields_recursively() {
         for document in [
-            VALID_CONFIG.replace("schemaVersion = 1", "schemaVersion = 1\nlegacy = true"),
+            VALID_CONFIG.replace("schemaVersion = 2", "schemaVersion = 2\nlegacy = true"),
             VALID_CONFIG.replace(
                 "requestBudgetMs = 30000",
                 "requestBudgetMs = 30000\nlegacy = true",
@@ -1298,14 +1334,48 @@ tenantAuthorityClockSkewSeconds = 60
 
     #[test]
     fn parser_and_schema_reject_old_or_unknown_schema_versions() {
-        for version in [0, 2] {
+        for version in [0, 1, 3] {
             let document =
-                VALID_CONFIG.replace("schemaVersion = 1", &format!("schemaVersion = {version}"));
+                VALID_CONFIG.replace("schemaVersion = 2", &format!("schemaVersion = {version}"));
             assert_eq!(
                 parse_error(&document),
                 ConfigError::InvalidValue("schemaVersion")
             );
             assert!(!schema_validator().is_valid(&json_value(&document)));
+        }
+    }
+
+    #[test]
+    fn explicit_amqp_and_redis_ca_paths_are_required() {
+        let v2 = VALID_CONFIG.to_owned();
+        parse(&v2).expect("schema v2 with both private CA paths must be accepted");
+        assert!(schema_validator().is_valid(&json_value(&v2)));
+
+        for (field, document) in [
+            (
+                "eventing.amqpCaCertPemPath",
+                v2.replace("amqpCaCertPemPath = \"/run/rss/amqp-ca.pem\"\n", ""),
+            ),
+            (
+                "redis.caCertPemPath",
+                v2.replace("caCertPemPath = \"/run/rss/redis-ca.pem\"\n", ""),
+            ),
+        ] {
+            assert!(parse(&document).is_err(), "missing {field} must fail");
+            assert!(!schema_validator().is_valid(&json_value(&document)));
+        }
+
+        for (field, document) in [
+            (
+                "eventing.amqpCaCertPemPath",
+                v2.replace("/run/rss/amqp-ca.pem", ""),
+            ),
+            (
+                "redis.caCertPemPath",
+                v2.replace("/run/rss/redis-ca.pem", ""),
+            ),
+        ] {
+            assert_eq!(parse_error(&document), ConfigError::InvalidValue(field));
         }
     }
 
@@ -1514,7 +1584,7 @@ tenantAuthorityClockSkewSeconds = 60
     }
 
     #[test]
-    fn explicit_loopback_plaintext_providers_are_accepted() {
+    fn loopback_plaintext_amqp_and_redis_are_rejected() {
         let document = VALID_CONFIG
             .replace("https://identity.example.test", "http://127.0.0.1:19000")
             .replace("https://identity.example.test", "http://127.0.0.1:19000")
@@ -1523,7 +1593,7 @@ tenantAuthorityClockSkewSeconds = 60
             .replace("sslMode = \"verifyFull\"", "sslMode = \"disable\"");
         parse(&document).expect("explicit loopback plaintext config");
 
-        let mut source = TestSource::complete(document);
+        let mut source = TestSource::complete(&document);
         source.environments.insert(
             IDENTITY_AMQP_URL_ENV,
             OsString::from("amqp://127.0.0.1:5672/%2fidentity"),
@@ -1531,7 +1601,19 @@ tenantAuthorityClockSkewSeconds = 60
         source
             .environments
             .insert(REDIS_URL_ENV, OsString::from("redis://[::1]:6379/0"));
-        capture_from(Path::new("ignored"), &mut source).expect("loopback provider capture");
+        let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
+        assert_eq!(error, ConfigError::InvalidValue("eventing.identityAmqpUrl"));
+
+        let mut source = TestSource::complete(&document);
+        source.environments.insert(
+            IDENTITY_AMQP_URL_ENV,
+            OsString::from("amqps://127.0.0.1:5671/%2fidentity"),
+        );
+        source
+            .environments
+            .insert(REDIS_URL_ENV, OsString::from("redis://[::1]:6379/0"));
+        let error = capture_from(Path::new("ignored"), &mut source).unwrap_err();
+        assert_eq!(error, ConfigError::InvalidValue("eventing.redisUrl"));
     }
 
     #[test]
@@ -1556,7 +1638,7 @@ tenantAuthorityClockSkewSeconds = 60
     #[allow(clippy::cognitive_complexity)]
     fn consuming_accessors_preserve_closed_values() {
         let config = parse(VALID_CONFIG).expect("valid config");
-        let (listeners, identity, oidc, postgres, vault, eventing) = config.into_sections();
+        let (listeners, identity, oidc, postgres, vault, eventing, redis) = config.into_sections();
         let (primary, admin, health, budget) = listeners.into_listener_inputs();
         assert_eq!(primary, "127.0.0.1:18080".parse().unwrap());
         assert_eq!(admin, "127.0.0.1:18081".parse().unwrap());
@@ -1572,10 +1654,18 @@ tenantAuthorityClockSkewSeconds = 60
         assert_eq!(vault.into_vault_inputs().3, "identity-access-es256");
         let eventing = eventing.into_eventing_inputs();
         assert_eq!(eventing.audit_chain_key_id.get(), 1);
+        assert_eq!(
+            eventing.amqp_ca_cert_pem_path,
+            PathBuf::from("/run/rss/amqp-ca.pem")
+        );
         assert_eq!(eventing.tenant_authority_ttl, Duration::from_secs(3600));
         assert_eq!(
             eventing.tenant_authority_clock_skew,
             Duration::from_secs(60)
+        );
+        assert_eq!(
+            redis.into_ca_cert_pem_path(),
+            PathBuf::from("/run/rss/redis-ca.pem")
         );
     }
 }

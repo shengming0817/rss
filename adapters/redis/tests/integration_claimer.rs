@@ -71,11 +71,11 @@ fn mint_token() -> LeaseToken {
     LeaseToken::mint()
 }
 
-// 经 bundle funnel 构造（REDIS-BUNDLE-FUNNEL-01：`RedisStore::new` 已 pub(crate)，唯一公开装配出口是
-// `RedisRuntimeDeps::setup`）；派发带 group/ttl 的幂等句柄。
+// 经 test-only raw-pool bundle funnel `RedisRuntimeDeps::setup_for_test` 构造；生产装配仅开放
+// `connect_with_private_ca`。派发带 group/ttl 的幂等句柄。
 fn make_deps(url: &str) -> Result<RedisRuntimeDeps, FixtureError> {
     let pool = Config::from_url(url).create_pool(Some(Runtime::Tokio1))?;
-    Ok(RedisRuntimeDeps::setup(pool))
+    Ok(RedisRuntimeDeps::setup_for_test(pool))
 }
 
 #[allow(clippy::expect_used)]

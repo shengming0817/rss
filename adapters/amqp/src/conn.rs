@@ -2,10 +2,12 @@
 
 use std::sync::Arc;
 
+#[cfg(any(test, feature = "integration-test-support"))]
+use lapin::DefaultConnectionBuilder;
 use lapin::options::ConfirmSelectOptions;
 use lapin::tcp::{AsyncTcpStream, RustlsConnector, RustlsConnectorConfig};
 use lapin::uri::{AMQPScheme, AMQPUri};
-use lapin::{Channel, Connection, ConnectionProperties, DefaultConnectionBuilder};
+use lapin::{Channel, Connection, ConnectionProperties};
 use rustls_pki_types::{CertificateDer, pem::PemObject};
 
 use crate::conn_events::{
@@ -69,9 +71,9 @@ impl AmqpPrivateCa {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) enum AmqpTlsTrust {
-    #[default]
+    #[cfg(any(test, feature = "integration-test-support"))]
     WebPki,
     PrivateCa(AmqpPrivateCa),
 }
@@ -87,7 +89,8 @@ impl std::fmt::Debug for AmqpConnectError {
 /// vhost/credential 隔离 seam）。`confirm=true` 时启用 publisher confirms（`confirm_select`），让
 /// publish 的 broker ack/nack 可被检测（durable publish-ok 语义，见 publisher）；subscriber 传 false。
 /// 失败经 redaction funnel 记日志，URL 原文绝不进日志。
-pub(crate) async fn connect(
+#[cfg(any(test, feature = "integration-test-support"))]
+pub(crate) async fn connect_with_webpki_for_test(
     endpoint: &secure::AmqpEndpoint,
     name: &str,
     confirm: bool,
@@ -159,6 +162,7 @@ async fn connect_with_context(
     // `auto_recover=false`). Publisher transport replacement is RSS-owned and bounded by one absolute deadline;
     // enabling lapin recovery here would create an uncancellable second reconnect owner.
     let connection = match trust {
+        #[cfg(any(test, feature = "integration-test-support"))]
         AmqpTlsTrust::WebPki => {
             DefaultConnectionBuilder::new()
                 .map_err(|source| {

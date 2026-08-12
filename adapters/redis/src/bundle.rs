@@ -96,15 +96,22 @@ impl RedisRuntimeDeps {
             .runtime(Runtime::Tokio1)
             .build()
             .map_err(|_| RedisConnectError::Pool)?;
-        Ok(Self::setup(pool))
+        Ok(Self::from_pool(pool))
     }
 
-    /// 唯一公开构造路径：新建 `Arc<RedisStore>`。`RedisStore::new` 为 crate 内可见，外部不能绕过 bundle。
+    /// Private pool injection funnel. Production callers cannot supply a raw pool.
     #[must_use]
-    pub fn setup(pool: Pool) -> Self {
+    fn from_pool(pool: Pool) -> Self {
         Self {
             store: Arc::new(RedisStore::new(pool)),
         }
+    }
+
+    /// Test-only raw-pool seam for deterministic fault injection.
+    #[cfg(any(test, feature = "fault-matrix-test-support"))]
+    #[must_use]
+    pub fn setup_for_test(pool: Pool) -> Self {
+        Self::from_pool(pool)
     }
 
     /// 校验 Redis lease TTL：拒绝 `< 1ms`（亚毫秒丢精度、零非法），不静默钳制。
@@ -163,7 +170,7 @@ impl RedisRuntimeDeps {
         ttl: Duration,
     ) -> Result<Self, InvalidClaimTtl> {
         Self::validate_ttl(ttl)?;
-        Ok(Self::setup(pool))
+        Ok(Self::from_pool(pool))
     }
 }
 
@@ -330,7 +337,7 @@ mod tests {
     }
 
     fn deps() -> RedisRuntimeDeps {
-        RedisRuntimeDeps::setup(lazy_pool())
+        RedisRuntimeDeps::setup_for_test(lazy_pool())
     }
 
     #[tokio::test]

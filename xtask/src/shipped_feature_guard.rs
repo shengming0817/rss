@@ -44,6 +44,16 @@ const GUARDED_FEATURES: &[GuardedFeature] = &[
         feature: "seed-data",
         rule: Rule::SettingsSeedData,
     },
+    GuardedFeature {
+        crate_name: "amqp",
+        feature: "integration-test-support",
+        rule: Rule::AmqpIntegrationTestSupport,
+    },
+    GuardedFeature {
+        crate_name: "redis-adapter",
+        feature: "fault-matrix-test-support",
+        rule: Rule::RedisFaultMatrixTestSupport,
+    },
 ];
 const OPERATOR_CLI_CRATE: &str = "runtime";
 const OPERATOR_CLI_FEATURE: &str = "operator-cli";
@@ -58,6 +68,10 @@ pub(crate) enum Rule {
     IdentitySeedLogin,
     /// Production graph enabled in-memory settings fixtures.
     SettingsSeedData,
+    /// Production graph enabled AMQP WebPKI integration-only constructors.
+    AmqpIntegrationTestSupport,
+    /// Production graph enabled raw Redis pool fault-matrix constructors.
+    RedisFaultMatrixTestSupport,
     /// Serving binary enabled `runtime/operator-cli` (pulls clap).
     ServerOperatorCli,
     /// Serving binary selected the external `clap` package (direct or transitive).
@@ -302,6 +316,16 @@ mod tests {
                     feature: "seed-data",
                     rule: Rule::SettingsSeedData,
                 },
+                GuardedFeature {
+                    crate_name: "amqp",
+                    feature: "integration-test-support",
+                    rule: Rule::AmqpIntegrationTestSupport,
+                },
+                GuardedFeature {
+                    crate_name: "redis-adapter",
+                    feature: "fault-matrix-test-support",
+                    rule: Rule::RedisFaultMatrixTestSupport,
+                },
             ]
         );
         Ok(())
@@ -460,7 +484,7 @@ mod tests {
             "artifact/operator production graphs must stay clean: {findings:?}"
         );
         assert!(summary.contains("4 shipped binaries"));
-        assert!(summary.contains("4 个登记的非生产 feature"));
+        assert!(summary.contains("6 个登记的非生产 feature"));
         assert!(summary.contains("server 未启用 operator-cli"));
         assert!(summary.contains("未选中 clap"));
         Ok(())
@@ -616,6 +640,8 @@ mod tests {
             ("runtime", package_path("runtime")),
             ("identity", package_path("identity")),
             ("settings", package_path("settings")),
+            ("amqp", package_path("amqp")),
+            ("redis-adapter", package_path("redis-adapter")),
         ];
         let ids = package_paths
             .iter()
@@ -653,13 +679,17 @@ mod tests {
                 {
                     // Named-feature only: runtime defaults include operator-cli, which must not
                     // contaminate leak fixtures that assert a single finding.
-                    dependencies.push(path_dependency_with_features(
+                    let mut dependency = path_dependency_with_features(
                         leak.crate_name,
                         package_path(leak.crate_name),
                         false,
                         false,
                         &[leak.feature],
-                    ));
+                    );
+                    if leak.crate_name == "redis-adapter" {
+                        dependency["rename"] = json!("redis");
+                    }
+                    dependencies.push(dependency);
                 }
                 let features = if *name == "runtime" {
                     json!({
@@ -704,7 +734,14 @@ mod tests {
                 } else if *name == "bridge"
                     && let Some(leak) = leak
                 {
-                    dependencies.push((leak.crate_name, ids[leak.crate_name].as_str()));
+                    dependencies.push((
+                        if leak.crate_name == "redis-adapter" {
+                            "redis"
+                        } else {
+                            leak.crate_name
+                        },
+                        ids[leak.crate_name].as_str(),
+                    ));
                 }
                 let features: &[&str] = if *name == "runtime" {
                     &["integration", OPERATOR_CLI_FEATURE]
@@ -739,6 +776,8 @@ mod tests {
             "runtime" => "/workspace/assemblies/runtime",
             "identity" => "/workspace/crates/identity",
             "settings" => "/workspace/crates/settings",
+            "amqp" => "/workspace/adapters/amqp",
+            "redis-adapter" => "/workspace/adapters/redis",
             _ => "/workspace/invalid",
         }
     }

@@ -56,7 +56,7 @@ async fn integration_explicit_private_ca_accepts_matching_broker_and_rejects_wro
     assert_eq!(deps.runtime_resources().len(), 2);
 
     assert!(
-        AmqpRuntimeDeps::connect(
+        AmqpRuntimeDeps::connect_with_webpki_for_test(
             &secure::AmqpEndpoint::parse(
                 fixture.publisher_url(),
                 secure::PlaintextEndpointPolicy::Deny,
@@ -286,12 +286,12 @@ fn amqp_endpoint(url: &str) -> anyhow::Result<secure::AmqpEndpoint> {
 
 async fn connect_publisher(url: &str, name: &str) -> anyhow::Result<AmqpPublisher> {
     let endpoint = amqp_endpoint(url)?;
-    Ok(AmqpPublisher::connect(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
+    Ok(AmqpPublisher::connect_with_webpki_for_test(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
 }
 
 async fn connect_subscriber(url: &str, name: &str) -> anyhow::Result<AmqpSubscriber> {
     let endpoint = amqp_endpoint(url)?;
-    Ok(AmqpSubscriber::connect(&endpoint, name).await?)
+    Ok(AmqpSubscriber::connect_with_webpki_for_test(&endpoint, name).await?)
 }
 
 async fn connect_subscriber_with_dlq_ttl(
@@ -329,7 +329,10 @@ async fn connect_subscriber_with_queue_limits(
 
 async fn connect_runtime_deps(url: &str, name: &str) -> anyhow::Result<AmqpRuntimeDeps> {
     let endpoint = amqp_endpoint(url)?;
-    Ok(AmqpRuntimeDeps::connect(&endpoint, name, TEST_PUBLISH_TIMEOUT).await?)
+    Ok(
+        AmqpRuntimeDeps::connect_with_webpki_for_test(&endpoint, name, TEST_PUBLISH_TIMEOUT)
+            .await?,
+    )
 }
 
 async fn assert_queue_limit_backpressures(
@@ -391,7 +394,13 @@ async fn integration_connect_failure_returns_safe_error() {
 async fn integration_invalid_publish_timeout_rejected_before_connect() {
     let endpoint = amqp_endpoint("amqp://user:secretpass@127.0.0.1:1/%2f")
         .expect("fixture endpoint must parse");
-    match AmqpPublisher::connect(&endpoint, "amqp-invalid-timeout", Duration::ZERO).await {
+    match AmqpPublisher::connect_with_webpki_for_test(
+        &endpoint,
+        "amqp-invalid-timeout",
+        Duration::ZERO,
+    )
+    .await
+    {
         Ok(_) => panic!("zero publish timeout must be rejected"),
         Err(err) => {
             assert_eq!(err.to_string(), "amqp connect failed");
@@ -1269,9 +1278,9 @@ async fn integration_envelope_header_roundtrip() -> Result<(), FixtureError> {
     Ok(())
 }
 
-/// #1498 bundle 装配出口：`AmqpRuntimeDeps::connect` 打开一个域 vhost 的 publisher + subscriber，经
-/// `infra()` 派发 DI-ready port 句柄跑 publish→subscribe 闭环；`runtime_resources()` 单源派生
-/// publisher-guard + subscriber-guard（各关其 connection），经 guard 关停干净收敛（D5 单源 rollback）。
+/// #1498 test-only WebPKI bundle 装配出口打开一个域 vhost 的 publisher + subscriber，经 `infra()`
+/// 派发 DI-ready port 句柄跑 publish→subscribe 闭环；`runtime_resources()` 单源派生 publisher-guard +
+/// subscriber-guard（各关其 connection），经 guard 关停干净收敛（D5 单源 rollback）。
 #[tokio::test(flavor = "multi_thread")]
 async fn integration_bundle_dispatch_and_single_source_resources() -> Result<(), FixtureError> {
     let rmq = testkit::env_or_rabbitmq().await?;

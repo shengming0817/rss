@@ -22,7 +22,7 @@ fn unique(label: &str) -> String {
 
 fn setup(url: &str) -> Result<(Pool, RedisRuntimeDeps), FixtureError> {
     let pool = Config::from_url(url).create_pool(Some(Runtime::Tokio1))?;
-    Ok((pool.clone(), RedisRuntimeDeps::setup(pool)))
+    Ok((pool.clone(), RedisRuntimeDeps::setup_for_test(pool)))
 }
 
 async fn limiter(
@@ -189,7 +189,7 @@ async fn integration_saturated_pool_fails_within_limiter_budget() -> Result<(), 
     let mut config = Config::from_url(fixture.url());
     config.pool = Some(deadpool_redis::PoolConfig::new(1));
     let pool = config.create_pool(Some(Runtime::Tokio1))?;
-    let deps = RedisRuntimeDeps::setup(pool.clone());
+    let deps = RedisRuntimeDeps::setup_for_test(pool.clone());
     let _held = pool.get().await?;
 
     let started = std::time::Instant::now();

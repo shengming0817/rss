@@ -87,7 +87,8 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
         let crate::providers::BuildResult {
             providers,
             listeners: listeners_config,
-            amqp_url,
+            amqp_endpoint,
+            amqp_ca,
             roles,
         } = build;
         let crate::providers::ProviderBundle {
@@ -133,7 +134,8 @@ impl runtimeexec::StartupAdapter for ProductionStartup {
             &pg,
             &redis,
             registry.drain_subscribers(),
-            &amqp_url,
+            &amqp_endpoint,
+            amqp_ca,
             &audit_chain_key,
             tenant_authority,
             dlx_payload_protector,

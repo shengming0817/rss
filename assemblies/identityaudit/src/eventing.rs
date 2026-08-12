@@ -38,7 +38,8 @@ pub(crate) async fn wire(
     pg: &postgres::PgRuntimeHandle,
     redis: &redis::RedisRuntimeDeps,
     bindings: Vec<bootstrap::SubscriberBinding>,
-    amqp_url: &secure::AmqpEndpoint,
+    amqp_endpoint: &secure::AmqpEndpoint,
+    amqp_ca: amqp::AmqpPrivateCa,
     audit_key: &primitives::MacKey,
     tenant_authority: Arc<eventexec::TenantAuthority>,
     dlx_payload_protector: postgres::DlxPayloadProtector,
@@ -55,8 +56,12 @@ pub(crate) async fn wire(
     pg.validate_relay_budget(budget)
         .context("identityaudit relay budget disagrees with database policy")?;
 
-    let amqp = amqp::AmqpRuntimeDeps::connect(
-        amqp_url,
+    let publisher_endpoint = amqp::AmqpPublisherEndpoint::new(amqp_endpoint.clone());
+    let subscriber_endpoint = amqp::AmqpSubscriberEndpoint::new(amqp_endpoint.clone());
+    let amqp = amqp::AmqpRuntimeDeps::connect_with_private_ca(
+        &publisher_endpoint,
+        &subscriber_endpoint,
+        amqp_ca,
         "identityaudit-identity",
         budget.publish_timeout(),
     )
