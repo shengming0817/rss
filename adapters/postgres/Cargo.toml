@@ -173,6 +173,15 @@ required-features = ["integration"]
 name = "migration_0105_projection_generation"
 path = "tests/migration_0105_projection_generation.rs"
 
+[[test]]
+name = "migration_0109_inbox_backlog_samples"
+path = "tests/migration_0109_inbox_backlog_samples.rs"
+
+[[test]]
+name = "migration_0109_inbox_backlog_samples_live"
+path = "tests/migration_0109_inbox_backlog_samples_live.rs"
+required-features = ["integration"]
+
 # Affected（无 live PG 资源；默认可构建，不绑 RemoteOnly 调度身份）。
 [[test]]
 name = "migration_0087_device_command_fencing_contract"

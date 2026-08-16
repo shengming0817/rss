@@ -324,6 +324,7 @@ struct NoopMetrics;
 impl OutboxMetrics for NoopMetrics {
     fn record_publish(&self, _scope: &OutboxMetricScope<'_>, _disposition: Disposition) {}
     fn record_backlog(&self, _scope: &OutboxMetricScope<'_>, _sample: BacklogSample) {}
+    fn record_backlog_unavailable(&self, _scope: &OutboxMetricScope<'_>) {}
     fn record_partition_blocked(&self, _scope: &OutboxMetricScope<'_>, _blocked_depth: u64) {}
     fn record_tick_duration(&self, _phase: RelayPhase, _seconds: f64) {}
 }

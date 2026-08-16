@@ -29,6 +29,7 @@ bootstrap = { path = "../../crates/bootstrap" }
 consistency = { path = "../../crates/consistency" }
 crypto-adapter = { path = "../../adapters/crypto", optional = true }
 diport = { path = "../../crates/diport" }
+distributed = { path = "../../crates/distributed" }
 eventexec = { path = "../../crates/eventexec" }
 futures = { workspace = true }
 generated = { path = "../../generated" }
@@ -37,7 +38,7 @@ postgres = { path = "../../adapters/postgres" }
 primitives = { path = "../../crates/primitives" }
 settings = { path = "../../crates/settings", optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync"] }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 vocab = { path = "../../crates/vocab" }

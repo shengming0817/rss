@@ -2361,6 +2361,19 @@ hard cut：取得 `ACCESS EXCLUSIVE` 后，用即将安装的 versioned validato
    重验。规则变化必须创建新版本函数、新 CHECK 并重新验证。旧 artifact 因 exact-head ledger 与新
    CHECK 不可恢复；数据库级回滚仅允许连同迁移前完整备份和旧 artifact 整体恢复。
 
+### 0109 Inbox stale-claim backlog export
+
+`0109` 为 runtime sampler 安装一次批量、跨 tenant 的只读聚合函数与 stale-claim partial index。函数只接受
+与 `generated::event::EVENTS` 精确同步的非空、无重复 consumer-group selection，只统计超过固定 60 秒 TTL
+的 `claimed` receipt；active claim、done 与未选 group 均不返回。
+
+1. 确认 ledger 精确为 108，并由唯一 migration Job 执行迁移；不要手工扩展函数 allowlist。
+2. postflight 验证函数 owner 为 `rss_inbox_receipt_maintenance`、`SECURITY DEFINER`、固定安全
+   `search_path`，且仅 `rss_app_read` 有 EXECUTE；PUBLIC、writer 与其它 serving role 必须无权。
+   `rss_app_read` 对 `public.inbox_receipts` 的历史 raw SELECT 必须已撤销，reader 只能看到四列聚合结果。
+3. 新 binary 的 reader capability gate 会精确验证有效函数集合、ACL、安全姿态与函数定义指纹；任一漂移
+   使 durable 启动 fail-closed。group 拓扑变化必须用新的 forward migration 与 generated catalog 同步推进。
+
 ### 0105 Settings projection input-generation hard cut
 
 `0105` 将 Settings v3 worker/operator/reader 的固定函数身份推进到当前 generated projection-input

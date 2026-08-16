@@ -136,6 +136,12 @@ fn relay_budget_fields_are_private() {
 }
 
 #[test]
+fn inbox_backlog_selection_is_generated_only() {
+    let t = trybuild::TestCases::new();
+    t.compile_fail("tests/ui/inbox_backlog_selection_raw_group_fail.rs");
+}
+
+#[test]
 fn dlx_lifecycle_proofs_and_capabilities_are_sealed() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/ui/dlx_hot_archive_key_swap_fail.rs");

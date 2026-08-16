@@ -6,14 +6,14 @@ ref: mdeloof/statig statig/src/lib.rs@main
 
 本索引是 #1642 的一致性运维入口。它不新增治理机制；所有 label 闭值集、PII 边界、tenant scope 与
 redrive 权限均引用已有 Hard / Medium carrier。若某模块尚无 runtime metric，本页明确标为
-`not currently exported`，并引用后续 backlog issue。
+`not currently exported`，并引用后续 backlog issue；#1683 inbox backlog 已不属于该集合。
 
 ## Coverage Matrix
 
 | Module | Runbook | Metric | Alert | Dashboard | Redrive | Carrier |
 |---|---|---|---|---|---|---|
 | Outbox relay / backlog | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | exported | `docs/ops/outbox-relay-alerts.rules.yaml` | `docs/ops/202607082104-1642-consistency-dashboard-checklist.md` | tenant-scoped `rss dlq redrive-outbox` | `OutboxMetricScope`, `RelayConfig`, `OutboxContractId`, `TenantId`, closed settlement operation/reason; see `docs/rules/observability.md` |
-| Inbox / consumer | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | consumer exported; inbox backlog `not currently exported` (#1683) | `docs/ops/outbox-relay-alerts.rules.yaml` | same checklist; inbox backlog gap references #1683 | tenant-scoped `rss dlq replay-dead-letter` | `InboxReceiptContext`, `ConsumerMeta`, tenant authority validation, `TenantId`; see `docs/rules/observability.md` |
+| Inbox / consumer | `docs/ops/202607081909-1440-outbox-inbox-redrive-runbook.md` | consumer metrics plus inbox stale-claim depth/oldest-age exported; active-owner failure semantics use NaN (#1683) | existing consumer rules only; no inbox backlog alert | same checklist; no shared inbox backlog panel authorized | tenant-scoped `rss dlq replay-dead-letter` | generated `InboxBacklogSelection`, private `InboxMetricScope`, `TenantId`, typed maintenance lane; see `docs/rules/observability.md` |
 | DLX lifecycle | this index | archive pending depth/oldest age + closed lifecycle outcome exported | `DlxArchiveLifecycleFailure`, `DlxArchiveOldestPendingHigh` | same checklist | no cold list/inspect/replay; expired receipt only via verified HEAD-missing proof | typed receipt/proof, dedicated PG/Vault/S3 credentials, verified WORM store; see `docs/rules/eventbus.md` / `observability.md` |
 | Saga | this index | saga DLX exported | `docs/ops/outbox-relay-alerts.rules.yaml` | same checklist | no replay; diagnostic DLX only | `SagaInstanceRef`, `SagaExecutorConfig` domain / contract binding, `saga_dead_letters_total` label closure |
 | LocalTx / generic UoW / plain producer settlement | `docs/runbooks/202607130312-1705-localtx-unsafe-settlement.md` | `localtx_retry_attempts_total`, `localtx_deadline_exceeded_total`, `localtx_final_total`, `localtx_attempts`, `postgres_localtx_connection_quarantine_total`, `tx_settlement_final_total` | unsafe settlement only: `docs/ops/localtx-alerts.rules.yaml`; deadline diagnostic has no page | same checklist | no automatic replay for unsafe settlement or deadline exhaustion | `observ::LocalTxObservation` for HTTP contracts; Postgres generic runner and move-only plain producer attempt for boundary-only settlement; closed boundary/retry/deadline-stage/final-status/quarantine-stage enums; see `docs/rules/observability.md` |
@@ -70,8 +70,20 @@ Operational signals:
 - `consumer_dlx_write_total{domain,outcome}`
 - `consumer_release_failed_total{domain}`
 - `consumer_lease_lost_total{domain}`
+- `inbox_stale_claim_depth{tenant_id,consumer_group}`
+- `inbox_oldest_stale_claim_age_seconds{tenant_id,consumer_group}`
 
-Inbox backlog is `not currently exported`; track #1683 for the runtime sampler and metric carrier.
+Inbox backlog is emitted only by the active maintenance owner. A receipt enters the metric only when
+`status='claimed'` and `claimed_at <= now() - 60s`; oldest age is the complete time since
+`claimed_at`, not time beyond the 60-second stale boundary. Query failure and ownership loss write
+NaN only for scopes this process has already emitted; an unseen scope legitimately has no series.
+A successful active tick writes zero for previously observed scopes that disappeared. For NaN or an
+unexpectedly missing known series, inspect the `inbox_sampler` readyz probe and the
+`RSS_INBOX_SAMPLE_INTERVAL_MS` cadence first. Then inspect maintenance-owner acquire/renew/fencing
+logs: verify the Redis lock is held by one runtime owner, the PostgreSQL CAS epoch advances in the
+same lane, and lease loss retires the old owner's series before peer takeover. Finally verify the PG
+reader can execute `rss_inbox_sample_backlog(text[])` and cannot read `inbox_receipts` directly.
+#1683 adds no shared alert, threshold or dashboard panel.
 
 On-call flow:
 

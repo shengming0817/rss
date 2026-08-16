@@ -14,7 +14,7 @@
 
 | 来源层 | DI port trait（举例） | 形态 |
 |---|---|---|
-| 引擎 | `Clock`（待决项#2 是否迁入）；`InboxStore`/`InboxBacklog`/`RetentionSweeper` 保持 `consistency` native AFIT，不进入 diport | dynosaur `dyn(box)` wrapper |
+| 引擎 | `Clock`（待决项#2 是否迁入）；`InboxStore`/`RetentionSweeper` 保持 `consistency` native AFIT，批量 `InboxBacklogSource` 保持 `eventexec` native AFIT，均不进入 diport | dynosaur `dyn(box)` wrapper |
 | 服务 | `Publisher`/`Subscriber`（+ sync `SubscribeInitializer`）、`AuditSink`、`Pdp`、session/refresh store、`DistLock`、`Transport`、`Signer` | dynosaur（sync port 如 `SubscribeInitializer` 同 `Clock` 不需 dynosaur） |
 | 生命周期 | `ManagedResource`（待决项#4 inter-ADR 冲突） | 暂遵 ADR-001（async_trait + `Arc<dyn>`）；PR-diport 统一→dynosaur 并同步重评 ADR-001 威胁矩阵 |
 | ~~域~~ | ~~各域仓储/领域服务 repo port~~ → **移出本表（ADR-005 #1083）**：域形 repo port 归**所属域 crate `pub mod ports`**（签名引用域内实体，不得收敛 diport），非 diport | （域 crate；同款 dynosaur 范式） |

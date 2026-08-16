@@ -9,7 +9,6 @@
 
 use crate::error::EngineError;
 use crate::idempotency::{ConsumerGroup, IdemKey, LeaseOutcome, LeaseToken, SeenState};
-use crate::outbox::BacklogSample;
 
 /// Maximum persisted `trace` metadata length for inbox receipts.
 pub const INBOX_RECEIPT_TRACE_MAX_LEN: usize = 512;
@@ -152,33 +151,6 @@ pub enum InboxReceiptContextError {
     /// Correlation metadata is empty or too long.
     #[error("inbox receipt correlation id is invalid")]
     InvalidCorrelationId,
-}
-
-/// Typed tenant/group scope for inbox backlog sampling.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InboxBacklogScope {
-    tenant_id: rss_request_context::TenantId,
-    consumer_group: ConsumerGroup,
-}
-
-impl InboxBacklogScope {
-    /// Build a typed backlog sampling scope.
-    pub fn new(tenant_id: rss_request_context::TenantId, consumer_group: ConsumerGroup) -> Self {
-        Self {
-            tenant_id,
-            consumer_group,
-        }
-    }
-
-    /// Tenant scope for RLS and backlog filtering.
-    pub fn tenant_id(&self) -> rss_request_context::TenantId {
-        self.tenant_id
-    }
-
-    /// Consumer group to sample.
-    pub fn consumer_group(&self) -> &ConsumerGroup {
-        &self.consumer_group
-    }
 }
 
 fn non_empty(raw: String) -> Option<String> {
@@ -434,20 +406,6 @@ pub trait InboxStore {
         key: &IdemKey,
         lease: &LeaseToken,
     ) -> Result<(), EngineError>;
-}
-
-/// Inbox backlog sampler scoped by an explicit tenant/group scope.
-///
-/// Implementations count only stale `claimed` rows that can block replay visibility for this group.
-/// Active claims and terminal `done` rows are excluded. When clear, implementations return
-/// [`BacklogSample::empty`] (`depth=0`, `oldest_age_seconds=0`). Native AFIT keeps this port generic
-/// and non-object-safe; do not add a `diport` dyn wrapper.
-#[allow(async_fn_in_trait)]
-// reason: native AFIT 引擎策略 trait 仅泛型静态分发消费；与 InboxStore/OutboxBacklog 同范式。
-pub trait InboxBacklog {
-    /// Sample stale claimed inbox rows for the provided tenant/group scope.
-    async fn sample_backlog(&self, scope: &InboxBacklogScope)
-    -> Result<BacklogSample, EngineError>;
 }
 
 #[cfg(test)]

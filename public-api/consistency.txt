@@ -505,26 +505,6 @@ impl core::marker::Unpin for consistency::inbox::InboxStatusError
 impl core::marker::UnsafeUnpin for consistency::inbox::InboxStatusError
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxStatusError
 impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxStatusError
-pub struct consistency::inbox::InboxBacklogScope
-impl consistency::inbox::InboxBacklogScope
-pub fn consistency::inbox::InboxBacklogScope::consumer_group(&self) -> &consistency::idempotency::ConsumerGroup
-pub fn consistency::inbox::InboxBacklogScope::new(rss_request_context::TenantId, consistency::idempotency::ConsumerGroup) -> Self
-pub fn consistency::inbox::InboxBacklogScope::tenant_id(&self) -> rss_request_context::TenantId
-impl core::clone::Clone for consistency::inbox::InboxBacklogScope
-pub fn consistency::inbox::InboxBacklogScope::clone(&self) -> consistency::inbox::InboxBacklogScope
-impl core::cmp::Eq for consistency::inbox::InboxBacklogScope
-impl core::cmp::PartialEq for consistency::inbox::InboxBacklogScope
-pub fn consistency::inbox::InboxBacklogScope::eq(&self, &consistency::inbox::InboxBacklogScope) -> bool
-impl core::fmt::Debug for consistency::inbox::InboxBacklogScope
-pub fn consistency::inbox::InboxBacklogScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for consistency::inbox::InboxBacklogScope
-impl core::marker::Freeze for consistency::inbox::InboxBacklogScope
-impl core::marker::Send for consistency::inbox::InboxBacklogScope
-impl core::marker::Sync for consistency::inbox::InboxBacklogScope
-impl core::marker::Unpin for consistency::inbox::InboxBacklogScope
-impl core::marker::UnsafeUnpin for consistency::inbox::InboxBacklogScope
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxBacklogScope
-impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxBacklogScope
 pub struct consistency::inbox::InboxClaim
 impl consistency::inbox::InboxClaim
 pub fn consistency::inbox::InboxClaim::active(consistency::idempotency::LeaseToken) -> Self
@@ -575,8 +555,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxReceip
 impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxReceiptContext
 pub const consistency::inbox::INBOX_RECEIPT_CORRELATION_MAX_LEN: usize
 pub const consistency::inbox::INBOX_RECEIPT_TRACE_MAX_LEN: usize
-pub trait consistency::inbox::InboxBacklog
-pub async fn consistency::inbox::InboxBacklog::sample_backlog(&self, &consistency::inbox::InboxBacklogScope) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
 pub trait consistency::inbox::InboxStore
 pub async fn consistency::inbox::InboxStore::commit(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::inbox::InboxStore::extend(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
@@ -4378,26 +4356,6 @@ impl core::marker::Unpin for consistency::idempotency::IdemKey
 impl core::marker::UnsafeUnpin for consistency::idempotency::IdemKey
 impl core::panic::unwind_safe::RefUnwindSafe for consistency::idempotency::IdemKey
 impl core::panic::unwind_safe::UnwindSafe for consistency::idempotency::IdemKey
-pub struct consistency::InboxBacklogScope
-impl consistency::inbox::InboxBacklogScope
-pub fn consistency::inbox::InboxBacklogScope::consumer_group(&self) -> &consistency::idempotency::ConsumerGroup
-pub fn consistency::inbox::InboxBacklogScope::new(rss_request_context::TenantId, consistency::idempotency::ConsumerGroup) -> Self
-pub fn consistency::inbox::InboxBacklogScope::tenant_id(&self) -> rss_request_context::TenantId
-impl core::clone::Clone for consistency::inbox::InboxBacklogScope
-pub fn consistency::inbox::InboxBacklogScope::clone(&self) -> consistency::inbox::InboxBacklogScope
-impl core::cmp::Eq for consistency::inbox::InboxBacklogScope
-impl core::cmp::PartialEq for consistency::inbox::InboxBacklogScope
-pub fn consistency::inbox::InboxBacklogScope::eq(&self, &consistency::inbox::InboxBacklogScope) -> bool
-impl core::fmt::Debug for consistency::inbox::InboxBacklogScope
-pub fn consistency::inbox::InboxBacklogScope::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl core::marker::StructuralPartialEq for consistency::inbox::InboxBacklogScope
-impl core::marker::Freeze for consistency::inbox::InboxBacklogScope
-impl core::marker::Send for consistency::inbox::InboxBacklogScope
-impl core::marker::Sync for consistency::inbox::InboxBacklogScope
-impl core::marker::Unpin for consistency::inbox::InboxBacklogScope
-impl core::marker::UnsafeUnpin for consistency::inbox::InboxBacklogScope
-impl core::panic::unwind_safe::RefUnwindSafe for consistency::inbox::InboxBacklogScope
-impl core::panic::unwind_safe::UnwindSafe for consistency::inbox::InboxBacklogScope
 pub struct consistency::InboxClaim
 impl consistency::inbox::InboxClaim
 pub fn consistency::inbox::InboxClaim::active(consistency::idempotency::LeaseToken) -> Self
@@ -5331,8 +5289,6 @@ impl core::panic::unwind_safe::RefUnwindSafe for consistency::tx_retry::TxRetryR
 impl core::panic::unwind_safe::UnwindSafe for consistency::tx_retry::TxRetryReport
 pub const consistency::INBOX_RECEIPT_CORRELATION_MAX_LEN: usize
 pub const consistency::INBOX_RECEIPT_TRACE_MAX_LEN: usize
-pub trait consistency::InboxBacklog
-pub async fn consistency::InboxBacklog::sample_backlog(&self, &consistency::inbox::InboxBacklogScope) -> core::result::Result<consistency::outbox::BacklogSample, consistency::error::EngineError>
 pub trait consistency::InboxStore
 pub async fn consistency::InboxStore::commit(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>
 pub async fn consistency::InboxStore::extend(&self, &consistency::inbox::InboxReceiptContext, &consistency::idempotency::IdemKey, &consistency::idempotency::LeaseToken) -> core::result::Result<consistency::idempotency::LeaseOutcome, consistency::error::EngineError>

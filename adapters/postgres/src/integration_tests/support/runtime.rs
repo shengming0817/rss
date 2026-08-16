@@ -121,8 +121,16 @@ pub(in super::super) fn test_tenant() -> rss_request_context::TenantId {
 
 #[allow(clippy::unwrap_used)]
 pub(in super::super) fn test_inbox_ctx(group: &str) -> InboxReceiptContext {
+    test_inbox_ctx_for(test_tenant(), group)
+}
+
+#[allow(clippy::unwrap_used)]
+pub(in super::super) fn test_inbox_ctx_for(
+    tenant: rss_request_context::TenantId,
+    group: &str,
+) -> InboxReceiptContext {
     InboxReceiptContext::new(
-        test_tenant(),
+        tenant,
         ConsumerGroup::parse(group).unwrap(),
         "identity",
         "identity.session-created",
@@ -133,11 +141,6 @@ pub(in super::super) fn test_inbox_ctx(group: &str) -> InboxReceiptContext {
         None,
     )
     .unwrap()
-}
-
-#[allow(clippy::unwrap_used)]
-pub(in super::super) fn test_inbox_scope(group: &str) -> InboxBacklogScope {
-    InboxBacklogScope::new(test_tenant(), ConsumerGroup::parse(group).unwrap())
 }
 
 #[allow(clippy::unwrap_used)]

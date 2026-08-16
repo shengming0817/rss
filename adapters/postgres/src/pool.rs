@@ -1149,7 +1149,7 @@ const EXPECTED_PROJECTION_SOURCE_FUNCTION_FINGERPRINT: &str =
 const EXPECTED_PROJECTION_OPERATOR_FUNCTION_FINGERPRINT: &str =
     "sha256:c6c2ce0c13e194e5d7bb540b2fd8d10e79971e2c69d18c47634e71674b148bde";
 const EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT: &str =
-    "sha256:cbe6b6331140a2d08e39c065612ccbeaf78dbb99a2a17fac84823909808dd596";
+    "sha256:2319389c7e92406de63bb774d14b8002e1a42ef29dd26e8ea3a2c629292aa6f9";
 
 /// Sorted capability rows for custom `pg_default_acl` privileges targeting the current serving
 /// role or PUBLIC across all custom object types (`r`/`S`/`f`/`T`/`n`). Empty result set is the
@@ -1386,6 +1386,7 @@ WITH reader AS (
            n.nspname = 'public'
                AND c.relname IN (
                    'settings_projection_active_pointer',
+                   'inbox_receipts',
                    'event_l2_dr_admission_epoch',
                    'event_l2_dr_admission_phase_receipt'
                ) AS denied_relation,
@@ -1393,6 +1394,7 @@ WITH reader AS (
                AND c.relkind IN ('r', 'p')
                AND c.relname NOT IN (
                    'settings_projection_active_pointer',
+                   'inbox_receipts',
                    'event_l2_dr_admission_epoch',
                    'event_l2_dr_admission_phase_receipt'
                )
@@ -1561,10 +1563,10 @@ SELECT COALESCE(
 "#;
 
 const TENANT_READ_FUNCTION_PRIVILEGES_SQL: &str = r#"
-WITH resolver AS (
-    SELECT pg_catalog.to_regprocedure(
-               'public.rss_settings_projection_resolve_active()'
-           ) AS oid
+WITH allowed(oid) AS (
+    VALUES
+        (pg_catalog.to_regprocedure('public.rss_settings_projection_resolve_active()')::oid),
+        (pg_catalog.to_regprocedure('public.rss_inbox_sample_backlog(text[])')::oid)
 ), effective AS (
     SELECT procedure.oid
     FROM pg_catalog.pg_proc AS procedure
@@ -1574,12 +1576,13 @@ WITH resolver AS (
       AND namespace.nspname !~ '^pg_'
       AND pg_catalog.has_function_privilege(current_user, procedure.oid, 'EXECUTE')
 )
-SELECT resolver.oid IS NOT NULL
+SELECT pg_catalog.count(allowed.oid) = 2
        AND COALESCE(
                (SELECT pg_catalog.array_agg(effective.oid ORDER BY effective.oid)
                 FROM effective),
                ARRAY[]::oid[]
-           ) = ARRAY[resolver.oid]::oid[] AS exact,
+           ) = (SELECT pg_catalog.array_agg(allowed.oid ORDER BY allowed.oid) FROM allowed)
+       AS exact,
        COALESCE(
            (SELECT pg_catalog.string_agg(
                        effective.oid::regprocedure::text,
@@ -1588,7 +1591,7 @@ SELECT resolver.oid IS NOT NULL
             FROM effective),
            ''
        ) AS effective_functions
-FROM resolver
+FROM allowed
 "#;
 
 const TENANT_READ_RESOLVER_FUNCTION_DEFINITION_SQL: &str = r#"
@@ -1601,9 +1604,88 @@ SELECT procedure.proname,
        procedure.proisstrict
 FROM pg_catalog.pg_proc AS procedure
 JOIN pg_catalog.pg_language AS language ON language.oid = procedure.prolang
-WHERE procedure.oid =
-    'public.rss_settings_projection_resolve_active()'::regprocedure
+WHERE procedure.oid IN (
+    'public.rss_settings_projection_resolve_active()'::regprocedure,
+    'public.rss_inbox_sample_backlog(text[])'::regprocedure
+)
 ORDER BY procedure.proname
+"#;
+
+const TENANT_READ_INBOX_FUNCTION_SECURITY_SQL: &str = r#"
+WITH source AS (
+    SELECT procedure.*, owner.rolname AS owner_name,
+           owner.rolcanlogin AS owner_can_login,
+           owner.rolsuper AS owner_super,
+           owner.rolbypassrls AS owner_bypass_rls,
+           owner.rolcreatedb AS owner_create_db,
+           owner.rolcreaterole AS owner_create_role,
+           owner.rolreplication AS owner_replication,
+           owner.rolinherit AS owner_inherit
+    FROM pg_catalog.pg_proc AS procedure
+    JOIN pg_catalog.pg_roles AS owner ON owner.oid = procedure.proowner
+    WHERE procedure.oid = 'public.rss_inbox_sample_backlog(text[])'::regprocedure
+), acl AS (
+    SELECT COALESCE(grantee.rolname, 'PUBLIC') AS grantee,
+           privilege.privilege_type,
+           privilege.is_grantable
+    FROM source
+    CROSS JOIN LATERAL pg_catalog.aclexplode(
+        COALESCE(source.proacl, pg_catalog.acldefault('f', source.proowner))
+    ) AS privilege
+    LEFT JOIN pg_catalog.pg_roles AS grantee ON grantee.oid = privilege.grantee
+)
+SELECT source.prokind = 'f'
+       AND source.prosecdef
+       AND source.provolatile = 's'
+       AND source.proparallel = 'u'
+       AND NOT source.proleakproof
+       AND NOT source.proisstrict
+       AND source.proconfig = ARRAY['search_path=pg_catalog, pg_temp']::text[]
+       AND source.owner_name = 'rss_inbox_receipt_maintenance'
+       AND NOT source.owner_can_login
+       AND NOT source.owner_super
+       AND source.owner_bypass_rls
+       AND NOT source.owner_create_db
+       AND NOT source.owner_create_role
+       AND NOT source.owner_replication
+       AND source.owner_inherit
+       AND NOT EXISTS (
+           SELECT 1 FROM pg_catalog.pg_auth_members AS membership
+           WHERE membership.member = source.proowner OR membership.roleid = source.proowner
+       )
+       AND COALESCE(
+           (SELECT pg_catalog.array_agg(
+                       acl.grantee || ':' || acl.privilege_type || ':' || acl.is_grantable::text
+                       ORDER BY acl.grantee, acl.privilege_type, acl.is_grantable)
+            FROM acl),
+           ARRAY[]::text[]
+       ) = ARRAY[
+           'rss_app_read:EXECUTE:false',
+           'rss_inbox_receipt_maintenance:EXECUTE:false'
+       ]::text[] AS exact,
+       pg_catalog.concat_ws(
+           ';',
+           'kind=' || source.prokind::text,
+           'security_definer=' || source.prosecdef::text,
+           'volatility=' || source.provolatile::text,
+           'parallel=' || source.proparallel::text,
+           'config=' || COALESCE(pg_catalog.array_to_string(source.proconfig, ','), ''),
+           'owner=' || source.owner_name,
+           'owner_login=' || source.owner_can_login::text,
+           'owner_bypass_rls=' || source.owner_bypass_rls::text,
+           'memberships=' || (
+               SELECT pg_catalog.count(*)::text FROM pg_catalog.pg_auth_members AS membership
+               WHERE membership.member = source.proowner OR membership.roleid = source.proowner
+           ),
+           'acl=' || COALESCE(
+               (SELECT pg_catalog.string_agg(
+                           acl.grantee || ':' || acl.privilege_type || ':' || acl.is_grantable::text,
+                           ',' ORDER BY acl.grantee, acl.privilege_type, acl.is_grantable)
+                FROM acl),
+               ''
+           )
+       ) AS details
+FROM source
 "#;
 
 const TENANT_READ_RESOLVER_SECURITY_SQL: &str = r#"
@@ -3252,6 +3334,8 @@ struct TenantReadResolverPosture {
     effective_functions: String,
     security_exact: bool,
     security_details: String,
+    inbox_security_exact: bool,
+    inbox_security_details: String,
 }
 
 async fn inspect_tenant_read_resolver_posture(
@@ -3267,16 +3351,23 @@ async fn inspect_tenant_read_resolver_posture(
             .fetch_one(&mut **tx)
             .await
             .map_err(PgError::TenantReadCapability)?;
+    let (inbox_security_exact, inbox_security_details): (bool, String) =
+        sqlx::query_as(TENANT_READ_INBOX_FUNCTION_SECURITY_SQL)
+            .fetch_one(&mut **tx)
+            .await
+            .map_err(PgError::TenantReadCapability)?;
     Ok(TenantReadResolverPosture {
         effective_exact,
         effective_functions: privileges,
         security_exact: resolver_security_exact,
         security_details: resolver_security_details,
+        inbox_security_exact,
+        inbox_security_details,
     })
 }
 
 fn ensure_tenant_read_resolver_posture(posture: TenantReadResolverPosture) -> Result<(), PgError> {
-    if posture.effective_exact && posture.security_exact {
+    if posture.effective_exact && posture.security_exact && posture.inbox_security_exact {
         return Ok(());
     }
     tracing::error!(
@@ -3285,6 +3376,8 @@ fn ensure_tenant_read_resolver_posture(posture: TenantReadResolverPosture) -> Re
         effective_exact = posture.effective_exact,
         resolver_security_exact = posture.security_exact,
         resolver_security_details = %posture.security_details,
+        inbox_security_exact = posture.inbox_security_exact,
+        inbox_security_details = %posture.inbox_security_details,
         "tenant reader capability gate: active resolver function privileges are not exact"
     );
     Err(PgError::TenantReadFunctionPrivileges {
@@ -3304,7 +3397,7 @@ async fn ensure_tenant_read_resolver_definition(
             .await
             .map_err(PgError::TenantReadCapability)?;
     let actual_fingerprint = function_definition_fingerprint(&definitions);
-    if definitions.len() == 1 && actual_fingerprint == EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT {
+    if definitions.len() == 2 && actual_fingerprint == EXPECTED_TENANT_READ_FUNCTION_FINGERPRINT {
         return Ok(());
     }
     tracing::error!(

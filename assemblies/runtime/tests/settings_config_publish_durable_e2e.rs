@@ -250,6 +250,8 @@ impl OutboxMetrics for TestTelemetry {
             });
     }
 
+    fn record_backlog_unavailable(&self, _scope: &OutboxMetricScope<'_>) {}
+
     fn record_partition_blocked(&self, _scope: &OutboxMetricScope<'_>, _blocked_depth: u64) {}
 
     fn record_tick_duration(&self, phase: RelayPhase, _seconds: f64) {

@@ -382,29 +382,45 @@ async fn t_inbox_sweep_removes_old_done_keeps_claimed_and_recent() -> TestResult
     Ok(())
 }
 
-/// InboxBacklog：只统计当前 group 的 stale claimed；active claim / done / 其它 group 均不计，空时零值。
+/// 批量 inbox backlog：跨 tenant 聚合，仅返回选中 generated group 的 stale claimed。
 #[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::unwrap_used)]
 // reason: 集成测试断言 fail-loud（往返结果必 Ok）；item-level carve-out（error-handling.md §Carve-out）。
 async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResult {
     let (_pg, store) = connect_pg().await?;
     store.run_migrations().await?;
-    let group_a = unique_domain("inbox-backlog-a");
-    let group_b = unique_domain("inbox-backlog-b");
+    let specs = generated::event::EVENTS
+        .iter()
+        .flat_map(|event| event.subscriptions().iter().copied())
+        .collect::<Vec<_>>();
+    assert!(specs.len() >= 2, "generated topology must be non-vacuous");
+    let group_a = specs[0].group();
+    let group_b = specs[1].group();
+    assert_ne!(
+        group_a, group_b,
+        "fixture requires two distinct generated groups"
+    );
+    let selection = InboxBacklogSelection::from_generated(&specs[..1])?;
+    let tenant_a = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
+    let tenant_b = rss_request_context::TenantId::parse(&uuid::Uuid::new_v4().to_string())?;
     let inbox = store.inbox();
-    let ctx_a = test_inbox_ctx(&group_a);
-    let ctx_b = test_inbox_ctx(&group_b);
-    let scope_a = test_inbox_scope(&group_a);
-    let scope_b = test_inbox_scope(&group_b);
+    let backlog = store.inbox_backlog_source();
+    let ctx_a = test_inbox_ctx_for(tenant_a, group_a);
+    let ctx_b = test_inbox_ctx_for(tenant_b, group_b);
 
-    async fn backdate_claim(store: &PgStore, event_id: &str, group: &str) -> TestResult {
-        let ctx = test_inbox_ctx(group);
+    async fn backdate_claim(
+        store: &PgStore,
+        event_id: &str,
+        group: &str,
+        tenant: rss_request_context::TenantId,
+        age_seconds: i64,
+    ) -> TestResult {
         sqlx::query(
-            "UPDATE inbox_receipts SET claimed_at = now() - make_interval(secs => $1), updated_at = now() - make_interval(secs => $1) \
+            "UPDATE inbox_receipts SET claimed_at = now() - make_interval(secs => $1), updated_at = now() \
              WHERE tenant_id = $2::uuid AND event_id = $3 AND consumer_group = $4",
         )
-        .bind(crate::inbox::INBOX_LEASE_TTL_SECONDS + 30)
-        .bind(ctx.tenant_id().to_string())
+        .bind(age_seconds)
+        .bind(tenant.to_string())
         .bind(event_id)
         .bind(group)
         .execute(&store.pool)
@@ -413,9 +429,9 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
     }
 
     assert_eq!(
-        inbox.sample_backlog(&scope_a).await?,
-        consistency::BacklogSample::empty(),
-        "无行时 inbox backlog 应为规范零值"
+        backlog.sample_backlog(&selection).await?,
+        InboxBacklogObservation::Active(Vec::new()),
+        "无 stale 行时批量函数不伪造 scope"
     );
 
     let active_key = unique_event_id("inbox-backlog-active");
@@ -440,7 +456,7 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
         inbox.commit(&ctx_a, &done, &done_lease).await.unwrap(),
         consistency::LeaseOutcome::Held
     );
-    backdate_claim(&store, &done_key, &group_a).await?;
+    backdate_claim(&store, &done_key, group_a, tenant_a, 180).await?;
 
     let other_group_key = unique_event_id("inbox-backlog-other-group");
     let other_group = IdemKey::parse(&other_group_key).unwrap();
@@ -452,17 +468,14 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
             .unwrap(),
         SeenState::Fresh
     );
-    backdate_claim(&store, &other_group_key, &group_b).await?;
+    backdate_claim(&store, &other_group_key, group_b, tenant_b, 120).await?;
 
-    assert_eq!(
-        inbox.sample_backlog(&scope_a).await?,
-        consistency::BacklogSample::empty(),
-        "active、done 和其它 group 的 stale claim 都不应计入当前 group"
-    );
-    assert_eq!(
-        inbox.sample_backlog(&scope_b).await?.depth(),
-        1,
-        "其它 group 自身应能看到自己的 stale claim"
+    let InboxBacklogObservation::Active(samples) = backlog.sample_backlog(&selection).await? else {
+        panic!("postgres source is always active")
+    };
+    assert!(
+        samples.is_empty(),
+        "active、done 与未选 generated group 均排除"
     );
 
     let stale_key = unique_event_id("inbox-backlog-stale");
@@ -472,16 +485,86 @@ async fn t_inbox_backlog_counts_only_stale_claimed_for_bound_group() -> TestResu
         inbox.try_claim(&ctx_a, &stale, &stale_lease).await.unwrap(),
         SeenState::Fresh
     );
-    backdate_claim(&store, &stale_key, &group_a).await?;
+    backdate_claim(&store, &stale_key, group_a, tenant_a, 95).await?;
 
-    let sample = inbox.sample_backlog(&scope_a).await?;
-    assert_eq!(sample.depth(), 1, "仅当前 group 的 stale claimed 行计数");
+    let older_key = unique_event_id("inbox-backlog-older");
+    let older = IdemKey::parse(&older_key).unwrap();
+    assert_eq!(
+        inbox.try_claim(&ctx_a, &older, &LeaseToken::mint()).await?,
+        SeenState::Fresh
+    );
+    backdate_claim(&store, &older_key, group_a, tenant_a, 150).await?;
+
+    let InboxBacklogObservation::Active(samples) = backlog.sample_backlog(&selection).await? else {
+        panic!("postgres source is always active")
+    };
+    assert_eq!(samples.len(), 1, "selection 只返回一个选中 scope");
+    let sample = samples
+        .iter()
+        .find(|sample| sample.tenant_id() == tenant_a)
+        .expect("tenant A scope");
+    assert_eq!(
+        sample.sample().depth(),
+        2,
+        "同 scope 的 stale claimed 行聚合计数"
+    );
     assert!(
-        sample.oldest_age_seconds() >= crate::inbox::INBOX_LEASE_TTL_SECONDS as u64,
-        "oldest_age_seconds 应来自 stale claimed 的 claimed_at"
+        (145..=165).contains(&sample.sample().oldest_age_seconds()),
+        "age 应来自最早 claimed_at 的完整 claim age，而非 updated_at 或逾期时长"
     );
 
     store.shutdown().await?;
+    Ok(())
+}
+
+/// Production reader can execute only the narrow aggregate function; raw receipt rows and the
+/// writer role cannot bypass that boundary.
+#[tokio::test(flavor = "multi_thread")]
+async fn t_inbox_backlog_reader_role_is_function_only() -> TestResult {
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let specs = generated::event::EVENTS
+        .iter()
+        .flat_map(|event| event.subscriptions().iter().copied())
+        .collect::<Vec<_>>();
+    assert!(!specs.is_empty(), "generated topology must be non-vacuous");
+    let selection = InboxBacklogSelection::from_generated(&specs[..1])?;
+
+    let reader = connect_pg_rss_app_read_role(&pg, &owner).await?;
+    assert_eq!(
+        reader
+            .inbox_backlog_source()
+            .sample_backlog(&selection)
+            .await?,
+        InboxBacklogObservation::Active(Vec::new()),
+        "reader executes the fixed aggregate function"
+    );
+    assert!(
+        sqlx::query("SELECT tenant_id FROM public.inbox_receipts LIMIT 1")
+            .execute(&reader.pool)
+            .await
+            .is_err(),
+        "reader must not SELECT raw receipt rows"
+    );
+
+    let writer = connect_pg_rss_app_role(&pg, &owner).await?;
+    let groups = selection
+        .groups()
+        .iter()
+        .map(|group| group.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        sqlx::query("SELECT * FROM public.rss_inbox_sample_backlog($1::text[])")
+            .bind(&groups)
+            .execute(&writer.pool)
+            .await
+            .is_err(),
+        "writer must not execute the cross-tenant aggregate function"
+    );
+
+    writer.shutdown().await?;
+    reader.shutdown().await?;
+    owner.shutdown().await?;
     Ok(())
 }
 

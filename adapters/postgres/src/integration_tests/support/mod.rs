@@ -6,8 +6,8 @@ pub(super) use authn::{AccountSecurityEventKind, AuthGrant, AuthnEpoch, GrantSec
 
 pub(super) use consistency::{
     BacklogObservation, CommandErrorSummary, CommandJournalOutcome, CommandJournalTerminalSummary,
-    CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey, InboxBacklog, InboxBacklogScope,
-    InboxReceiptContext, InboxStore, LeaseToken, OutboxPayload, Outcome, SeenState,
+    CommandResultSummary, ConsumerGroup, ConvergeAction, IdemKey, InboxReceiptContext, InboxStore,
+    LeaseToken, OutboxPayload, Outcome, SeenState,
 };
 
 pub(super) use diport::{CertNotAfter, CertScope, CertSerial, ManagedResource, RevocationStore};
@@ -23,9 +23,10 @@ pub(super) use eventexec::reconcile::{
 };
 
 pub(super) use eventexec::{
-    AttemptResult, AttemptTrigger, OperatorReconcileCapability, ReconcileMaxInFlight,
-    ReconcileOperatorStore, ReconcileQuarantineReason, ReconcileScheduleErrorKind,
-    ReconcileScheduleStore, ReconcileTargetStatus, ScheduleActionOutcome, ScheduleAttemptOutcome,
+    AttemptResult, AttemptTrigger, InboxBacklogObservation, InboxBacklogSelection,
+    InboxBacklogSource, OperatorReconcileCapability, ReconcileMaxInFlight, ReconcileOperatorStore,
+    ReconcileQuarantineReason, ReconcileScheduleErrorKind, ReconcileScheduleStore,
+    ReconcileTargetStatus, ScheduleActionOutcome, ScheduleAttemptOutcome,
 };
 
 pub(super) use futures::future::{BoxFuture, poll_fn};

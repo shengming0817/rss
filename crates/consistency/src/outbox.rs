@@ -872,8 +872,8 @@ pub trait RetentionSweeper {
 
 /// 单采样对象的 backlog 快照（纯标量值类型，sync 构造；不携 outbox entry）。
 ///
-/// 供 outbox / inbox backlog 采样端口复用；具体统计集合由 [`OutboxBacklog`] /
-/// [`crate::inbox::InboxBacklog`] 各自定义。engine 类型——**不** derive serde（ADR-004 C6）；
+/// 供 outbox / inbox backlog 采样端口复用；具体统计集合由各自服务端口定义。
+/// engine 类型——**不** derive serde（ADR-004 C6）；
 /// 私有字段 + accessor。
 ///
 /// backlog **drain/clear 后**（无可采样积压行）规范零值是 [`BacklogSample::empty`]（depth=0, age=0）——

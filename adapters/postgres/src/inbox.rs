@@ -27,14 +27,17 @@
 //! ref: serverlesstechnology/cqrs（postgres persistence 幂等消费，INSERT ON CONFLICT 范式）。
 
 use consistency::{
-    BacklogSample, EngineError, EngineErrorKind, IdemKey, InboxBacklog, InboxBacklogScope,
-    InboxReceiptContext, InboxStore, LeaseOutcome, LeaseToken, RetentionSweeper, SeenState,
+    BacklogSample, ConsumerGroup, EngineError, EngineErrorKind, IdemKey, InboxReceiptContext,
+    InboxStore, LeaseOutcome, LeaseToken, RetentionSweeper, SeenState,
+};
+use eventexec::{
+    InboxBacklogObservation, InboxBacklogSample, InboxBacklogSelection, InboxBacklogSource,
 };
 use sqlx::{PgPool, Row};
 
 use crate::PgStore;
 use crate::cotx::eventing::{EventingTx, InboxOperationConcern};
-use crate::cotx::{ServingReadLane, ServingWriteLane, TenantDb, infra_tenant_scope};
+use crate::cotx::{ServingWriteLane, TenantDb, infra_tenant_scope};
 use crate::delivery_policy::EventDeliveryPolicy;
 use crate::pool::{VerifiedPgReadStore, VerifiedPgWriteStore};
 
@@ -47,7 +50,6 @@ pub const INBOX_LEASE_TTL_SECONDS: i64 = 60;
 ///
 /// 私有字段分别持 typed read/write capability；tenant 表访问必须经对应 scope funnel。
 pub struct PgInboxStore {
-    read_pool: TenantDb<ServingReadLane>,
     write_pool: TenantDb<ServingWriteLane>,
 }
 
@@ -58,16 +60,22 @@ impl PgStore {
     /// `pub(crate)`（#1423，PG-BUNDLE-FUNNEL-01）：经 [`crate::PgDomainDeps`]`<caps::Identity>::inbox` 收口。
     pub(crate) fn inbox(&self) -> PgInboxStore {
         PgInboxStore {
-            read_pool: TenantDb::<ServingReadLane>::from_unverified_for_test(self),
             write_pool: TenantDb::<ServingWriteLane>::from_unverified_for_test(self),
+        }
+    }
+
+    /// Test-only construction of the cross-tenant aggregate source. Production construction is
+    /// restricted to a verified `rss_app_read` capability.
+    pub(crate) fn inbox_backlog_source(&self) -> PgInboxBacklogSource {
+        PgInboxBacklogSource {
+            pool: self.pool.clone(),
         }
     }
 }
 
 impl PgInboxStore {
-    pub(crate) fn new(reader: &VerifiedPgReadStore, writer: &VerifiedPgWriteStore) -> Self {
+    pub(crate) fn new(writer: &VerifiedPgWriteStore) -> Self {
         Self {
-            read_pool: TenantDb::<ServingReadLane>::new(reader),
             write_pool: TenantDb::<ServingWriteLane>::new(writer),
         }
     }
@@ -79,40 +87,74 @@ impl PgInboxStore {
     }
 }
 
-impl InboxBacklog for PgInboxStore {
-    /// 采样指定 tenant/group scope 的 stale claimed 行。active claims / done 均排除；清空时返回规范零值。
-    async fn sample_backlog(
-        &self,
-        scope: &InboxBacklogScope,
-    ) -> Result<BacklogSample, EngineError> {
-        sample_inbox_backlog(&self.read_pool, scope).await
+/// Function-only, cross-tenant inbox backlog source backed by the verified reader role.
+pub struct PgInboxBacklogSource {
+    pool: PgPool,
+}
+
+impl PgInboxBacklogSource {
+    pub(crate) fn new(reader: &VerifiedPgReadStore) -> Self {
+        Self {
+            pool: reader.pool().clone(),
+        }
     }
 }
 
-async fn sample_inbox_backlog(
-    pool: &TenantDb<ServingReadLane>,
-    scope: &InboxBacklogScope,
-) -> Result<BacklogSample, EngineError> {
-    let tenant = scope.tenant_id();
-    let group = scope.consumer_group().as_str().to_string();
-    let sample = pool
-        .inbox_read(infra_tenant_scope(tenant), move |mut conn| {
-            Box::pin(async move {
-                conn.inbox_sample_backlog(&group, INBOX_LEASE_TTL_SECONDS)
-                    .await
-            })
-        })
+#[derive(sqlx::FromRow)]
+struct InboxBacklogSampleRow {
+    tenant_id: String,
+    consumer_group: String,
+    depth: i64,
+    oldest_age_seconds: i64,
+}
+
+impl InboxBacklogSource for PgInboxBacklogSource {
+    async fn sample_backlog(
+        &self,
+        selection: &InboxBacklogSelection,
+    ) -> Result<InboxBacklogObservation, EngineError> {
+        let groups = selection
+            .groups()
+            .iter()
+            .map(|group| group.as_str().to_owned())
+            .collect::<Vec<_>>();
+        let rows: Vec<InboxBacklogSampleRow> = sqlx::query_as(
+            "SELECT tenant_id::text, consumer_group, depth, oldest_age_seconds \
+             FROM public.rss_inbox_sample_backlog($1::text[])",
+        )
+        .bind(groups)
+        .fetch_all(&self.pool)
         .await
-        .map_err(|e| {
-            tracing::warn!(target: "postgres", operation = "inbox_sample_backlog", error = %secure::redact_error(&e), "inbox: sample_backlog db error");
+        .map_err(|error| {
+            tracing::warn!(
+                target: "postgres",
+                operation = "rss_inbox_sample_backlog",
+                error = %secure::redact_error(&error),
+                "inbox backlog function failed"
+            );
             EngineError::new(EngineErrorKind::Transient)
         })?;
 
-    let depth =
-        u64::try_from(sample.depth).map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-    let oldest_age_seconds = u64::try_from(sample.oldest_age_seconds.max(0))
-        .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
-    Ok(BacklogSample::new(depth, oldest_age_seconds))
+        let samples = rows
+            .into_iter()
+            .map(|row| {
+                let tenant_id = rss_request_context::TenantId::parse(&row.tenant_id)
+                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                let consumer_group = ConsumerGroup::parse(&row.consumer_group)
+                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                let depth = u64::try_from(row.depth)
+                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                let oldest_age_seconds = u64::try_from(row.oldest_age_seconds)
+                    .map_err(|_| EngineError::new(EngineErrorKind::Invariant))?;
+                Ok(InboxBacklogSample::new(
+                    tenant_id,
+                    consumer_group,
+                    BacklogSample::new(depth, oldest_age_seconds),
+                ))
+            })
+            .collect::<Result<Vec<_>, EngineError>>()?;
+        Ok(InboxBacklogObservation::Active(samples))
+    }
 }
 
 /// postgres `inbox_receipts` 保留期清理 sweeper（**全域**，与 consumer_group 无关，#1210）。

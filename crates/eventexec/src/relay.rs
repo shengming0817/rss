@@ -177,7 +177,8 @@ impl WorkerHealth {
     /// 顺序不变式由**构造**保证而非此方法：loop 仅在运行期每轮 tick 据结果二选一调
     /// `mark_healthy`/`mark_degraded`，退出时恰调一次终态 `mark_stopped`（Unhealthy）；cancel 后不再
     /// tick，故 Unhealthy 之后不会被运行期标记回退。
-    pub(crate) fn mark_degraded(&self) {
+    #[doc(hidden)]
+    pub fn mark_degraded(&self) {
         if self.0.load(Ordering::Acquire) == HEALTH_INVARIANT {
             return;
         }
@@ -219,7 +220,8 @@ impl WorkerHealth {
     }
 
     /// loop 退出（worker 停止运行）→ Unhealthy；readyz 据此翻。
-    pub(crate) fn mark_stopped(&self) {
+    #[doc(hidden)]
+    pub fn mark_stopped(&self) {
         if matches!(
             self.0.load(Ordering::Acquire),
             HEALTH_SUBSCRIBER_UNAVAILABLE | HEALTH_INVARIANT
@@ -549,6 +551,12 @@ fn log_sweep_failed(target: &'static str, e: &impl std::fmt::Display) {
 
 type BacklogScopeState = HashMap<String, HashSet<ObservedBacklogScope>>;
 
+/// Process-local outbox metric state retained for one ownership session.
+#[derive(Default)]
+pub struct OutboxSamplerState {
+    observed_scopes: BacklogScopeState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ObservedBacklogScope {
     tenant_id: rss_request_context::TenantId,
@@ -574,13 +582,60 @@ impl ObservedBacklogScope {
 /// set `outbox_pending_depth{domain,contract_id,tenant_id}` /
 /// `outbox_oldest_pending_age_seconds{domain,contract_id,tenant_id}` gauge；同一进程内已观测 scope
 /// 后续从成功采样结果消失时显式置 0，避免保留陈旧非零 series（#1209/#1625）。
-/// [`BacklogObservation::Standby`] 不是成功空采样：不写 gauge、不清理已观测 scope，也不把 worker
-/// health 恢复为 Healthy；只有 active observation 能变更这三类状态。
+/// [`BacklogObservation::Standby`] 不是成功空采样：从 active 失去所有权时把本进程已观测 gauge 写
+/// `NaN` 并退役 scope，不写零，也不把 worker health 恢复为 Healthy。
 /// 独立于 relay/sweeper 的专用 worker（独立 [`WorkerHealth`]）：gauge 新鲜度由 `config.sample_interval()`
 /// 解耦 relay 吞吐与 retention 周期（默认数十秒，远密于 5min oldest-age SLO 窗口），采样失败只降级
 /// `outbox_sampler` probe、不污染 relay readyz。取消/错误骨架同 `sweeper_loop`。
 /// `config`（domains / sample_interval）经 [`SamplerConfig`] funnel 已校验（SAMPLER-CONFIG-01），
 /// 同 [`relay_loop`]），此处不再防御 0 间隔 / 越界 domain 集。
+pub async fn backlog_sampler_session<B>(
+    store: Arc<B>,
+    config: &SamplerConfig,
+    state: &mut OutboxSamplerState,
+    token: CancellationToken,
+    health: Arc<WorkerHealth>,
+    metrics: Arc<dyn OutboxMetrics>,
+) where
+    B: OutboxBacklog,
+{
+    let mut ticker = tokio::time::interval(config.sample_interval());
+    loop {
+        tokio::select! {
+            biased;
+            () = token.cancelled() => break,
+            _ = ticker.tick() => {
+                sampler_tick(
+                    &store,
+                    config.domains(),
+                    &mut state.observed_scopes,
+                    &health,
+                    metrics.as_ref(),
+                ).await;
+            }
+        }
+    }
+}
+
+/// Mark all locally minted outbox backlog series unavailable and forget the retired owner state.
+pub fn retire_outbox_backlog_metrics(
+    state: &mut OutboxSamplerState,
+    domains: &[DomainName],
+    metrics: &dyn OutboxMetrics,
+) {
+    for domain in domains {
+        let Some(scopes) = state.observed_scopes.get(domain.as_str()) else {
+            continue;
+        };
+        for stale_scope in scopes {
+            let subject = stale_scope.to_subject();
+            metrics.record_backlog_unavailable(&OutboxMetricScope::new(domain, &subject));
+        }
+    }
+    state.observed_scopes.clear();
+}
+
+/// Run an uncoordinated outbox sampler for callers that own no distributed maintenance lane.
 pub async fn backlog_sampler_loop<B>(
     store: Arc<B>,
     config: SamplerConfig,
@@ -590,23 +645,17 @@ pub async fn backlog_sampler_loop<B>(
 ) where
     B: OutboxBacklog,
 {
-    let mut ticker = tokio::time::interval(config.sample_interval());
-    let mut observed_scopes = BacklogScopeState::default();
-    loop {
-        tokio::select! {
-            biased;
-            () = token.cancelled() => break,
-            _ = ticker.tick() => {
-                sampler_tick(
-                    &store,
-                    config.domains(),
-                    &mut observed_scopes,
-                    &health,
-                    metrics.as_ref(),
-                ).await;
-            }
-        }
-    }
+    let mut state = OutboxSamplerState::default();
+    backlog_sampler_session(
+        store,
+        &config,
+        &mut state,
+        token,
+        Arc::clone(&health),
+        Arc::clone(&metrics),
+    )
+    .await;
+    retire_outbox_backlog_metrics(&mut state, config.domains(), metrics.as_ref());
     health.mark_stopped();
 }
 
@@ -649,15 +698,30 @@ async fn sampler_tick<B>(
                     metrics.record_backlog(&scope, BacklogSample::empty());
                     metrics.record_partition_blocked(&scope, 0);
                 }
-                if current_scopes.is_empty() {
-                    observed_scopes.remove(domain.as_str());
-                } else {
-                    observed_scopes.insert(domain.as_str().to_owned(), current_scopes);
-                }
+                observed_scopes
+                    .entry(domain.as_str().to_owned())
+                    .or_default()
+                    .extend(current_scopes);
             }
-            Ok(BacklogObservation::Standby) => standby = true,
+            Ok(BacklogObservation::Standby) => {
+                if let Some(previous) = observed_scopes.remove(domain.as_str()) {
+                    for stale_scope in previous {
+                        let subject = stale_scope.to_subject();
+                        let scope = OutboxMetricScope::new(domain, &subject);
+                        metrics.record_backlog_unavailable(&scope);
+                    }
+                }
+                standby = true;
+            }
             Err(e) => {
                 log_sample_failed(domain.as_str(), &e);
+                if let Some(previous) = observed_scopes.get(domain.as_str()) {
+                    for stale_scope in previous {
+                        let subject = stale_scope.to_subject();
+                        let scope = OutboxMetricScope::new(domain, &subject);
+                        metrics.record_backlog_unavailable(&scope);
+                    }
+                }
                 degraded = true;
             }
         }
@@ -830,6 +894,7 @@ impl diport::ManagedResource for SweeperWorker {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
     use std::sync::atomic::{AtomicUsize, Ordering as AtomOrd};
     use std::sync::{Arc, Mutex};
     use std::time::Duration;
@@ -945,6 +1010,7 @@ mod tests {
     struct CountingMetrics {
         publishes: Mutex<Vec<(String, String, String, Disposition)>>,
         backlogs: Mutex<Vec<(String, String, String, BacklogSample)>>,
+        unavailable: Mutex<Vec<(String, String, String)>>,
         partition_blocked: Mutex<Vec<(String, String, String, u64)>>,
         tick_phases: Mutex<Vec<RelayPhase>>,
     }
@@ -967,6 +1033,10 @@ mod tests {
         // reason: 同上。
         fn partition_blocked(&self) -> Vec<(String, String, String, u64)> {
             self.partition_blocked.lock().unwrap().clone()
+        }
+        #[allow(clippy::unwrap_used)]
+        fn unavailable(&self) -> Vec<(String, String, String)> {
+            self.unavailable.lock().unwrap().clone()
         }
         #[allow(clippy::unwrap_used)]
         // reason: 同上。
@@ -994,6 +1064,15 @@ mod tests {
                 scope.contract_id_label().to_string(),
                 scope.tenant_id_label(),
                 sample,
+            ));
+        }
+        #[allow(clippy::unwrap_used)]
+        // reason: test-only mutex recorder.
+        fn record_backlog_unavailable(&self, scope: &OutboxMetricScope<'_>) {
+            self.unavailable.lock().unwrap().push((
+                scope.domain_label().to_string(),
+                scope.contract_id_label().to_string(),
+                scope.tenant_id_label(),
             ));
         }
         #[allow(clippy::unwrap_used)]
@@ -2100,10 +2179,9 @@ mod tests {
         assert_eq!(health.status(), HealthStatus::Healthy);
     }
 
-    /// Active -> standby is not a real empty sample: preserve the last gauges and do not report a
-    /// successful sampling recovery while this replica does not own the maintenance lease.
+    /// Active -> standby retires process-local series with NaN without reporting recovery.
     #[tokio::test]
-    async fn sampler_standby_preserves_observation_and_health() {
+    async fn sampler_standby_marks_process_local_observation_unavailable() {
         let health = Arc::new(WorkerHealth::healthy());
         let metrics = CountingMetrics::new();
         let mut observed_scopes = super::BacklogScopeState::default();
@@ -2113,6 +2191,14 @@ mod tests {
         )]);
         super::sampler_tick(
             &active,
+            &[dn("identity")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
+        super::sampler_tick(
+            &FakeBacklog::with_samples(Vec::new()),
             &[dn("identity")],
             &mut observed_scopes,
             &health,
@@ -2132,14 +2218,31 @@ mod tests {
 
         assert_eq!(
             metrics.backlogs(),
+            vec![
+                (
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    BacklogSample::new(42, 305),
+                ),
+                (
+                    "identity".to_string(),
+                    "identity.session-created".to_string(),
+                    "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
+                    BacklogSample::empty(),
+                ),
+            ],
+            "successful disappearance writes zero before standby"
+        );
+        assert_eq!(
+            metrics.unavailable(),
             vec![(
                 "identity".to_string(),
                 "identity.session-created".to_string(),
                 "f47ac10b-58cc-4372-a567-0e02b2c3d479".to_string(),
-                BacklogSample::new(42, 305),
-            )],
-            "standby must not zero the active replica's last observation"
+            )]
         );
+        assert!(observed_scopes.is_empty());
         assert_eq!(
             health.status(),
             HealthStatus::Degraded,
@@ -2175,13 +2278,36 @@ mod tests {
         assert_eq!(degraded.status(), HealthStatus::Degraded);
     }
 
-    /// sampler 采样 Err → 整轮 Degraded（不发 gauge），干净下一轮自愈（F5）。
+    /// Active → empty → Err writes NaN for every minted scope, then a clean tick recovers health.
     #[tokio::test]
     async fn sampler_error_marks_degraded_then_recovers() {
         let health = Arc::new(WorkerHealth::healthy());
         let metrics = CountingMetrics::new();
         let mut observed_scopes = super::BacklogScopeState::default();
-        // 第一轮：采样 Err → Degraded、无 gauge 发射。
+        let active = FakeBacklog::with_samples(vec![backlog_sample(
+            "identity.session-created",
+            BacklogSample::new(7, 91),
+        )]);
+        super::sampler_tick(
+            &active,
+            &[dn("dom")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
+
+        let empty = FakeBacklog::with_samples(Vec::new());
+        super::sampler_tick(
+            &empty,
+            &[dn("dom")],
+            &mut observed_scopes,
+            &health,
+            metrics.as_ref(),
+        )
+        .await;
+        assert_eq!(observed_scopes.get("dom").map(HashSet::len), Some(1));
+
         let erroring = FakeBacklog::with_err(consistency::error::EngineErrorKind::Transient);
         super::sampler_tick(
             &erroring,
@@ -2192,11 +2318,9 @@ mod tests {
         )
         .await;
         assert_eq!(health.status(), HealthStatus::Degraded);
-        assert!(
-            metrics.backlogs().is_empty(),
-            "Err round must not emit gauge"
-        );
-        // 第二轮：干净采样 → 恢复 Healthy。
+        assert_eq!(metrics.unavailable().len(), 1);
+        assert_eq!(observed_scopes.get("dom").map(HashSet::len), Some(1));
+
         let clean = FakeBacklog::new(BacklogSample::empty());
         super::sampler_tick(
             &clean,

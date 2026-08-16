@@ -134,6 +134,12 @@ fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留�
   绑定的 closed set，非请求派生，基数有界。缺失、未知、越界必须归入固定 fallback 或 fail-fast。
 - outbox 可观测路由维度允许 `contract_id` 与 `tenant_id` 入 label，前提是二者分别经 canonical
   grammar 校验与 typed `vocab::TenantId` 取得。跨域 transport metric 不适用该例外。
+- inbox stale-claim backlog 的 `inbox_stale_claim_depth` 与
+  `inbox_oldest_stale_claim_age_seconds` 仅允许 `{tenant_id,consumer_group}`：tenant 必须是 canonical
+  typed `TenantId`，group 必须来自 generated `SubscriptionSpec` 的闭拓扑。emit 只能消费无公共构造器的
+  `InboxMetricScope`；provider 返回未知或重复 group 时整轮 fail-closed，禁止从 broker header、请求输入或
+  任意历史字符串铸造 label。runtime cadence 只由 `RSS_INBOX_SAMPLE_INTERVAL_MS` 控制，不与
+  `RSS_RELAY_SAMPLE_INTERVAL_MS` 的 outbox 调优耦合。本例外不外推到其它 inbox / consumer metric。
 - Projection worker metrics（`projection_lag` / `projection_checkpoint_freshness_seconds` /
   `projection_apply_failure_total` / `projection_dlq_backlog` / `projection_processed_events_total`）
   允许且仅允许 sealed `eventexec::ProjectionMetricScope` 入 label：该 scope 无公共构造器，只经
@@ -157,7 +163,10 @@ fail-fast。诊断只能指出 `RUST_LOG` 无效，不得回显原值或保留�
 - 连接隔离信号与事务结算正交：可能没有结算状态，但必须以私有闭阶段发射并结构化 WARN，
   且不得据此伪造 transaction final status。
 - backlog gauge 查询失败必须写 `NaN` 并把 tick 记为 transient，不得把 stale sample 或缺失 series 当作 0。
-  从未观测过的 scope 不造假 label。
+  从未观测过的 scope 不造假 label。active owner 丢失所有权时，必须先把其进程内已观测 series 写 `NaN`
+  再退役；只有成功 active tick 中消失的已观测 scope 才写规范零值。standby 不查询、不写零，也不得洗掉
+  已存在的 Degraded 状态。maintenance ownership namespace 必须包含 canonical、排序去重后的本地拓扑
+  selection 摘要：相同 selection 竞争同一 owner，不同 selection 不得互相阻塞；空 selection 必须拒绝构造。
 - 每个 attempt 恰好发射一次终态 metric；success / error / panic 三条分支都必须经 typed 映射入口。
 
 告警面纪律：

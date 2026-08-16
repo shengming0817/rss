@@ -194,6 +194,7 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
             &identityaudit_content,
         ));
     }
+    findings.extend(inbox_sampler_inventory_findings(root)?);
     findings.extend(scan_dedicated_runtime_sources(
         &load_dedicated_runtime_sources(root)?,
     ));
@@ -220,6 +221,102 @@ pub(crate) fn check_root(root: &Path) -> Result<(String, Vec<Finding<Rule>>)> {
         ),
         findings,
     ))
+}
+
+fn inbox_sampler_inventory_findings(root: &Path) -> Result<Vec<Finding<Rule>>> {
+    let mut findings = Vec::new();
+    for path in [
+        TARGET,
+        IDENTITYAUDIT_EVENTING_TARGET,
+        "assemblies/settingsonly/src/eventing.rs",
+    ] {
+        let content = std::fs::read_to_string(root.join(path)).with_context(|| {
+            format!("event-transport-guard: read {}", root.join(path).display())
+        })?;
+        findings.extend(inbox_sampler_inventory_content_findings(path, &content));
+    }
+    Ok(findings)
+}
+
+fn inbox_sampler_inventory_content_findings(path: &str, content: &str) -> Vec<Finding<Rule>> {
+    let production = strip_cfg_test_modules(content);
+    let Ok(file) = syn::parse_file(&production) else {
+        return vec![finding(
+            Rule::MissingBundleFragment,
+            path.to_string(),
+            "supported assembly inbox sampler production AST 无法解析".to_string(),
+        )];
+    };
+    let (worker_name, expected) = match path {
+        TARGET => ("inbox-backlog-sampler", 1),
+        IDENTITYAUDIT_EVENTING_TARGET => ("identityaudit-inbox-backlog-sampler", 0),
+        _ => ("settingsonly-inbox-backlog-sampler", 0),
+    };
+    let mut visitor = InboxInventoryVisitor::new(worker_name);
+    visitor.visit_file(&file);
+    [
+        ("worker", visitor.worker_literals),
+        ("sampler loop", visitor.sampler_calls),
+        ("probe", visitor.probe_calls),
+    ]
+    .into_iter()
+    .filter(|(_, count)| *count != expected)
+    .map(|(carrier, count)| {
+        finding(
+            Rule::MissingBundleFragment,
+            path.to_string(),
+            format!(
+                "canonical runtime inbox sampler production {carrier} 期望 {expected} 次，实际 {count}；reference assembly 冻结为零"
+            ),
+        )
+    })
+    .collect()
+}
+
+struct InboxInventoryVisitor<'a> {
+    worker_name: &'a str,
+    worker_literals: usize,
+    sampler_calls: usize,
+    probe_calls: usize,
+}
+
+impl<'a> InboxInventoryVisitor<'a> {
+    const fn new(worker_name: &'a str) -> Self {
+        Self {
+            worker_name,
+            worker_literals: 0,
+            sampler_calls: 0,
+            probe_calls: 0,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for InboxInventoryVisitor<'_> {
+    fn visit_lit_str(&mut self, lit: &'ast syn::LitStr) {
+        if lit.value() == self.worker_name {
+            self.worker_literals += 1;
+        }
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = call.func.as_ref() {
+            let last = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string());
+            if last.as_deref() == Some("coordinated_inbox_backlog_sampler_loop") {
+                self.sampler_calls += 1;
+            }
+            if last.as_deref() == Some("parse")
+                && path.path.segments.iter().any(|segment| segment.ident == "ProbeName")
+                && call.args.iter().any(|arg| matches!(arg, syn::Expr::Path(value) if value.path.is_ident("INBOX_SAMPLER_PROBE")))
+            {
+                self.probe_calls += 1;
+            }
+        }
+        syn::visit::visit_expr_call(self, call);
+    }
 }
 
 fn load_dedicated_runtime_sources(root: &Path) -> Result<Vec<(PathBuf, String)>> {
@@ -1418,7 +1515,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
             }
             syn::Item::Fn(item) if item.sig.ident == "wire_event_transport" => {
                 shape.bridged_input = item.sig.inputs.iter().any(|input| {
-                    normalized_tokens(input).contains("subscribers:Vec<BridgedSubscription>")
+                    normalized_tokens(input).contains("subscribers:BridgedSubscriptions")
                 });
             }
             syn::Item::Fn(item) if item.sig.ident == "wire_consumer_resource_bundle" => {
@@ -1460,7 +1557,7 @@ fn runtime_shape_findings(path: &Path, content: &str) -> Vec<Finding<Rule>> {
         ),
         (
             shape.bridged_input,
-            "wire_event_transport 必须消费 Vec<BridgedSubscription>",
+            "wire_event_transport 必须消费 opaque BridgedSubscriptions bundle",
         ),
         (
             shape.required_worker_probe_bundle && shape.policy_bound_worker_activation,
@@ -1835,7 +1932,7 @@ fn identityaudit_closure_findings(path: &Path, content: &str) -> Vec<Finding<Rul
         if item.sig.ident == "wire" {
             let bridge =
                 body.find("eventing_composition::bridge_generated_audit_subscriptions(bindings)");
-            let validate = body.find("validate_audit_closure(&subscriptions)");
+            let validate = body.find("validate_audit_closure(subscriptions.subscriptions())");
             let budget_gate = body.find("pg.validate_relay_budget(budget)");
             let connect = body.find("amqp::AmqpRuntimeDeps::connect_with_private_ca(");
             bridge_and_budget = matches!(
@@ -7352,7 +7449,7 @@ mod tests {
             pub fn bridge_generated_subscriptions(bindings: Vec<SubscriberBinding>) {
                 eventing_composition::bridge_generated_subscriptions(bindings)
             }
-            fn wire_event_transport(subscribers: Vec<BridgedSubscription>) {}
+            fn wire_event_transport(subscribers: BridgedSubscriptions) {}
             fn wire_consumer_resource_bundle(pg: Pg, module: &mut Module) {
                 let group = subscription.group().clone();
                 let inbox = pg.infra().inbox();
@@ -7766,7 +7863,7 @@ mod tests {
 
         for (needle, replacement) in [
             (
-                "validate_audit_closure(&subscriptions)?;",
+                "validate_audit_closure(subscriptions.subscriptions())?;",
                 "let _ = &subscriptions;",
             ),
             (
@@ -7782,6 +7879,57 @@ mod tests {
                     .any(|finding| finding.rule == Rule::MissingBundleFragment),
                 "mutation `{needle}` must fail closed"
             );
+        }
+    }
+
+    #[test]
+    fn canonical_inbox_sampler_inventory_has_green_and_red_witnesses() {
+        for (path, canonical, worker, expected) in [
+            (
+                TARGET,
+                include_str!("../../assemblies/runtime/src/event_transport.rs"),
+                "\"inbox-backlog-sampler\"",
+                1,
+            ),
+            (
+                IDENTITYAUDIT_EVENTING_TARGET,
+                include_str!("../../assemblies/identityaudit/src/eventing.rs"),
+                "\"identityaudit-inbox-backlog-sampler\"",
+                0,
+            ),
+            (
+                "assemblies/settingsonly/src/eventing.rs",
+                include_str!("../../assemblies/settingsonly/src/eventing.rs"),
+                "\"settingsonly-inbox-backlog-sampler\"",
+                0,
+            ),
+        ] {
+            assert!(inbox_sampler_inventory_content_findings(path, canonical).is_empty());
+            let red = if expected == 1 {
+                let red = canonical.replace(worker, "\"removed-inbox-sampler\"");
+                assert_ne!(red, canonical);
+                red
+            } else {
+                format!(
+                    "{canonical}\nfn forbidden_reference_sampler() {{ let _ = {worker}; coordinated_inbox_backlog_sampler_loop(); ProbeName::parse(INBOX_SAMPLER_PROBE); }}"
+                )
+            };
+            assert!(
+                inbox_sampler_inventory_content_findings(path, &red)
+                    .iter()
+                    .any(|finding| finding.rule == Rule::MissingBundleFragment)
+            );
+            let duplicate_worker =
+                format!("{canonical}\nconst DUPLICATE_INBOX_WORKER: &str = {worker};");
+            assert!(!inbox_sampler_inventory_content_findings(path, &duplicate_worker).is_empty());
+            let duplicate_probe = format!(
+                "{canonical}\nfn duplicate_inbox_probe() {{ let _ = ProbeName::parse(INBOX_SAMPLER_PROBE); }}"
+            );
+            assert!(!inbox_sampler_inventory_content_findings(path, &duplicate_probe).is_empty());
+            let bait = format!(
+                "{canonical}\n#[cfg(test)] mod inventory_bait {{ fn bait() {{ coordinated_inbox_backlog_sampler_loop(); ProbeName::parse(INBOX_SAMPLER_PROBE); let _ = {worker}; }} }}\n// {worker}"
+            );
+            assert!(inbox_sampler_inventory_content_findings(path, &bait).is_empty());
         }
     }
 

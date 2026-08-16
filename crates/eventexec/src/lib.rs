@@ -40,9 +40,10 @@ mod worker_control;
 
 pub mod relay;
 pub use relay::{
-    OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, RelayWorker,
-    SWEEPER_WORKER_NAME, SamplerWorker, SweeperWorker, WorkerHealth, WorkerStoppedGuard,
-    backlog_sampler_loop, relay_loop, sweeper_loop,
+    OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE, OutboxSamplerState,
+    RelayWorker, SWEEPER_WORKER_NAME, SamplerWorker, SweeperWorker, WorkerHealth,
+    WorkerStoppedGuard, backlog_sampler_loop, backlog_sampler_session, relay_loop,
+    retire_outbox_backlog_metrics, sweeper_loop,
 };
 
 // #1209 outbox relay 配置护栏（构造期 fail-fast）+ 可观测性发射端口（注入式）。
@@ -53,6 +54,14 @@ pub use relay_config::{
 };
 pub mod relay_metrics;
 pub use relay_metrics::{MetricsOutboxMetrics, OutboxMetricScope, OutboxMetrics, RelayPhase};
+
+pub mod inbox_backlog;
+pub use inbox_backlog::{
+    INBOX_SAMPLER_PROBE, InboxBacklogObservation, InboxBacklogSample, InboxBacklogSelection,
+    InboxBacklogSelectionError, InboxBacklogSource, InboxMetricScope, InboxMetrics,
+    InboxSamplerConfig, InboxSamplerConfigError, InboxSamplerState, MetricsInboxMetrics,
+    inbox_backlog_sampler_loop, inbox_backlog_sampler_session, retire_inbox_backlog_metrics,
+};
 
 pub mod projection_metrics;
 pub use projection_metrics::{

@@ -42,12 +42,13 @@ use diport::{
 use eventexec::ManagedBlockingWorker;
 use eventexec::{
     ConsumerMeta, DlxArchiveKeyName, DlxHotKeyName, DlxLifecycle, DlxLifecycleHealth,
-    DlxLifecycleTickReport, EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics,
+    DlxLifecycleTickReport, EVENT_CONSUMER_PROBE, INBOX_SAMPLER_PROBE, InboxBacklogSelection,
+    InboxSamplerConfig, LeaseConfig, MetricsInboxMetrics, MetricsOutboxMetrics,
     MetricsRetentionMetrics, OUTBOX_RELAY_PROBE, OUTBOX_SAMPLER_PROBE, OUTBOX_SWEEPER_PROBE,
     RelayBudget, RelayConfig, RetentionMetrics, RetentionOutcome, RetentionTarget,
     SWEEPER_WORKER_NAME, SamplerConfig, SweeperConfig, SweeperWorker, TenantAuthority,
-    WorkerHealth, apply_dlx_lifecycle_health, backlog_sampler_loop, spawn_on_dedicated_runtime,
-    spawn_relay, sweeper_loop,
+    WorkerHealth, apply_dlx_lifecycle_health, spawn_on_dedicated_runtime, spawn_relay,
+    sweeper_loop,
 };
 #[cfg(test)]
 use generated::event::{EventSpec, SubscriptionSpec};
@@ -61,12 +62,16 @@ use vault::VaultKeyProvider;
 use crate::EnvSecret;
 use crate::config::{ServingConfigMapper, SnapshotConfig};
 use crate::distributed_runtime::{
-    CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, DistributedRuntimeDeps,
+    CoordinatedRetentionSweeper, DistributedRuntimeDeps, InboxBacklogMaintenance,
+    MaintenanceCoordinator, OutboxBacklogMaintenance,
 };
 use crate::infra::vault::{DEFAULT_VAULT_TIMEOUT, build_vault_tls_client_from};
 use crate::support::SystemClock;
-pub use eventing_composition::BridgedSubscription;
-use eventing_composition::{AuditConsumerFactory, SettingsConsumerFactory, WorkerInputs};
+use eventing_composition::{
+    AuditConsumerFactory, SettingsConsumerFactory, WorkerInputs,
+    coordinated_inbox_backlog_sampler_loop, coordinated_outbox_backlog_sampler_loop,
+};
+pub use eventing_composition::{BridgedSubscription, BridgedSubscriptions};
 
 // ── 对外类型 ──────────────────────────────────────────────────────────────────
 
@@ -146,6 +151,11 @@ impl EventWorkerConfig {
     #[cfg(test)]
     pub(crate) fn relay_sample_interval(&self) -> Duration {
         self.relay.sampler.sample_interval()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inbox_sample_interval(&self) -> Duration {
+        self.relay.inbox_sample_interval
     }
 
     #[cfg(test)]
@@ -334,6 +344,7 @@ pub struct EventWorkerTestValues {
     max_in_flight: usize,
     budget: RelayBudget,
     sample: Duration,
+    inbox_sample: Duration,
     sweep: Duration,
     retain_seconds: u64,
 }
@@ -351,6 +362,7 @@ impl EventWorkerTestValues {
                 Duration::from_millis(DEFAULT_RELAY_SAFETY_MARGIN_MS),
             )?,
             sample: Duration::from_millis(30_000),
+            inbox_sample: Duration::from_millis(30_000),
             sweep: Duration::from_millis(300_000),
             retain_seconds: 604_800,
         })
@@ -366,6 +378,11 @@ impl EventWorkerTestValues {
         self
     }
 
+    pub fn with_inbox_sample_interval(mut self, value: Duration) -> Self {
+        self.inbox_sample = value;
+        self
+    }
+
     pub fn with_outbox_sweep_interval(mut self, value: Duration) -> Self {
         self.sweep = value;
         self
@@ -378,6 +395,7 @@ impl EventWorkerTestValues {
                 self.max_in_flight,
                 self.budget,
                 self.sample,
+                self.inbox_sample,
                 self.sweep,
                 self.retain_seconds,
             )?,
@@ -477,6 +495,7 @@ struct RelayTiming {
     relay: RelayConfig,
     budget: RelayBudget,
     sampler: SamplerConfig,
+    inbox_sample_interval: Duration,
     outbox_sweeper: SweeperConfig,
 }
 
@@ -528,6 +547,13 @@ impl RelayTiming {
             ),
             parse_duration_ms_env(
                 config
+                    .value("RSS_INBOX_SAMPLE_INTERVAL_MS")
+                    .map(str::to_owned),
+                "RSS_INBOX_SAMPLE_INTERVAL_MS",
+                30_000,
+            ),
+            parse_duration_ms_env(
+                config
                     .value("RSS_OUTBOX_SWEEP_INTERVAL_MS")
                     .map(str::to_owned),
                 "RSS_OUTBOX_SWEEP_INTERVAL_MS",
@@ -546,6 +572,7 @@ impl RelayTiming {
         max_in_flight: usize,
         budget: RelayBudget,
         sample: Duration,
+        inbox_sample_interval: Duration,
         sweep: Duration,
         retain_seconds: u64,
     ) -> anyhow::Result<Self> {
@@ -564,6 +591,7 @@ impl RelayTiming {
             relay,
             budget,
             sampler,
+            inbox_sample_interval,
             outbox_sweeper,
         })
     }
@@ -744,7 +772,7 @@ fn consumer_meta_for_subscription(
 pub(crate) fn bridge_generated_subscriptions_for_execution(
     bindings: Vec<SubscriberBinding>,
     execution: &crate::plan::LocalEventExecutionPlan,
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     eventing_composition::bridge_generated_subscriptions_selected(
         bindings,
         execution.local_subscriptions(),
@@ -754,7 +782,7 @@ pub(crate) fn bridge_generated_subscriptions_for_execution(
 #[cfg(any(test, feature = "integration"))]
 pub fn bridge_generated_subscriptions(
     bindings: Vec<SubscriberBinding>,
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     eventing_composition::bridge_generated_subscriptions(bindings)
 }
 
@@ -762,7 +790,7 @@ pub fn bridge_generated_subscriptions(
 fn bridge_subscriptions_with_events(
     bindings: Vec<SubscriberBinding>,
     events: &[EventSpec],
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     eventing_composition::bridge_subscriptions_with_events_for_test(bindings, events)
 }
 
@@ -807,7 +835,7 @@ fn resolve_event_decision<T: AsRef<str>>(
 pub(crate) async fn wire_event_transport(
     pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
-    subscribers: Vec<BridgedSubscription>,
+    subscribers: BridgedSubscriptions,
     cfg: EventTransportConfig,
     worker: EventWorkerConfig,
     audit_key: Option<MacKey>,
@@ -1615,7 +1643,7 @@ fn event_security_for_topology(
 async fn wire_durable(
     pg: &PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
-    subscribers: Vec<BridgedSubscription>,
+    subscribers: BridgedSubscriptions,
     execution: DurableEventExecution,
     timing: RelayTiming,
     security: EventSecurity,
@@ -1624,6 +1652,7 @@ async fn wire_durable(
     consumer_admission: primitives::ConsumerAdmission,
     write_admission: primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
+    let (subscribers, inbox_backlog_selection) = subscribers.into_runtime_parts();
     let DurableEventExecution {
         per_domain,
         local_producers,
@@ -1698,11 +1727,29 @@ async fn wire_durable(
     }
     if let Err(primary) = wire_outbox_maintenance(
         pg,
-        distributed,
+        &distributed,
         &timing,
         write_admission.clone(),
         &mut module,
     ) {
+        return Err(crate::provider_output::abort_uncommitted(module, primary).await);
+    }
+
+    let inbox_sampler_config =
+        match inbox_sampler_registration(inbox_backlog_selection, timing.inbox_sample_interval) {
+            Ok(config) => config,
+            Err(primary) => {
+                return Err(crate::provider_output::abort_uncommitted(module, primary).await);
+            }
+        };
+    if let Some(config) = inbox_sampler_config
+        && let Err(primary) = wire_inbox_backlog_sampler(
+            pg.infra().inbox_backlog_source(),
+            distributed.inbox_backlog_maintenance_coordinator(config.selection().groups())?,
+            config,
+            &mut module,
+        )
+    {
         return Err(crate::provider_output::abort_uncommitted(module, primary).await);
     }
 
@@ -1830,7 +1877,7 @@ fn wire_domain_relay(
 /// outbox maintenance workers：backlog sampler + published-row sweeper。
 fn wire_outbox_maintenance(
     pg: &PgRuntimeHandle,
-    distributed: DistributedRuntimeDeps,
+    distributed: &DistributedRuntimeDeps,
     timing: &RelayTiming,
     admission: primitives::WriteAdmission,
     module: &mut DomainModuleResult,
@@ -1839,14 +1886,10 @@ fn wire_outbox_maintenance(
     let sweeper_cfg = timing.outbox_sweeper.clone();
 
     let maintenance = pg.infra().outbox_maintenance();
-    let coordinator = distributed.outbox_maintenance_coordinator();
-    wire_sampler_worker(
-        CoordinatedOutboxBacklog::new(maintenance.clone(), coordinator.clone()),
-        sampler_cfg,
-        module,
-    )?;
+    let coordinator = distributed.outbox_maintenance_coordinator(sampler_cfg.domains())?;
+    wire_sampler_worker(maintenance.clone(), coordinator, sampler_cfg, module)?;
     wire_sweeper_worker(
-        CoordinatedRetentionSweeper::new(maintenance, coordinator),
+        CoordinatedRetentionSweeper::new(maintenance, distributed.outbox_retention_coordinator()),
         sweeper_cfg,
         SWEEPER_WORKER_NAME,
         OUTBOX_SWEEPER_PROBE,
@@ -1858,8 +1901,66 @@ fn wire_outbox_maintenance(
     Ok(())
 }
 
+fn wire_inbox_backlog_sampler(
+    source: postgres::PgInboxBacklogSource,
+    coordinator: MaintenanceCoordinator<InboxBacklogMaintenance>,
+    config: InboxSamplerConfig,
+    module: &mut DomainModuleResult,
+) -> anyhow::Result<()> {
+    let health = Arc::new(WorkerHealth::starting());
+    let worker_health = Arc::clone(&health);
+    let worker = WorkerSpec::observational_phase_one(
+        "assemblies.runtime.src.event_transport.06-inbox",
+        move |token| {
+            DynManagedResource::new_box(spawn_on_dedicated_runtime(
+                "inbox-backlog-sampler",
+                token,
+                Arc::clone(&worker_health),
+                EVENT_WORKER_SHUTDOWN_TIMEOUT,
+                move |thread_token| async move {
+                    coordinated_inbox_backlog_sampler_loop(
+                        Arc::new(source),
+                        coordinator,
+                        config,
+                        thread_token,
+                        Arc::clone(&worker_health),
+                        Arc::new(MetricsInboxMetrics),
+                    )
+                    .await;
+                    Ok(())
+                },
+            ))
+        },
+    );
+    module.workers.push(worker);
+
+    let probe_name =
+        ProbeName::parse(INBOX_SAMPLER_PROBE).context("parse inbox sampler probe name")?;
+    module.probes.push((
+        probe_name.clone(),
+        Box::new(WorkerHealthProbe {
+            name: probe_name,
+            health,
+        }),
+    ));
+    Ok(())
+}
+
+fn inbox_sampler_registration(
+    selection: InboxBacklogSelection,
+    interval: Duration,
+) -> anyhow::Result<Option<InboxSamplerConfig>> {
+    if selection.is_empty() {
+        return Ok(None);
+    }
+    InboxSamplerConfig::new(selection, interval)
+        .map(Some)
+        .context("build inbox backlog sampler config")
+}
+
 fn wire_sampler_worker(
-    maintenance: CoordinatedOutboxBacklog<postgres::PgOutboxMaintenance>,
+    maintenance: postgres::PgOutboxMaintenance,
+    coordinator: MaintenanceCoordinator<OutboxBacklogMaintenance>,
     config: SamplerConfig,
     module: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
@@ -1874,8 +1975,9 @@ fn wire_sampler_worker(
                 Arc::clone(&worker_health),
                 EVENT_WORKER_SHUTDOWN_TIMEOUT,
                 move |thread_token| async move {
-                    backlog_sampler_loop(
+                    coordinated_outbox_backlog_sampler_loop(
                         Arc::new(maintenance),
+                        coordinator,
                         config,
                         thread_token,
                         Arc::clone(&worker_health),
@@ -2573,7 +2675,7 @@ mod tests {
             let selected = execution.local_subscriptions().len();
             let bridged = bridge_generated_subscriptions_for_execution(bindings, &execution)?;
             anyhow::ensure!(
-                bridged.len() == selected,
+                bridged.subscriptions().len() == selected,
                 "mask={remote_mask} live bridge count drift"
             );
         }
@@ -2593,13 +2695,13 @@ mod tests {
             .copied()
             .find(|event| event.contract_id() == contract_id && event.topic() == topic)
             .unwrap();
-        bridge_subscriptions_with_events(
+        let (mut subscriptions, _selection) = bridge_subscriptions_with_events(
             vec![test_binding(contract_id, topic, consumer, group)],
             &[event],
         )
         .unwrap()
-        .pop()
-        .unwrap()
+        .into_runtime_parts();
+        subscriptions.pop().unwrap()
     }
 
     #[test]
@@ -2608,6 +2710,7 @@ mod tests {
             ("RSS_RELAY_POLL_INTERVAL_MS", "201"),
             ("RSS_RELAY_MAX_IN_FLIGHT", "17"),
             ("RSS_RELAY_SAMPLE_INTERVAL_MS", "30001"),
+            ("RSS_INBOX_SAMPLE_INTERVAL_MS", "30002"),
             ("RSS_OUTBOX_SWEEP_INTERVAL_MS", "300001"),
             ("RSS_OUTBOX_RETAIN_SECONDS", "604801"),
         ])
@@ -2621,6 +2724,10 @@ mod tests {
         assert_eq!(
             worker.relay_sample_interval(),
             Duration::from_millis(30_001)
+        );
+        assert_eq!(
+            worker.inbox_sample_interval(),
+            Duration::from_millis(30_002)
         );
         assert_eq!(
             worker.outbox_sweep_interval(),
@@ -3982,6 +4089,31 @@ mod tests {
             primitives::ProbeName::parse(OUTBOX_SWEEPER_PROBE).is_ok(),
             "outbox sweeper probe name must remain readyz-compatible"
         );
+        assert!(
+            primitives::ProbeName::parse(INBOX_SAMPLER_PROBE).is_ok(),
+            "inbox sampler probe name must remain readyz-compatible"
+        );
+    }
+
+    #[test]
+    fn inbox_sampler_registration_follows_local_generated_subscription_inventory() {
+        let empty = InboxBacklogSelection::from_generated(&[]).expect("empty generated selection");
+        assert!(
+            inbox_sampler_registration(empty, Duration::from_secs(30))
+                .expect("empty registration")
+                .is_none(),
+            "a runtime without local subscriptions must not register a worker or probe"
+        );
+
+        let local = InboxBacklogSelection::from_generated(&[
+            generated::event::settings_v1::SETTINGS_SUBSCRIPTION,
+        ])
+        .expect("local generated selection");
+        let registration = inbox_sampler_registration(local, Duration::from_secs(30))
+            .expect("local registration")
+            .expect("local subscriptions register one sampler");
+        assert_eq!(registration.selection().groups().len(), 1);
+        assert_eq!(registration.sample_interval(), Duration::from_secs(30));
     }
 
     // ── resolve_event_decision（纯函数；无 PG/infra 依赖）────────────────────

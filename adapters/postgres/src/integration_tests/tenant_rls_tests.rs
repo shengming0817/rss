@@ -1514,6 +1514,96 @@ async fn tenant_reader_gate_rejects_active_resolver_body_drift() -> TestResult {
     Ok(())
 }
 
+async fn assert_inbox_function_posture_drift(
+    reader_config: &crate::pool::PgTenantReadConfig,
+    owner: &PgStore,
+    drift: &str,
+    restore: &str,
+) -> TestResult {
+    sqlx::query(drift).execute(&owner.pool).await?;
+    let verdict = tenant_reader_gate_verdict(reader_config).await?;
+    sqlx::query(restore).execute(&owner.pool).await?;
+    assert!(
+        matches!(
+            verdict,
+            Err(crate::PgError::TenantReadFunctionPrivileges { .. })
+        ),
+        "inbox SECURITY DEFINER posture drift must fail closed: {verdict:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn tenant_reader_gate_rejects_inbox_function_posture_and_body_drift() -> TestResult {
+    const FUNCTION: &str = "public.rss_inbox_sample_backlog(text[])";
+    let (pg, owner) = connect_pg().await?;
+    owner.run_migrations().await?;
+    let reader_config = rss_app_read_config(&pg, &owner).await?;
+
+    for (drift, restore) in [
+        (
+            format!("ALTER FUNCTION {FUNCTION} SECURITY INVOKER"),
+            format!("ALTER FUNCTION {FUNCTION} SECURITY DEFINER"),
+        ),
+        (
+            format!("ALTER FUNCTION {FUNCTION} RESET search_path"),
+            format!("ALTER FUNCTION {FUNCTION} SET search_path TO pg_catalog, pg_temp"),
+        ),
+        (
+            "ALTER ROLE rss_inbox_receipt_maintenance LOGIN".to_owned(),
+            "ALTER ROLE rss_inbox_receipt_maintenance NOLOGIN".to_owned(),
+        ),
+        (
+            "GRANT rss_app_read TO rss_inbox_receipt_maintenance".to_owned(),
+            "REVOKE rss_app_read FROM rss_inbox_receipt_maintenance".to_owned(),
+        ),
+        (
+            format!("GRANT EXECUTE ON FUNCTION {FUNCTION} TO PUBLIC"),
+            format!("REVOKE EXECUTE ON FUNCTION {FUNCTION} FROM PUBLIC"),
+        ),
+    ] {
+        assert_inbox_function_posture_drift(&reader_config, &owner, &drift, &restore).await?;
+    }
+
+    let original_definition: String = sqlx::query_scalar(&format!(
+        "SELECT pg_catalog.pg_get_functiondef('{FUNCTION}'::regprocedure)"
+    ))
+    .fetch_one(&owner.pool)
+    .await?;
+    sqlx::raw_sql(
+        r#"
+        CREATE OR REPLACE FUNCTION public.rss_inbox_sample_backlog(p_consumer_groups text[])
+        RETURNS TABLE (
+            tenant_id uuid,
+            consumer_group text,
+            depth bigint,
+            oldest_age_seconds bigint
+        )
+        LANGUAGE plpgsql
+        STABLE
+        SECURITY DEFINER
+        SET search_path = pg_catalog, pg_temp
+        AS $function$ BEGIN RETURN; END; $function$
+        "#,
+    )
+    .execute(&owner.pool)
+    .await?;
+    let body_verdict = tenant_reader_gate_verdict(&reader_config).await?;
+    sqlx::raw_sql(&original_definition)
+        .execute(&owner.pool)
+        .await?;
+    assert!(
+        matches!(
+            body_verdict,
+            Err(crate::PgError::TenantReadFunctionDefinition { .. })
+        ),
+        "inbox function body drift must fail closed: {body_verdict:?}"
+    );
+
+    owner.shutdown().await?;
+    Ok(())
+}
+
 /// RLS 能力门反例（fail-closed）：存在含 `tenant_id` 列却**无** RLS 的表 → `Err(RlsNotEnforced)`。
 /// throwaway 表经 owner 建，能力门经**非绕过角色**判定（pg_catalog 不受权限过滤、仍可见该表）；DROP 还原。
 #[tokio::test(flavor = "multi_thread")]

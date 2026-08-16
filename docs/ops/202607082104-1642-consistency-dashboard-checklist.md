@@ -5,8 +5,8 @@ ref: oxidecomputer/steno src/saga_action_generic.rs@main
 ref: mdeloof/statig statig/src/lib.rs@main
 
 本清单定义 #1642 的 shared server dashboard 面板组合。表中 panel 只消费当前长驻 runtime 通过
-`/health/v1/metrics` 暴露的 metric；缺失的 inbox backlog 明确标为 `not currently exported` 并跟踪
-#1683。#2010 已把 active Projection worker 的低基数 runtime metric 接到 scrape；shadow 的
+`/health/v1/metrics` 暴露的 metric。#1683 已补齐 inbox backlog runtime carrier，但未授权新增 shared
+panel/alert；#2010 已把 active Projection worker 的低基数 runtime metric 接到 scrape；shadow 的
 activation label / emitter 由 sealed bind 支持，但只有将来 assembly 真正 `bind_shadow` 后才会出现
 shadow series。本清单不因此新增 shadow lifecycle、dashboard panel、alert 或 SLO。
 
@@ -62,12 +62,12 @@ Dashboard 不是 enforcement carrier。metric 名、label 闭值集、PII 边界
 
 | Gap | Current status | Follow-up |
 |---|---|---|
-| Inbox backlog depth / age | `consistency::InboxBacklog` and Postgres sampling exist, but runtime Prometheus export is not currently wired. | #1683 |
+| Inbox backlog depth / age | Runtime exports `inbox_stale_claim_depth{tenant_id,consumer_group}` and `inbox_oldest_stale_claim_age_seconds{tenant_id,consumer_group}` from the active maintenance owner on the independent `RSS_INBOX_SAMPLE_INTERVAL_MS` cadence; failure/ownership loss writes NaN. | Delivered by #1683; no shared panel or alert authorized. |
 | Projection replay duration | #2010 exports long-lived active worker lag, checkpoint freshness, apply failure, Projection DLQ backlog and throughput on the `bind_active` scrape path. Shadow series remain dormant until an assembly binds shadow. The one-shot replay CLI intentionally does not emit worker metrics or a duration family. | N/A；不在 #2010 范围内 |
 
-Do not synthesize these gaps with ad hoc SQL dashboard panels in this PR. If a deployment needs inbox
-backlog before #1683 or replay duration, treat the panel as deployment-local and keep it out of the
-shared ops contract.
+Do not synthesize these signals with ad hoc SQL dashboard panels. Inbox backlog now has a runtime
+Prometheus carrier, but #1683 does not authorize a shared panel, alert, SLO or threshold. Any such
+consumer remains deployment-local and outside the shared ops contract.
 
 ## Shared Dashboard Omissions
 
@@ -92,8 +92,9 @@ shared ops contract.
 - Label allowlists are references to existing closed enum / newtype / constructor carriers.
 - Tenant-scoped redrive remains enforced by the existing DLQ operator capability, tenant parameter,
   service-token replay nonce and audit path.
-- The remaining inbox metric carrier is tracked by #1683; Projection worker metric identity and
-  labels come from the sealed #2010 Rust scope rather than this checklist.
+- Inbox metric identity and labels come from the generated selection plus private #1683 Rust scope;
+  Projection worker metric identity and labels come from the sealed #2010 Rust scope. This checklist
+  is not either feature's enforcement carrier.
 - The LocalTx deadline panel consumes the typed `LocalTxObservation` metric and closed stage only;
   it does not create a paging rule or a parallel PostgreSQL deadline metric contract.
 - Operator-local and journey/library-only metrics are explicitly omitted from the shared server

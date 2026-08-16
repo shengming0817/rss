@@ -86,6 +86,134 @@ pub struct BridgedSubscription {
     consumer_tx: GeneratedDispatchToken,
 }
 
+/// Opaque, exact generated subscription bridge consumed by runtime event transport wiring.
+///
+/// Consumer workers and inbox backlog selection are derived in the same bridge pass and cannot be
+/// assembled independently by a caller.
+pub struct BridgedSubscriptions {
+    subscriptions: Vec<BridgedSubscription>,
+    inbox_backlog: eventexec::InboxBacklogSelection,
+}
+
+impl BridgedSubscriptions {
+    /// Whether the selected runtime owns no generated event subscriptions.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.subscriptions.is_empty()
+    }
+
+    /// Borrow the exact bridged subscriptions for inspection.
+    #[must_use]
+    pub fn subscriptions(&self) -> &[BridgedSubscription] {
+        &self.subscriptions
+    }
+
+    /// Consume the single-origin bundle inside the runtime composition root.
+    #[must_use]
+    pub fn into_runtime_parts(
+        self,
+    ) -> (Vec<BridgedSubscription>, eventexec::InboxBacklogSelection) {
+        (self.subscriptions, self.inbox_backlog)
+    }
+}
+
+macro_rules! run_coordinated_sampler {
+    ($coordinator:expr, $token:expr, $health:expr, $interval:expr, $operation:expr, $retire:expr) => {{
+        loop {
+            if $token.is_cancelled() {
+                break;
+            }
+            match $coordinator.run_active($operation).await {
+                Ok(distributed::MaintenanceObservation::Active(())) => break,
+                Ok(distributed::MaintenanceObservation::Standby) => $health.mark_started(),
+                Err(_) => $health.mark_degraded(),
+            }
+            $retire;
+            tokio::select! {
+                () = $token.cancelled() => break,
+                () = tokio::time::sleep($interval) => {}
+            }
+        }
+    }};
+}
+
+/// Run an ownership-stable inbox sampler. The distributed lease covers provider reads,
+/// validation, zero/NaN transitions, and metric emission, and is retained between ticks.
+pub async fn coordinated_inbox_backlog_sampler_loop<S>(
+    source: Arc<S>,
+    coordinator: distributed::MaintenanceCoordinator<distributed::InboxBacklogMaintenance>,
+    config: eventexec::InboxSamplerConfig,
+    token: tokio_util::sync::CancellationToken,
+    health: Arc<eventexec::WorkerHealth>,
+    metrics: Arc<dyn eventexec::InboxMetrics>,
+) where
+    S: eventexec::InboxBacklogSource,
+{
+    let mut state = eventexec::InboxSamplerState::default();
+    run_coordinated_sampler!(
+        coordinator,
+        token,
+        health,
+        config.sample_interval(),
+        async {
+            let operation = async {
+                eventexec::inbox_backlog_sampler_session(
+                    Arc::clone(&source),
+                    &config,
+                    &mut state,
+                    token.clone(),
+                    Arc::clone(&health),
+                    Arc::clone(&metrics),
+                )
+                .await;
+                Ok(())
+            };
+            operation.await
+        },
+        eventexec::retire_inbox_backlog_metrics(&mut state, metrics.as_ref())
+    );
+    eventexec::retire_inbox_backlog_metrics(&mut state, metrics.as_ref());
+    health.mark_stopped();
+}
+
+/// Run an ownership-stable outbox sampler on a lane isolated from retention maintenance.
+pub async fn coordinated_outbox_backlog_sampler_loop<B>(
+    source: Arc<B>,
+    coordinator: distributed::MaintenanceCoordinator<distributed::OutboxBacklogMaintenance>,
+    config: eventexec::SamplerConfig,
+    token: tokio_util::sync::CancellationToken,
+    health: Arc<eventexec::WorkerHealth>,
+    metrics: Arc<dyn eventexec::OutboxMetrics>,
+) where
+    B: consistency::OutboxBacklog,
+{
+    let mut state = eventexec::OutboxSamplerState::default();
+    run_coordinated_sampler!(
+        coordinator,
+        token,
+        health,
+        config.sample_interval(),
+        async {
+            let operation = async {
+                eventexec::backlog_sampler_session(
+                    Arc::clone(&source),
+                    &config,
+                    &mut state,
+                    token.clone(),
+                    Arc::clone(&health),
+                    Arc::clone(&metrics),
+                )
+                .await;
+                Ok(())
+            };
+            operation.await
+        },
+        eventexec::retire_outbox_backlog_metrics(&mut state, config.domains(), metrics.as_ref())
+    );
+    eventexec::retire_outbox_backlog_metrics(&mut state, config.domains(), metrics.as_ref());
+    health.mark_stopped();
+}
+
 impl BridgedSubscription {
     #[must_use]
     pub const fn contract_id(&self) -> &'static str {
@@ -159,7 +287,7 @@ impl BridgedSubscription {
 /// Bridge all registered subscriber bindings against the complete generated event registry.
 pub fn bridge_generated_subscriptions(
     bindings: Vec<SubscriberBinding>,
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     bridge_subscriptions_with_events_selected(bindings, generated::event::EVENTS, admitted_dispatch)
 }
 
@@ -171,7 +299,7 @@ pub fn bridge_generated_subscriptions(
 pub fn bridge_generated_subscriptions_selected(
     bindings: Vec<SubscriberBinding>,
     selected: &[SubscriptionDispatchKey],
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     for (index, dispatch) in selected.iter().copied().enumerate() {
         anyhow::ensure!(
             !selected[..index].contains(&dispatch),
@@ -202,7 +330,7 @@ pub fn bridge_generated_subscriptions_selected(
 #[cfg(feature = "audit-consumers")]
 pub fn bridge_generated_audit_subscriptions(
     bindings: Vec<SubscriberBinding>,
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     bridge_subscriptions_with_events_selected(
         bindings,
         generated::event::EVENTS,
@@ -218,13 +346,13 @@ pub fn bridge_generated_audit_subscriptions(
 #[cfg(feature = "settings-consumers")]
 pub fn bridge_generated_settings_subscriptions(
     bindings: Vec<SubscriberBinding>,
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     let bridged = bridge_subscriptions_with_events_selected(
         bindings,
         generated::event::EVENTS,
         admitted_settings_dispatch,
     )?;
-    let [subscription] = bridged.as_slice() else {
+    let [subscription] = bridged.subscriptions() else {
         anyhow::bail!(
             "settings topology must contain exactly one config-version reconciliation subscription"
         );
@@ -249,7 +377,7 @@ pub fn bridge_generated_settings_subscriptions(
 pub fn bridge_subscriptions_with_events_for_test(
     bindings: Vec<SubscriberBinding>,
     events: &[EventSpec],
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     bridge_subscriptions_with_events_selected(bindings, events, admitted_dispatch)
 }
 
@@ -257,7 +385,7 @@ fn bridge_subscriptions_with_events_selected(
     bindings: Vec<SubscriberBinding>,
     events: &[EventSpec],
     select: impl Fn(SubscriptionDispatchKey) -> bool + Copy,
-) -> anyhow::Result<Vec<BridgedSubscription>> {
+) -> anyhow::Result<BridgedSubscriptions> {
     let specs: Vec<(EventSpec, SubscriptionSpec)> = events
         .iter()
         .flat_map(|event| {
@@ -339,7 +467,16 @@ fn bridge_subscriptions_with_events_selected(
             spec.group()
         );
     }
-    Ok(bridged)
+    let specs = bridged
+        .iter()
+        .map(|subscription| subscription.subscription)
+        .collect::<Vec<_>>();
+    let inbox_backlog = eventexec::InboxBacklogSelection::from_generated(&specs)
+        .map_err(|error| anyhow::anyhow!(error))?;
+    Ok(BridgedSubscriptions {
+        subscriptions: bridged,
+        inbox_backlog,
+    })
 }
 
 #[cfg(feature = "audit-consumers")]
@@ -824,10 +961,10 @@ mod tests {
     fn audit_only_bridge_requires_exactly_five_audit_bindings() -> anyhow::Result<()> {
         let bridged = bridge_generated_subscriptions(admitted_bindings()?)?;
         anyhow::ensure!(
-            bridged.len() == 5,
+            bridged.subscriptions().len() == 5,
             "audit-only bridge must admit five specs"
         );
-        anyhow::ensure!(bridged.iter().all(|subscription| {
+        anyhow::ensure!(bridged.subscriptions().iter().all(|subscription| {
             subscription.dispatch_token().policy() == ExternalEffectPolicy::TransactionalOnly
         }));
         Ok(())
@@ -838,9 +975,10 @@ mod tests {
     fn settings_only_bridge_requires_exactly_one_settings_binding() -> anyhow::Result<()> {
         let bridged = bridge_generated_settings_subscriptions(admitted_bindings()?)?;
         let subscription = bridged
+            .subscriptions()
             .first()
             .ok_or_else(|| anyhow::anyhow!("settings-only bridge must admit one spec"))?;
-        anyhow::ensure!(bridged.len() == 1);
+        anyhow::ensure!(bridged.subscriptions().len() == 1);
         anyhow::ensure!(subscription.dispatch_token().policy() == ExternalEffectPolicy::Reconcile);
         Ok(())
     }
@@ -853,7 +991,7 @@ mod tests {
             bindings_selected_by(admitted_settings_dispatch)?,
             &settings,
         )?;
-        anyhow::ensure!(settings_bridged.len() == 1);
+        anyhow::ensure!(settings_bridged.subscriptions().len() == 1);
 
         let audit = generated::event::EVENTS
             .iter()
@@ -865,7 +1003,7 @@ mod tests {
             bindings_selected_by(admitted_audit_dispatch)?,
             &audit,
         )?;
-        anyhow::ensure!(audit_bridged.len() == 5);
+        anyhow::ensure!(audit_bridged.subscriptions().len() == 5);
         Ok(())
     }
 
@@ -896,7 +1034,9 @@ mod tests {
     fn audit_bridge_is_exact_under_workspace_feature_unification() -> anyhow::Result<()> {
         let audit_bindings = bindings_selected_by(admitted_audit_dispatch)?;
         assert_eq!(
-            bridge_generated_audit_subscriptions(audit_bindings)?.len(),
+            bridge_generated_audit_subscriptions(audit_bindings)?
+                .subscriptions()
+                .len(),
             5
         );
 
@@ -924,10 +1064,16 @@ mod tests {
             )
         })?;
         let bridged = bridge_generated_settings_subscriptions(settings_bindings)?;
+        let (bridged, selection) = bridged.into_runtime_parts();
         let subscription = bridged
             .first()
             .ok_or_else(|| anyhow::anyhow!("settings bridge must admit one spec"))?;
         assert_eq!(bridged.len(), 1);
+        assert_eq!(selection.groups().len(), 1);
+        assert_eq!(
+            selection.groups()[0].as_str(),
+            subscription.group().as_str()
+        );
         assert_eq!(
             subscription.contract_id(),
             "settings.config-version-changed"
@@ -974,7 +1120,7 @@ mod tests {
         let typed_group =
             bridge_generated_settings_subscriptions(typed_group_registry.drain_subscribers())?;
         assert_eq!(
-            typed_group[0].group().as_str(),
+            typed_group.subscriptions()[0].group().as_str(),
             generated::event::settings_v1::SETTINGS_SUBSCRIPTION.group()
         );
         Ok(())

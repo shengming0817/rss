@@ -13,8 +13,8 @@ use diport::{
 use eventexec::EVENT_CONSUMER_PROBE;
 use eventexec::{
     LeaseConfig, MetricsOutboxMetrics, RelayBudget, RelayConfig, RetentionTarget, SamplerConfig,
-    SweeperConfig, SweeperWorker, WorkerHealth, backlog_sampler_loop, spawn_on_dedicated_runtime,
-    spawn_relay, sweeper_loop,
+    SweeperConfig, SweeperWorker, WorkerHealth, spawn_on_dedicated_runtime, spawn_relay,
+    sweeper_loop,
 };
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
 use vocab::ExternalEffectPolicy;
@@ -29,7 +29,7 @@ const INBOX_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 const OUTBOX_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const OUTBOX_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 const OUTBOX_RETAIN_SECONDS: u64 = 604_800;
-const OUTBOX_MAINTENANCE_TTL: Duration = Duration::from_secs(30);
+const MAINTENANCE_TTL: Duration = Duration::from_secs(30);
 const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 const AMQP_READINESS_INTERVAL: Duration = Duration::from_secs(2);
 
@@ -127,7 +127,8 @@ pub(crate) async fn wire(
 ) -> anyhow::Result<EventingRoleOutputs> {
     let subscriptions = eventing_composition::bridge_generated_settings_subscriptions(bindings)
         .context("bridge settingsonly generated subscription")?;
-    validate_settings_closure(&subscriptions)?;
+    validate_settings_closure(subscriptions.subscriptions())?;
+    let (subscriptions, _) = subscriptions.into_runtime_parts();
 
     let budget = relay_budget()?;
     inputs
@@ -529,17 +530,25 @@ fn wire_outbox_maintenance(
     admission: primitives::WriteAdmission,
     output: &mut DomainModuleResult,
 ) -> anyhow::Result<()> {
-    let coordinator = distributed::OutboxMaintenanceCoordinator::from_ports(
-        redis.infra().lock_store(),
-        pg.infra().cas_store(),
-        OUTBOX_MAINTENANCE_TTL,
-    );
-    let maintenance = pg.infra().outbox_maintenance();
-    let sampler =
-        distributed::CoordinatedOutboxBacklog::new(maintenance.clone(), coordinator.clone());
-    let sweeper = distributed::CoordinatedRetentionSweeper::new(maintenance, coordinator);
     let sampler_config = SamplerConfig::new(vec!["settings".to_owned()], OUTBOX_SAMPLE_INTERVAL)
         .context("build settingsonly outbox sampler config")?;
+    let sampler_coordinator =
+        distributed::MaintenanceCoordinator::<distributed::OutboxBacklogMaintenance>::for_domains(
+            redis.infra().lock_store(),
+            pg.infra().cas_store(),
+            MAINTENANCE_TTL,
+            sampler_config.domains(),
+        )?;
+    let retention_coordinator = distributed::MaintenanceCoordinator::<
+        distributed::OutboxRetentionMaintenance,
+    >::for_retention(
+        redis.infra().lock_store(),
+        pg.infra().cas_store(),
+        MAINTENANCE_TTL,
+    );
+    let maintenance = pg.infra().outbox_maintenance();
+    let sweeper =
+        distributed::CoordinatedRetentionSweeper::new(maintenance.clone(), retention_coordinator);
     let sweeper_config = SweeperConfig::new(OUTBOX_RETAIN_SECONDS, OUTBOX_SWEEP_INTERVAL)
         .context("build settingsonly outbox sweeper config")?;
 
@@ -556,8 +565,9 @@ fn wire_outbox_maintenance(
                     Arc::clone(&sampler_worker_health),
                     EVENT_WORKER_SHUTDOWN_TIMEOUT,
                     move |thread_token| async move {
-                        backlog_sampler_loop(
-                            Arc::new(sampler),
+                        eventing_composition::coordinated_outbox_backlog_sampler_loop(
+                            Arc::new(maintenance),
+                            sampler_coordinator,
                             sampler_config,
                             thread_token,
                             Arc::clone(&sampler_worker_health),
@@ -715,8 +725,8 @@ mod tests {
         let subscriptions = eventing_composition::bridge_generated_settings_subscriptions(
             registry.drain_subscribers(),
         )?;
-        validate_settings_closure(&subscriptions)?;
-        let [subscription] = subscriptions.as_slice() else {
+        validate_settings_closure(subscriptions.subscriptions())?;
+        let [subscription] = subscriptions.subscriptions() else {
             unreachable!("validated singular subscription")
         };
         assert_eq!(subscription.readiness(), SubscriberReadiness::Required);

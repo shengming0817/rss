@@ -312,7 +312,6 @@ eventing_read_map_runner!(FaultMatrixReadLane, saga_fault_read_map, SagaConcern)
 #[cfg(feature = "fault-matrix-test-support")]
 eventing_read_map_runner!(FaultMatrixReadLane, l2_dr_fault_read_map, OutboxConcern);
 eventing_read_runner!(MaintenanceReadLane, dlq_read, DlqConcern);
-eventing_read_runner!(ServingReadLane, inbox_read, InboxConcern);
 
 #[derive(Debug, thiserror::Error)]
 #[error("{carrier} tenant does not match tenant transaction")]
@@ -2169,12 +2168,6 @@ async fn append_projection(
 }
 
 #[derive(sqlx::FromRow)]
-pub(crate) struct InboxBacklogRow {
-    pub(crate) depth: i64,
-    pub(crate) oldest_age_seconds: i64,
-}
-
-#[derive(sqlx::FromRow)]
 pub(crate) struct InboxIdentityRow {
     pub(crate) domain: String,
     pub(crate) topic: String,
@@ -2182,33 +2175,6 @@ pub(crate) struct InboxIdentityRow {
     pub(crate) contract_version: String,
     pub(crate) schema_hash: String,
     pub(crate) status: String,
-}
-
-impl EventingTx<'_, ServingReadLane, InboxConcern> {
-    pub(crate) async fn inbox_sample_backlog(
-        &mut self,
-        consumer_group: &str,
-        lease_ttl_seconds: i64,
-    ) -> Result<InboxBacklogRow, sqlx::Error> {
-        sqlx::query_as(
-            r#"
-            SELECT
-              count(*)::bigint AS depth,
-              COALESCE(EXTRACT(EPOCH FROM now() - MIN(claimed_at))::bigint, 0)
-                AS oldest_age_seconds
-            FROM inbox_receipts
-            WHERE tenant_id = $1::uuid
-              AND consumer_group = $2
-              AND status = 'claimed'
-              AND claimed_at <= now() - make_interval(secs => $3)
-            "#,
-        )
-        .bind(self.tenant.to_string())
-        .bind(consumer_group)
-        .bind(lease_ttl_seconds)
-        .fetch_one(&mut *self.conn)
-        .await
-    }
 }
 
 impl<C: InboxOperationConcern> EventingTx<'_, ServingWriteLane, C> {

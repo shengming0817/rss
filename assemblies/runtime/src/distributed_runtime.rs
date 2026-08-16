@@ -10,24 +10,25 @@ use std::time::Duration;
 use distributed::HttpContractTransport;
 
 pub use distributed::{
-    CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, OutboxMaintenanceCoordinator,
+    CoordinatedRetentionSweeper, InboxBacklogMaintenance, MaintenanceCoordinator,
+    MaintenanceObservation, OutboxBacklogMaintenance, OutboxRetentionMaintenance,
 };
 
 use crate::SharedRuntimeDeps;
 
-const DEFAULT_OUTBOX_MAINTENANCE_TTL: Duration = Duration::from_secs(30);
+const DEFAULT_MAINTENANCE_TTL: Duration = Duration::from_secs(30);
 
 /// Exact, non-optional timing owned by the process configuration snapshot.
 #[derive(Clone, Copy)]
 pub(crate) struct DistributedWorkerConfig {
-    outbox_maintenance_ttl: Duration,
+    maintenance_ttl: Duration,
 }
 
 impl DistributedWorkerConfig {
     /// Preserve the existing non-configurable distributed maintenance timing.
     pub(crate) const fn canonical() -> Self {
         Self {
-            outbox_maintenance_ttl: DEFAULT_OUTBOX_MAINTENANCE_TTL,
+            maintenance_ttl: DEFAULT_MAINTENANCE_TTL,
         }
     }
 }
@@ -35,15 +36,57 @@ impl DistributedWorkerConfig {
 /// Hard-wired distributed runtime dependencies.
 #[derive(Clone)]
 pub struct DistributedRuntimeDeps {
-    outbox_maintenance: OutboxMaintenanceCoordinator,
+    lock_store: Arc<dyn Fn() -> Box<diport::DynLockStore<'static>> + Send + Sync>,
+    cas_store: Arc<dyn Fn() -> Box<diport::DynCasStore<'static>> + Send + Sync>,
+    maintenance_ttl: Duration,
     domain_transport: Arc<dyn HttpContractTransport>,
 }
 
 impl DistributedRuntimeDeps {
     /// Coordinator for the durable event outbox maintenance workers.
     #[must_use]
-    pub fn outbox_maintenance_coordinator(&self) -> OutboxMaintenanceCoordinator {
-        self.outbox_maintenance.clone()
+    pub fn outbox_maintenance_coordinator(
+        &self,
+        domains: &[vocab::DomainName],
+    ) -> Result<
+        MaintenanceCoordinator<OutboxBacklogMaintenance>,
+        distributed::MaintenanceCoordinatorError,
+    > {
+        MaintenanceCoordinator::for_domains(
+            (self.lock_store)(),
+            (self.cas_store)(),
+            self.maintenance_ttl,
+            domains,
+        )
+    }
+
+    /// Coordinator for outbox retention, isolated from the continuously owned sampler lane.
+    #[must_use]
+    pub fn outbox_retention_coordinator(
+        &self,
+    ) -> MaintenanceCoordinator<OutboxRetentionMaintenance> {
+        MaintenanceCoordinator::for_retention(
+            (self.lock_store)(),
+            (self.cas_store)(),
+            self.maintenance_ttl,
+        )
+    }
+
+    /// Coordinator for the inbox backlog sampler.
+    #[must_use]
+    pub fn inbox_backlog_maintenance_coordinator(
+        &self,
+        groups: &[consistency::ConsumerGroup],
+    ) -> Result<
+        MaintenanceCoordinator<InboxBacklogMaintenance>,
+        distributed::MaintenanceCoordinatorError,
+    > {
+        MaintenanceCoordinator::for_consumer_groups(
+            (self.lock_store)(),
+            (self.cas_store)(),
+            self.maintenance_ttl,
+            groups,
+        )
     }
 
     /// Shared outbound domain transport dispatch seam.
@@ -62,12 +105,12 @@ pub(crate) fn wire_distributed(
     deps: &SharedRuntimeDeps,
     worker: DistributedWorkerConfig,
 ) -> anyhow::Result<DistributedRuntimeDeps> {
+    let redis = deps.redis.clone();
+    let pg = deps.pg.clone();
     Ok(DistributedRuntimeDeps {
-        outbox_maintenance: OutboxMaintenanceCoordinator::from_ports(
-            deps.redis.infra().lock_store(),
-            deps.pg.infra().cas_store(),
-            worker.outbox_maintenance_ttl,
-        ),
+        lock_store: Arc::new(move || redis.infra().lock_store()),
+        cas_store: Arc::new(move || pg.infra().cas_store()),
+        maintenance_ttl: worker.maintenance_ttl,
         domain_transport: Arc::clone(&deps.domain_transport),
     })
 }
@@ -75,22 +118,13 @@ pub(crate) fn wire_distributed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use diport::{CasStore, CasStoreOutcome, LockAcquireOutcome, LockRenewOutcome, LockStore};
     use std::collections::HashMap;
     use std::future::Future;
-    use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex as StdMutex};
-    use tokio::sync::Notify;
-
-    use consistency::{
-        BacklogMetricSample, BacklogObservation, BacklogSample, EngineError, OutboxBacklog,
-        OutboxContractId, OutboxMetricSubject,
-    };
-    use diport::{CasStore, CasStoreOutcome, LockAcquireOutcome, LockRenewOutcome, LockStore};
-    use testkit::await_delay;
 
     type LockMap = HashMap<String, (Option<vocab::Epoch>, u64)>;
     type CasMap = HashMap<String, (Vec<u8>, vocab::Epoch)>;
-    type TestResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
     struct NoopDomainTransport;
 
@@ -113,19 +147,6 @@ mod tests {
         }
     }
 
-    #[allow(clippy::expect_used)]
-    // reason: runtime wrapper tests use fixed known-valid tenant/contract fixtures.
-    fn backlog_metric_sample(depth: u64, oldest_age_seconds: u64) -> BacklogMetricSample {
-        let tenant = rss_request_context::TenantId::parse("00000000-0000-4000-8000-000000000001")
-            .expect("valid tenant fixture");
-        let contract =
-            OutboxContractId::parse("identity.session-created").expect("valid contract fixture");
-        BacklogMetricSample::new(
-            OutboxMetricSubject::new(tenant, contract),
-            BacklogSample::new(depth, oldest_age_seconds),
-        )
-    }
-
     #[derive(Clone, Default)]
     struct FakeDistributedStore {
         locks: Arc<StdMutex<LockMap>>,
@@ -135,26 +156,15 @@ mod tests {
     }
 
     impl FakeDistributedStore {
-        fn losing_on_first_renew() -> Self {
-            Self {
-                lose_after_renewals: Arc::new(StdMutex::new(Some(0))),
-                ..Self::default()
-            }
-        }
-
         fn deps(&self) -> DistributedRuntimeDeps {
+            let lock_store = self.clone();
+            let cas_store = self.clone();
             DistributedRuntimeDeps {
-                outbox_maintenance: OutboxMaintenanceCoordinator::from_ports(
-                    diport::DynLockStore::new_box(self.clone()),
-                    diport::DynCasStore::new_box(self.clone()),
-                    Duration::from_millis(15),
-                ),
+                lock_store: Arc::new(move || diport::DynLockStore::new_box(lock_store.clone())),
+                cas_store: Arc::new(move || diport::DynCasStore::new_box(cas_store.clone())),
+                maintenance_ttl: Duration::from_millis(15),
                 domain_transport: Arc::new(NoopDomainTransport),
             }
-        }
-
-        fn renew_calls(&self) -> u64 {
-            *self.renew_calls.lock().unwrap_or_else(|e| e.into_inner())
         }
     }
 
@@ -276,49 +286,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Default)]
-    struct CountingBacklog {
-        calls: Arc<StdMutex<u64>>,
-    }
-
-    impl CountingBacklog {
-        fn calls(&self) -> u64 {
-            *self.calls.lock().unwrap_or_else(|e| e.into_inner())
-        }
-    }
-
-    impl OutboxBacklog for CountingBacklog {
-        async fn sample_backlog(&self, _domain: &str) -> Result<BacklogObservation, EngineError> {
-            *self.calls.lock().unwrap_or_else(|e| e.into_inner()) += 1;
-            Ok(BacklogObservation::Active(vec![backlog_metric_sample(
-                7, 11,
-            )]))
-        }
-    }
-
-    #[derive(Clone, Default)]
-    struct SlowBacklog {
-        started: Arc<Notify>,
-        completed: Arc<AtomicBool>,
-    }
-
-    impl SlowBacklog {
-        fn completed(&self) -> bool {
-            self.completed.load(Ordering::SeqCst)
-        }
-    }
-
-    impl OutboxBacklog for SlowBacklog {
-        async fn sample_backlog(&self, _domain: &str) -> Result<BacklogObservation, EngineError> {
-            self.started.notify_one();
-            await_delay(Duration::from_secs(1)).await;
-            self.completed.store(true, Ordering::SeqCst);
-            Ok(BacklogObservation::Active(vec![backlog_metric_sample(
-                13, 17,
-            )]))
-        }
-    }
-
     #[test]
     fn distributed_runtime_deps_exposes_domain_transport_handle() {
         let deps = FakeDistributedStore::default().deps();
@@ -329,62 +296,63 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn outbox_backlog_runs_when_coordinator_is_active() -> TestResult {
+    async fn inbox_coordinator_namespace_is_derived_from_typed_local_selection()
+    -> anyhow::Result<()> {
         let store = FakeDistributedStore::default();
-        let coordinator = store.deps().outbox_maintenance_coordinator();
-        let backlog = CountingBacklog::default();
-        let wrapped = CoordinatedOutboxBacklog::new(backlog.clone(), coordinator);
-
-        let sample = wrapped.sample_backlog("identity").await?;
+        let deps = store.deps();
+        let audit = consistency::ConsumerGroup::parse("audit.session-created")?;
+        let settings = consistency::ConsumerGroup::parse("settings.config-version-changed")?;
+        let first = deps.inbox_backlog_maintenance_coordinator(std::slice::from_ref(&audit))?;
+        let same = deps.inbox_backlog_maintenance_coordinator(std::slice::from_ref(&audit))?;
+        let distinct =
+            deps.inbox_backlog_maintenance_coordinator(std::slice::from_ref(&settings))?;
 
         assert_eq!(
-            sample,
-            BacklogObservation::Active(vec![backlog_metric_sample(7, 11)])
+            first
+                .run_active(async { Ok::<_, consistency::EngineError>(()) })
+                .await?,
+            MaintenanceObservation::Active(())
         );
-        assert_eq!(backlog.calls(), 1);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn outbox_backlog_standby_is_explicit_without_calling_inner() -> TestResult {
-        let store = FakeDistributedStore::default();
-        let active = SlowBacklog::default();
-        let active_started = Arc::clone(&active.started);
-        let first =
-            CoordinatedOutboxBacklog::new(active, store.deps().outbox_maintenance_coordinator());
-        let backlog = CountingBacklog::default();
-        let wrapped = CoordinatedOutboxBacklog::new(
-            backlog.clone(),
-            store.deps().outbox_maintenance_coordinator(),
+        let key_count_after_first = store
+            .locks
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .len();
+        assert_eq!(
+            same.run_active(async { Ok::<_, consistency::EngineError>(()) })
+                .await?,
+            MaintenanceObservation::Standby,
+            "a fresh peer first synchronizes the existing CAS epoch"
         );
-
-        let (active_result, standby_result) =
-            tokio::join!(first.sample_backlog("identity"), async {
-                active_started.notified().await;
-                wrapped.sample_backlog("identity").await
-            });
-        let _active = active_result?;
-        let sample = standby_result?;
-
-        assert_eq!(sample, BacklogObservation::Standby);
-        assert_eq!(backlog.calls(), 0);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn outbox_backlog_cancels_current_tick_when_lock_renew_is_lost() -> TestResult {
-        let store = FakeDistributedStore::losing_on_first_renew();
-        let coordinator = store.deps().outbox_maintenance_coordinator();
-        let backlog = SlowBacklog::default();
-        let wrapped = CoordinatedOutboxBacklog::new(backlog.clone(), coordinator);
-
-        let sample = wrapped.sample_backlog("identity").await?;
-
-        assert_eq!(sample, BacklogObservation::Standby);
-        assert_eq!(store.renew_calls(), 1);
-        assert!(
-            !backlog.completed(),
-            "lost lease must cancel the active tick"
+        assert_eq!(
+            store
+                .locks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            key_count_after_first,
+            "the same typed selection must reuse the exact namespace"
+        );
+        assert_eq!(
+            same.run_active(async { Ok::<_, consistency::EngineError>(()) })
+                .await?,
+            MaintenanceObservation::Active(()),
+            "the synchronized peer can take over the same namespace"
+        );
+        assert_eq!(
+            distinct
+                .run_active(async { Ok::<_, consistency::EngineError>(()) })
+                .await?,
+            MaintenanceObservation::Active(())
+        );
+        assert_eq!(
+            store
+                .locks
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .len(),
+            key_count_after_first + 1,
+            "a distinct typed local selection must use a distinct namespace"
         );
         Ok(())
     }

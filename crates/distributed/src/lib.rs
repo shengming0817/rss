@@ -14,7 +14,9 @@ mod transport;
 pub use cas::StateCas;
 pub use locker::Locker;
 pub use maintenance::{
-    CoordinatedOutboxBacklog, CoordinatedRetentionSweeper, OutboxMaintenanceCoordinator,
+    CoordinatedRetentionSweeper, InboxBacklogMaintenance, MaintenanceCoordinator,
+    MaintenanceCoordinatorError, MaintenanceObservation, OutboxBacklogMaintenance,
+    OutboxRetentionMaintenance,
 };
 pub use transport::{
     HttpContractMethod, HttpContractRequest, HttpContractResponse, HttpContractTarget,

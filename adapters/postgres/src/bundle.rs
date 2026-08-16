@@ -101,12 +101,12 @@ use crate::{
 };
 use crate::{
     DlxPayloadProtector, PgAuthGrantSweeper, PgCheckpointStore, PgCommandJournal, PgConfig,
-    PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxStore, PgInboxSweeper,
-    PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgMaintenanceReconcileStore,
-    PgOutboxCdcEmitter, PgOutboxMaintenance, PgProjectionOperatorConfig,
-    PgProjectionSourceReadConfig, PgReconcileStore, PgRevocationStore, PgRevocationSweeper,
-    PgRlsReadiness, PgRuntimeMonitor, PgRuntimeMonitorConfig, PgSagaDurableStore,
-    PgSagaOperatorConfig, PgSagaReceiptProtection, PgSagaTerminalSweeper,
+    PgDbReadiness, PgDeadLetterStore, PgDlqStore, PgEmitter, PgError, PgInboxBacklogSource,
+    PgInboxStore, PgInboxSweeper, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig,
+    PgMaintenanceReconcileStore, PgOutboxCdcEmitter, PgOutboxMaintenance,
+    PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgReconcileStore, PgRevocationStore,
+    PgRevocationSweeper, PgRlsReadiness, PgRuntimeMonitor, PgRuntimeMonitorConfig,
+    PgSagaDurableStore, PgSagaOperatorConfig, PgSagaReceiptProtection, PgSagaTerminalSweeper,
     PgServiceTokenReplayStore, PgServiceTokenReplaySweeper, PgStore, PgStoreGuard,
     PgTenantReadConfig,
 };
@@ -3037,10 +3037,13 @@ impl PgInfraDeps {
     /// framework/global infra 句柄，避免组合根为通用 consumer 借用某个业务域句柄。
     #[must_use]
     pub fn inbox(&self) -> PgInboxStore {
-        PgInboxStore::new(
-            self.stores.reader_capability(),
-            self.stores.writer_capability(),
-        )
+        PgInboxStore::new(self.stores.writer_capability())
+    }
+
+    /// Cross-tenant stale-claim backlog source with only the reviewed reader function capability.
+    #[must_use]
+    pub fn inbox_backlog_source(&self) -> PgInboxBacklogSource {
+        PgInboxBacklogSource::new(self.stores.reader_capability())
     }
 
     /// Tenant-scoped HOT dead-letter writer. Archive/purge is intentionally absent from this

@@ -294,7 +294,7 @@ mod integration_tests;
 #[cfg(all(test, feature = "integration"))]
 mod test_pg;
 
-pub use inbox::{PgInboxStore, PgInboxSweeper};
+pub use inbox::{PgInboxBacklogSource, PgInboxStore, PgInboxSweeper};
 pub use pool::{
     PgConfig, PgError, PgL2DrRecoveryAuditConfig, PgL2DrRecoveryExecutorConfig, PgPassword,
     PgProjectionOperatorConfig, PgProjectionSourceReadConfig, PgSagaOperatorConfig,
@@ -450,7 +450,7 @@ mod smoke {
     //! [`super::PgRoleRepo`](真实 impl，roles 表 + tenant scope，#1250)承载——替换原 `RoleRepoEdgeProof`
     //! 编译证明。PhantomData 绑定检查，不构造、不执行 body。
     //! INVARIANT: ADAPTER-PORT-FREEZE-06 { level = "Medium", exec = "manual/opt-in", source = "code" }—— ManagedResource on PgStore + RoleReadRepo on PgRoleRepo（真实 impl，#1250）+
-    //! InboxStore/InboxBacklog on PgInboxStore + SagaDurableStore on PgSagaDurableStore + CasStore on PgCasStore +
+    //! InboxStore on PgInboxStore + InboxBacklogSource on PgInboxBacklogSource + SagaDurableStore on PgSagaDurableStore + CasStore on PgCasStore +
     //! OwnerCheckpointStore on PgCheckpointStore + AuthGrantLifecycle on PgAuthGrantLifecycle（login co-tx + find/close）+
     //! ConfigRepo/ConfigUnitOfWork on PgConfigRepo（真实 impl，#1249）+
     //! SecretRepo on PgSecretRepo + SecretUnitOfWork on PgSecretUnitOfWork（真实 impl，#1274）+
@@ -483,7 +483,7 @@ mod smoke {
     ) {
     }
     fn assert_inbox_store<T: consistency::InboxStore>(_: PhantomData<T>) {}
-    fn assert_inbox_backlog<T: consistency::InboxBacklog>(_: PhantomData<T>) {}
+    fn assert_inbox_backlog<T: eventexec::InboxBacklogSource>(_: PhantomData<T>) {}
     fn assert_outbox_backlog<T: consistency::OutboxBacklog>(_: PhantomData<T>) {}
     fn assert_retention_sweeper<T: consistency::RetentionSweeper>(_: PhantomData<T>) {}
     fn assert_config_repo<T: settings::ports::ConfigRepo>(_: PhantomData<T>) {}
@@ -519,9 +519,9 @@ mod smoke {
         assert_auth_grant_lifecycle(PhantomData::<super::PgAuthGrantLifecycle>);
         assert_identity_security_lifecycle(PhantomData::<super::PgIdentitySecurityLifecycle>);
         assert_account_reactivation_lifecycle(PhantomData::<super::PgAccountReactivationLifecycle>);
-        // `PgInboxStore: InboxStore + InboxBacklog` 类型级 anti-vacuity edge proof（不构造、不执行 body）。
+        // Consumer write path and function-only batch sampler remain distinct capabilities.
         assert_inbox_store(PhantomData::<super::PgInboxStore>);
-        assert_inbox_backlog(PhantomData::<super::PgInboxStore>);
+        assert_inbox_backlog(PhantomData::<super::PgInboxBacklogSource>);
         assert_outbox_backlog(PhantomData::<super::PgOutboxMaintenance>);
         assert_retention_sweeper(PhantomData::<super::PgOutboxMaintenance>);
         // `PgConfigRepo: ConfigRepo + ConfigUnitOfWork` 真实 impl（非 edge proof）——配置仓储 + co-tx UoW（#1249）。

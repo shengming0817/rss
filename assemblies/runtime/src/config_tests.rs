@@ -297,6 +297,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
     let values = [
         ("RSS_RELAY_POLL_INTERVAL_MS", "275"),
         ("RSS_RELAY_SAMPLE_INTERVAL_MS", "31000"),
+        ("RSS_INBOX_SAMPLE_INTERVAL_MS", "31500"),
         ("RSS_OUTBOX_SWEEP_INTERVAL_MS", "320000"),
         ("RSS_AUTH_GRANT_SWEEP_INTERVAL_MS", "330000"),
         ("RSS_KEYPROVIDER_READINESS_SAMPLE_INTERVAL_SECS", "7"),
@@ -316,6 +317,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
         [
             event.relay_poll_interval(),
             event.relay_sample_interval(),
+            event.inbox_sample_interval(),
             event.outbox_sweep_interval(),
             auth_grant_sweep_interval,
             keyprovider_readiness_interval.get(),
@@ -323,6 +325,7 @@ fn worker_runtime_config_uses_one_snapshot_generation_for_every_interval() {
         [
             std::time::Duration::from_millis(275),
             std::time::Duration::from_secs(31),
+            std::time::Duration::from_millis(31_500),
             std::time::Duration::from_secs(320),
             std::time::Duration::from_secs(330),
             std::time::Duration::from_secs(7),

@@ -13,7 +13,7 @@ use eventexec::ManagedBlockingWorker;
 use eventexec::{
     EVENT_CONSUMER_PROBE, LeaseConfig, MetricsOutboxMetrics, OUTBOX_RELAY_PROBE, RelayBudget,
     RelayConfig, RetentionTarget, SamplerConfig, SweeperConfig, SweeperWorker, WorkerHealth,
-    backlog_sampler_loop, spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
+    spawn_on_dedicated_runtime, spawn_relay, sweeper_loop,
 };
 use generated::event::{SubscriberReadiness, SubscriptionDispatchKey};
 
@@ -28,7 +28,7 @@ const INBOX_SWEEPER_NAME: &str = "identityaudit-inbox-dedup-sweeper";
 const OUTBOX_SAMPLE_INTERVAL: Duration = Duration::from_secs(30);
 const OUTBOX_SWEEP_INTERVAL: Duration = Duration::from_secs(300);
 const OUTBOX_RETAIN_SECONDS: u64 = 604_800;
-const OUTBOX_MAINTENANCE_TTL: Duration = Duration::from_secs(30);
+const MAINTENANCE_TTL: Duration = Duration::from_secs(30);
 const EVENT_WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 type LifecycleProbe = (primitives::ProbeName, Box<dyn bootstrap::HealthProbe>);
 
@@ -51,7 +51,8 @@ pub(crate) async fn wire(
 ) -> anyhow::Result<crate::providers::EventingRoleOutputs> {
     let subscriptions = eventing_composition::bridge_generated_audit_subscriptions(bindings)
         .context("bridge identityaudit generated subscriptions")?;
-    validate_audit_closure(&subscriptions)?;
+    validate_audit_closure(subscriptions.subscriptions())?;
+    let (subscriptions, _) = subscriptions.into_runtime_parts();
     let budget = relay_budget()?;
     pg.validate_relay_budget(budget)
         .context("identityaudit relay budget disagrees with database policy")?;
@@ -381,17 +382,24 @@ fn wire_distributed_maintenance(
     redis: &redis::RedisRuntimeDeps,
     admission: primitives::WriteAdmission,
 ) -> anyhow::Result<DomainModuleResult> {
-    let coordinator = distributed::OutboxMaintenanceCoordinator::from_ports(
+    let (sampler_config, sweeper_config, sampler_name, sweeper_name) = maintenance_plan()?;
+    let sampler_coordinator =
+        distributed::MaintenanceCoordinator::<distributed::OutboxBacklogMaintenance>::for_domains(
+            redis.infra().lock_store(),
+            pg.infra().cas_store(),
+            MAINTENANCE_TTL,
+            sampler_config.domains(),
+        )?;
+    let retention_coordinator = distributed::MaintenanceCoordinator::<
+        distributed::OutboxRetentionMaintenance,
+    >::for_retention(
         redis.infra().lock_store(),
         pg.infra().cas_store(),
-        OUTBOX_MAINTENANCE_TTL,
+        MAINTENANCE_TTL,
     );
     let maintenance = pg.infra().outbox_maintenance();
-    let sampler =
-        distributed::CoordinatedOutboxBacklog::new(maintenance.clone(), coordinator.clone());
-    let sweeper = distributed::CoordinatedRetentionSweeper::new(maintenance, coordinator);
-    let (sampler_config, sweeper_config, sampler_name, sweeper_name) = maintenance_plan()?;
-
+    let sweeper =
+        distributed::CoordinatedRetentionSweeper::new(maintenance.clone(), retention_coordinator);
     let sampler_health = Arc::new(WorkerHealth::healthy());
     let sampler_worker_health = Arc::clone(&sampler_health);
     let sampler_worker = WorkerSpec::observational_phase_one(
@@ -403,8 +411,9 @@ fn wire_distributed_maintenance(
                 Arc::clone(&sampler_worker_health),
                 EVENT_WORKER_SHUTDOWN_TIMEOUT,
                 move |thread_token| async move {
-                    backlog_sampler_loop(
-                        Arc::new(sampler),
+                    eventing_composition::coordinated_outbox_backlog_sampler_loop(
+                        Arc::new(maintenance),
+                        sampler_coordinator,
                         sampler_config,
                         thread_token,
                         Arc::clone(&sampler_worker_health),
@@ -590,19 +599,19 @@ mod lifecycle_tests {
         let subscriptions = eventing_composition::bridge_generated_audit_subscriptions(
             registry.drain_subscribers(),
         )?;
-        validate_audit_closure(&subscriptions)?;
-        assert_eq!(subscriptions.len(), 5);
-        assert!(subscriptions.iter().all(|subscription| {
+        validate_audit_closure(subscriptions.subscriptions())?;
+        assert_eq!(subscriptions.subscriptions().len(), 5);
+        assert!(subscriptions.subscriptions().iter().all(|subscription| {
             subscription.readiness() == SubscriberReadiness::Required
                 && !subscription.identity_slug().is_empty()
                 && !subscription.topic_owner().is_empty()
         }));
-        for subscription in &subscriptions {
+        for subscription in subscriptions.subscriptions() {
             let (worker, probe) = consumer_plan(subscription)?;
             assert!(worker.starts_with("identityaudit-event-consumer:"));
             assert!(probe.as_str().starts_with(EVENT_CONSUMER_PROBE));
         }
-        assert!(validate_audit_closure(&subscriptions[..3]).is_err());
+        assert!(validate_audit_closure(&subscriptions.subscriptions()[..3]).is_err());
         Ok(())
     }
 

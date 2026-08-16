@@ -551,7 +551,7 @@ fn shared_runtime_deps_from_parts(
 pub async fn wire_event_transport(
     pg: &postgres::PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
-    subscribers: Vec<crate::event_transport::BridgedSubscription>,
+    subscribers: crate::event_transport::BridgedSubscriptions,
     cfg: crate::event_transport::EventTransportConfig,
     worker: crate::event_transport::EventWorkerConfig,
     audit_key: primitives::MacKey,
@@ -578,7 +578,7 @@ pub async fn wire_event_transport(
 pub async fn wire_event_transport_with_admission(
     pg: &postgres::PgRuntimeHandle,
     distributed: DistributedRuntimeDeps,
-    subscribers: Vec<crate::event_transport::BridgedSubscription>,
+    subscribers: crate::event_transport::BridgedSubscriptions,
     cfg: crate::event_transport::EventTransportConfig,
     worker: crate::event_transport::EventWorkerConfig,
     audit_key: primitives::MacKey,

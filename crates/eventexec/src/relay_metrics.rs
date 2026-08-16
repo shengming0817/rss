@@ -89,6 +89,9 @@ pub trait OutboxMetrics: Send + Sync {
     /// 采样器：set `outbox_pending_depth` / `outbox_oldest_pending_age_seconds` gauge。
     fn record_backlog(&self, scope: &OutboxMetricScope<'_>, sample: BacklogSample);
 
+    /// 采样失败或所有权丢失：全部 backlog gauge 写 NaN，禁止保留旧值或伪造零。
+    fn record_backlog_unavailable(&self, scope: &OutboxMetricScope<'_>);
+
     /// 采样器：set `outbox_partition_blocked_depth` gauge。
     fn record_partition_blocked(&self, scope: &OutboxMetricScope<'_>, blocked_depth: u64);
 
@@ -161,6 +164,33 @@ impl OutboxMetrics for MetricsOutboxMetrics {
             "tenant_id" => tenant_id,
         )
         .set(blocked_depth as f64);
+    }
+
+    fn record_backlog_unavailable(&self, scope: &OutboxMetricScope<'_>) {
+        let domain = scope.domain_label().to_owned();
+        let contract_id = scope.contract_id_label().to_owned();
+        let tenant_id = scope.tenant_id_label();
+        metrics::gauge!(
+            "outbox_pending_depth",
+            "domain" => domain.clone(),
+            "contract_id" => contract_id.clone(),
+            "tenant_id" => tenant_id.clone(),
+        )
+        .set(f64::NAN);
+        metrics::gauge!(
+            "outbox_oldest_pending_age_seconds",
+            "domain" => domain.clone(),
+            "contract_id" => contract_id.clone(),
+            "tenant_id" => tenant_id.clone(),
+        )
+        .set(f64::NAN);
+        metrics::gauge!(
+            "outbox_partition_blocked_depth",
+            "domain" => domain,
+            "contract_id" => contract_id,
+            "tenant_id" => tenant_id,
+        )
+        .set(f64::NAN);
     }
 
     fn record_tick_duration(&self, phase: RelayPhase, seconds: f64) {
@@ -359,6 +389,33 @@ mod tests {
                 "non-reject {} must not emit any DLX series: {rendered}",
                 disposition.as_label(),
             );
+        }
+    }
+
+    #[test]
+    fn metrics_facade_marks_all_backlog_gauges_nan_when_unavailable() {
+        let recorder = metrics_exporter_prometheus::PrometheusBuilder::new().build_recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            let domain = dn("identity");
+            let subject = subject();
+            let scope = OutboxMetricScope::new(&domain, &subject);
+            MetricsOutboxMetrics.record_backlog(&scope, BacklogSample::new(7, 305));
+            MetricsOutboxMetrics.record_partition_blocked(&scope, 2);
+            MetricsOutboxMetrics.record_backlog_unavailable(&scope);
+        });
+        let samples = parse_samples(&handle.render());
+        let scope = [
+            ("contract_id", "identity.session-created"),
+            ("domain", "identity"),
+            ("tenant_id", "f47ac10b-58cc-4372-a567-0e02b2c3d479"),
+        ];
+        for metric in [
+            "outbox_pending_depth",
+            "outbox_oldest_pending_age_seconds",
+            "outbox_partition_blocked_depth",
+        ] {
+            assert_eq!(values_for(&samples, metric, &scope), vec!["NaN"]);
         }
     }
 }

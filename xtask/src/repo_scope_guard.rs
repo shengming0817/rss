@@ -247,7 +247,6 @@ const INFRA_TENANT_SCOPE_ALLOWED_CALLS: &[(&str, &str)] = &[
     ("adapters/postgres/src/inbox.rs", "commit"),
     ("adapters/postgres/src/inbox.rs", "extend"),
     ("adapters/postgres/src/inbox.rs", "release"),
-    ("adapters/postgres/src/inbox.rs", "sample_inbox_backlog"),
     ("adapters/postgres/src/inbox.rs", "try_claim"),
     ("adapters/postgres/src/device_outbox.rs", "settle_accepted"),
     (

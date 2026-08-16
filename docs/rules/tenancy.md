@@ -165,6 +165,10 @@ Hard / Medium 分工：
   跨租 relay / retention / backlog 维护不得开放全表 UPDATE/DELETE，只能调用迁移安装的固定
   `SECURITY DEFINER` 函数；函数 owner 为 NOLOGIN BYPASSRLS 维护角色。
 - **inbox_receipts**：tenant-scoped mutable receipt 表，主键含 tenant，受 RLS 约束，不保留 dual write 或回填路径。
+  在线 backlog 可观测性只能经 `rss_inbox_sample_backlog(text[])`：reader 仅有该固定函数 EXECUTE，函数以
+  `rss_inbox_receipt_maintenance`（NOLOGIN BYPASSRLS）为 owner、固定安全 `search_path`，只做 generated group
+  allowlist 内的 stale-claim 聚合。runtime/writer/PUBLIC 无函数权限，serving lane 不获得跨 tenant raw
+  table 能力；启动 reader gate 精确验证函数集合、安全姿态、ACL 与定义指纹。
 - **saga 表**：instance 表持 lease token/epoch，journal 主键含 tenant 且 append-only（仅 `SELECT, INSERT`）。
   所有状态变更必须经 write pool 注入 tenant scope，并由 DB 侧 `tenant_id + saga_id + lease_token + epoch +
   expires_at` CAS fence，不能依赖调用方约定。
