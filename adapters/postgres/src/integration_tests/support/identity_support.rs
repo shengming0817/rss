@@ -330,14 +330,18 @@ pub(in super::super) const ROLE_TENANT_A: &str = "f47ac10b-58cc-4372-a567-0e02b2
 
 pub(in super::super) const ROLE_TENANT_B: &str = "550e8400-e29b-41d4-a716-446655440000";
 
+#[allow(clippy::expect_used)]
 pub(in super::super) fn role_mutation_actor(
     tenant: TenantId,
 ) -> identity::ports::RoleMutationActor {
+    let user_id = ids::UserId::parse("11111111-2222-4333-8444-555555555555")
+        .expect("role mutation test user id is canonical");
     identity::test_support::role_mutation_actor(
-        &tenant.to_string(),
-        "11111111-2222-4333-8444-555555555555",
+        tenant,
+        user_id,
         rss_request_context::PrincipalKind::Admin,
     )
+    .expect("role mutation test actor is authenticated")
 }
 
 pub(in super::super) fn role_tenant(

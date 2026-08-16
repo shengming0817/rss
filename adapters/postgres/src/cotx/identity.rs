@@ -1879,7 +1879,7 @@ impl IdentityWrite<'_, '_> {
         .bind(role.id().as_str())
         .bind(role.name())
         .bind(permissions)
-        .bind(actor.id().as_str())
+        .bind(actor.user_id().as_uuid().to_string())
         .bind(actor.kind().as_actor_metadata_label())
         .fetch_one(&mut *self.tx.conn)
         .await

@@ -1137,18 +1137,36 @@ impl RoleRevision {
     }
 }
 
-/// 角色定义变更的已认证操作者。字段私有，生产仅能由 identity application 从可信主体构造。
+/// 角色定义变更的已认证操作者。字段私有；生产构造器必须消费同一份 sealed 认证证据。
 #[derive(Clone)]
 pub struct RoleMutationActor {
     tenant: TenantId,
-    id: diport::OpaqueActorId,
+    user_id: RoleMutationUserId,
     kind: rss_request_context::PrincipalKind,
 }
 
+/// Role-mutation persistence identity. Construction stays sealed behind [`RoleMutationActor`],
+/// and default formatting never exposes the canonical user identifier.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct RoleMutationUserId(ids::UserId);
+
+impl RoleMutationUserId {
+    /// Explicitly reveal the UUID only at a reviewed persistence boundary.
+    pub fn as_uuid(self) -> uuid::Uuid {
+        self.0.as_uuid()
+    }
+}
+
+impl std::fmt::Debug for RoleMutationUserId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("RoleMutationUserId(<redacted>)")
+    }
+}
+
 impl RoleMutationActor {
-    /// Raw-value constructor is compiled only for tests. Production role-management wiring must
-    /// add a constructor that consumes one sealed verified-authentication evidence value and
-    /// derives tenant, subject and kind from that same value.
+    /// Typed constructor compiled only for tests. Production role-management wiring must add a
+    /// constructor that consumes one sealed verified-authentication evidence value and derives
+    /// tenant, subject and kind from that same value.
     #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn for_test_user(
         tenant: TenantId,
@@ -1165,14 +1183,14 @@ impl RoleMutationActor {
         }
         Ok(Self {
             tenant,
-            id: diport::OpaqueActorId::from_user_id(user_id),
+            user_id: RoleMutationUserId(user_id),
             kind,
         })
     }
 
-    /// Persisted-only actor identifier; callers must not log it.
-    pub fn id(&self) -> &diport::OpaqueActorId {
-        &self.id
+    /// Canonical authenticated user identity with redacted default formatting.
+    pub fn user_id(&self) -> RoleMutationUserId {
+        self.user_id
     }
 
     pub fn tenant(&self) -> TenantId {
@@ -1187,7 +1205,7 @@ impl RoleMutationActor {
 impl std::fmt::Debug for RoleMutationActor {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RoleMutationActor")
-            .field("id", &"<redacted>")
+            .field("user_id", &"<redacted>")
             .field("kind", &self.kind)
             .finish()
     }
@@ -1196,6 +1214,30 @@ impl std::fmt::Debug for RoleMutationActor {
 #[cfg(test)]
 mod role_mutation_actor_tests {
     use super::*;
+
+    #[test]
+    #[allow(clippy::expect_used)]
+    fn user_backed_test_actor_preserves_canonical_identity() {
+        let tenant =
+            TenantId::parse("f47ac10b-58cc-4372-a567-0e02b2c3d479").expect("canonical tenant");
+        let user =
+            ids::UserId::parse("11111111-2222-4333-8444-555555555555").expect("canonical user");
+
+        for kind in [
+            rss_request_context::PrincipalKind::User,
+            rss_request_context::PrincipalKind::Admin,
+            rss_request_context::PrincipalKind::SuperAdmin,
+        ] {
+            let actor = RoleMutationActor::for_test_user(tenant, user, kind)
+                .expect("user-backed principal is accepted");
+            assert_eq!(actor.tenant(), tenant);
+            assert_eq!(actor.user_id().as_uuid(), user.as_uuid());
+            assert_eq!(actor.kind(), kind);
+            let debug = format!("{:?}", actor.user_id());
+            assert_eq!(debug, "RoleMutationUserId(<redacted>)");
+            assert!(!debug.contains("11111111"));
+        }
+    }
 
     #[test]
     #[allow(clippy::expect_used)]

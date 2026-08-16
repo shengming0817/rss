@@ -109,8 +109,6 @@ use axum::response::{IntoResponse, Response};
 #[cfg(test)]
 use axum::routing::{delete, get, post, put};
 use base64::Engine as _;
-#[cfg(test)]
-use bootstrap::Domain as _;
 use bootstrap::KernelError;
 use consistency::IdemKey;
 use diport::{Clock, OutboxEmitError, OutboxEmitErrorKind};
@@ -5147,6 +5145,69 @@ mod tests {
         ))
     }
 
+    struct TestPrimaryAuthorizationRoot {
+        authorizer: Arc<dyn RouteAuthorizer>,
+    }
+
+    impl TestPrimaryAuthorizationRoot {
+        fn new(
+            roles: Arc<DynRoleReadRepo<'static>>,
+            binding_reads: Arc<DynRoleBindingReadRepo<'static>>,
+            policies: Arc<DynPolicyRepo<'static>>,
+            clock: Arc<dyn Clock>,
+        ) -> Self {
+            Self {
+                authorizer: build_contract_authorizer(roles, binding_reads, policies, clock),
+            }
+        }
+
+        fn install(&self, registry: &mut bootstrap::Registry) -> Result<(), KernelError> {
+            registry.register_primary_authorizer(self.authorizer())
+        }
+
+        fn authorizer(&self) -> Arc<dyn RouteAuthorizer> {
+            Arc::clone(&self.authorizer)
+        }
+    }
+
+    struct TestIdentityComposition<D> {
+        domain: D,
+        authorization_root: TestPrimaryAuthorizationRoot,
+    }
+
+    fn identity_test_composition<S>(
+        deps: IdentityDomainDeps<S>,
+    ) -> TestIdentityComposition<IdentityDomain<S>>
+    where
+        S: diport::Signer + Send + Sync + 'static,
+    {
+        let authorization_root = TestPrimaryAuthorizationRoot::new(
+            Arc::clone(&deps.roles),
+            Arc::clone(&deps.binding_reads),
+            Arc::clone(&deps.policies),
+            Arc::clone(&deps.clock),
+        );
+        TestIdentityComposition {
+            domain: IdentityDomain::new(deps),
+            authorization_root,
+        }
+    }
+
+    fn federated_identity_test_composition(
+        deps: FederatedIdentityDomainDeps,
+    ) -> TestIdentityComposition<FederatedIdentityDomain> {
+        let authorization_root = TestPrimaryAuthorizationRoot::new(
+            Arc::clone(&deps.roles),
+            Arc::clone(&deps.binding_reads),
+            Arc::clone(&deps.policies),
+            Arc::clone(&deps.clock),
+        );
+        TestIdentityComposition {
+            domain: FederatedIdentityDomain::new(deps),
+            authorization_root,
+        }
+    }
+
     fn tid(raw: &str) -> TenantId {
         #[allow(clippy::expect_used)]
         TenantId::parse(raw).expect("canonical tenant")
@@ -5205,7 +5266,7 @@ mod tests {
         capture: CapturingAuthGrantLifecycle,
         now_secs: u64,
         ttl_secs: u64,
-    ) -> IdentityDomain<TestSigner> {
+    ) -> TestIdentityComposition<IdentityDomain<TestSigner>> {
         seed_domain_with_profile_permissions(capture, now_secs, ttl_secs, &[])
     }
 
@@ -5215,7 +5276,7 @@ mod tests {
         now_secs: u64,
         ttl_secs: u64,
         profile_permissions: &[&str],
-    ) -> IdentityDomain<TestSigner> {
+    ) -> TestIdentityComposition<IdentityDomain<TestSigner>> {
         let credentials = crate::internal::mem::InMemCredentialRepo::with_seed_credential(
             "alice",
             uid(CANON_USER),
@@ -5274,7 +5335,7 @@ mod tests {
             make_clock(now_secs),
         ));
         let (policy_manage, policies) = empty_policy_manage(now_secs);
-        IdentityDomain::new(IdentityDomainDeps {
+        identity_test_composition(IdentityDomainDeps {
             credential_security: test_credential_security(&login),
             login,
             refresh,
@@ -5287,7 +5348,7 @@ mod tests {
         })
     }
 
-    fn seed_federated_domain(now_secs: u64) -> FederatedIdentityDomain {
+    fn seed_federated_domain(now_secs: u64) -> TestIdentityComposition<FederatedIdentityDomain> {
         let roles_for_admin = Arc::from(DynRoleReadRepo::new_box(
             crate::internal::mem::InMemRoleRepo::new(),
         ));
@@ -5301,7 +5362,7 @@ mod tests {
             make_clock(now_secs),
         ));
         let (policy_manage, policies) = empty_policy_manage(now_secs);
-        FederatedIdentityDomain::new(FederatedIdentityDomainDeps {
+        federated_identity_test_composition(FederatedIdentityDomainDeps {
             rbac_admin,
             policy_manage,
             roles: roles_for_list,
@@ -5322,9 +5383,13 @@ mod tests {
             ::generated::http::identity_v1::profile::RouteMarker,
         >,
     ) {
-        let domain =
+        let composition =
             seed_domain_with_profile_permissions(capture, 1_000, 3_600, profile_permissions);
+        let domain = composition.domain;
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        registry
+            .register_primary_authorizer(composition.authorization_root.authorizer())
+            .expect("test process root installs Primary authorizer");
         let authorizer = registry
             .take_primary_authorizer()
             .expect("identity Primary authorizer");
@@ -5752,7 +5817,7 @@ mod tests {
             rbac_admin,
             policy_manage,
         } = identity_local_only_ancillary_services();
-        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+        let composition = identity_test_composition(super::IdentityDomainDeps {
             credential_security: test_credential_security(&login),
             login,
             refresh,
@@ -5763,7 +5828,11 @@ mod tests {
             policies: repo.policies,
             clock: make_shared_clock(1_000),
         });
+        let domain = composition.domain;
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        registry
+            .register_primary_authorizer(composition.authorization_root.authorizer())
+            .expect("test process root installs Primary authorizer");
         let authorizer = registry
             .take_primary_authorizer()
             .expect("identity Primary authorizer");
@@ -5826,7 +5895,7 @@ mod tests {
             seed_password_policy(),
             make_clock(1_000),
         ));
-        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+        let composition = identity_test_composition(super::IdentityDomainDeps {
             login,
             refresh,
             credential_security,
@@ -5837,7 +5906,11 @@ mod tests {
             policies: repo.policies,
             clock: make_shared_clock(1_000),
         });
+        let domain = composition.domain;
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        registry
+            .register_primary_authorizer(composition.authorization_root.authorizer())
+            .expect("test process root installs Primary authorizer");
         let authorizer = registry
             .take_primary_authorizer()
             .expect("identity Primary authorizer");
@@ -5885,7 +5958,7 @@ mod tests {
             rbac_admin,
             policy_manage,
         } = identity_local_only_ancillary_services();
-        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+        let composition = identity_test_composition(super::IdentityDomainDeps {
             credential_security: test_credential_security(&login),
             login,
             refresh,
@@ -5896,7 +5969,11 @@ mod tests {
             policies: repo.policies,
             clock: make_shared_clock(1_000),
         });
+        let domain = composition.domain;
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        registry
+            .register_primary_authorizer(composition.authorization_root.authorizer())
+            .expect("test process root installs Primary authorizer");
         let authorizer = registry
             .take_primary_authorizer()
             .expect("identity Primary authorizer");
@@ -5943,7 +6020,7 @@ mod tests {
             rbac_admin,
             policy_manage,
         } = identity_local_only_ancillary_services();
-        let domain = super::IdentityDomain::new(super::IdentityDomainDeps {
+        let composition = identity_test_composition(super::IdentityDomainDeps {
             credential_security: test_credential_security(&login),
             login,
             refresh,
@@ -5954,7 +6031,11 @@ mod tests {
             policies: repo.policies,
             clock: make_shared_clock(1_000),
         });
+        let domain = composition.domain;
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        registry
+            .register_primary_authorizer(composition.authorization_root.authorizer())
+            .expect("test process root installs Primary authorizer");
         let authorizer = registry
             .take_primary_authorizer()
             .expect("identity Primary authorizer");
@@ -7228,8 +7309,8 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn identity_domain_declares_login_route_group() {
-        let domain = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
-        let reg = bootstrap::compose(&[&domain]).expect("compose ok");
+        let composition = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
+        let reg = bootstrap::compose(&[&composition.domain]).expect("compose ok");
         let groups = reg.route_groups();
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].0, ListenerKind::Primary);
@@ -7239,8 +7320,9 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn federated_identity_domain_excludes_all_local_session_routes() {
-        let domain = seed_federated_domain(1_000);
-        let mut registry = bootstrap::compose(&[&domain]).expect("compose federated identity");
+        let composition = seed_federated_domain(1_000);
+        let mut registry =
+            bootstrap::compose(&[&composition.domain]).expect("compose federated identity");
         let mut finalized = registry
             .finalize_routes()
             .expect("finalize federated identity routes");
@@ -7281,8 +7363,8 @@ mod tests {
     #[test]
     #[allow(clippy::expect_used)]
     fn identity_login_route_mount_consumes_generated_spec() {
-        let domain = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
-        let mut reg = bootstrap::compose(&[&domain]).expect("compose ok");
+        let composition = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
+        let mut reg = bootstrap::compose(&[&composition.domain]).expect("compose ok");
         let routes = reg.finalize_routes().expect("finalize routes");
         // identity domain 在 1 个 Primary listener 上挂载多条 identity HTTP 路由，
         // finalize_routes 按 listener 分组 → len() 仍 1（计组/listener，非 route 数）。
@@ -7312,30 +7394,51 @@ mod tests {
 
     #[test]
     #[allow(clippy::expect_used)]
-    fn identity_domain_registers_primary_authorizer_once() {
-        let domain = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
-        let mut registry = bootstrap::Registry::new();
+    fn identity_domains_do_not_own_the_process_root_authorizer() {
+        let local = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
+        let federated = seed_federated_domain(1_000);
 
-        domain.init(&mut registry).expect("first init succeeds");
-        assert!(registry.take_primary_authorizer().is_ok());
+        for domain in [
+            &local.domain as &dyn bootstrap::Domain,
+            &federated.domain as &dyn bootstrap::Domain,
+        ] {
+            let mut registry = bootstrap::compose(&[domain]).expect("compose identity domain");
+            assert!(matches!(
+                registry.take_primary_authorizer(),
+                Err(KernelError::MissingDependency)
+            ));
+        }
 
-        domain
-            .init(&mut registry)
-            .expect("init after authorizer take succeeds once");
+        let mut registry = bootstrap::compose(&[&local.domain]).expect("compose identity domain");
+        local
+            .authorization_root
+            .install(&mut registry)
+            .expect("process root installs authorizer once");
         assert!(matches!(
-            domain.init(&mut registry),
+            local.authorization_root.install(&mut registry),
             Err(KernelError::Invariant)
+        ));
+        registry
+            .take_primary_authorizer()
+            .expect("installed process-root authorizer is available");
+        assert!(matches!(
+            registry.take_primary_authorizer(),
+            Err(KernelError::MissingDependency)
         ));
     }
 
     #[tokio::test]
     #[allow(clippy::expect_used)]
     async fn identity_http_route_specs_match_nested_v1_contracts_and_mounted_router() {
-        let domain = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
+        let composition = seed_domain(CapturingAuthGrantLifecycle::default(), 1_000, 3_600);
+        let domain = composition.domain;
         let mut registry = bootstrap::compose(&[&domain]).expect("compose identity domain");
+        registry
+            .register_primary_authorizer(composition.authorization_root.authorizer())
+            .expect("test process root installs Primary authorizer");
         let authorizer = registry
             .take_primary_authorizer()
-            .expect("identity registers Primary authorizer");
+            .expect("process root registers Primary authorizer");
         let mut finalized = registry
             .finalize_routes()
             .expect("finalize identity routes");
